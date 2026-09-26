@@ -2,6 +2,8 @@
 
 Inputs (relative to ``--qe-root``) are fixed below; nothing else under the qe
 root is opened. Definitions come from ``contracts/`` in this repository.
+Conventions R1-R7 are the orchestrator rulings appended to the acceptance metric
+spec (state/briefs/acceptance-metric-spec.md).
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -17,15 +20,16 @@ from typing import Any
 
 from . import DERIVATION, SCHEMA
 from .numerics import (
+    BOD,
     PRECISION,
     ZERO,
-    BOD,
     CalendarMisalignmentError,
     IrrResult,
     Member,
     UndefinedReturnError,
     composite_subperiods,
     investor_cash_flows,
+    is_reopening,
     subperiod_return,
     time_weighted_return,
     xirr,
@@ -42,9 +46,12 @@ from .sources import (
     QuantbaseSleeve,
     UnusableFlow,
     parse_crosswalk,
+    parse_flow_policy,
     parse_ledger,
     parse_matrixport_wallet,
+    parse_membership_status,
     parse_quantbase_sleeve,
+    parse_quantbase_values,
     read_input,
 )
 
@@ -66,6 +73,9 @@ MP_DISPOSITIONS = MATRIXPORT_CSV + "wallet_currency_dispositions.csv"
 QUANTBASE_CSV = "dataQuantbase/source-runs/refresh-20260902/csv_full/"
 QB_ACCOUNTS = QUANTBASE_CSV + "accounts.csv"
 QB_ACTIVITY = QUANTBASE_CSV + "account_activity.csv"
+# R6 needs raw Quantbase daily values; this raw file of the same capture is the
+# source the provider ledger itself cites for the Volatis sleeve.
+QB_VALUES = QUANTBASE_CSV + "dashboard_Volatis_Strategy_pricehistory.csv"
 
 INPUT_ORDER = (
     LEDGER,
@@ -76,49 +86,89 @@ INPUT_ORDER = (
     MP_DISPOSITIONS,
     QB_ACCOUNTS,
     QB_ACTIVITY,
+    QB_VALUES,
 )
 # Identities pinned by state/briefs/acceptance-inputs.json.
 PINNED_SHA256 = {
     LEDGER: "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13",
     CROSSWALK: "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f",
 }
-CONTRACTS = (
-    "contracts/portfolio-performance-policy-v1.json",
-    "contracts/portfolio-financial-mvp-source-v1.json",
-    "contracts/account-strategy-flow-classification-policy-v1.json",
-)
+PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
+MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
+FLOW_POLICY = "contracts/account-strategy-flow-classification-policy-v1.json"
+CONTRACTS = (PERFORMANCE_POLICY, MVP_CONTRACT, FLOW_POLICY)
+DECLARED_CUTOFF = dt.date(2026, 9, 17)
+FUNDED = "FUNDED_MEMBERSHIP"
+MATRIXPORT_PRODUCT_CURRENCY = "USDT"
 WINDOW = "ITD"
 CENT = Decimal("0.01")
 RATIO_QUANTUM = Decimal("1e-12")
 
+ACCOUNT_METRICS = (
+    "capital.account.cutoff",
+    "date.source_last_observation",
+    "flows.account.net",
+    "flows.account.count",
+    "twr.account",
+    "mwr.account",
+)
+STRATEGY_METRICS = ("capital.strategy.cutoff", "twr.strategy", "mwr.strategy")
+PORTFOLIO_METRICS = (
+    "capital.portfolio.systematic.cutoff",
+    "capital.portfolio.liquid.cutoff",
+    "capital.retained_excluded.cutoff",
+    "universe.active_strategy_ids",
+    "universe.active_strategy_count",
+)
+WINDOWED = {
+    "flows.account.net",
+    "flows.account.count",
+    "twr.account",
+    "mwr.account",
+    "twr.strategy",
+    "mwr.strategy",
+}
+
 CONVENTION_NOTES = (
-    "Cutoff 2026-09-17 is the fixed fact in the metric spec; it is checked against "
-    "crosswalk.calculation_cutoff_date and provider-ledger.as_of_date. The "
-    "account-strategy manifest is a production output and is not read.",
+    "R7 cutoff gate: the declared cutoff 2026-09-17 (metric spec fixed fact) must "
+    "equal the selected cutoff, crosswalk.calculation_cutoff_date, crosswalk."
+    "as_of_date and provider-ledger.as_of_date; any mismatch fails closed and every "
+    "metric is emitted as not_derivable. The account-strategy manifest is a "
+    "production output and is not read.",
     "Windows: contracts/portfolio-performance-policy-v1.json defines no window ids; "
     "only ITD is derived (spec minimum).",
-    "ITD start S = effective_start of the entity's INCLUDED_PRODUCT_EPOCH assignment. "
-    "Capital enters at beginning of day S (contracts/portfolio-financial-mvp-source-"
-    "v1.json golden_case.inputs.calculation_configuration."
+    "R1/R2 membership: contracts/portfolio-hwm-policy-v4.json membership_policy."
+    "basis = EFFECTIVE_FUNDED_MEMBERSHIP. Each INCLUDED_PRODUCT_EPOCH crosswalk row "
+    "takes the status of the contracts/portfolio-financial-mvp-source-v1.json "
+    "current_census.account_sleeves[].assignments[].status with the same (provider, "
+    "strategy_id, effective_start, effective_end); sleeves are redacted, so the "
+    "join is by interval. Only FUNDED_MEMBERSHIP rows enter account or strategy "
+    "windows, the active universe and strategy capital; ASSIGNMENT_ONLY rows never "
+    "do; a row with no unique status fails closed.",
+    "R1 ITD start S = effective_start of the entity's first FUNDED_MEMBERSHIP "
+    "interval. Capital enters at beginning of day S (contracts/portfolio-financial-"
+    "mvp-source-v1.json golden_case.inputs.calculation_configuration."
     "initial_contributions_timing and internal_transfers_timing = "
     "BEGINNING_OF_DAY_BEFORE_RETURN), so the opening point is the last observation "
     "before S when its value is positive, otherwise the first positive observation "
-    "on or after S (the account's first observation).",
-    "Flow timing: contracts/portfolio-financial-mvp-source-v1.json flow_timing."
+    "on or after S. Earlier observations are excluded. Openings are compared with "
+    "provider-ledger OPENING_CAPITAL_ANCHOR (nav_recognition_date, opening_nav).",
+    "R4 flow dating: provider-ledger nav_recognition_date where present, else "
+    "event_date (the date used is counted in each row's notes). Flow timing per "
+    "contracts/portfolio-financial-mvp-source-v1.json flow_timing."
     "selected_treatment = EXACT_TIMESTAMP_BOUNDARY_WHEN_AVAILABLE; "
-    "DATE_ONLY_END_OF_DAY_WITH_INFERRED_TIMING and external_flows_timing = "
-    "END_OF_DAY_AFTER_RETURN. A flow is placed in the sub-period ending at the first "
-    "value observation that contains it: provider-ledger nav_recognition_date when "
-    "present, else event_date. Flows dated on or before the opening point are "
-    "embedded in the opening value.",
+    "DATE_ONLY_END_OF_DAY_WITH_INFERRED_TIMING: date-only flows are EOD and belong "
+    "to the sub-period ending at the first observation on or after that date. "
+    "Flows on or before the opening point are embedded in the opening value.",
     "Sub-period return: contracts/portfolio-performance-policy-v1.json "
-    "twr_cases[date_only_end_of_day] -> (ending - net_flow) / beginning - 1; "
-    "chain-link per twr_cases[exact_timestamp_segments]. TWR is cumulative, not "
-    "annualized. A sub-period with non-positive beginning value and a non-zero "
-    "result is undefined, making that TWR not derivable.",
-    "Strategy TWR/MWR sum member account values and flows on the union of member "
-    "observation dates without filling; membership start/end are capital transfers "
-    "at those end-of-day points. This equals composite_twr_cases"
+    "twr_cases[date_only_end_of_day] -> (ending - EOD flow) / (beginning + BOD "
+    "flow) - 1; chain-link per twr_cases[exact_timestamp_segments]. TWR is "
+    "cumulative, not annualized. R3: zero beginning capital is neutral (return 0); "
+    "a non-zero value arising from zero capital re-opens the series as embedded "
+    "capital (noted); negative capital makes the TWR not derivable.",
+    "Strategy TWR/MWR sum FUNDED member values and flows on the union of member "
+    "observation dates without filling; membership start/end are capital "
+    "transfers at those end-of-day points. This equals composite_twr_cases"
     "[beginning_capital_weighted].",
     "MWR = XIRR on investor cash flows (opening value paid in, deposits paid in, "
     "withdrawals received, terminal value received), same-date flows netted, "
@@ -126,32 +176,46 @@ CONVENTION_NOTES = (
     "annualized rate. Uniqueness is proved with Laguerre's partial-sum rule "
     "(r > 0 forward, -1 < r < 0 reversed, plus r = 0) and the end-point signs; "
     "otherwise NO_ROOT or UNIQUENESS_NOT_PROVED per mwr_cases.",
-    "External flow at account level = any capital crossing the account boundary. "
-    "contracts/account-strategy-flow-classification-policy-v1.json "
-    "event_dispositions classes INTERNAL transfers only at the portfolio "
-    "perimeter; an inter-account transfer is still a flow of each account, and "
-    "same-date transfers between two members of one strategy net to zero in the "
-    "strategy sum.",
-    "Fees, taxes, dividends and interest inside an account are investment results, "
-    "not flows: contracts/portfolio-financial-mvp-source-v1.json "
-    "classification_treatments.FEE_TAX_REBATE_EXPENSE.selected_treatment = "
-    "NO_EFFECT_WHEN_INVESTMENT_RESULT and DIVIDEND_INTEREST_REINVESTMENT = "
-    "NO_INVESTED_CAPITAL_EFFECT.",
+    "R5 flows: a provider-ledger flow enters only if contracts/account-strategy-"
+    "flow-classification-policy-v1.json event_dispositions classifies its flow_type "
+    "(exact[].flow_type: EXTERNAL_CONTRIBUTION, EXTERNAL_WITHDRAWAL, "
+    "EXTERNAL_PROVIDER_TRANSFER, DEPOSIT_OR_WITHDRAWAL = EXTERNAL; ACCOUNT_TRANSFER "
+    "= INTERNAL; prefix[].flow_type_prefix TRANSFER:INTERNAL: = INTERNAL) and its "
+    "amount satisfies amount_sign; any other in-window flow fails closed. INTERNAL "
+    "transfers are entity-level flows for accounts and strategies "
+    "(classification_treatments.INTERNAL_TRANSFER.selected_treatment = "
+    "BY_STRATEGY_OFFSET_AND_AGGREGATE_ZERO); they net to zero only in aggregate.",
+    "Fees, taxes, dividends and interest are investment results, not flows: "
+    "contracts/portfolio-financial-mvp-source-v1.json classification_treatments."
+    "FEE_TAX_REBATE_EXPENSE.selected_treatment = NO_EFFECT_WHEN_INVESTMENT_RESULT "
+    "and DIVIDEND_INTEREST_REINVESTMENT.selected_treatment = "
+    "NO_INVESTED_CAPITAL_EFFECT. The provider-ledger flows array carries none of "
+    "them; raw Quantbase fee sales, journals and dividends are excluded on this "
+    "basis.",
     "IBKR/Schwab/Alpaca/Fidelity values and flows: provider-ledger nav_observations "
-    "and flows (every flow_type, AVAILABLE USD amounts).",
-    "Quantbase (admission under test): flows are rebuilt from raw account_activity."
-    "csv for the fund whose title matches the crosswalk label (fund BUY +, SELL/"
-    "MAX_S -, created_to_cover_fees sales = fee, RBLNC = internal). Fills carry "
-    "exact timestamps (flow_timing EXACT_TIMESTAMP_BOUNDARY_WHEN_AVAILABLE): a fill "
-    "whose last order filled on UTC date F is absent from the value dated F and is "
-    "held, at the next close, in the value dated F+1, so it starts that sub-period: "
-    "r = ending / (beginning + flow) - 1 (the fund's own order fills show the bought "
-    "units repriced at the next close, e.g. 2025-11-12 BUY). MWR dates the flow F. "
-    "The provider-ledger Quantbase account deposits are not used as sleeve flows.",
-    "Matrixport (admission under test): flows come from raw wallet_deposits.csv and "
+    "and classified flows (AVAILABLE USD amounts).",
+    "R6 Quantbase (admission under test): values from raw "
+    "dashboard_Volatis_Strategy_pricehistory.csv (the file the ledger cites as "
+    "source_artifact_id; added to the listed inputs to satisfy R6), flows from raw "
+    "account_activity.csv for the fund whose title matches the crosswalk label "
+    "(fund BUY +, SELL/MAX_S -, created_to_cover_fees sales = fee, RBLNC = "
+    "internal). Fills carry exact timestamps (EXACT_TIMESTAMP_BOUNDARY_WHEN_"
+    "AVAILABLE): a fill whose last order filled on UTC date F is absent from the "
+    "value dated F and held, at the next close, in the value dated F+1, so it "
+    "starts that sub-period: r = ending / (beginning + flow) - 1; MWR dates it F. "
+    "Ledger values and ledger account deposits are cross-checks only.",
+    "R6 Matrixport (admission under test): values = units x raw nav_daily.csv nav "
+    "(fee-net) x USDT->USD. Units = the wallet's USDT debits (wallet_bills.csv "
+    "direction 2) / nav at the first nav_daily day_timestamp_ms after each debit. "
+    "No raw FX input is listed, so the USDT->USD rate is the ledger row's "
+    "valuation_fx rate (portfolio FX generation, Yahoo UTC close) - a rate, not a "
+    "valuation; a date without it is dropped. Flows from wallet_deposits.csv and "
     "wallet_bills.csv; wallet_currency_dispositions.csv proves which currencies' "
-    "deposit/withdrawal history was readable. Values are provider-ledger "
-    "nav_observations, cross-checked against raw nav_daily.csv per-unit NAV.",
+    "history was readable. Ledger values are cross-checks only.",
+    "R6 ledger valuations after the last raw observation are not expected values; "
+    "their count and last date/value are reported in notes. Capital at cutoff for "
+    "Quantbase/Matrixport = last raw observation on or before the cutoff with its "
+    "true as_of.",
     "Money: Decimal sums, rounded once to cents (ROUND_HALF_UP). Returns: "
     "Decimal (60 digits), quantized to 1e-12 (ROUND_HALF_UP).",
 )
@@ -242,6 +306,8 @@ class AccountSource:
     # Last date covered by the raw flow evidence (None: provider-ledger flows).
     flow_coverage_end: dt.date | None = None
     flow_notes: list[str] = field(default_factory=list)
+    value_notes: list[str] = field(default_factory=list)
+    anchor: tuple[dt.date, Decimal] | None = None
 
 
 class NotDerivableError(RuntimeError):
@@ -262,6 +328,14 @@ def opening_point(
     return None
 
 
+def _within(flow: Flow, start: dt.date, end: dt.date) -> bool:
+    """Whether ``flow`` lies in the value interval ``(start, end]``."""
+
+    if flow.timing == BOD:
+        return start <= flow.effective_date < end
+    return start < flow.effective_date <= end
+
+
 def build_member(
     source: AccountSource, segment: Segment, cutoff: dt.date
 ) -> tuple[Member, list[str]]:
@@ -273,8 +347,7 @@ def build_member(
             f"[{_day(segment.start)}, {_day(limit)}]"
         )
     open_day, basis = opening
-    closing = [day for day in source.values if open_day <= day <= limit]
-    close_day = max(closing)
+    close_day = max(day for day in source.values if open_day <= day <= limit)
     for event_day, description in source.raw_events:
         if open_day < event_day <= limit:
             raise NotDerivableError(
@@ -326,14 +399,27 @@ def build_member(
         for flow in embedded
         if flow.effective_date >= segment.start - dt.timedelta(days=31)
     ]
+    dated = Counter(flow.dated_by for flow in in_window)
+    classes = Counter(flow.disposition for flow in in_window)
     notes = [
-        f"{source.account_id} segment [{_day(segment.start)}, "
+        f"{source.account_id} funded segment [{_day(segment.start)}, "
         f"{_day(segment.end) if segment.end else 'open'}] opening "
         f"{_day(open_day)} value {_money(source.values[open_day])} ({basis}); "
         f"terminal {_day(close_day)} value {_money(source.values[close_day])}; "
         f"{len(in_window)} window flow(s) net "
         f"{_money(sum((f.amount for f in in_window), ZERO))}"
+        + (f" dated by {dict(sorted(dated.items()))}" if dated else "")
+        + (f", classes {dict(sorted(classes.items()))}" if classes else "")
     ]
+    if source.anchor is not None:
+        anchor_day, anchor_value = source.anchor
+        agrees = anchor_day == open_day and _money(anchor_value) == _money(
+            source.values[open_day]
+        )
+        notes.append(
+            f"OPENING_CAPITAL_ANCHOR {_day(anchor_day)} {_money(anchor_value)} "
+            + ("agrees" if agrees else "DIFFERS")
+        )
     if near:
         notes.append(
             f"{len(near)} flow(s) net {_money(sum((f.amount for f in near), ZERO))} "
@@ -358,15 +444,8 @@ def build_member(
             "raw inputs and none are assumed"
         )
     notes.extend(source.flow_notes)
+    notes.extend(source.value_notes)
     return member, notes
-
-
-def _within(flow: Flow, start: dt.date, end: dt.date) -> bool:
-    """Whether ``flow`` lies in the value interval ``(start, end]``."""
-
-    if flow.timing == BOD:
-        return start <= flow.effective_date < end
-    return start < flow.effective_date <= end
 
 
 def _returns(
@@ -379,7 +458,14 @@ def _returns(
         periods = composite_subperiods(members)
         twr = time_weighted_return(periods)
         extreme = []
+        reopened = []
         for period in periods:
+            if is_reopening(period):
+                reopened.append(
+                    f"({_day(period.start)}, {_day(period.end)}] value "
+                    f"{_money(period.ending_value - period.net_flow)}"
+                )
+                continue
             value = subperiod_return(
                 period.beginning_value,
                 period.ending_value,
@@ -389,33 +475,66 @@ def _returns(
             if abs(value) > 1:
                 extreme.append(f"{_day(period.end)}:{_ratio(value)}")
         notes.append(f"{len(periods)} sub-periods")
+        if reopened:
+            notes.append(
+                "R3 zero-capital re-opening (neutral, value embedded as capital) at "
+                + ", ".join(reopened)
+            )
         if extreme:
             notes.append("sub-period |r|>1 at " + ", ".join(extreme))
-    except UndefinedReturnError:
-        undefined = []
-        for period in composite_subperiods(members):
-            try:
-                subperiod_return(
-                    period.beginning_value,
-                    period.ending_value,
-                    period.net_flow,
-                    period.beginning_flow,
-                )
-            except UndefinedReturnError:
-                undefined.append(
-                    f"({_day(period.start)}, {_day(period.end)}] beginning "
-                    f"{period.beginning_value}+{period.beginning_flow} ending "
-                    f"{period.ending_value} flow {period.net_flow}"
-                )
-        twr_reason = (
-            "TWR undefined: non-positive beginning value with non-zero result in "
-            + "; ".join(undefined[:3])
-            + (f" (+{len(undefined) - 3} more)" if len(undefined) > 3 else "")
-        )
+    except UndefinedReturnError as exc:
+        twr_reason = f"TWR undefined: negative beginning capital ({exc})"
     except CalendarMisalignmentError as exc:
         twr_reason = f"member calendars misaligned without filling: {exc}"
     irr = xirr(investor_cash_flows(members))
     return twr, twr_reason, irr, notes
+
+
+def _ledger_cross_check(
+    raw: Mapping[dt.date, Decimal],
+    ledger: Mapping[dt.date, Decimal],
+    cutoff: dt.date,
+) -> list[str]:
+    """R6: the ledger is a cross-check; later ledger valuations are not expected."""
+
+    common = sorted(set(raw).intersection(ledger))
+    differences = [day for day in common if abs(raw[day] - ledger[day]) >= CENT]
+    notes = [
+        f"cross-check provider-ledger values: {len(common)} common dates, "
+        f"{len(differences)} differ by >= 0.01"
+        + (
+            " ("
+            + ", ".join(
+                f"{_day(day)} raw {_money(raw[day])} ledger {_money(ledger[day])}"
+                for day in differences[:3]
+            )
+            + ")"
+            if differences
+            else ""
+        )
+    ]
+    last_raw = max(raw) if raw else None
+    later = sorted(
+        day for day in ledger if day <= cutoff and (last_raw is None or day > last_raw)
+    )
+    if later:
+        notes.append(
+            f"R6 NOT EXPECTED VALUES: {len(later)} provider-ledger valuation(s) after "
+            f"the last raw observation {_day(last_raw) if last_raw else '-'}, "
+            f"{_day(later[0])}..{_day(later[-1])}, last {_money(ledger[later[-1]])}"
+        )
+    return notes
+
+
+def _opening_anchor(ledger: Ledger, account_id: str) -> tuple[dt.date, Decimal] | None:
+    for anchor in ledger.anchors.get(account_id, ()):
+        if (
+            anchor.capital_type == "OPENING_CAPITAL_ANCHOR"
+            and anchor.recognition_date is not None
+            and anchor.opening_nav is not None
+        ):
+            return anchor.recognition_date, anchor.opening_nav
+    return None
 
 
 def _account_sources(
@@ -432,29 +551,32 @@ def _account_sources(
     sources: dict[str, AccountSource] = {}
     for account_id in sorted(providers):
         provider = providers[account_id]
-        values = {
+        ledger_values = {
             day: value
             for day, value in ledger.nav.get(account_id, {}).items()
             if day <= cutoff
         }
-        issues = list(ledger.nav_issues.get(account_id, ()))
         if provider == "QUANTBASE":
             source = _quantbase_source(
-                account_id, labels[account_id], values, ledger, files
+                account_id, labels[account_id], ledger_values, ledger, files, cutoff
             )
         elif provider == "MATRIXPORT":
-            source = _matrixport_source(account_id, values, ledger, files)
+            source = _matrixport_source(
+                account_id, ledger_values, ledger, files, cutoff
+            )
         else:
             source = AccountSource(
                 account_id,
                 provider,
-                values,
+                ledger_values,
                 ledger.flows.get(account_id, AccountFlows()),
                 (LEDGER,),
                 (LEDGER,),
             )
+        issues = sorted(set(ledger.nav_issues.get(account_id, ())))
         if issues:
-            source.notes.append("ledger nav issues: " + ", ".join(sorted(set(issues))))
+            source.notes.append("ledger nav issues: " + ", ".join(issues))
+        source.anchor = _opening_anchor(ledger, account_id)
         sources[account_id] = source
     return sources
 
@@ -462,21 +584,27 @@ def _account_sources(
 def _quantbase_source(
     account_id: str,
     label: str,
-    values: Mapping[dt.date, Decimal],
+    ledger_values: Mapping[dt.date, Decimal],
     ledger: Ledger,
     files: Mapping[str, InputFile],
+    cutoff: dt.date,
 ) -> AccountSource:
     title = label.split("—", 1)[1].strip() if "—" in label else label
     sleeve: QuantbaseSleeve = parse_quantbase_sleeve(
         files[QB_ACTIVITY].data, files[QB_ACCOUNTS].data, title
     )
+    raw_values = {
+        day: value
+        for day, value in parse_quantbase_values(files[QB_VALUES].data).items()
+        if day <= cutoff
+    }
     source = AccountSource(
         account_id,
         "QUANTBASE",
-        values,
+        raw_values,
         sleeve.flows,
-        (LEDGER, QB_ACTIVITY),
-        (LEDGER, QB_ACCOUNTS),
+        (QB_ACTIVITY, QB_VALUES),
+        (QB_VALUES, QB_ACCOUNTS, LEDGER),
     )
     raw = sleeve.flows.flows
     source.flow_coverage_end = sleeve.coverage_end
@@ -505,7 +633,6 @@ def _quantbase_source(
         f"{_money(sum((f.amount for f in ledger_flows), ZERO))} (account-level "
         "deposits, not sleeve flows; not used)"
     )
-    source.notes.extend([summary, anchor_check, ledger_check])
     source.flow_notes.extend([summary, anchor_check, ledger_check])
     if sleeve.dividends:
         source.flow_notes.append(
@@ -515,29 +642,26 @@ def _quantbase_source(
             "investment results, not flows (DIVIDEND_INTEREST_REINVESTMENT); the listed "
             "inputs do not show whether they were credited inside the sleeve value"
         )
-    if sleeve.coverage_end is not None and sleeve.snapshot_value is not None:
-        around = [sleeve.coverage_end + dt.timedelta(days=offset) for offset in (0, 1)]
-        compared = ", ".join(
-            f"{_day(day)} {_money(values[day])} diff "
-            f"{_money(sleeve.snapshot_value - values[day])}"
-            for day in around
-            if day in values
-        )
-        source.notes.append(
-            f"cross-check raw accounts.csv fund value {_money(sleeve.snapshot_value)} "
-            f"(capture after activity end {_day(sleeve.coverage_end)}) vs ledger "
-            f"{compared}; later ledger values are not raw-verifiable from listed inputs"
-        )
     if sleeve.other_types:
-        source.notes.append(f"unknown fund txn types {list(sleeve.other_types)}")
+        source.flow_notes.append(f"unknown fund txn types {list(sleeve.other_types)}")
+    source.value_notes.extend(_ledger_cross_check(raw_values, ledger_values, cutoff))
+    if raw_values and sleeve.snapshot_value is not None:
+        last = max(raw_values)
+        source.value_notes.append(
+            f"cross-check raw accounts.csv fund value {_money(sleeve.snapshot_value)} "
+            f"vs raw value {_day(last)} {_money(raw_values[last])} diff "
+            f"{_money(sleeve.snapshot_value - raw_values[last])}"
+        )
+    source.notes.extend(source.flow_notes + source.value_notes)
     return source
 
 
 def _matrixport_source(
     account_id: str,
-    values: Mapping[dt.date, Decimal],
+    ledger_values: Mapping[dt.date, Decimal],
     ledger: Ledger,
     files: Mapping[str, InputFile],
+    cutoff: dt.date,
 ) -> AccountSource:
     wallet: MatrixportWallet = parse_matrixport_wallet(
         files[MP_DEPOSITS].data,
@@ -546,13 +670,14 @@ def _matrixport_source(
         files[MP_NAV].data,
     )
     flows = AccountFlows()
+    raw_values, value_notes = _matrixport_values(account_id, wallet, ledger, cutoff)
     source = AccountSource(
         account_id,
         "MATRIXPORT",
-        values,
+        raw_values,
         flows,
-        (LEDGER, MP_DEPOSITS, MP_BILLS, MP_DISPOSITIONS),
-        (LEDGER, MP_NAV),
+        (MP_DEPOSITS, MP_BILLS, MP_DISPOSITIONS, MP_NAV),
+        (MP_NAV, MP_BILLS, LEDGER),
     )
     seen_currencies: set[str] = set()
     for day, amount, currency in wallet.deposits:
@@ -597,30 +722,67 @@ def _matrixport_source(
         f"{reasons}, latest {_day(max(ledger_days)) if ledger_days else '-'} "
         f"(generation {ledger.generations.get('matrixport', '-')}; not used)"
     )
-    source.notes.extend([wallet_summary, ledger_check])
     source.flow_notes.extend([wallet_summary, ledger_check])
-    # Cross-check: ledger USD value / its USDT valuation rate / raw per-unit NAV.
-    ratios: list[Decimal] = []
-    with localcontext() as context:
-        context.prec = PRECISION
-        for day in sorted(set(values).intersection(wallet.nav_per_unit)):
-            row = ledger.nav_rows.get(account_id, {}).get(day, {})
-            rates = [
-                Decimal(str(item["rate"]))
-                for item in row.get("valuation_fx", [])
-                if item.get("currency") == "USDT"
-            ]
-            if len(rates) == 1 and wallet.nav_per_unit[day] > 0:
-                ratios.append(values[day] / rates[0] / wallet.nav_per_unit[day])
-    if ratios:
-        spread = max(ratios) - min(ratios)
-        source.notes.append(
-            f"cross-check raw nav_daily: implied units {str(min(ratios))[:18]} on "
-            f"{len(ratios)} common dates, spread {spread:.3E}; raw capture ends "
-            f"{_day(wallet.coverage_end) if wallet.coverage_end else '-'}, later "
-            "ledger values are not raw-verifiable from listed inputs"
-        )
+    source.value_notes.extend(value_notes)
+    source.value_notes.extend(_ledger_cross_check(raw_values, ledger_values, cutoff))
+    source.notes.extend(source.flow_notes + source.value_notes)
     return source
+
+
+def _matrixport_values(
+    account_id: str,
+    wallet: MatrixportWallet,
+    ledger: Ledger,
+    cutoff: dt.date,
+) -> tuple[dict[dt.date, Decimal], list[str]]:
+    """R6 raw Matrixport values: units x fee-net NAV x USDT->USD rate."""
+
+    debits = [
+        (stamp, amount)
+        for stamp, amount, currency, direction in wallet.bill_times
+        if currency == MATRIXPORT_PRODUCT_CURRENCY and direction == "2"
+    ]
+    if not debits:
+        return {}, ["no USDT subscription debit in raw wallet bills"]
+    units = ZERO
+    first_day: dt.date | None = None
+    for stamp, amount in debits:
+        confirm = next(
+            (day for moment, day in wallet.nav_times if moment > stamp), None
+        )
+        if confirm is None or wallet.nav_per_unit[confirm] <= 0:
+            return {}, [f"no raw NAV after the subscription debit at {stamp}"]
+        units += amount / wallet.nav_per_unit[confirm]
+        first_day = confirm if first_day is None else min(first_day, confirm)
+    assert first_day is not None
+    values: dict[dt.date, Decimal] = {}
+    missing_fx: list[dt.date] = []
+    for day in sorted(wallet.nav_per_unit):
+        if day < first_day or day > cutoff:
+            continue
+        row = ledger.nav_rows.get(account_id, {}).get(day, {})
+        rates = [
+            Decimal(str(item["rate"]))
+            for item in row.get("valuation_fx", [])
+            if item.get("currency") == MATRIXPORT_PRODUCT_CURRENCY
+            and item.get("base_currency") == "USD"
+        ]
+        if len(rates) != 1:
+            missing_fx.append(day)
+            continue
+        values[day] = units * wallet.nav_per_unit[day] * rates[0]
+    notes = [
+        f"raw units {str(units)[:22]} from {len(debits)} USDT debit(s) "
+        f"{sum((a for _, a in debits), ZERO)} at NAV of {_day(first_day)}; "
+        f"{len(values)} raw valuations {_day(min(values)) if values else '-'}.."
+        f"{_day(max(values)) if values else '-'}"
+        + (
+            f"; {len(missing_fx)} raw NAV date(s) without a ledger FX rate dropped"
+            if missing_fx
+            else ""
+        )
+    ]
+    return values, notes
 
 
 def derive(
@@ -632,13 +794,21 @@ def derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None = None,
     layout: Mapping[str, str] | None = None,
+    declared_cutoff: dt.date = DECLARED_CUTOFF,
 ) -> dict[str, Any]:
     """Derive every metric; ``layout`` may relocate inputs (synthetic tests only)."""
 
     with localcontext() as context:
         context.prec = PRECISION
         return _derive(
-            qe_root, repo_root, cutoff, model, code_commit, expected_sha256, layout
+            qe_root,
+            repo_root,
+            cutoff,
+            model,
+            code_commit,
+            expected_sha256,
+            layout,
+            declared_cutoff,
         )
 
 
@@ -650,40 +820,45 @@ def _derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None,
     layout: Mapping[str, str] | None,
+    declared_cutoff: dt.date,
 ) -> dict[str, Any]:
     pins = PINNED_SHA256 if expected_sha256 is None else expected_sha256
     moved = layout or {}
     files = {
         path: read_input(qe_root, moved.get(path, path), pins) for path in INPUT_ORDER
     }
+    contract_bytes = {
+        relative: repo_root.joinpath(*relative.split("/")).read_bytes()
+        for relative in CONTRACTS
+    }
     crosswalk = parse_crosswalk(files[CROSSWALK].data)
-    ledger = parse_ledger(files[LEDGER].data)
+    ledger = parse_ledger(
+        files[LEDGER].data, parse_flow_policy(contract_bytes[FLOW_POLICY])
+    )
+    statuses = parse_membership_status(contract_bytes[MVP_CONTRACT])
     output = Output()
     notes = list(CONVENTION_NOTES)
-    if crosswalk.calculation_cutoff_date != cutoff:
-        notes.append(
-            f"WARNING crosswalk calculation_cutoff_date "
-            f"{crosswalk.calculation_cutoff_date} != cutoff {cutoff}"
+    mismatches = [
+        f"{name} {value} != {declared_cutoff}"
+        for name, value in (
+            ("selected cutoff", cutoff),
+            ("crosswalk.calculation_cutoff_date", crosswalk.calculation_cutoff_date),
+            ("crosswalk.as_of_date", crosswalk.as_of_date),
+            ("provider-ledger.as_of_date", ledger.as_of_date),
         )
-    if ledger.as_of_date != cutoff:
-        notes.append(
-            f"WARNING ledger as_of_date {ledger.as_of_date} != cutoff {cutoff}"
-        )
-    sources = _account_sources(crosswalk, ledger, files, cutoff)
-    _derive_accounts(output, crosswalk, sources, cutoff)
-    _derive_strategies_and_portfolio(output, crosswalk, sources, cutoff)
+        if value != declared_cutoff
+    ]
+    if mismatches:
+        reason = "R7 INPUT_CUTOFF_MISMATCH (fail closed): " + "; ".join(mismatches)
+        notes.append(reason)
+        _fail_closed(output, crosswalk, reason)
+    else:
+        membership = _membership(crosswalk, statuses, cutoff)
+        sources = _account_sources(crosswalk, ledger, files, cutoff)
+        _derive_accounts(output, crosswalk, membership, sources, cutoff)
+        _derive_strategies_and_portfolio(output, crosswalk, membership, sources, cutoff)
     output.metrics.sort(key=lambda m: (m["metric_id"], m["entity"], m["window"] or ""))
     output.not_derivable.sort(key=lambda m: (m["metric_id"], m["entity"]))
-    contracts = []
-    for relative in CONTRACTS:
-        data = repo_root.joinpath(*relative.split("/")).read_bytes()
-        contracts.append(
-            {
-                "path": relative,
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "bytes": len(data),
-            }
-        )
     return {
         "schema": SCHEMA,
         "derivation": DERIVATION,
@@ -694,27 +869,70 @@ def _derive(
             {"path": item.path, "sha256": item.sha256, "bytes": item.size}
             for item in (files[path] for path in INPUT_ORDER)
         ],
-        "contracts": contracts,
+        "contracts": [
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+            }
+            for relative, data in contract_bytes.items()
+        ],
         "convention_notes": notes,
         "metrics": output.metrics,
         "not_derivable": output.not_derivable,
     }
 
 
-def _included(rows: Sequence[Assignment], cutoff: dt.date) -> list[Assignment]:
-    return [
-        row
-        for row in rows
-        if row.disposition == INCLUDED and row.effective_start <= cutoff
-    ]
+def _fail_closed(output: Output, crosswalk: Crosswalk, reason: str) -> None:
+    for account_id in sorted({row.account_id for row in crosswalk.rows}):
+        for metric_id in ACCOUNT_METRICS:
+            window = WINDOW if metric_id in WINDOWED else None
+            output.missing(metric_id, account_id, window, reason)
+    for strategy_id in sorted({row.strategy_id for row in crosswalk.rows}):
+        for metric_id in STRATEGY_METRICS:
+            window = WINDOW if metric_id in WINDOWED else None
+            output.missing(metric_id, strategy_id, window, reason)
+    for metric_id in PORTFOLIO_METRICS:
+        output.missing(metric_id, "portfolio", None, reason)
+    output.missing("capital.reserve.cutoff", "reserve", None, reason)
 
 
-def _current(rows: Sequence[Assignment], cutoff: dt.date) -> list[Assignment]:
-    return [row for row in _included(rows, cutoff) if row.effective_end is None]
+@dataclass(frozen=True)
+class Membership:
+    funded: tuple[Assignment, ...]
+    assignment_only: tuple[Assignment, ...]
+    unknown: tuple[tuple[Assignment, str], ...]
+
+
+def _membership(
+    crosswalk: Crosswalk,
+    statuses: Mapping[tuple[str, str, str, str], set[str]],
+    cutoff: dt.date,
+) -> Membership:
+    funded: list[Assignment] = []
+    assignment_only: list[Assignment] = []
+    unknown: list[tuple[Assignment, str]] = []
+    for row in crosswalk.rows:
+        if row.disposition != INCLUDED or row.effective_start > cutoff:
+            continue
+        key = (
+            row.provider,
+            row.strategy_id,
+            _day(row.effective_start),
+            _day(row.effective_end) if row.effective_end else "",
+        )
+        found = statuses.get(key, set())
+        if found == {FUNDED}:
+            funded.append(row)
+        elif found == {"ASSIGNMENT_ONLY"}:
+            assignment_only.append(row)
+        else:
+            unknown.append((row, f"contract statuses {sorted(found)} for {key}"))
+    return Membership(tuple(funded), tuple(assignment_only), tuple(unknown))
 
 
 def _account_span(rows: Sequence[Assignment]) -> Segment | None:
-    """Merge an account's included assignments into one contiguous span."""
+    """Merge an account's funded assignments into one contiguous span."""
 
     ordered = sorted(rows, key=lambda row: row.effective_start)
     for earlier, later in zip(ordered, ordered[1:]):
@@ -740,20 +958,22 @@ def _last_value(
 def _derive_accounts(
     output: Output,
     crosswalk: Crosswalk,
+    membership: Membership,
     sources: Mapping[str, AccountSource],
     cutoff: dt.date,
 ) -> None:
-    included = _included(crosswalk.rows, cutoff)
-    by_account: dict[str, list[Assignment]] = {}
-    for row in crosswalk.rows:
-        by_account.setdefault(row.account_id, [])
-    for row in included:
-        by_account[row.account_id].append(row)
-    for account_id, rows in sorted(by_account.items()):
+    for account_id in sorted({row.account_id for row in crosswalk.rows}):
         source = sources[account_id]
         dispositions = sorted(
             {row.disposition for row in crosswalk.rows if row.account_id == account_id}
         )
+        funded = [row for row in membership.funded if row.account_id == account_id]
+        skipped = [
+            row for row in membership.assignment_only if row.account_id == account_id
+        ]
+        unknown = [
+            reason for row, reason in membership.unknown if row.account_id == account_id
+        ]
         last = _last_value(source, cutoff)
         base_notes = [
             f"provider {source.provider}",
@@ -785,7 +1005,7 @@ def _derive_accounts(
                 _day(day),
                 "date",
                 source.value_inputs,
-                base_notes + extra,
+                base_notes + extra + source.value_notes,
             )
         windowed = (
             "flows.account.net",
@@ -793,22 +1013,31 @@ def _derive_accounts(
             "twr.account",
             "mwr.account",
         )
-        if not rows:
+        if unknown:
+            for metric_id in windowed:
+                output.missing(
+                    metric_id,
+                    account_id,
+                    WINDOW,
+                    "membership status not determinable: " + "; ".join(unknown),
+                )
+            continue
+        if not funded:
             reason = (
-                "account has no INCLUDED_PRODUCT_EPOCH assignment "
+                "account has no FUNDED_MEMBERSHIP interval "
                 f"({'/'.join(dispositions)}); it is outside the governed product window"
             )
             for metric_id in windowed:
                 output.missing(metric_id, account_id, WINDOW, reason)
             continue
-        span = _account_span(rows)
+        span = _account_span(funded)
         if span is None:
             for metric_id in windowed:
                 output.missing(
                     metric_id,
                     account_id,
                     WINDOW,
-                    "included assignments are not contiguous",
+                    "funded assignments are not contiguous",
                 )
             continue
         try:
@@ -817,8 +1046,17 @@ def _derive_accounts(
             for metric_id in windowed:
                 output.missing(metric_id, account_id, WINDOW, str(exc))
             continue
+        if skipped:
+            member_notes = member_notes + [
+                "R1/R2 excluded ASSIGNMENT_ONLY "
+                + ", ".join(
+                    f"{row.strategy_id} [{_day(row.effective_start)}, "
+                    f"{_day(row.effective_end) if row.effective_end else 'open'}]"
+                    for row in skipped
+                )
+            ]
         flow_total = sum((amount for _, amount, _ in member.flows), ZERO)
-        inputs = source.inputs
+        inputs = source.inputs + (CROSSWALK, MVP_CONTRACT)
         output.metric(
             "flows.account.net",
             account_id,
@@ -893,46 +1131,72 @@ def _emit_returns(
 def _derive_strategies_and_portfolio(
     output: Output,
     crosswalk: Crosswalk,
+    membership: Membership,
     sources: Mapping[str, AccountSource],
     cutoff: dt.date,
 ) -> None:
-    current = _current(crosswalk.rows, cutoff)
-    included = _included(crosswalk.rows, cutoff)
-    strategies = sorted({row.strategy_id for row in current})
-    portfolio_inputs = (CROSSWALK,)
-    output.metric(
-        "universe.active_strategy_ids",
-        "portfolio",
-        None,
-        cutoff,
-        strategies,
-        "list",
-        portfolio_inputs,
-        [
-            f"{len(current)} current INCLUDED_PRODUCT_EPOCH rows "
-            f"({len({row.account_id for row in current})} accounts) with "
-            "effective_end null and effective_start <= cutoff"
-        ],
-    )
-    output.metric(
-        "universe.active_strategy_count",
-        "portfolio",
-        None,
-        cutoff,
-        str(len(strategies)),
-        "count",
-        portfolio_inputs,
-    )
+    current = [row for row in membership.funded if row.effective_end is None]
+    unknown_current = [
+        (row, reason) for row, reason in membership.unknown if row.effective_end is None
+    ]
+    unresolved = sorted({row.strategy_id for row, _ in unknown_current})
+    strategies = sorted({row.strategy_id for row in current} | set(unresolved))
+    portfolio_inputs = (CROSSWALK, MVP_CONTRACT)
+    unknown_notes = [reason for _, reason in membership.unknown]
+    if unknown_current:
+        reason = (
+            "current membership status not determinable (fail closed): "
+            + "; ".join(reason for _, reason in unknown_current)
+        )
+        output.missing("universe.active_strategy_ids", "portfolio", None, reason)
+        output.missing("universe.active_strategy_count", "portfolio", None, reason)
+    else:
+        output.metric(
+            "universe.active_strategy_ids",
+            "portfolio",
+            None,
+            cutoff,
+            strategies,
+            "list",
+            portfolio_inputs,
+            [
+                f"{len(current)} current FUNDED_MEMBERSHIP rows "
+                f"({len({row.account_id for row in current})} accounts) with "
+                "effective_end null and effective_start <= cutoff"
+            ],
+        )
+        output.metric(
+            "universe.active_strategy_count",
+            "portfolio",
+            None,
+            cutoff,
+            str(len(strategies)),
+            "count",
+            portfolio_inputs,
+        )
     systematic = ZERO
-    systematic_ok = True
-    systematic_inputs: set[str] = {CROSSWALK}
+    systematic_ok = not unknown_notes
+    systematic_inputs: set[str] = set(portfolio_inputs)
+    stale_members: list[str] = []
     for strategy_id in strategies:
+        if strategy_id in unresolved:
+            output.missing(
+                "capital.strategy.cutoff",
+                strategy_id,
+                None,
+                "current membership status not determinable: "
+                + "; ".join(
+                    r for row, r in unknown_current if row.strategy_id == strategy_id
+                ),
+            )
+            _strategy_returns(output, strategy_id, membership, sources, cutoff)
+            continue
         holders = sorted(
             row.account_id for row in current if row.strategy_id == strategy_id
         )
         total = ZERO
         days: list[dt.date] = []
-        strategy_inputs: set[str] = {CROSSWALK}
+        strategy_inputs: set[str] = set(portfolio_inputs)
         missing = []
         for account_id in holders:
             last = _last_value(sources[account_id], cutoff)
@@ -953,6 +1217,11 @@ def _derive_strategies_and_portfolio(
         else:
             systematic += total
             systematic_inputs.update(strategy_inputs)
+            stale_members.extend(
+                f"{strategy_id} {_day(day)}"
+                for day in sorted(set(days))
+                if day != cutoff
+            )
             output.metric(
                 "capital.strategy.cutoff",
                 strategy_id,
@@ -968,39 +1237,7 @@ def _derive_strategies_and_portfolio(
                     else []
                 ),
             )
-        members: list[Member] = []
-        member_notes: list[str] = []
-        member_inputs: set[str] = {CROSSWALK}
-        failure = ""
-        for row in sorted(
-            (row for row in included if row.strategy_id == strategy_id),
-            key=lambda row: (row.effective_start, row.account_id),
-        ):
-            try:
-                member, notes = build_member(
-                    sources[row.account_id],
-                    Segment(row.account_id, row.effective_start, row.effective_end),
-                    cutoff,
-                )
-            except NotDerivableError as exc:
-                failure = str(exc)
-                break
-            members.append(member)
-            member_notes.extend(notes)
-            member_inputs.update(sources[row.account_id].inputs)
-            member_inputs.update(sources[row.account_id].value_inputs)
-        if failure or not members:
-            for metric_id in ("twr.strategy", "mwr.strategy"):
-                output.missing(metric_id, strategy_id, WINDOW, failure or "no members")
-        else:
-            _emit_returns(
-                output,
-                "strategy",
-                strategy_id,
-                members,
-                sorted(member_inputs),
-                member_notes,
-            )
+        _strategy_returns(output, strategy_id, membership, sources, cutoff)
     if systematic_ok:
         output.metric(
             "capital.portfolio.systematic.cutoff",
@@ -1010,14 +1247,22 @@ def _derive_strategies_and_portfolio(
             _money(systematic),
             "USD",
             sorted(systematic_inputs),
-            [f"sum of {len(strategies)} active strategies"],
+            [f"sum of {len(strategies)} active strategies"]
+            + (
+                [
+                    "members observed before the cutoff (last raw observation, R6): "
+                    + ", ".join(stale_members)
+                ]
+                if stale_members
+                else []
+            ),
         )
     else:
         output.missing(
             "capital.portfolio.systematic.cutoff",
             "portfolio",
             None,
-            "a strategy capital is not derivable",
+            "a strategy capital or membership status is not derivable",
         )
     reserve_reason = (
         "no listed input carries a reserve balance: the crosswalk has no reserve "
@@ -1039,12 +1284,14 @@ def _derive_strategies_and_portfolio(
     parts = []
     lacking = []
     retained_total = ZERO
+    retained_inputs: set[str] = {CROSSWALK}
     for account_id in excluded:
         last = _last_value(sources[account_id], cutoff)
         if last is None:
             lacking.append(account_id)
         else:
             retained_total += last[1]
+            retained_inputs.update(sources[account_id].value_inputs)
             parts.append(f"{account_id} {_money(last[1])} at {_day(last[0])}")
     if lacking:
         output.missing(
@@ -1062,9 +1309,71 @@ def _derive_strategies_and_portfolio(
             cutoff,
             _money(retained_total),
             "USD",
-            (CROSSWALK, LEDGER),
+            sorted(retained_inputs),
             parts,
         )
+
+
+def _strategy_returns(
+    output: Output,
+    strategy_id: str,
+    membership: Membership,
+    sources: Mapping[str, AccountSource],
+    cutoff: dt.date,
+) -> None:
+    unknown = [
+        reason for row, reason in membership.unknown if row.strategy_id == strategy_id
+    ]
+    if unknown:
+        for metric_id in ("twr.strategy", "mwr.strategy"):
+            output.missing(
+                metric_id,
+                strategy_id,
+                WINDOW,
+                "membership status not determinable: " + "; ".join(unknown),
+            )
+        return
+    members: list[Member] = []
+    member_notes: list[str] = []
+    member_inputs: set[str] = {CROSSWALK, MVP_CONTRACT}
+    rows = sorted(
+        (row for row in membership.funded if row.strategy_id == strategy_id),
+        key=lambda row: (row.effective_start, row.account_id),
+    )
+    for row in rows:
+        try:
+            member, notes = build_member(
+                sources[row.account_id],
+                Segment(row.account_id, row.effective_start, row.effective_end),
+                cutoff,
+            )
+        except NotDerivableError as exc:
+            for metric_id in ("twr.strategy", "mwr.strategy"):
+                output.missing(metric_id, strategy_id, WINDOW, str(exc))
+            return
+        members.append(member)
+        member_notes.extend(notes)
+        member_inputs.update(sources[row.account_id].inputs)
+        member_inputs.update(sources[row.account_id].value_inputs)
+    if not members:
+        for metric_id in ("twr.strategy", "mwr.strategy"):
+            output.missing(metric_id, strategy_id, WINDOW, "no funded members")
+        return
+    skipped = [
+        row for row in membership.assignment_only if row.strategy_id == strategy_id
+    ]
+    if skipped:
+        member_notes.append(
+            "R2 excluded ASSIGNMENT_ONLY "
+            + ", ".join(
+                f"{row.account_id} [{_day(row.effective_start)}, "
+                f"{_day(row.effective_end) if row.effective_end else 'open'}]"
+                for row in skipped
+            )
+        )
+    _emit_returns(
+        output, "strategy", strategy_id, members, sorted(member_inputs), member_notes
+    )
 
 
 def dumps(document: Mapping[str, Any]) -> bytes:

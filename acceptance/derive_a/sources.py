@@ -138,6 +138,8 @@ class Flow:
     kind: str
     record_id: str
     timing: str = "EOD"
+    dated_by: str = "event_date"
+    disposition: str = "EXTERNAL"
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,73 @@ class Anchor:
     event_date: dt.date | None
     recognition_date: dt.date | None
     amount: Decimal | None
+    opening_nav: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class FlowPolicy:
+    """``contracts/account-strategy-flow-classification-policy-v1.json``.
+
+    ``exact`` maps flow_type -> (disposition, amount_sign); ``prefix`` maps
+    flow_type_prefix -> (disposition, amount_sign).
+    """
+
+    exact: Mapping[str, tuple[str, str]]
+    prefix: Mapping[str, tuple[str, str]]
+
+    def classify(self, flow_type: str) -> tuple[str, str] | None:
+        if flow_type in self.exact:
+            return self.exact[flow_type]
+        for head, rule in self.prefix.items():
+            if flow_type.startswith(head):
+                return rule
+        return None
+
+
+def parse_flow_policy(data: bytes) -> FlowPolicy:
+    document = json.loads(data.decode("utf-8"))
+    dispositions = document["event_dispositions"]
+    exact = {
+        str(item["flow_type"]): (str(item["disposition"]), str(item["amount_sign"]))
+        for item in dispositions.get("exact", [])
+    }
+    prefix = {
+        str(item["flow_type_prefix"]): (
+            str(item["disposition"]),
+            str(item["amount_sign"]),
+        )
+        for item in dispositions.get("prefix", [])
+    }
+    return FlowPolicy(exact, prefix)
+
+
+def sign_allowed(amount: Decimal, rule: str) -> bool:
+    if rule == "POSITIVE":
+        return amount > 0
+    if rule == "NEGATIVE":
+        return amount < 0
+    return amount != 0
+
+
+def parse_membership_status(data: bytes) -> dict[tuple[str, str, str, str], set[str]]:
+    """Assignment statuses from ``current_census.account_sleeves`` of the MVP contract.
+
+    Sleeves are redacted aliases, so the key is (provider, strategy_id,
+    effective_start, effective_end or "") which joins to crosswalk rows.
+    """
+
+    document = json.loads(data.decode("utf-8"))
+    statuses: dict[tuple[str, str, str, str], set[str]] = {}
+    for sleeve in document["current_census"]["account_sleeves"]:
+        for assignment in sleeve.get("assignments", []):
+            key = (
+                str(sleeve["provider_id"]),
+                str(assignment["strategy_id"]),
+                str(assignment["effective_start"]),
+                str(assignment.get("effective_end") or ""),
+            )
+            statuses.setdefault(key, set()).add(str(assignment["status"]))
+    return statuses
 
 
 @dataclass(frozen=True)
@@ -172,7 +241,7 @@ class Ledger:
     generations: Mapping[str, str]
 
 
-def parse_ledger(data: bytes) -> Ledger:
+def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
     document = json.loads(data.decode("utf-8"))
     nav: dict[str, dict[dt.date, Decimal]] = {}
     nav_rows: dict[str, dict[dt.date, Mapping[str, Any]]] = {}
@@ -204,7 +273,8 @@ def parse_ledger(data: bytes) -> Ledger:
         account = str(row["account_id"])
         bucket = flows.setdefault(account, AccountFlows())
         event = iso_date(row.get("event_date"))
-        recognized = iso_date(row.get("nav_recognition_date")) or event
+        recognition = iso_date(row.get("nav_recognition_date"))
+        recognized = recognition or event
         amount_block = row.get("amount") or {}
         amount = decimal_or_none(amount_block.get("value"))
         record = str(row.get("record_id"))
@@ -225,8 +295,28 @@ def parse_ledger(data: bytes) -> Ledger:
                 )
             )
             continue
+        kind = str(row.get("flow_type"))
+        rule = policy.classify(kind)
+        if rule is None:
+            bucket.unusable.append(
+                UnusableFlow(recognized, record, f"flow_type {kind} not classified")
+            )
+            continue
+        if not sign_allowed(amount, rule[1]):
+            bucket.unusable.append(
+                UnusableFlow(recognized, record, f"{kind} amount sign not {rule[1]}")
+            )
+            continue
         bucket.flows.append(
-            Flow(recognized, amount, event, str(row.get("flow_type")), record)
+            Flow(
+                recognized,
+                amount,
+                event,
+                kind,
+                record,
+                dated_by="nav_recognition_date" if recognition else "event_date",
+                disposition=rule[0],
+            )
         )
     anchors: dict[str, list[Anchor]] = {}
     for row in document.get("capital_anchors", []):
@@ -237,6 +327,9 @@ def parse_ledger(data: bytes) -> Ledger:
                 event_date=iso_date(row.get("event_date")),
                 recognition_date=iso_date(row.get("nav_recognition_date")),
                 amount=decimal_or_none(amount_block.get("value")),
+                opening_nav=decimal_or_none(
+                    (row.get("opening_nav") or {}).get("value")
+                ),
             )
         )
     generations = {
@@ -347,7 +440,17 @@ def parse_quantbase_sleeve(
             fee_sales.append((effective, amount))
             continue
         event = _utc_day(row.get("time", "")) or effective
-        bucket.flows.append(Flow(effective, amount, event, kind, record, "BOD"))
+        bucket.flows.append(
+            Flow(
+                effective,
+                amount,
+                event,
+                kind,
+                record,
+                "BOD",
+                dated_by="fill_timestamp",
+            )
+        )
     snapshot: Decimal | None = None
     for row in csv_rows(accounts):
         try:
@@ -371,6 +474,24 @@ def parse_quantbase_sleeve(
     )
 
 
+def parse_quantbase_values(data: bytes) -> dict[dt.date, Decimal]:
+    """Raw dashboard value history (``time`` MM/DD/YYYY, ``value`` USD)."""
+
+    values: dict[dt.date, Decimal] = {}
+    for row in csv_rows(data):
+        try:
+            day = dt.datetime.strptime(row.get("time", ""), "%m/%d/%Y").date()
+        except ValueError as exc:
+            raise InputError("unparseable Quantbase value date") from exc
+        value = decimal_or_none(row.get("value"))
+        if value is None:
+            raise InputError(f"unparseable Quantbase value on {day.isoformat()}")
+        if day in values and values[day] != value:
+            raise InputError(f"conflicting Quantbase values on {day.isoformat()}")
+        values[day] = value
+    return values
+
+
 # ---------------------------------------------------------------------------- Matrixport
 
 
@@ -381,6 +502,8 @@ class MatrixportWallet:
     rejected_currencies: tuple[str, ...]
     nav_per_unit: Mapping[dt.date, Decimal]
     coverage_end: dt.date | None
+    bill_times: tuple[tuple[int, Decimal, str, str], ...] = ()
+    nav_times: tuple[tuple[int, dt.date], ...] = ()
 
 
 def parse_matrixport_wallet(
@@ -393,11 +516,16 @@ def parse_matrixport_wallet(
         if row.get("state") == "confirmed" and day is not None and amount is not None:
             deposit_rows.append((day, amount, row.get("currency", "")))
     bill_rows: list[tuple[dt.date, Decimal, str, str, str]] = []
+    bill_times: list[tuple[int, Decimal, str, str]] = []
     for row in csv_rows(bills):
         day = _utc_day(row.get("timestamp_utc", ""))
         amount = decimal_or_none(row.get("amount"))
-        if day is None or amount is None:
+        stamp = row.get("timestamp_ms", "")
+        if day is None or amount is None or not stamp.isdigit():
             raise InputError("unparseable Matrixport wallet bill")
+        bill_times.append(
+            (int(stamp), amount, row.get("currency", ""), row.get("direction", ""))
+        )
         bill_rows.append(
             (
                 day,
@@ -415,15 +543,23 @@ def parse_matrixport_wallet(
         }
     )
     per_unit: dict[dt.date, Decimal] = {}
+    nav_times: list[tuple[int, dt.date]] = []
     for row in csv_rows(nav_daily):
         day = _utc_day(row.get("day_timestamp_utc", ""))
         value = decimal_or_none(row.get("nav"))
+        stamp = row.get("day_timestamp_ms", "")
         if day is not None and value is not None:
+            if day in per_unit and per_unit[day] != value:
+                raise InputError(f"conflicting Matrixport NAV on {day.isoformat()}")
             per_unit[day] = value
+            if stamp.isdigit():
+                nav_times.append((int(stamp), day))
     return MatrixportWallet(
         deposits=tuple(sorted(deposit_rows)),
         bills=tuple(sorted(bill_rows)),
         rejected_currencies=tuple(rejected),
         nav_per_unit=per_unit,
         coverage_end=max(per_unit) if per_unit else None,
+        bill_times=tuple(sorted(bill_times)),
+        nav_times=tuple(sorted(nav_times)),
     )

@@ -145,17 +145,30 @@ def test_twr_beginning_of_period_flow_earns_the_period_return() -> None:
     assert abs(numerics.time_weighted_return(periods) - D("0.331")) < D("1e-50")
 
 
-def test_twr_is_undefined_on_zero_beginning_capital() -> None:
+def test_twr_zero_capital_is_neutral_and_reopens() -> None:
+    # R3: 100 -> withdrawn to 0 (return 0), 0 -> 0 neutral, 0 -> 5 re-opens with the
+    # 5 embedded as capital (neutral), then 5 -> 6 is +20%. TWR = 0.2.
     account = member(
         "a",
-        {"2026-01-01": "100", "2026-01-02": "0", "2026-01-03": "5"},
+        {
+            "2026-01-01": "100",
+            "2026-01-02": "0",
+            "2026-01-03": "0",
+            "2026-01-04": "5",
+            "2026-01-05": "6",
+        },
         "2026-01-01",
-        "2026-01-03",
+        "2026-01-05",
         (("2026-01-02", "-100", numerics.EOD),),
     )
+    periods = numerics.composite_subperiods([account])
+    assert [numerics.is_reopening(p) for p in periods] == [False, False, True, False]
+    assert numerics.time_weighted_return(periods) == D("0.2")
+
+
+def test_twr_is_undefined_on_negative_beginning_capital() -> None:
     with pytest.raises(numerics.UndefinedReturnError):
-        numerics.time_weighted_return(numerics.composite_subperiods([account]))
-    assert numerics.subperiod_return(D(0), D(0), D(0)) == D(0)
+        numerics.subperiod_return(D(-1), D(5), D(0))
 
 
 # ------------------------------------------------------------------------- MWR
@@ -271,21 +284,30 @@ def test_opening_point_uses_prior_positive_value_else_first_observation() -> Non
 
 
 CUTOFF = "2026-01-10"
+DAYS = [f"2026-01-{d:02d}" for d in range(1, 12)]
 
 
 def _nav(
-    account: str, provider: str, values: dict[str, str]
+    account: str,
+    provider: str,
+    values: dict[str, str],
+    fx: bool = False,
 ) -> list[dict[str, object]]:
-    return [
-        {
+    rows: list[dict[str, object]] = []
+    for when, value in values.items():
+        row: dict[str, object] = {
             "account_id": account,
             "as_of_date": when,
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
             "provider_id": provider,
             "record_id": f"{provider}:{when}",
         }
-        for when, value in values.items()
-    ]
+        if fx:
+            row["valuation_fx"] = [
+                {"base_currency": "USD", "currency": "USDT", "rate": "1", "date": when}
+            ]
+        rows.append(row)
+    return rows
 
 
 # Short relative paths keep the synthetic tree under the Windows MAX_PATH limit.
@@ -298,71 +320,116 @@ def _write(root: Path, relative: str, text: str) -> None:
     target.write_bytes(text.encode("utf-8"))
 
 
-def _run(root: Path, **kwargs: Any) -> Any:
+def _row(
+    account: str,
+    provider: str,
+    strategy: str,
+    start: str,
+    end: str | None = None,
+    disposition: str = "INCLUDED_PRODUCT_EPOCH",
+    label: str = "Synthetic",
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "account_label": label,
+        "provider": provider,
+        "strategy_id": strategy,
+        "effective_start": start,
+        "effective_end": end,
+        "product_epoch_disposition": disposition,
+    }
+
+
+CROSSWALK_ROWS = [
+    _row("acct-ib", "IBKR", "strat-one", "2026-01-02"),
+    # ASSIGNMENT_ONLY to strat-one, then FUNDED in strat-four (R1/R2).
+    _row("acct-sw", "SCHWAB", "strat-one", "2026-01-02", "2026-01-05"),
+    _row("acct-sw", "SCHWAB", "strat-four", "2026-01-06"),
+    _row(
+        "acct-qb",
+        "QUANTBASE",
+        "strat-two",
+        "2026-01-02",
+        label="Quantbase — Demo Fund",
+    ),
+    _row("acct-mp", "MATRIXPORT", "strat-three", "2026-01-03"),
+    _row(
+        "acct-old",
+        "ALPACA",
+        "strat-old",
+        "2025-01-01",
+        "2025-06-30",
+        "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+    ),
+]
+SLEEVES = [
+    ("IBKR", "strat-one", "2026-01-02", None, "FUNDED_MEMBERSHIP"),
+    ("SCHWAB", "strat-one", "2026-01-02", "2026-01-05", "ASSIGNMENT_ONLY"),
+    ("SCHWAB", "strat-four", "2026-01-06", None, "FUNDED_MEMBERSHIP"),
+    ("QUANTBASE", "strat-two", "2026-01-02", None, "FUNDED_MEMBERSHIP"),
+    ("MATRIXPORT", "strat-three", "2026-01-03", None, "FUNDED_MEMBERSHIP"),
+]
+
+
+def _synthetic_repo(root: Path, sleeves: list[Any] | None = None) -> Path:
+    contracts = root / "repo" / "contracts"
+    contracts.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "portfolio-performance-policy-v1.json",
+        "account-strategy-flow-classification-policy-v1.json",
+    ):
+        (contracts / name).write_bytes(
+            (REPOSITORY_ROOT / "contracts" / name).read_bytes()
+        )
+    census = {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "sleeve_alias": f"synthetic-{index}",
+                    "assignments": [
+                        {
+                            "strategy_id": strategy,
+                            "status": status,
+                            "effective_start": start,
+                            "effective_end": end,
+                        }
+                    ],
+                }
+                for index, (provider, strategy, start, end, status) in enumerate(
+                    SLEEVES if sleeves is None else sleeves
+                )
+            ]
+        }
+    }
+    (contracts / "portfolio-financial-mvp-source-v1.json").write_bytes(
+        json.dumps(census).encode("utf-8")
+    )
+    return root / "repo"
+
+
+def _run(
+    root: Path,
+    *,
+    cutoff: str = CUTOFF,
+    expected_sha256: dict[str, str] | None = None,
+) -> Any:
+    repo = root / "repo"
+    if not repo.exists():
+        _synthetic_repo(root)
     return derive.derive(
         root,
-        REPOSITORY_ROOT,
-        cutoff=day(CUTOFF),
+        repo,
+        cutoff=day(cutoff),
         model="test",
         code_commit="test",
         layout=LAYOUT,
-        **kwargs,
+        expected_sha256={} if expected_sha256 is None else expected_sha256,
+        declared_cutoff=day(CUTOFF),
     )
 
 
-def _synthetic_root(root: Path) -> None:
-    crosswalk = {
-        "calculation_cutoff_date": CUTOFF,
-        "as_of_date": CUTOFF,
-        "rows": [
-            {
-                "account_id": "acct-ib",
-                "account_label": "Broker one",
-                "provider": "IBKR",
-                "strategy_id": "strat-one",
-                "effective_start": "2026-01-02",
-                "effective_end": None,
-                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
-            },
-            {
-                "account_id": "acct-sw",
-                "account_label": "Broker two",
-                "provider": "SCHWAB",
-                "strategy_id": "strat-one",
-                "effective_start": "2026-01-02",
-                "effective_end": None,
-                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
-            },
-            {
-                "account_id": "acct-qb",
-                "account_label": "Quantbase — Demo Fund",
-                "provider": "QUANTBASE",
-                "strategy_id": "strat-two",
-                "effective_start": "2026-01-02",
-                "effective_end": None,
-                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
-            },
-            {
-                "account_id": "acct-mp",
-                "account_label": "Matrixport — Demo",
-                "provider": "MATRIXPORT",
-                "strategy_id": "strat-three",
-                "effective_start": "2026-01-03",
-                "effective_end": None,
-                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
-            },
-            {
-                "account_id": "acct-old",
-                "account_label": "Retired",
-                "provider": "ALPACA",
-                "strategy_id": "strat-old",
-                "effective_start": "2025-01-01",
-                "effective_end": "2025-06-30",
-                "product_epoch_disposition": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
-            },
-        ],
-    }
-    days = [f"2026-01-{d:02d}" for d in range(1, 12)]
+def _ledger(extra_flows: tuple[dict[str, object], ...] = ()) -> dict[str, object]:
     nav = (
         # IBKR: last observation on or before the cutoff is 01-09 (01-11 is after).
         _nav(
@@ -370,145 +437,182 @@ def _synthetic_root(root: Path) -> None:
             "ibkr",
             {
                 "2026-01-01": "1000",
-                "2026-01-05": "1100",
-                "2026-01-09": "1210",
+                "2026-01-05": "1200",
+                "2026-01-09": "1320",
                 "2026-01-11": "9999",
             },
         )
         + _nav(
             "acct-sw",
             "schwab",
-            {"2026-01-01": "500", "2026-01-05": "550", "2026-01-09": "605"},
+            {"2026-01-01": "500", "2026-01-05": "600", "2026-01-09": "605"},
         )
-        + _nav(
-            "acct-qb",
-            "quantbase",
-            {
-                d: v
-                for d, v in zip(
-                    days,
-                    [
-                        "100",
-                        "100",
-                        "100",
-                        "202",
-                        "202",
-                        "202",
-                        "202",
-                        "202",
-                        "202",
-                        "202",
-                        "1",
-                    ],
-                )
-            },
-        )
-        + _nav("acct-mp", "matrixport", {d: "50" for d in days[2:10]})
+        # Ledger Quantbase values run past the raw capture: never expected values.
+        + _nav("acct-qb", "quantbase", {"2026-01-08": "202", "2026-01-09": "300"})
+        + _nav("acct-mp", "matrixport", {d: "50" for d in DAYS[2:10]}, fx=True)
         + _nav("acct-old", "alpaca", {"2025-12-01": "3"})
     )
-    ledger = {
+    flows: list[dict[str, object]] = [
+        {
+            # An internal transfer is an account-level flow (R5).
+            "account_id": "acct-ib",
+            "event_date": "2026-01-04",
+            "nav_recognition_date": "2026-01-05",
+            "flow_type": "TRANSFER:INTERNAL:IN",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            "record_id": "ib-1",
+        },
+        {
+            # A Quantbase account deposit must not be used as a sleeve flow.
+            "account_id": "acct-qb",
+            "event_date": "2026-01-03",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "5000"},
+            "record_id": "qb-deposit",
+        },
+    ]
+    flows.extend(extra_flows)
+    return {
         "as_of_date": CUTOFF,
         "nav_observations": nav,
-        "flows": [
-            {
-                "account_id": "acct-ib",
-                "event_date": "2026-01-04",
-                "nav_recognition_date": "2026-01-05",
-                "flow_type": "TRANSFER:INTERNAL:IN",
-                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
-                "record_id": "ib-1",
-            },
-            {
-                # A Quantbase account deposit must not be used as a sleeve flow.
-                "account_id": "acct-qb",
-                "event_date": "2026-01-03",
-                "flow_type": "DEPOSIT_OR_WITHDRAWAL",
-                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "5000"},
-                "record_id": "qb-deposit",
-            },
-        ],
+        "flows": flows,
         "capital_anchors": [],
         "provider_generations": [],
     }
-    _write(root, derive.LEDGER, json.dumps(ledger))
-    _write(root, derive.CROSSWALK, json.dumps(crosswalk))
-    activity_header = (
-        "account_id,activity_type,amount,created_to_cover_fees,executed,filled,"
-        "filled_at,fund,fund_title,id,is_rebalance,time,transaction,type\n"
+
+
+def _crosswalk(**overrides: str) -> dict[str, object]:
+    document: dict[str, object] = {
+        "calculation_cutoff_date": CUTOFF,
+        "as_of_date": CUTOFF,
+        "rows": CROSSWALK_ROWS,
+    }
+    document.update(overrides)
+    return document
+
+
+def _ms(text: str) -> str:
+    moment = dt.datetime.fromisoformat(text).replace(tzinfo=dt.timezone.utc)
+    return str(int(moment.timestamp() * 1000))
+
+
+ACTIVITY = (
+    "account_id,activity_type,amount,created_to_cover_fees,executed,filled,"
+    "filled_at,fund,fund_title,id,is_rebalance,time,transaction,type\n"
+    # BUY 100 filled 01-03 -> held from the 01-04 value (BOD flow dated 01-03).
+    ",filled_txn,100,False,,Y,,7,Demo Fund,11,False,2026-01-03T01:00:00Z,,BUY\n"
+    ",order,,False,Y,,2026-01-03T20:00:00Z,7,,901,,,11,\n"
+    # Fee sale: an expense, not a flow.
+    ",filled_txn,-1,True,,Y,,7,Demo Fund,12,False,2026-01-06T01:00:00Z,,SELL\n"
+    ",order,,True,Y,,2026-01-06T14:00:00Z,7,,902,,,12,\n"
+    ",filled_txn,0,False,,Y,,7,Demo Fund,13,True,2026-01-07T01:00:00Z,,RBLNC\n"
+)
+
+
+def _synthetic_root(root: Path) -> None:
+    _write(root, derive.LEDGER, json.dumps(_ledger()))
+    _write(root, derive.CROSSWALK, json.dumps(_crosswalk()))
+    _write(root, derive.QB_ACTIVITY, ACTIVITY)
+    _write(root, derive.QB_ACCOUNTS, "id,funds\nx,[]\n")
+    # Raw Quantbase values end 01-08, before the 01-10 cutoff.
+    raw_values = ["100", "100", "100", "202", "202", "202", "202", "202"]
+    _write(
+        root,
+        derive.QB_VALUES,
+        "time,value\n"
+        + "".join(
+            f"{d[5:7]}/{d[8:10]}/{d[0:4]},{v}\n" for d, v in zip(DAYS, raw_values)
+        ),
     )
-    activity = activity_header + "".join(
-        [
-            # BUY 100 filled 01-03 -> held from the 01-04 value (BOD flow dated 01-03).
-            ",filled_txn,100,False,,Y,,7,Demo Fund,11,False,2026-01-03T01:00:00Z,,BUY\n",
-            ",order,,False,Y,,2026-01-03T20:00:00Z,7,,901,,,11,\n",
-            # Fee sale: an expense, not a flow.
-            ",filled_txn,-1,True,,Y,,7,Demo Fund,12,False,2026-01-06T01:00:00Z,,SELL\n",
-            ",order,,True,Y,,2026-01-06T14:00:00Z,7,,902,,,12,\n",
-            ",filled_txn,0,False,,Y,,7,Demo Fund,13,True,2026-01-07T01:00:00Z,,RBLNC\n",
-        ]
-    )
-    _write(root, derive.QB_ACTIVITY, activity)
-    _write(root, derive.QB_ACCOUNTS, 'id,funds\nx,"[]"\n')
     _write(
         root,
         derive.MP_DEPOSITS,
-        "amount,created_at_utc,currency,state\n50,2026-01-02T10:00:00+00:00,USDC,confirmed\n",
+        "amount,created_at_utc,currency,state\n"
+        "50,2026-01-02T10:00:00+00:00,USDC,confirmed\n",
     )
     _write(
         root,
         derive.MP_BILLS,
-        "amount,currency,direction,timestamp_utc,tx_type\n"
-        "50,USDC,1,2026-01-02T10:00:00+00:00,2001\n",
+        "amount,currency,direction,timestamp_ms,timestamp_utc,tx_type\n"
+        f"50,USDC,1,{_ms('2026-01-02T10:00:00')},2026-01-02T10:00:00+00:00,2001\n"
+        f"50,USDT,2,{_ms('2026-01-02T12:00:00')},2026-01-02T12:00:00+00:00,2855\n",
     )
     _write(
         root,
         derive.MP_DISPOSITIONS,
         "currency,dataset,disposition\nODD-COIN,wallet_deposits,rejected\n",
     )
-    _write(
-        root,
-        derive.MP_NAV,
-        "day_timestamp_utc,nav\n"
-        + "".join(f"{d}T00:00:00+00:00,1\n" for d in days[:9]),
+    # Raw per-unit NAV 01-02..01-09: 1, then 1.1 on 01-09; units = 50 / 1.
+    nav_rows = "".join(
+        f"{d}T00:00:00+00:00,{_ms(d + 'T00:00:00')},"
+        f"{'1.1' if d == '2026-01-09' else '1'}\n"
+        for d in DAYS[1:9]
     )
+    _write(root, derive.MP_NAV, "day_timestamp_utc,day_timestamp_ms,nav\n" + nav_rows)
 
 
 def _index(document: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     return {(m["metric_id"], m["entity"]): m for m in document["metrics"]}
 
 
+def _reasons(document: dict[str, Any]) -> dict[tuple[str, str], str]:
+    return {
+        (m["metric_id"], m["entity"]): m["reason"] for m in document["not_derivable"]
+    }
+
+
 def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     _synthetic_root(tmp_path)
-    document = _run(tmp_path, expected_sha256={})
+    document = _run(tmp_path)
     metrics = _index(document)
     # Capital at cutoff takes the last observation on or before the cutoff.
     capital = metrics[("capital.account.cutoff", "acct-ib")]
-    assert (capital["value"], capital["as_of"]) == ("1210.00", "2026-01-09")
-    assert metrics[("capital.strategy.cutoff", "strat-one")]["value"] == "1815.00"
+    assert (capital["value"], capital["as_of"]) == ("1320.00", "2026-01-09")
+    assert metrics[("capital.strategy.cutoff", "strat-one")]["value"] == "1320.00"
+    assert metrics[("capital.strategy.cutoff", "strat-four")]["value"] == "605.00"
     assert metrics[("capital.portfolio.systematic.cutoff", "portfolio")]["value"] == (
-        "2067.00"  # 1815 + Quantbase 202 + Matrixport 50
+        "2182.00"  # 1320 + 605 + Quantbase raw 202 + Matrixport raw 55
     )
     assert metrics[("capital.retained_excluded.cutoff", "portfolio")]["value"] == "3.00"
     assert metrics[("universe.active_strategy_ids", "portfolio")]["value"] == [
+        "strat-four",
         "strat-one",
         "strat-three",
         "strat-two",
     ]
-    assert metrics[("universe.active_strategy_count", "portfolio")]["value"] == "3"
+    assert metrics[("universe.active_strategy_count", "portfolio")]["value"] == "4"
     assert metrics[("date.source_last_observation", "acct-sw")]["value"] == "2026-01-09"
-    # Opening = EOD 01-01 (prior positive value) for a 01-02 start; 1000 -> 1210.
+    # Opening = EOD 01-01 (prior positive value) for a 01-02 start; the +100 internal
+    # transfer is an account flow (R5): (1200 - 100)/1000 * 1320/1200 - 1.
     assert metrics[("twr.account", "acct-ib")]["value"] == "0.210000000000"
+    assert metrics[("flows.account.count", "acct-ib")]["value"] == "1"
+    assert metrics[("flows.account.net", "acct-ib")]["value"] == "100.00"
+    # R2: acct-sw's ASSIGNMENT_ONLY interval never enters strat-one.
     assert metrics[("twr.strategy", "strat-one")]["value"] == "0.210000000000"
-    # Quantbase sleeve: raw BUY 100 (BOD, dated 01-03) -> 202 / (100 + 100); the fee
-    # sale is an expense, the ledger account deposit is ignored, and the 01-11 value
-    # is after the cutoff.
+    assert (
+        "R2 excluded ASSIGNMENT_ONLY acct-sw"
+        in (metrics[("twr.strategy", "strat-one")]["notes"])
+    )
+    # R1: acct-sw's ITD starts at its first FUNDED interval (01-06): 605 / 600 - 1.
+    assert metrics[("twr.account", "acct-sw")]["value"] == "0.008333333333"
+    assert metrics[("twr.strategy", "strat-four")]["value"] == "0.008333333333"
+    # R6 Quantbase: raw values end 01-08; the later ledger value is not expected.
+    qb_capital = metrics[("capital.account.cutoff", "acct-qb")]
+    assert (qb_capital["value"], qb_capital["as_of"]) == ("202.00", "2026-01-08")
+    assert "R6 NOT EXPECTED VALUES: 1 provider-ledger valuation" in qb_capital["notes"]
+    assert metrics[("date.source_last_observation", "acct-qb")]["value"] == "2026-01-08"
+    # Raw BUY 100 (BOD, dated 01-03) -> 202 / (100 + 100); the fee sale is an expense
+    # and the ledger account deposit is ignored.
     assert metrics[("flows.account.count", "acct-qb")]["value"] == "1"
     assert metrics[("flows.account.net", "acct-qb")]["value"] == "100.00"
     assert metrics[("twr.account", "acct-qb")]["value"] == "0.010000000000"
-    # Matrixport: the USDC deposit precedes the opening observation.
+    # R6 Matrixport: 50 units x raw NAV x rate; the USDC deposit and the USDT
+    # subscription precede the opening observation.
+    mp_capital = metrics[("capital.account.cutoff", "acct-mp")]
+    assert (mp_capital["value"], mp_capital["as_of"]) == ("55.00", "2026-01-09")
     assert metrics[("flows.account.count", "acct-mp")]["value"] == "0"
-    assert metrics[("twr.account", "acct-mp")]["value"] == "0.000000000000"
-    missing = {(m["metric_id"], m["entity"]) for m in document["not_derivable"]}
+    assert metrics[("twr.account", "acct-mp")]["value"] == "0.100000000000"
+    missing = _reasons(document)
     assert ("capital.reserve.cutoff", "reserve") in missing
     assert ("twr.account", "acct-old") in missing
     assert document["schema"] == "qe-cp-derivation/1"
@@ -517,17 +621,82 @@ def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["crosswalk_cutoff", "crosswalk_as_of", "ledger_as_of", "selected_cutoff"],
+)
+def test_cutoff_mismatch_fails_closed(tmp_path: Path, mutation: str) -> None:
+    _synthetic_root(tmp_path)
+    ledger = _ledger()
+    cutoff = CUTOFF
+    if mutation == "crosswalk_cutoff":
+        _write(
+            tmp_path,
+            derive.CROSSWALK,
+            json.dumps(_crosswalk(calculation_cutoff_date="2026-01-09")),
+        )
+    elif mutation == "crosswalk_as_of":
+        _write(
+            tmp_path, derive.CROSSWALK, json.dumps(_crosswalk(as_of_date="2026-01-09"))
+        )
+    elif mutation == "ledger_as_of":
+        ledger["as_of_date"] = "2026-01-11"
+        _write(tmp_path, derive.LEDGER, json.dumps(ledger))
+    else:
+        cutoff = "2026-01-09"
+    document = _run(tmp_path, cutoff=cutoff)
+    # R7: no apparently valid output; every metric is refused with the reason.
+    assert document["metrics"] == []
+    reasons = _reasons(document)
+    assert ("capital.account.cutoff", "acct-ib") in reasons
+    assert ("twr.strategy", "strat-one") in reasons
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in reasons
+    assert all("R7 INPUT_CUTOFF_MISMATCH" in reason for reason in reasons.values())
+
+
+@pytest.mark.parametrize(
+    ("flow_type", "amount", "expected"),
+    [
+        ("DIVIDEND", "5", "not classified"),
+        ("EXTERNAL_CONTRIBUTION", "-5", "amount sign not POSITIVE"),
+    ],
+)
+def test_unclassified_or_mis_signed_ledger_flow_fails_closed(
+    tmp_path: Path, flow_type: str, amount: str, expected: str
+) -> None:
+    _synthetic_root(tmp_path)
+    bad: dict[str, object] = {
+        "account_id": "acct-ib",
+        "event_date": "2026-01-07",
+        "flow_type": flow_type,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        "record_id": "ib-bad",
+    }
+    _write(tmp_path, derive.LEDGER, json.dumps(_ledger((bad,))))
+    reasons = _reasons(_run(tmp_path))
+    assert expected in reasons[("twr.account", "acct-ib")]
+    assert expected in reasons[("twr.strategy", "strat-one")]
+
+
+def test_unknown_membership_status_fails_closed(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    _synthetic_repo(tmp_path, sleeves=[])
+    reasons = _reasons(_run(tmp_path))
+    expected = "membership status not determinable"
+    assert expected in reasons[("twr.account", "acct-ib")]
+    assert expected in reasons[("twr.strategy", "strat-one")]
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in reasons
+
+
 def test_in_window_non_usd_matrixport_deposit_is_not_derivable(tmp_path: Path) -> None:
     _synthetic_root(tmp_path)
     _write(
         tmp_path,
         derive.MP_DEPOSITS,
-        "amount,created_at_utc,currency,state\n5,2026-01-06T10:00:00+00:00,USDC,confirmed\n",
+        "amount,created_at_utc,currency,state\n"
+        "5,2026-01-06T10:00:00+00:00,USDC,confirmed\n",
     )
-    document = _run(tmp_path, expected_sha256={})
-    reasons = {
-        (m["metric_id"], m["entity"]): m["reason"] for m in document["not_derivable"]
-    }
+    reasons = _reasons(_run(tmp_path))
     assert "without an accepted FX input" in reasons[("twr.account", "acct-mp")]
 
 
