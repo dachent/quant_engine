@@ -29,7 +29,6 @@ from .numerics import (
     UndefinedReturnError,
     composite_subperiods,
     investor_cash_flows,
-    is_reopening,
     subperiod_return,
     time_weighted_return,
     xirr,
@@ -38,6 +37,7 @@ from .sources import (
     INCLUDED,
     AccountFlows,
     Assignment,
+    Bill,
     Crosswalk,
     Flow,
     InputFile,
@@ -45,8 +45,10 @@ from .sources import (
     MatrixportWallet,
     QuantbaseSleeve,
     UnusableFlow,
+    iso_date,
     parse_crosswalk,
     parse_flow_policy,
+    parse_fx_history,
     parse_ledger,
     parse_matrixport_wallet,
     parse_membership_status,
@@ -76,6 +78,12 @@ QB_ACTIVITY = QUANTBASE_CSV + "account_activity.csv"
 # R6 needs raw Quantbase daily values; this raw file of the same capture is the
 # source the provider ledger itself cites for the Volatis sleeve.
 QB_VALUES = QUANTBASE_CSV + "dashboard_Volatis_Strategy_pricehistory.csv"
+# X1: raw Yahoo USDT-USD history, listed in state/briefs/acceptance-inputs.json with
+# this absolute path (a scratch extract of the candidate FX generation's raw file).
+FX_HISTORY = "C:/Dev/scratch/quant_engine/lineage/fx/yfinance-history.json"
+FX_CANDIDATE_GENERATION = (
+    "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+)
 
 INPUT_ORDER = (
     LEDGER,
@@ -87,11 +95,13 @@ INPUT_ORDER = (
     QB_ACCOUNTS,
     QB_ACTIVITY,
     QB_VALUES,
+    FX_HISTORY,
 )
 # Identities pinned by state/briefs/acceptance-inputs.json.
 PINNED_SHA256 = {
     LEDGER: "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13",
     CROSSWALK: "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f",
+    FX_HISTORY: "927e107b6dacb2feac903c03766856b802b73fbd79a1a79bd21e23355941858c",
 }
 PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
@@ -163,9 +173,10 @@ CONVENTION_NOTES = (
     "Sub-period return: contracts/portfolio-performance-policy-v1.json "
     "twr_cases[date_only_end_of_day] -> (ending - EOD flow) / (beginning + BOD "
     "flow) - 1; chain-link per twr_cases[exact_timestamp_segments]. TWR is "
-    "cumulative, not annualized. R3: zero beginning capital is neutral (return 0); "
-    "a non-zero value arising from zero capital re-opens the series as embedded "
-    "capital (noted); negative capital makes the TWR not derivable.",
+    "cumulative, not annualized. R3: a sub-period with zero beginning and zero "
+    "ending value (net of EOD flows) is neutral (return 0); a sub-period cannot "
+    "start at zero capital without a same-day inflow in its opening, so zero or "
+    "negative capital with a non-zero result makes the TWR not derivable.",
     "Strategy TWR/MWR sum FUNDED member values and flows on the union of member "
     "observation dates without filling; membership start/end are capital "
     "transfers at those end-of-day points. This equals composite_twr_cases"
@@ -204,14 +215,23 @@ CONVENTION_NOTES = (
     "value dated F and held, at the next close, in the value dated F+1, so it "
     "starts that sub-period: r = ending / (beginning + flow) - 1; MWR dates it F. "
     "Ledger values and ledger account deposits are cross-checks only.",
-    "R6 Matrixport (admission under test): values = units x raw nav_daily.csv nav "
-    "(fee-net) x USDT->USD. Units = the wallet's USDT debits (wallet_bills.csv "
-    "direction 2) / nav at the first nav_daily day_timestamp_ms after each debit. "
-    "No raw FX input is listed, so the USDT->USD rate is the ledger row's "
-    "valuation_fx rate (portfolio FX generation, Yahoo UTC close) - a rate, not a "
-    "valuation; a date without it is dropped. Flows from wallet_deposits.csv and "
-    "wallet_bills.csv; wallet_currency_dispositions.csv proves which currencies' "
-    "history was readable. Ledger values are cross-checks only.",
+    "R6 Matrixport (admission under test): the entity is the strategy holding "
+    "(the ledger value basis excludes the wallet). Values = units x raw "
+    "nav_daily.csv nav (fee-net) x USDT->USD. Raw wallet_bills.csv classes: a USDT "
+    "debit is a strategy subscription - a holding inflow of amount x USDT->USD, EOD "
+    "at its confirm date (first nav_daily day_timestamp_ms after the bill), adding "
+    "amount / confirm NAV units; bills in other currencies and a USDT credit within "
+    "10 minutes after another-currency debit (conversion) stay in the wallet; any "
+    "other USDT credit (e.g. redemption) is unsupported and fails closed in a "
+    "window. Raw wallet_deposits.csv deposits are wallet-level. "
+    "wallet_currency_dispositions.csv proves which currencies' history was "
+    "readable.",
+    "X1 FX: USDT->USD = Yahoo USDT-USD daily Close on the original UTC NAV or "
+    "confirm date from the raw yfinance-history.json listed in acceptance-inputs "
+    "(contract source_segments[portfolio-fx-rates].splice_policy "
+    "ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL); a date without a rate is "
+    "dropped. Each Matrixport row carries an fx_provenance note and a cross-check "
+    "against the ledger valuation_fx copy.",
     "R6 ledger valuations after the last raw observation are not expected values; "
     "their count and last date/value are reported in notes. Capital at cutoff for "
     "Quantbase/Matrixport = last raw observation on or before the cutoff with its "
@@ -458,14 +478,7 @@ def _returns(
         periods = composite_subperiods(members)
         twr = time_weighted_return(periods)
         extreme = []
-        reopened = []
         for period in periods:
-            if is_reopening(period):
-                reopened.append(
-                    f"({_day(period.start)}, {_day(period.end)}] value "
-                    f"{_money(period.ending_value - period.net_flow)}"
-                )
-                continue
             value = subperiod_return(
                 period.beginning_value,
                 period.ending_value,
@@ -475,15 +488,30 @@ def _returns(
             if abs(value) > 1:
                 extreme.append(f"{_day(period.end)}:{_ratio(value)}")
         notes.append(f"{len(periods)} sub-periods")
-        if reopened:
-            notes.append(
-                "R3 zero-capital re-opening (neutral, value embedded as capital) at "
-                + ", ".join(reopened)
-            )
         if extreme:
             notes.append("sub-period |r|>1 at " + ", ".join(extreme))
-    except UndefinedReturnError as exc:
-        twr_reason = f"TWR undefined: negative beginning capital ({exc})"
+    except UndefinedReturnError:
+        undefined = []
+        for period in composite_subperiods(members):
+            try:
+                subperiod_return(
+                    period.beginning_value,
+                    period.ending_value,
+                    period.net_flow,
+                    period.beginning_flow,
+                )
+            except UndefinedReturnError:
+                undefined.append(
+                    f"({_day(period.start)}, {_day(period.end)}] beginning "
+                    f"{period.beginning_value}+{period.beginning_flow} ending "
+                    f"{period.ending_value} EOD flow {period.net_flow}"
+                )
+        twr_reason = (
+            "R3 TWR undefined (fail closed): a sub-period starts at zero or negative "
+            "capital without a same-day inflow in "
+            + "; ".join(undefined[:3])
+            + (f" (+{len(undefined) - 3} more)" if len(undefined) > 3 else "")
+        )
     except CalendarMisalignmentError as exc:
         twr_reason = f"member calendars misaligned without filling: {exc}"
     irr = xirr(investor_cash_flows(members))
@@ -541,6 +569,7 @@ def _account_sources(
     crosswalk: Crosswalk,
     ledger: Ledger,
     files: Mapping[str, InputFile],
+    fx: FxSource,
     cutoff: dt.date,
 ) -> dict[str, AccountSource]:
     providers: dict[str, str] = {}
@@ -562,7 +591,7 @@ def _account_sources(
             )
         elif provider == "MATRIXPORT":
             source = _matrixport_source(
-                account_id, ledger_values, ledger, files, cutoff
+                account_id, ledger_values, ledger, files, fx, cutoff
             )
         else:
             source = AccountSource(
@@ -656,11 +685,101 @@ def _quantbase_source(
     return source
 
 
+def _fx_provenance(fx: FxSource, used: Sequence[dt.date]) -> str:
+    after = [day for day in used if fx.admitted_through and day > fx.admitted_through]
+    return (
+        f"fx_provenance: USDT->USD Yahoo daily Close from raw {FX_HISTORY} "
+        f"(sha256 {fx.sha256}; candidate FX generation {FX_CANDIDATE_GENERATION}, "
+        "pending owner selection per state/briefs/acceptance-inputs.json); the "
+        "contract binds source_segments[portfolio-fx-rates].current_generation "
+        f"{fx.contract_generation} observed through {fx.contract_observed_end}, and "
+        "matrixport-account-generation splice_policy admits USD conversion "
+        f"{fx.splice_rule}; rates used "
+        f"{_day(min(used)) if used else '-'}..{_day(max(used)) if used else '-'}, "
+        f"{len(after)} after the admitted boundary"
+    )
+
+
+@dataclass(frozen=True)
+class FxSource:
+    rates: Mapping[dt.date, Decimal]
+    sha256: str
+    contract_generation: str
+    contract_observed_end: str
+    admitted_through: dt.date | None
+    splice_rule: str
+
+
+def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
+    document = json.loads(contract.decode("utf-8"))
+    segments = {
+        str(segment.get("source_id")): segment
+        for segment in document.get("source_segments", [])
+    }
+    fx_segment = segments.get("portfolio-fx-rates", {})
+    generation = str((fx_segment.get("current_generation") or {}).get("generation_id"))
+    observed_end = str((fx_segment.get("interval") or {}).get("observed_end"))
+    splice = str(
+        (segments.get("matrixport-account-generation", {}).get("interval") or {}).get(
+            "splice_policy", ""
+        )
+    )
+    rule = next(
+        (part.strip() for part in splice.split(";") if "USD_CONVERSION" in part), ""
+    )
+    through: dt.date | None = None
+    if "THROUGH_" in rule:
+        through = iso_date(rule.rsplit("THROUGH_", 1)[1].replace("_", "-"))
+    return FxSource(
+        rates=parse_fx_history(fx_file.data, "USDT-USD"),
+        sha256=fx_file.sha256,
+        contract_generation=generation,
+        contract_observed_end=observed_end,
+        admitted_through=through,
+        splice_rule=rule or "-",
+    )
+
+
+def _classify_bills(
+    wallet: MatrixportWallet,
+) -> tuple[list[Bill], list[tuple[Bill, str]], list[Bill]]:
+    """Split raw wallet bills for the strategy-holding entity.
+
+    - product-currency (USDT) debits are strategy subscriptions: capital into the
+      holding;
+    - bills in any other currency, and a USDT credit within 10 minutes after a
+      debit in another currency (a conversion), stay in the wallet: no holding
+      effect;
+    - any other USDT credit (e.g. a redemption) is unsupported and fails closed
+      when it falls inside a window.
+    """
+
+    subscriptions: list[Bill] = []
+    wallet_level: list[tuple[Bill, str]] = []
+    unsupported: list[Bill] = []
+    for bill in wallet.bills:
+        if bill.currency != MATRIXPORT_PRODUCT_CURRENCY:
+            wallet_level.append((bill, "non-product currency"))
+        elif bill.direction == "2":
+            subscriptions.append(bill)
+        elif any(
+            other.currency != MATRIXPORT_PRODUCT_CURRENCY
+            and other.direction == "2"
+            and 0 <= bill.moment_ms - other.moment_ms <= 600_000
+            for other in wallet.bills
+        ):
+            wallet_level.append((bill, "conversion credit"))
+        else:
+            unsupported.append(bill)
+    return subscriptions, wallet_level, unsupported
+
+
 def _matrixport_source(
     account_id: str,
     ledger_values: Mapping[dt.date, Decimal],
     ledger: Ledger,
     files: Mapping[str, InputFile],
+    fx: FxSource,
     cutoff: dt.date,
 ) -> AccountSource:
     wallet: MatrixportWallet = parse_matrixport_wallet(
@@ -670,43 +789,109 @@ def _matrixport_source(
         files[MP_NAV].data,
     )
     flows = AccountFlows()
-    raw_values, value_notes = _matrixport_values(account_id, wallet, ledger, cutoff)
     source = AccountSource(
         account_id,
         "MATRIXPORT",
-        raw_values,
+        {},
         flows,
-        (MP_DEPOSITS, MP_BILLS, MP_DISPOSITIONS, MP_NAV),
-        (MP_NAV, MP_BILLS, LEDGER),
+        (MP_BILLS, MP_DEPOSITS, MP_DISPOSITIONS, MP_NAV, FX_HISTORY),
+        (MP_NAV, MP_BILLS, FX_HISTORY),
     )
-    seen_currencies: set[str] = set()
-    for day, amount, currency in wallet.deposits:
-        seen_currencies.add(currency)
-        if currency == "USD":
-            flows.flows.append(Flow(day, amount, day, "WALLET_DEPOSIT", "deposit"))
-        else:
-            source.raw_events.append(
-                (day, f"{currency} deposit {amount} without an accepted FX input")
-            )
-    for day, amount, currency, direction, kind in wallet.bills:
-        seen_currencies.add(currency)
-        source.raw_events.append(
-            (day, f"wallet bill tx_type {kind} dir {direction} {amount} {currency}")
+    subscriptions, wallet_level, unsupported = _classify_bills(wallet)
+    units_added: list[tuple[dt.date, Decimal]] = []
+    fx_days: list[dt.date] = []
+    for bill in subscriptions:
+        confirm = next(
+            (day for moment, day in wallet.nav_times if moment > bill.moment_ms), None
         )
-    blocked = sorted(seen_currencies.intersection(wallet.rejected_currencies))
+        if confirm is None or wallet.nav_per_unit[confirm] <= 0:
+            source.raw_events.append(
+                (bill.day, f"subscription {bill.amount} USDT with no later raw NAV")
+            )
+            continue
+        rate = fx.rates.get(confirm)
+        if rate is None:
+            flows.unusable.append(
+                UnusableFlow(confirm, f"bill:{bill.moment_ms}", "no USDT-USD rate")
+            )
+            continue
+        units_added.append((confirm, bill.amount / wallet.nav_per_unit[confirm]))
+        fx_days.append(confirm)
+        flows.flows.append(
+            Flow(
+                confirm,
+                bill.amount * rate,
+                bill.day,
+                "STRATEGY_SUBSCRIPTION",
+                f"matrixport:bill:{bill.moment_ms}",
+                dated_by="nav_confirm_date",
+            )
+        )
+    for bill in unsupported:
+        source.raw_events.append(
+            (
+                bill.day,
+                f"unsupported wallet bill tx_type {bill.tx_type} credit {bill.amount} "
+                f"{bill.currency}",
+            )
+        )
+    # Holding value per raw NAV date: units subscribed by then x NAV x USDT-USD.
+    missing_fx: list[dt.date] = []
+    values: dict[dt.date, Decimal] = {}
+    if units_added:
+        first_day = min(day for day, _ in units_added)
+        for day in sorted(wallet.nav_per_unit):
+            if day < first_day or day > cutoff:
+                continue
+            rate = fx.rates.get(day)
+            if rate is None:
+                missing_fx.append(day)
+                continue
+            units = sum((u for confirm, u in units_added if confirm <= day), ZERO)
+            values[day] = units * wallet.nav_per_unit[day] * rate
+            fx_days.append(day)
+    source.values = values
+    seen = {bill.currency for bill in wallet.bills} | {c for _, _, c in wallet.deposits}
+    blocked = sorted(seen.intersection(wallet.rejected_currencies))
     if blocked:
         flows.unusable.append(
             UnusableFlow(None, "wallet", f"history unreadable for {blocked}")
         )
     source.flow_coverage_end = wallet.coverage_end
-    first_bill = _day(wallet.bills[0][0]) if wallet.bills else "-"
-    last_bill = _day(wallet.bills[-1][0]) if wallet.bills else "-"
-    wallet_summary = (
+    units_total = sum((u for _, u in units_added), ZERO)
+    source.value_notes.append(
+        f"raw holding: {len(subscriptions)} USDT subscription debit(s) "
+        f"{sum((b.amount for b in subscriptions), ZERO)} -> units "
+        f"{str(units_total)[:22]}; {len(source.values)} raw valuations "
+        f"{_day(min(source.values)) if source.values else '-'}.."
+        f"{_day(max(source.values)) if source.values else '-'}"
+        + (
+            f"; {len(missing_fx)} raw NAV date(s) without a raw USDT-USD rate dropped"
+            if missing_fx
+            else ""
+        )
+    )
+    source.value_notes.append(_fx_provenance(fx, sorted(set(fx_days))))
+    ledger_rates = {
+        day: Decimal(str(item["rate"]))
+        for day, row in ledger.nav_rows.get(account_id, {}).items()
+        for item in row.get("valuation_fx", [])
+        if item.get("currency") == MATRIXPORT_PRODUCT_CURRENCY
+    }
+    common = sorted(set(ledger_rates).intersection(fx.rates).intersection(fx_days))
+    differing = [day for day in common if ledger_rates[day] != fx.rates[day]]
+    source.value_notes.append(
+        f"cross-check provider-ledger valuation_fx: {len(common) - len(differing)}/"
+        f"{len(common)} rates equal the raw Close"
+    )
+    source.flow_notes.append(
         f"raw wallet: {len(wallet.deposits)} confirmed deposit(s) "
         f"{sum((a for _, a, _ in wallet.deposits), ZERO)} "
-        f"{sorted({c for _, _, c in wallet.deposits})}; {len(wallet.bills)} bill(s) "
-        f"dated {first_bill}..{last_bill}; deposit/withdrawal history rejected for "
-        f"{len(wallet.rejected_currencies)} currency code(s), "
+        f"{sorted({c for _, _, c in wallet.deposits})} and "
+        f"{len(wallet_level)} wallet-level bill(s) stay outside the strategy holding; "
+        f"{len(subscriptions)} subscription(s) are holding inflows (EOD at the NAV "
+        f"confirm date); {len(unsupported)} unsupported bill(s); deposit/withdrawal "
+        f"history rejected for {len(wallet.rejected_currencies)} currency code(s), "
         + ("none used by the account" if not blocked else f"including {blocked}")
     )
     ledger_flows = ledger.flows.get(account_id, AccountFlows())
@@ -715,74 +900,14 @@ def _matrixport_source(
         for flow in ledger_flows.unusable
         if flow.effective_date is not None
     ]
-    reasons = sorted({flow.reason for flow in ledger_flows.unusable})
-    ledger_check = (
+    source.flow_notes.append(
         f"provider-ledger flows for this account: "
-        f"{len(ledger_flows.flows) + len(ledger_flows.unusable)} record(s) "
-        f"{reasons}, latest {_day(max(ledger_days)) if ledger_days else '-'} "
-        f"(generation {ledger.generations.get('matrixport', '-')}; not used)"
+        f"{len(ledger_flows.flows) + len(ledger_flows.unusable)} record(s), latest "
+        f"{_day(max(ledger_days)) if ledger_days else '-'} (not used)"
     )
-    source.flow_notes.extend([wallet_summary, ledger_check])
-    source.value_notes.extend(value_notes)
-    source.value_notes.extend(_ledger_cross_check(raw_values, ledger_values, cutoff))
+    source.value_notes.extend(_ledger_cross_check(source.values, ledger_values, cutoff))
     source.notes.extend(source.flow_notes + source.value_notes)
     return source
-
-
-def _matrixport_values(
-    account_id: str,
-    wallet: MatrixportWallet,
-    ledger: Ledger,
-    cutoff: dt.date,
-) -> tuple[dict[dt.date, Decimal], list[str]]:
-    """R6 raw Matrixport values: units x fee-net NAV x USDT->USD rate."""
-
-    debits = [
-        (stamp, amount)
-        for stamp, amount, currency, direction in wallet.bill_times
-        if currency == MATRIXPORT_PRODUCT_CURRENCY and direction == "2"
-    ]
-    if not debits:
-        return {}, ["no USDT subscription debit in raw wallet bills"]
-    units = ZERO
-    first_day: dt.date | None = None
-    for stamp, amount in debits:
-        confirm = next(
-            (day for moment, day in wallet.nav_times if moment > stamp), None
-        )
-        if confirm is None or wallet.nav_per_unit[confirm] <= 0:
-            return {}, [f"no raw NAV after the subscription debit at {stamp}"]
-        units += amount / wallet.nav_per_unit[confirm]
-        first_day = confirm if first_day is None else min(first_day, confirm)
-    assert first_day is not None
-    values: dict[dt.date, Decimal] = {}
-    missing_fx: list[dt.date] = []
-    for day in sorted(wallet.nav_per_unit):
-        if day < first_day or day > cutoff:
-            continue
-        row = ledger.nav_rows.get(account_id, {}).get(day, {})
-        rates = [
-            Decimal(str(item["rate"]))
-            for item in row.get("valuation_fx", [])
-            if item.get("currency") == MATRIXPORT_PRODUCT_CURRENCY
-            and item.get("base_currency") == "USD"
-        ]
-        if len(rates) != 1:
-            missing_fx.append(day)
-            continue
-        values[day] = units * wallet.nav_per_unit[day] * rates[0]
-    notes = [
-        f"raw units {str(units)[:22]} from {len(debits)} USDT debit(s) "
-        f"{sum((a for _, a in debits), ZERO)} at NAV of {_day(first_day)}; "
-        f"{len(values)} raw valuations {_day(min(values)) if values else '-'}.."
-        f"{_day(max(values)) if values else '-'}"
-        + (
-            f"; {len(missing_fx)} raw NAV date(s) without a ledger FX rate dropped"
-            if missing_fx
-            else ""
-        )
-    ]
-    return values, notes
 
 
 def derive(
@@ -854,7 +979,8 @@ def _derive(
         _fail_closed(output, crosswalk, reason)
     else:
         membership = _membership(crosswalk, statuses, cutoff)
-        sources = _account_sources(crosswalk, ledger, files, cutoff)
+        fx = _fx_source(files[FX_HISTORY], contract_bytes[MVP_CONTRACT])
+        sources = _account_sources(crosswalk, ledger, files, fx, cutoff)
         _derive_accounts(output, crosswalk, membership, sources, cutoff)
         _derive_strategies_and_portfolio(output, crosswalk, membership, sources, cutoff)
     output.metrics.sort(key=lambda m: (m["metric_id"], m["entity"], m["window"] or ""))

@@ -145,9 +145,9 @@ def test_twr_beginning_of_period_flow_earns_the_period_return() -> None:
     assert abs(numerics.time_weighted_return(periods) - D("0.331")) < D("1e-50")
 
 
-def test_twr_zero_capital_is_neutral_and_reopens() -> None:
-    # R3: 100 -> withdrawn to 0 (return 0), 0 -> 0 neutral, 0 -> 5 re-opens with the
-    # 5 embedded as capital (neutral), then 5 -> 6 is +20%. TWR = 0.2.
+def test_twr_zero_capital_neutral_only_when_nothing_happens() -> None:
+    # R3: 100 withdrawn to 0 (return 0), then 0 -> 0 is neutral, then 5 is funded
+    # at end of day (EOD inflow embedded in the next opening), then 5 -> 6 (+20%).
     account = member(
         "a",
         {
@@ -159,11 +159,26 @@ def test_twr_zero_capital_is_neutral_and_reopens() -> None:
         },
         "2026-01-01",
         "2026-01-05",
-        (("2026-01-02", "-100", numerics.EOD),),
+        (("2026-01-02", "-100", numerics.EOD), ("2026-01-04", "5", numerics.EOD)),
     )
     periods = numerics.composite_subperiods([account])
-    assert [numerics.is_reopening(p) for p in periods] == [False, False, True, False]
     assert numerics.time_weighted_return(periods) == D("0.2")
+
+
+def test_twr_zero_capital_value_without_inflow_fails_closed() -> None:
+    # R3: 0 -> 3.81 with no same-day inflow (e.g. a dividend on an emptied
+    # account) cannot start a sub-period; the TWR is not derivable.
+    account = member(
+        "a",
+        {"2026-01-01": "100", "2026-01-02": "0", "2026-01-03": "3.81"},
+        "2026-01-01",
+        "2026-01-03",
+        (("2026-01-02", "-100", numerics.EOD),),
+    )
+    with pytest.raises(numerics.UndefinedReturnError):
+        numerics.time_weighted_return(numerics.composite_subperiods([account]))
+    # A beginning-of-period inflow into zero capital is admissible.
+    assert numerics.subperiod_return(D(0), D(55), D(0), D(50)) == D("0.1")
 
 
 def test_twr_is_undefined_on_negative_beginning_capital() -> None:
@@ -509,7 +524,30 @@ ACTIVITY = (
 )
 
 
+def _fx_history(days: list[str]) -> str:
+    rows = [
+        {"Ticker": "USDT-USD", "Date": f"{d}T00:00:00", "Close": 1.0} for d in days
+    ] + [{"Ticker": "USDC-USD", "Date": f"{d}T00:00:00", "Close": 0.5} for d in days]
+    return json.dumps({"provider": "yahoo", "rows": rows})
+
+
+MP_BILLS_HEADER = "amount,currency,direction,timestamp_ms,timestamp_utc,tx_type\n"
+
+
+def _bill(amount: str, currency: str, direction: str, moment: str, kind: str) -> str:
+    return f"{amount},{currency},{direction},{_ms(moment)},{moment}+00:00,{kind}\n"
+
+
+BASE_BILLS = (
+    _bill("50", "USDC", "1", "2026-01-02T10:00:00", "2001")
+    + _bill("50", "USDC", "2", "2026-01-02T11:00:00", "2008")
+    + _bill("50", "USDT", "1", "2026-01-02T11:00:30", "2557")
+    + _bill("50", "USDT", "2", "2026-01-02T12:00:00", "2855")
+)
+
+
 def _synthetic_root(root: Path) -> None:
+    _write(root, derive.FX_HISTORY, _fx_history(DAYS))
     _write(root, derive.LEDGER, json.dumps(_ledger()))
     _write(root, derive.CROSSWALK, json.dumps(_crosswalk()))
     _write(root, derive.QB_ACTIVITY, ACTIVITY)
@@ -530,13 +568,7 @@ def _synthetic_root(root: Path) -> None:
         "amount,created_at_utc,currency,state\n"
         "50,2026-01-02T10:00:00+00:00,USDC,confirmed\n",
     )
-    _write(
-        root,
-        derive.MP_BILLS,
-        "amount,currency,direction,timestamp_ms,timestamp_utc,tx_type\n"
-        f"50,USDC,1,{_ms('2026-01-02T10:00:00')},2026-01-02T10:00:00+00:00,2001\n"
-        f"50,USDT,2,{_ms('2026-01-02T12:00:00')},2026-01-02T12:00:00+00:00,2855\n",
-    )
+    _write(root, derive.MP_BILLS, MP_BILLS_HEADER + BASE_BILLS)
     _write(
         root,
         derive.MP_DISPOSITIONS,
@@ -610,6 +642,12 @@ def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     # subscription precede the opening observation.
     mp_capital = metrics[("capital.account.cutoff", "acct-mp")]
     assert (mp_capital["value"], mp_capital["as_of"]) == ("55.00", "2026-01-09")
+    # X1: the raw FX file supplies the rate; the ledger copy only cross-checks it.
+    assert "fx_provenance: USDT->USD Yahoo daily Close from raw" in mp_capital["notes"]
+    assert (
+        "cross-check provider-ledger valuation_fx: 7/7 rates equal"
+        in (mp_capital["notes"])
+    )
     assert metrics[("flows.account.count", "acct-mp")]["value"] == "0"
     assert metrics[("twr.account", "acct-mp")]["value"] == "0.100000000000"
     missing = _reasons(document)
@@ -688,16 +726,107 @@ def test_unknown_membership_status_fails_closed(tmp_path: Path) -> None:
     assert ("capital.portfolio.systematic.cutoff", "portfolio") in reasons
 
 
-def test_in_window_non_usd_matrixport_deposit_is_not_derivable(tmp_path: Path) -> None:
+def test_in_window_matrixport_subscription_is_a_timed_flow(tmp_path: Path) -> None:
     _synthetic_root(tmp_path)
+    # A second USDT subscription of 55 after the opening confirms at the 01-06 NAV.
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("55", "USDT", "2", "2026-01-05T12:00:00", "2855"),
+    )
+    metrics = _index(_run(tmp_path))
+    # (01-05, 01-06]: (105 - 55)/50 - 1 = 0; (01-06, 01-09]: 115.5/105 - 1 = 0.1.
+    assert metrics[("flows.account.count", "acct-mp")]["value"] == "1"
+    assert metrics[("flows.account.net", "acct-mp")]["value"] == "55.00"
+    assert metrics[("twr.account", "acct-mp")]["value"] == "0.100000000000"
+    assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "115.50"
+    assert (
+        "dated by {'nav_confirm_date': 1}"
+        in (metrics[("twr.account", "acct-mp")]["notes"])
+    )
+
+
+def test_in_window_wallet_deposit_stays_outside_the_holding(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    baseline = _index(_run(tmp_path))
     _write(
         tmp_path,
         derive.MP_DEPOSITS,
         "amount,created_at_utc,currency,state\n"
+        "50,2026-01-02T10:00:00+00:00,USDC,confirmed\n"
         "5,2026-01-06T10:00:00+00:00,USDC,confirmed\n",
     )
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("5", "USDC", "1", "2026-01-06T10:00:00", "2001"),
+    )
+    metrics = _index(_run(tmp_path))
+    for metric_id in ("twr.account", "mwr.account", "capital.account.cutoff"):
+        assert (
+            metrics[(metric_id, "acct-mp")]["value"]
+            == (baseline[(metric_id, "acct-mp")]["value"])
+        )
+
+
+def test_in_window_unsupported_usdt_credit_fails_closed(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("7", "USDT", "1", "2026-01-06T12:00:00", "9999"),
+    )
     reasons = _reasons(_run(tmp_path))
-    assert "without an accepted FX input" in reasons[("twr.account", "acct-mp")]
+    assert "unsupported wallet bill" in reasons[("twr.account", "acct-mp")]
+
+
+def test_quantbase_and_matrixport_metrics_never_read_ledger_values(
+    tmp_path: Path,
+) -> None:
+    # R6: corrupt every ledger valuation of the raw-sourced accounts and drop the
+    # ledger FX copy; their expected values must not move.
+    _synthetic_root(tmp_path)
+    baseline = _index(_run(tmp_path))
+    ledger = _ledger()
+    nav_rows = ledger["nav_observations"]
+    assert isinstance(nav_rows, list)
+    for row in nav_rows:
+        if row["account_id"] in {"acct-qb", "acct-mp"}:
+            row["nav"]["value"] = str(D(row["nav"]["value"]) * 10 + 1)
+            row.pop("valuation_fx", None)
+    _write(tmp_path, derive.LEDGER, json.dumps(ledger))
+    leaked = _index(_run(tmp_path))
+    for account in ("acct-qb", "acct-mp"):
+        for metric_id in (
+            "capital.account.cutoff",
+            "date.source_last_observation",
+            "flows.account.net",
+            "flows.account.count",
+            "twr.account",
+            "mwr.account",
+        ):
+            before = baseline[(metric_id, account)]
+            after = leaked[(metric_id, account)]
+            assert (after["value"], after["as_of"]) == (
+                before["value"],
+                before["as_of"],
+            ), (metric_id, account)
+
+
+def test_fx_history_close_is_read_exactly(tmp_path: Path) -> None:
+    text = (
+        '{"rows": [{"Ticker": "USDT-USD", "Date": "2026-01-02T00:00:00", '
+        '"Close": 1.0003390312194824}, {"Ticker": "USDC-USD", '
+        '"Date": "2026-01-02T00:00:00", "Close": 0.99}]}'
+    )
+    rates = sources.parse_fx_history(text.encode("utf-8"), "USDT-USD")
+    assert rates == {day("2026-01-02"): D("1.0003390312194824")}
 
 
 def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:

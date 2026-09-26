@@ -35,7 +35,12 @@ class InputFile:
 def read_input(
     qe_root: Path, relative: str, expected_sha256: Mapping[str, str]
 ) -> InputFile:
-    target = qe_root.joinpath(*relative.split("/"))
+    """Read one input: relative to ``qe_root``, or an absolute listed path."""
+
+    absolute = Path(relative)
+    target = (
+        absolute if absolute.is_absolute() else qe_root.joinpath(*relative.split("/"))
+    )
     try:
         data = target.read_bytes()
     except OSError as exc:
@@ -496,13 +501,24 @@ def parse_quantbase_values(data: bytes) -> dict[dt.date, Decimal]:
 
 
 @dataclass(frozen=True)
+class Bill:
+    """One raw Matrixport wallet bill (``direction`` 1 = credit, 2 = debit)."""
+
+    moment_ms: int
+    day: dt.date
+    amount: Decimal
+    currency: str
+    direction: str
+    tx_type: str
+
+
+@dataclass(frozen=True)
 class MatrixportWallet:
     deposits: tuple[tuple[dt.date, Decimal, str], ...]
-    bills: tuple[tuple[dt.date, Decimal, str, str, str], ...]
+    bills: tuple[Bill, ...]
     rejected_currencies: tuple[str, ...]
     nav_per_unit: Mapping[dt.date, Decimal]
     coverage_end: dt.date | None
-    bill_times: tuple[tuple[int, Decimal, str, str], ...] = ()
     nav_times: tuple[tuple[int, dt.date], ...] = ()
 
 
@@ -515,23 +531,30 @@ def parse_matrixport_wallet(
         amount = decimal_or_none(row.get("amount"))
         if row.get("state") == "confirmed" and day is not None and amount is not None:
             deposit_rows.append((day, amount, row.get("currency", "")))
-    bill_rows: list[tuple[dt.date, Decimal, str, str, str]] = []
-    bill_times: list[tuple[int, Decimal, str, str]] = []
+    bill_rows: list[Bill] = []
     for row in csv_rows(bills):
         day = _utc_day(row.get("timestamp_utc", ""))
         amount = decimal_or_none(row.get("amount"))
         stamp = row.get("timestamp_ms", "")
-        if day is None or amount is None or not stamp.isdigit():
+        direction = row.get("direction", "")
+        if (
+            day is None
+            or amount is None
+            or not stamp.isdigit()
+            or direction
+            not in {
+                "1",
+                "2",
+            }
+        ):
             raise InputError("unparseable Matrixport wallet bill")
-        bill_times.append(
-            (int(stamp), amount, row.get("currency", ""), row.get("direction", ""))
-        )
         bill_rows.append(
-            (
+            Bill(
+                int(stamp),
                 day,
                 amount,
                 row.get("currency", ""),
-                row.get("direction", ""),
+                direction,
                 row.get("tx_type", ""),
             )
         )
@@ -556,10 +579,35 @@ def parse_matrixport_wallet(
                 nav_times.append((int(stamp), day))
     return MatrixportWallet(
         deposits=tuple(sorted(deposit_rows)),
-        bills=tuple(sorted(bill_rows)),
+        bills=tuple(sorted(bill_rows, key=lambda bill: (bill.moment_ms, bill.tx_type))),
         rejected_currencies=tuple(rejected),
         nav_per_unit=per_unit,
         coverage_end=max(per_unit) if per_unit else None,
-        bill_times=tuple(sorted(bill_times)),
         nav_times=tuple(sorted(nav_times)),
     )
+
+
+# ------------------------------------------------------------------------------- FX
+
+
+def parse_fx_history(data: bytes, ticker: str) -> dict[dt.date, Decimal]:
+    """Raw yfinance history: ``rows[]`` of ``{Ticker, Date, Close}``.
+
+    ``Close`` is parsed from its JSON literal as a Decimal, so the digits are
+    exactly the bytes in the file.
+    """
+
+    document = json.loads(data.decode("utf-8"), parse_float=Decimal)
+    rates: dict[dt.date, Decimal] = {}
+    for row in document["rows"]:
+        if row.get("Ticker") != ticker:
+            continue
+        day = iso_date(row.get("Date"))
+        close = row.get("Close")
+        if day is None or not isinstance(close, (Decimal, int)) or close <= 0:
+            raise InputError(f"unparseable {ticker} FX row {row.get('Date')}")
+        value = Decimal(close)
+        if day in rates and rates[day] != value:
+            raise InputError(f"conflicting {ticker} FX on {day.isoformat()}")
+        rates[day] = value
+    return rates

@@ -15,11 +15,11 @@ Conventions (see ``contracts/portfolio-performance-policy-v1.json``):
 * ``mwr_cases``: XIRR on investor cash flows (paid in negative) with
   ``day_count = ACTUAL_365``; no root -> ``NO_ROOT``; a root that cannot be
   proved unique -> ``UNIQUENESS_NOT_PROVED``.
-* Orchestrator ruling R3: a sub-period with zero beginning capital is neutral
-  (return 0). With zero ending value it is a plain zero-capital interval; with a
-  non-zero ending value the series re-opens from that value, which is treated as
-  capital embedded in the new opening (a sub-period cannot start at zero capital
-  and earn a return). Negative beginning capital is undefined.
+* Orchestrator ruling R3: a sub-period with zero beginning and zero ending value
+  (net of end-of-day flows) is neutral (return 0). A sub-period cannot start at
+  zero capital without a same-day inflow embedded in its opening (a beginning-of-
+  period flow): zero capital with a non-zero result, or negative capital, is
+  undefined and the TWR fails closed.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ BOD = "BOD"
 
 
 class UndefinedReturnError(ValueError):
-    """A sub-period return is undefined (negative beginning capital)."""
+    """A sub-period return is undefined (no positive beginning capital)."""
 
 
 class CalendarMisalignmentError(ValueError):
@@ -96,27 +96,21 @@ def subperiod_return(
 ) -> Decimal:
     """``(ending - EOD flows) / (beginning + BOD flows) - 1`` (PORT-PERF-1).
 
-    Zero beginning capital is neutral (ruling R3); negative capital is undefined.
+    Ruling R3: zero capital with a zero result is neutral; zero capital with a
+    non-zero result (no same-day inflow) or negative capital is undefined.
     """
 
     with localcontext() as context:
         context.prec = PRECISION
         result = ending - net_flow
         capital = beginning + beginning_flow
-        if capital == ZERO:
+        if capital == ZERO and result == ZERO:
             return ZERO
-        if capital < ZERO:
+        if capital <= ZERO:
             raise UndefinedReturnError(
                 f"beginning capital {capital} with ending-less-flow {result}"
             )
         return result / capital - ONE
-
-
-def is_reopening(period: SubPeriod) -> bool:
-    """A zero-capital sub-period whose ending value re-opens the series (R3)."""
-
-    capital = period.beginning_value + period.beginning_flow
-    return capital == ZERO and period.ending_value - period.net_flow != ZERO
 
 
 def chain_link(returns: Iterable[Decimal]) -> Decimal:
