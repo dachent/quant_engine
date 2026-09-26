@@ -205,6 +205,7 @@ def current_crosswalk(
     excluded: set[str] = set()
     problems: dict[str, str] = {}
     in_effect_rows: dict[str, list[dict[str, object]]] = defaultdict(list)
+    out_of_effect_included: set[str] = set()
     for row in rows:
         account_id = str(row["account_id"])
         effective_start = parse_date(str(row["effective_start"]))
@@ -215,7 +216,7 @@ def current_crosswalk(
         if in_effect:
             in_effect_rows[account_id].append(row)
         elif row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH":
-            problems[account_id] = "included crosswalk row is out of effect at cutoff"
+            out_of_effect_included.add(account_id)
     for account_id, account_rows in in_effect_rows.items():
         if len(account_rows) != 1:
             problems[account_id] = "multiple crosswalk rows are in effect at cutoff"
@@ -225,10 +226,30 @@ def current_crosswalk(
             account_strategies[account_id] = str(row["strategy_id"])
         else:
             excluded.add(account_id)
+    for account_id in out_of_effect_included:
+        if account_id not in account_strategies:
+            problems.setdefault(
+                account_id, "included crosswalk row is out of effect at cutoff"
+            )
     for account_id in problems:
         account_strategies.pop(account_id, None)
         excluded.discard(account_id)
     return account_strategies, excluded, problems
+
+
+def active_included_strategy_ids(rows: list[dict[str, object]]) -> list[str]:
+    """Return every distinct included strategy that is in effect at the cutoff."""
+    strategy_ids: set[str] = set()
+    for row in rows:
+        if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH":
+            continue
+        effective_start = parse_date(str(row["effective_start"]))
+        effective_end = row.get("effective_end")
+        if effective_start <= CUTOFF and (
+            effective_end is None or parse_date(str(effective_end)) >= CUTOFF
+        ):
+            strategy_ids.add(str(row["strategy_id"]))
+    return sorted(strategy_ids)
 
 
 def latest_observations(
@@ -430,6 +451,7 @@ def derive(qe_root: Path) -> dict[str, object]:
     account_strategies, excluded_accounts, crosswalk_problems = current_crosswalk(
         crosswalk["rows"]
     )
+    active_strategy_ids = active_included_strategy_ids(crosswalk["rows"])
     observations, observation_conflicts = latest_observations(ledger)
     inputs = [
         {
@@ -633,13 +655,20 @@ def derive(qe_root: Path) -> dict[str, object]:
         Decimal("0"),
     )
     missing_included = set(account_strategies).difference(account_values)
-    for strategy_id in sorted(set(account_strategies.values())):
+    for strategy_id in active_strategy_ids:
         members = {
             account_id
             for account_id, assigned in account_strategies.items()
             if assigned == strategy_id
         }
-        if members.intersection(missing_included):
+        if not members:
+            add_not_derivable(
+                output,
+                "capital.strategy.cutoff",
+                strategy_id,
+                "no included member account remains after crosswalk conflict",
+            )
+        elif members.intersection(missing_included):
             add_not_derivable(
                 output,
                 "capital.strategy.cutoff",
@@ -714,7 +743,6 @@ def derive(qe_root: Path) -> dict[str, object]:
         "portfolio",
         "liquid capital requires the non-derivable reserve balance",
     )
-    active_strategy_ids = sorted(set(account_strategies.values()))
     metrics.append(
         metric(
             "universe.active_strategy_ids",
@@ -740,6 +768,22 @@ def derive(qe_root: Path) -> dict[str, object]:
             for account_id, assigned in account_strategies.items()
             if assigned == strategy_id
         )
+        if not members:
+            add_not_derivable(
+                output,
+                "twr.strategy",
+                strategy_id,
+                "no included member account remains after crosswalk conflict",
+                "ITD",
+            )
+            add_not_derivable(
+                output,
+                "mwr.strategy",
+                strategy_id,
+                "no included member account remains after crosswalk conflict",
+                "ITD",
+            )
+            continue
         if any(account_id not in account_values for account_id in members):
             add_not_derivable(
                 output,

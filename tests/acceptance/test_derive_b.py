@@ -393,6 +393,70 @@ def test_current_crosswalk_filters_out_of_effect_rows_and_reports_in_effect_conf
     }
 
 
+def test_current_crosswalk_ignores_ended_included_predecessor_of_current_mapping():
+    """An expired predecessor cannot invalidate the account's unique current mapping."""
+    derivation = load_derivation_module()
+
+    account_strategies, excluded, conflicts = derivation.current_crosswalk(
+        [
+            {
+                "account_id": "account-a",
+                "strategy_id": "strategy-predecessor",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2025-11-25",
+                "effective_end": "2026-01-04",
+            },
+            {
+                "account_id": "account-a",
+                "strategy_id": "strategy-current",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2026-01-05",
+                "effective_end": None,
+            },
+        ]
+    )
+
+    assert account_strategies == {"account-a": "strategy-current"}
+    assert excluded == set()
+    assert conflicts == {}
+
+
+def test_derive_keeps_crosswalk_listed_strategy_when_all_members_are_conflicted(
+    tmp_path: Path,
+):
+    """A listed active strategy must be explicit even when its only account is dropped."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {"nav_observations": [], "flows": [], "capital_anchors": []},
+        [
+            included_row("account-a", "strategy-listed"),
+            {
+                "account_id": "account-a",
+                "strategy_id": None,
+                "product_epoch_disposition": "RETAINED_EXCLUDED",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+        ],
+    )
+
+    output = derivation.derive(tmp_path)
+    strategy_ids = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "universe.active_strategy_ids"
+    )
+
+    assert strategy_ids["value"] == '["strategy-listed"]'
+    assert {
+        row["metric_id"]
+        for row in output["not_derivable"]
+        if row["entity"] == "strategy-listed"
+    } == {"capital.strategy.cutoff", "twr.strategy", "mwr.strategy"}
+
+
 def test_paired_prefix_flows_reject_unbalanced_three_row_group():
     """All-pairs matching would erase a real external credit in this ambiguous group."""
     derivation = load_derivation_module()
