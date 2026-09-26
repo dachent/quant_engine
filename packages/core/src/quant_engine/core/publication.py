@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from types import MappingProxyType, ModuleType
-from typing import Callable, Mapping, Protocol, cast
+from typing import Callable, Final, Mapping, Protocol, cast
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -26,7 +26,11 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     canonical_json_bytes,
 )
-from quant_engine.core.strict_json import StrictJSONError, strict_json_loads
+from quant_engine.core.strict_json import (
+    StrictJSONError,
+    strict_json_loads,
+    strict_json_object,
+)
 
 
 _GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -1781,3 +1785,192 @@ def read_current(root: Path) -> CurrentPointer:
                 "current generation artifact inventory hash differs"
             )
     return pointer
+
+
+# --- Release-validation-findings precondition ---------------------------------------
+#
+# Cross-lane contract with the `acc-validator` lane (`state/briefs/findings-contract.md`,
+# corrective program): `tools/validate_generation.py` writes a findings document for a
+# generation; release publication refuses to commit that generation unless the document
+# exists, matches this contract, names exactly that generation, and carries zero
+# `BLOCKER_*` findings. This lives here (not only in an operator script) because the
+# refusal is meant to be a property of release publication itself -- every caller of
+# `commit_release`, not one wrapper around it.
+
+_RELEASE_VALIDATION_SCHEMA: Final = "qe-validate-generation/1"
+_RELEASE_VALIDATION_BLOCKER_PREFIX: Final = "BLOCKER_"
+_RELEASE_VALIDATION_FINDING_CLASSES: Final = frozenset(
+    {
+        "BLOCKER_INVARIANT",
+        "BLOCKER_AUTHORITY",
+        "BLOCKER_REGRESSION",
+        "NOT_READY",
+        "WARNING",
+    }
+)
+_RELEASE_VALIDATION_FINDING_KEYS: Final = frozenset(
+    {"check_id", "class", "entity", "observed", "expected", "pointer", "defect_ids"}
+)
+_RELEASE_VALIDATION_DOCUMENT_KEYS: Final = frozenset(
+    {
+        "schema",
+        "generation_id",
+        "generation_dir",
+        "validator_commit",
+        "expected_baseline_sha256",
+        "summary",
+        "findings",
+    }
+)
+
+# Windows FILE_ATTRIBUTE_* flags for cloud-sync (OneDrive/SharePoint Files-On-Demand)
+# placeholders: metadata only, no local bytes. Reading one hydrates it through the sync
+# provider's filter driver; AGENT-CONSTRAINTS requires checking residency first (`stat`
+# never hydrates) and refusing rather than reading through a placeholder.
+_CLOUD_PLACEHOLDER_ATTRIBUTES: Final = 0x00001000 | 0x00040000 | 0x00400000
+
+
+class ReleaseValidationFindingsError(ValueError):
+    """A validate_generation findings document does not match the cross-lane contract."""
+
+
+def _is_cloud_placeholder(path: Path) -> bool:
+    try:
+        attributes = path.stat().st_file_attributes
+    except (OSError, AttributeError):
+        return False
+    return bool(attributes & _CLOUD_PLACEHOLDER_ATTRIBUTES)
+
+
+def default_release_validation_findings_path(root: Path, generation_id: str) -> Path:
+    """Where `validate_generation` writes findings for a generation under ``root``.
+
+    A ``validation/`` sibling of ``generations/``, per the cross-lane contract: the
+    validator never writes inside a sealed, content-addressed generation directory.
+    """
+    return root / "validation" / generation_id / "findings.json"
+
+
+def _release_validation_required_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ReleaseValidationFindingsError(f"{label} must be a non-empty string")
+    return value
+
+
+def _release_validation_finding(entry: object, *, index: int) -> dict[str, object]:
+    if not isinstance(entry, dict):
+        raise ReleaseValidationFindingsError(f"findings[{index}] is not an object")
+    if set(entry) != _RELEASE_VALIDATION_FINDING_KEYS:
+        raise ReleaseValidationFindingsError(f"findings[{index}] shape differs")
+    _release_validation_required_string(
+        entry["check_id"], f"findings[{index}].check_id"
+    )
+    finding_class = entry["class"]
+    if (
+        not isinstance(finding_class, str)
+        or finding_class not in _RELEASE_VALIDATION_FINDING_CLASSES
+    ):
+        raise ReleaseValidationFindingsError(
+            f"findings[{index}].class is not a recognized class"
+        )
+    _release_validation_required_string(entry["entity"], f"findings[{index}].entity")
+    _release_validation_required_string(entry["pointer"], f"findings[{index}].pointer")
+    defect_ids = entry["defect_ids"]
+    if not isinstance(defect_ids, list) or not all(
+        isinstance(item, str) for item in defect_ids
+    ):
+        raise ReleaseValidationFindingsError(
+            f"findings[{index}].defect_ids must be a list of strings"
+        )
+    return entry
+
+
+def _release_validation_document(payload: object) -> dict[str, object]:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _RELEASE_VALIDATION_DOCUMENT_KEYS
+    ):
+        raise ReleaseValidationFindingsError("findings document shape differs")
+    if payload["schema"] != _RELEASE_VALIDATION_SCHEMA:
+        raise ReleaseValidationFindingsError("findings document schema differs")
+    _release_validation_required_string(payload["generation_id"], "generation_id")
+    _release_validation_required_string(payload["generation_dir"], "generation_dir")
+    _release_validation_required_string(payload["validator_commit"], "validator_commit")
+    baseline = payload["expected_baseline_sha256"]
+    if baseline is not None and not (isinstance(baseline, str) and baseline):
+        raise ReleaseValidationFindingsError(
+            "expected_baseline_sha256 must be a string or null"
+        )
+    summary = payload["summary"]
+    if (
+        not isinstance(summary, dict)
+        or set(summary) != _RELEASE_VALIDATION_FINDING_CLASSES
+    ):
+        raise ReleaseValidationFindingsError("summary shape differs")
+    for key, value in summary.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ReleaseValidationFindingsError(
+                f"summary.{key} must be a non-negative integer"
+            )
+    findings_list = payload["findings"]
+    if not isinstance(findings_list, list):
+        raise ReleaseValidationFindingsError("findings must be a list")
+    findings = [
+        _release_validation_finding(entry, index=index)
+        for index, entry in enumerate(findings_list)
+    ]
+    counted = {key: 0 for key in _RELEASE_VALIDATION_FINDING_CLASSES}
+    for entry in findings:
+        counted[cast(str, entry["class"])] += 1
+    if counted != summary:
+        raise ReleaseValidationFindingsError("summary disagrees with findings")
+    return payload
+
+
+def evaluate_release_validation_findings(
+    path: Path, *, expected_generation_id: str
+) -> tuple[bool, list[dict[str, object]], str | None]:
+    """Return ``(may_publish, blocking_findings, refusal_reason)`` for one generation.
+
+    Fails closed on every axis the contract names: missing, unreadable, a
+    non-resident cloud placeholder, malformed, or naming a different generation
+    all refuse. Only a well-formed document for exactly ``expected_generation_id``
+    with zero ``BLOCKER_*`` findings may publish. ``refusal_reason`` is set only
+    for those non-finding refusals; a well-formed document with blockers returns
+    them instead so the caller can report exactly what refused it.
+    """
+    if not path.is_file():
+        return False, [], f"no release-validation findings file at {path}"
+    if _is_cloud_placeholder(path):
+        return (
+            False,
+            [],
+            (
+                f"release-validation findings file is not resident (cloud placeholder): {path}"
+            ),
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return False, [], f"release-validation findings file cannot be read: {exc}"
+    try:
+        payload = strict_json_object(raw, label="release-validation findings")
+        document = _release_validation_document(payload)
+    except (StrictJSONError, ReleaseValidationFindingsError) as exc:
+        return False, [], str(exc)
+    if document["generation_id"] != expected_generation_id:
+        return (
+            False,
+            [],
+            (
+                "release-validation findings generation_id differs: expected "
+                f"{expected_generation_id!r}, found {document['generation_id']!r}"
+            ),
+        )
+    findings = cast(list[dict[str, object]], document["findings"])
+    blockers = [
+        entry
+        for entry in findings
+        if cast(str, entry["class"]).startswith(_RELEASE_VALIDATION_BLOCKER_PREFIX)
+    ]
+    return not blockers, blockers, None

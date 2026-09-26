@@ -174,6 +174,10 @@ def _commit_until_terminated(
         roots=roots,
         companion_contents=companion_contents,
         fault_hook=pause,
+        # Rehearses crash/resume mechanics against a synthetic release; not a
+        # real financial publish, so the release-validation-findings gate does
+        # not apply here.
+        skip_release_validation=True,
     )
 
 
@@ -413,6 +417,9 @@ def rehearse_release_boundaries(
                     roots=roots,
                     companion_contents=proposed_companions,
                     fault_hook=fail,
+                    # Rehearses a fault-injected commit against a synthetic
+                    # release; not a real financial publish.
+                    skip_release_validation=True,
                 )
             except ReleaseCommitError:
                 pass
@@ -1002,6 +1009,9 @@ def _publish_synthetic_release(
         release_id=release.release_id,
         roots=roots,
         companion_contents={"panel-launcher": launcher},
+        # `_publish_synthetic_release` publishes fabricated rehearsal data, not
+        # a real financial release; the validation-findings gate does not apply.
+        skip_release_validation=True,
     )
     if journal.state is not ReleaseState.COMMITTED:
         raise RehearsalError("synthetic release did not commit")

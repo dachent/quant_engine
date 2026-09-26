@@ -99,6 +99,24 @@ if [ "${PUBLISH:-0}" != "1" ]; then
   exit 0
 fi
 
+# #469/#326/#444, generalized: a detector already computes a signal that
+# should stop publication (conformance blocking reasons, an applicable open
+# correction, a stale retained pin) and nothing downstream refuses on it.
+# `execute --commit` below reaches `commit_release`
+# (packages/core/src/quant_engine/core/release.py), which now refuses -- for
+# every caller, not only this script -- unless every target root in the
+# release manifest has a clean validate_generation findings file for its own
+# `proposed_generation_id`, expected at
+# "<that root>/validation/<generation_id>/findings.json"
+# (state/briefs/findings-contract.md; `evaluate_release_validation_findings`,
+# packages/core/src/quant_engine/core/publication.py). Missing findings
+# refuse too -- a validator that has not run yet is not evidence of
+# readiness. There is deliberately no separate precondition step here: the
+# generation identity that matters is the one in the release manifest being
+# committed, not a spec-file hash invented by this script, so the check
+# belongs at the sink that reads that manifest, not in a wrapper that has to
+# guess it.
+
 echo "== execute --commit =="
 "$PY" tools/data_pipeline.py execute --spec "$P/production-spec.json" \
   --commit --commit-authorization "$P/commit-authorization.json" > "$P/execute.json"
