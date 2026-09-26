@@ -616,7 +616,7 @@ POSITIVE_STATUS_TOKENS = (
     "PASSED",
     "GO_LIVE",
 )
-_TOKEN = re.compile(r"\b(" + "|".join(POSITIVE_STATUS_TOKENS) + r")\b")
+_STATUS_WORD = re.compile(r"\b(" + "|".join(POSITIVE_STATUS_TOKENS) + r")\b")
 _PHRASE = re.compile(
     r"(?i)^\s*(?:status\s*[:=-]\s*)?("
     r"published|verified|ready|ready\s+(?:for|to)\s+(?:release|publish|publication)|"
@@ -637,7 +637,7 @@ def _positive_words(text: str) -> list[str]:
 
     found = [
         match.group(1)
-        for match in _TOKEN.finditer(text)
+        for match in _STATUS_WORD.finditer(text)
         if not _NEGATED.search(text[: match.start()])
     ]
     phrase = _PHRASE.match(text)
@@ -682,7 +682,7 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
         if "${" in value:
             value = re.sub(r"\$\{[^}]*\}", " ", value)
         words = (
-            [w for w in _TOKEN.findall(value)]
+            [w for w in _STATUS_WORD.findall(value)]
             if not match.group(0).startswith("class")
             else []
         )
@@ -715,7 +715,9 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
             operators = ("===", "!==", "==", "!=", "case")
             if before.endswith(operators) or after.startswith(operators[:4]):
                 continue
-            if _PHRASE.match(literal.group(2)) or _TOKEN.fullmatch(literal.group(2)):
+            if _PHRASE.match(literal.group(2)) or _STATUS_WORD.fullmatch(
+                literal.group(2)
+            ):
                 add(index, "template-expression-literal", literal.group(2))
     unique = {(item.line, item.context, item.literal): item for item in results}
     return [unique[key] for key in sorted(unique)]
