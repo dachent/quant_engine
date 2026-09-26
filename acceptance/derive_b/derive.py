@@ -828,13 +828,13 @@ def raw_provider_data(
     ):
         with (
             (qe_root / MATRIXPORT_NAV_PATH).open(
-                encoding="utf-8", newline=""
+                encoding="utf-8-sig", newline=""
             ) as nav_handle,
             (qe_root / MATRIXPORT_DEPOSITS_PATH).open(
-                encoding="utf-8", newline=""
+                encoding="utf-8-sig", newline=""
             ) as deposit_handle,
             (qe_root / MATRIXPORT_BILLS_PATH).open(
-                encoding="utf-8", newline=""
+                encoding="utf-8-sig", newline=""
             ) as bill_handle,
         ):
             deposit_rows = list(csv.DictReader(deposit_handle))

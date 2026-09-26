@@ -1104,3 +1104,88 @@ def test_derive_keeps_a_not_ready_account_explicitly_not_derivable(
         "mwr.account",
         "twr.account",
     }
+
+
+def test_derive_matrixport_stops_at_raw_last_date_despite_later_ledger_row(
+    tmp_path: Path,
+):
+    """A BOM-prefixed raw capture must bound the series; the later ledger row is not an expected value."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [
+                nav("account-m", "2026-01-02", "8.91"),
+                nav("account-m", "2026-09-17", "99999"),
+            ],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                **included_row("account-m", "strategy-m"),
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-01-02",
+            }
+        ],
+    )
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
+        "day_timestamp_utc,nav\n"
+        "2026-01-02T00:00:00+00:00,1.1\n"
+        "2026-01-03T00:00:00+00:00,1.21\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-01-01T16:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-01-01T20:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.FX_PATH).write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-01-02T00:00:00",
+                        "Close": 0.99,
+                    },
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-01-03T00:00:00",
+                        "Close": 0.98,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = derivation.derive(tmp_path)
+    capital = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "capital.account.cutoff" and row["entity"] == "account-m"
+    )
+    last_observation = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "date.source_last_observation"
+        and row["entity"] == "account-m"
+    )
+
+    assert capital["value"] == "9.70"
+    assert capital["as_of"] == "2026-01-03"
+    assert last_observation["value"] == "2026-01-03"
+    assert derivation.MATRIXPORT_NAV_PATH.as_posix() in {
+        item["path"] for item in output["inputs"]
+    }
