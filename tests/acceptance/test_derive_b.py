@@ -646,29 +646,46 @@ def test_strategy_composite_uses_union_dates_and_member_intervals():
     assert derivation.time_weighted_return(observations, flows) == Decimal("0.21")
 
 
-def test_quantbase_buy_uses_the_next_valuation_after_its_exact_timestamp():
-    """Dating a filled sleeve buy to the prior day treats new capital as if it earned that return."""
+def test_quantbase_buy_uses_the_linked_order_fill_at_the_subperiod_start():
+    """Using order creation instead of the linked fill would put the BUY in the wrong subperiod."""
     derivation = load_derivation_module()
 
-    flows, count = derivation.quantbase_sleeve_flows(
+    flow_data = derivation.quantbase_sleeve_flows(
         [
             {
                 "activity_type": "filled_txn",
+                "id": "transaction-a",
                 "fund": "107",
                 "type": "BUY",
                 "amount": "50",
-                "time": "2026-01-02T20:32:52Z",
+                "time": "2026-01-01T20:32:52Z",
                 "created_to_cover_fees": "False",
                 "is_rebalance": "False",
-            }
+            },
+            {
+                "activity_type": "order",
+                "transaction": "transaction-a",
+                "filled_at": "2026-01-02T20:32:52Z",
+            },
         ],
         [
             (date(2026, 1, 2), Decimal("100")),
-            (date(2026, 1, 3), Decimal("160")),
+            (date(2026, 1, 3), Decimal("165")),
         ],
+        opening_date=date(2026, 1, 2),
     )
 
-    assert (flows, count) == ({date(2026, 1, 3): Decimal("50")}, 1)
+    assert flow_data.cash_flows == {date(2026, 1, 2): Decimal("50")}
+    assert flow_data.twr_beginning_flows == {date(2026, 1, 2): Decimal("50")}
+    assert flow_data.count == 1
+    assert derivation.time_weighted_return(
+        [
+            (date(2026, 1, 2), Decimal("100")),
+            (date(2026, 1, 3), Decimal("165")),
+        ],
+        flow_data.twr_end_flows,
+        flow_data.twr_beginning_flows,
+    ) == Decimal("0.10")
 
 
 def test_quantbase_raw_account_value_replaces_ledger_observation():
@@ -688,30 +705,48 @@ def test_quantbase_raw_account_value_replaces_ledger_observation():
     assert observations == [(date(2026, 9, 2), Decimal("123.45"))]
 
 
-def test_matrixport_raw_nav_and_deposits_define_value_and_flow_timing():
-    """An opening deposit is embedded in raw NAV rather than booked as a later flow."""
+def test_matrixport_raw_nav_uses_subscription_bill_units_and_embeds_opening_funding():
+    """Treating USDC funding as units would value the subscription at the wrong amount."""
     derivation = load_derivation_module()
     nav_rows = [
-        {"day_timestamp_utc": "2026-01-02T00:00:00+00:00", "nav": "1"},
-        {"day_timestamp_utc": "2026-01-03T00:00:00+00:00", "nav": "1.1"},
+        {"day_timestamp_utc": "2026-01-01T00:00:00+00:00", "nav": "0.5"},
+        {"day_timestamp_utc": "2026-01-02T00:00:00+00:00", "nav": "0.6"},
+        {"day_timestamp_utc": "2026-01-03T00:00:00+00:00", "nav": "0.66"},
     ]
     deposits = [
         {
             "state": "confirmed",
             "currency": "USDC",
             "amount": "100",
-            "created_at_utc": "2026-01-01T20:00:00+00:00",
+            "created_at_utc": "2026-01-01T16:00:00+00:00",
+        }
+    ]
+    bills = [
+        {
+            "currency": "USDT",
+            "direction": "2",
+            "amount": "90",
+            "timestamp_utc": "2026-01-01T20:00:00+00:00",
         }
     ]
 
     observations = derivation.matrixport_raw_observations(
-        nav_rows, deposits, "account-m"
+        nav_rows,
+        deposits,
+        bills,
+        "account-m",
+        {
+            date(2026, 1, 2): Decimal("0.99"),
+            date(2026, 1, 3): Decimal("0.98"),
+        },
     )
-    flows, count = derivation.matrixport_raw_flows(deposits, observations)
+    flows, count = derivation.matrixport_raw_flows(
+        deposits, observations, opening_date=date(2026, 1, 2)
+    )
 
     assert observations == [
-        (date(2026, 1, 2), Decimal("100")),
-        (date(2026, 1, 3), Decimal("110.0")),
+        (date(2026, 1, 2), Decimal("89.10")),
+        (date(2026, 1, 3), Decimal("97.0200")),
     ]
     assert (flows, count) == ({}, 0)
 
@@ -852,11 +887,14 @@ def test_composite_series_books_member_entry_and_exit_as_flows():
     assert derivation.time_weighted_return(observations, flows) == Decimal("0.331")
 
 
-def test_raw_provider_matrixport_uses_subscription_units_and_usdt_fx(tmp_path: Path):
-    """Treating a USDT deposit amount as USD principal overstates the USD raw NAV."""
+def test_raw_provider_matrixport_uses_subscription_bill_units_and_usdt_fx(
+    tmp_path: Path,
+):
+    """Using the USDC deposit as units would bypass the raw subscription debit."""
     derivation = load_derivation_module()
     derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
     derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
     derivation.FX_PATH = Path("fx.json")
     (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
     (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
@@ -864,8 +902,12 @@ def test_raw_provider_matrixport_uses_subscription_units_and_usdt_fx(tmp_path: P
         encoding="utf-8",
     )
     (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
-        "state,currency,amount,subscription_share,created_at_utc\n"
-        "confirmed,USDT,1000,10,2026-01-01T20:00:00+00:00\n",
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-01-01T16:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-01-01T20:00:00+00:00\n",
         encoding="utf-8",
     )
     (tmp_path / derivation.FX_PATH).write_text(
@@ -884,11 +926,22 @@ def test_raw_provider_matrixport_uses_subscription_units_and_usdt_fx(tmp_path: P
     )
 
     observations, flows, used = derivation.raw_provider_data(
-        tmp_path, [{"account_id": "account-m", "provider": "MATRIXPORT"}]
+        tmp_path,
+        [
+            {
+                "account_id": "account-m",
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-01-02",
+            }
+        ],
     )
 
-    assert observations == {"account-m": [(date(2026, 1, 2), Decimal("10.890"))]}
-    assert flows == {"account-m": ({}, 0)}
+    assert observations == {"account-m": [(date(2026, 1, 2), Decimal("8.910"))]}
+    assert flows["account-m"].cash_flows == {}
+    assert flows["account-m"].twr_end_flows == {}
+    assert flows["account-m"].twr_beginning_flows == {}
+    assert flows["account-m"].count == 0
+    assert derivation.MATRIXPORT_BILLS_PATH in used
     assert derivation.FX_PATH in used
 
 
@@ -896,25 +949,54 @@ def test_quantbase_opening_buy_is_not_reintroduced_as_a_flow():
     """A buy already embedded in the first raw valuation must not be booked twice."""
     derivation = load_derivation_module()
 
-    flows, count = derivation.quantbase_sleeve_flows(
+    flow_data = derivation.quantbase_sleeve_flows(
         [
             {
                 "activity_type": "filled_txn",
+                "id": "transaction-a",
                 "fund": "107",
                 "type": "BUY",
                 "amount": "50",
                 "time": "2026-01-01T20:32:52Z",
                 "created_to_cover_fees": "False",
                 "is_rebalance": "False",
-            }
+            },
+            {
+                "activity_type": "order",
+                "transaction": "transaction-a",
+                "filled_at": "2026-01-01T20:32:52Z",
+            },
         ],
         [
             (date(2026, 1, 2), Decimal("100")),
             (date(2026, 1, 3), Decimal("160")),
         ],
+        opening_date=date(2026, 1, 2),
     )
 
-    assert (flows, count) == ({}, 0)
+    assert flow_data.cash_flows == {}
+    assert flow_data.twr_end_flows == {}
+    assert flow_data.twr_beginning_flows == {}
+    assert flow_data.count == 0
+
+
+def test_matrixport_fx_capture_ends_at_the_admitted_boundary(tmp_path: Path):
+    """Admitting a later scratch FX close would change the contract-bound raw value."""
+    derivation = load_derivation_module()
+    fx_path = tmp_path / "fx.json"
+    fx_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDT-USD", "Date": "2026-09-03", "Close": 0.99},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-04", "Close": 0.98},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert derivation.usdt_usd_fx_rates(fx_path) == {date(2026, 9, 3): Decimal("0.99")}
 
 
 def test_quantbase_raw_observations_read_the_pricehistory_dates_and_values():
@@ -951,6 +1033,7 @@ def test_derive_adds_fx_provenance_note_to_matrixport_metrics(tmp_path: Path):
     )
     derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
     derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
     derivation.FX_PATH = Path("fx.json")
     (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
     (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
@@ -958,8 +1041,12 @@ def test_derive_adds_fx_provenance_note_to_matrixport_metrics(tmp_path: Path):
         encoding="utf-8",
     )
     (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
-        "state,currency,amount,subscription_share,created_at_utc\n"
-        "confirmed,USDT,1000,10,2026-01-01T20:00:00+00:00\n",
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-01-01T16:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-01-01T20:00:00+00:00\n",
         encoding="utf-8",
     )
     (tmp_path / derivation.FX_PATH).write_text(
@@ -984,5 +1071,36 @@ def test_derive_adds_fx_provenance_note_to_matrixport_metrics(tmp_path: Path):
         if row["metric_id"] == "capital.account.cutoff" and row["entity"] == "account-m"
     )
 
-    assert capital["value"] == "10.89"
+    assert capital["value"] == "8.91"
     assert "fx_provenance" in capital["notes"]
+
+
+def test_derive_keeps_a_not_ready_account_explicitly_not_derivable(
+    tmp_path: Path,
+):
+    """An unavailable provider account must remain a disclosed gap rather than a zero value."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {"nav_observations": [], "flows": [], "capital_anchors": []},
+        [included_row("account-not-ready", "strategy-a")],
+    )
+
+    output = derivation.derive(tmp_path)
+
+    assert not [
+        row for row in output["metrics"] if row["entity"] == "account-not-ready"
+    ]
+    assert {
+        row["metric_id"]
+        for row in output["not_derivable"]
+        if row["entity"] == "account-not-ready"
+    } == {
+        "capital.account.cutoff",
+        "date.source_last_observation",
+        "flows.account.count",
+        "flows.account.net",
+        "mwr.account",
+        "twr.account",
+    }
