@@ -35,7 +35,7 @@ AS_OF="${HISTORY_AS_OF:-2026-09-04}"
 GB="$S/GrizzlyBulls"
 QSI="$S/Quanta72 Stratum Index"
 TT="$S/TuringTrader"
-VOLATIS="$Q/audit/coding/2026-09-06_codex_mvp2-execution/source-integration-r6/quantbase-private/source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+VOLATIS="$Q/dataQuantbase/source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
 P123_ROOT="$Q/dataPortfolio123/generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8"
 
 cd "$REPO"
