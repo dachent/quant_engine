@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import json
 import subprocess
@@ -10,6 +11,7 @@ import sys
 
 import pytest
 
+from quant_engine.core import run_storage
 from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_attended_preparation as preparation
@@ -230,9 +232,7 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
     # preparation attempt leaves behind before its verified resumed handoff.
     materializer._attended_start_preparation_attempt(output)
     resumed_attempt = materializer._attended_start_preparation_attempt(output)
-    materializer._attended_finish_preparation_attempt(
-        output, resumed_attempt, "COMPLETED"
-    )
+    materializer._attended_finish_preparation_attempt(output, resumed_attempt, "PASSED")
 
     def prepared(**kwargs: object) -> dict[str, object]:
         assert kwargs["resume"] is True
@@ -262,11 +262,14 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
     observations = json.loads(
         (output / "attended-execution-observations.json").read_text(encoding="utf-8")
     )
+    # The killed attempt is CANCELLED (formerly INCOMPLETE), the resumed one PASSED.
     assert [attempt["status"] for attempt in observations["preparation_attempts"]] == [
-        "INCOMPLETE",
-        "COMPLETED",
+        "CANCELLED",
+        "PASSED",
     ]
     assert observations["execution_attempts"][-1]["status"] == "FAILED"
+    state = json.loads((output / "attended-run-state.json").read_text("utf-8"))
+    assert (state["state"], state["pid"]) == ("FAILED", os.getpid())
 
 
 @pytest.mark.parametrize(
@@ -2098,6 +2101,8 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
 
     def prepare(**kwargs: object) -> dict[str, object]:
         events.append("prepare")
+        # The runner marks the root it creates, so preparation receives that hook.
+        assert callable(kwargs.pop("on_create"))
         assert kwargs == {
             "preparation_spec_path": tmp_path / "native-inputs.json",
             "output_root": output,
@@ -2122,12 +2127,13 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
         return preflight
 
     def execute(
-        actual: object, actual_root: Path, *, resume: bool
+        actual: object, actual_root: Path, *, resume: bool, storage: object
     ) -> tuple[int, dict[str, object]]:
         events.append("execute")
         assert actual is preflight
         assert actual_root == output
         assert resume is False
+        assert isinstance(storage, run_storage.AttendedStorage)
         return 0, {"status": "EXECUTED"}
 
     monkeypatch.setattr(preparation, "prepare_attended_inputs", prepare)
@@ -2162,6 +2168,7 @@ def test_supported_entrypoint_records_preparation_attempt_before_preflight(
         assert receipt["preparation_attempts"] == [
             {
                 "attempt": 1,
+                "pid": os.getpid(),
                 "started_at": "2026-09-19T12:00:00+00:00",
                 "status": "RUNNING",
             }
@@ -2173,7 +2180,7 @@ def test_supported_entrypoint_records_preparation_attempt_before_preflight(
         return {"prepared": True}
 
     def execute(
-        actual: object, _root: Path, *, resume: bool
+        actual: object, _root: Path, *, resume: bool, storage: object
     ) -> tuple[int, dict[str, object]]:
         events.append("execute")
         assert actual == {"prepared": True}
@@ -2196,13 +2203,18 @@ def test_supported_entrypoint_records_preparation_attempt_before_preflight(
             {
                 "attempt": 1,
                 "ended_at": "2026-09-19T12:00:01+00:00",
+                "pid": os.getpid(),
                 "started_at": "2026-09-19T12:00:00+00:00",
-                "status": "COMPLETED",
+                "status": "PASSED",
             }
         ],
-        "schema_version": 2,
+        "schema_version": 3,
     }
     assert events == ["prepare", "preflight", "execute"]
+    # The runner created this root, so it carries the marker retire looks for.
+    marker = json.loads((output / "attended-run-root.json").read_text("utf-8"))
+    assert marker["kind"] == run_storage.RUN_MARKER_KIND
+    assert marker["run_root"] == str(output)
 
 
 def test_preparation_attempt_resume_marks_interruption_without_terminal_time(
@@ -2257,14 +2269,16 @@ def test_preparation_attempt_resume_marks_interruption_without_terminal_time(
     assert attempts == [
         {
             "attempt": 1,
+            "pid": os.getpid(),
             "started_at": "2026-09-19T12:00:00+00:00",
-            "status": "INCOMPLETE",
+            "status": "CANCELLED",
         },
         {
             "attempt": 2,
             "ended_at": "2026-09-19T12:01:01+00:00",
+            "pid": os.getpid(),
             "started_at": "2026-09-19T12:01:00+00:00",
-            "status": "COMPLETED",
+            "status": "PASSED",
         },
     ]
 
