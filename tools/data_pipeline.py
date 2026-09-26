@@ -31,15 +31,13 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--commit", action="store_true")
             command.add_argument("--commit-authorization", type=Path)
             command.add_argument("--allow-external-read", action="store_true")
-            command.add_argument(
-                "--skip-release-validation",
-                action="store_true",
-                help=(
-                    "bypass the validate_generation findings precondition on "
-                    "commit -- for a deliberately non-financial commit only "
-                    "(e.g. recovery rehearsal); never for a real release"
-                ),
-            )
+            # Deliberately no CLI escape hatch for the release-validation
+            # gate: a flag on the primary publish command is a friction-free
+            # bypass that leaves no trail (journal, manifest, execute.json
+            # all look like a normal commit). `commit_release`'s
+            # `skip_release_validation` stays available as a Python-level
+            # parameter for legitimate non-CLI callers that justify it inline
+            # (rehearsal.py calls the API directly; see its 3 call sites).
         elif name == "recover":
             command.add_argument("--confirm-stale-lock", action="store_true")
     inventory = commands.add_parser("inventory")
@@ -68,7 +66,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     commit=args.commit,
                     commit_authorization=args.commit_authorization,
                     allow_external_read=args.allow_external_read,
-                    skip_release_validation=args.skip_release_validation,
                 )
     except (
         OSError,
