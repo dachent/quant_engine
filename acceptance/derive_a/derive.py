@@ -78,11 +78,12 @@ QB_ACTIVITY = QUANTBASE_CSV + "account_activity.csv"
 # R6 needs raw Quantbase daily values; this raw file of the same capture is the
 # source the provider ledger itself cites for the Volatis sleeve.
 QB_VALUES = QUANTBASE_CSV + "dashboard_Volatis_Strategy_pricehistory.csv"
-# X1: raw Yahoo USDT-USD history, listed in state/briefs/acceptance-inputs.json with
-# this absolute path (a scratch extract of the candidate FX generation's raw file).
-FX_HISTORY = "C:/Dev/scratch/quant_engine/lineage/fx/yfinance-history.json"
-FX_CANDIDATE_GENERATION = (
-    "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+# X1: raw Yahoo capture of the contract-bound FX generation 9812f253 (resident;
+# reconstructed byte-exact, state/reports/FX-9812f253-report.md), as listed in
+# state/briefs/acceptance-inputs.json. Only dates <= the admitted boundary are used.
+FX_HISTORY = (
+    "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/"
+    "raw/yfinance-history.json"
 )
 
 INPUT_ORDER = (
@@ -101,7 +102,7 @@ INPUT_ORDER = (
 PINNED_SHA256 = {
     LEDGER: "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13",
     CROSSWALK: "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f",
-    FX_HISTORY: "927e107b6dacb2feac903c03766856b802b73fbd79a1a79bd21e23355941858c",
+    FX_HISTORY: "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c",
 }
 PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
@@ -227,7 +228,9 @@ CONVENTION_NOTES = (
     "wallet_currency_dispositions.csv proves which currencies' history was "
     "readable.",
     "X1 FX: USDT->USD = Yahoo USDT-USD daily Close on the original UTC NAV or "
-    "confirm date from the raw yfinance-history.json listed in acceptance-inputs "
+    "confirm date from the raw yfinance-history.json capture of the contract-bound "
+    "FX generation 9812f253 listed in acceptance-inputs, dates <= the admitted "
+    "boundary (matrixport-account-generation splice_policy USD_CONVERSION_..._THROUGH) "
     "(contract source_segments[portfolio-fx-rates].splice_policy "
     "ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL); a date without a rate is "
     "dropped. Each Matrixport row carries an fx_provenance note and a cross-check "
@@ -688,13 +691,13 @@ def _quantbase_source(
 def _fx_provenance(fx: FxSource, used: Sequence[dt.date]) -> str:
     after = [day for day in used if fx.admitted_through and day > fx.admitted_through]
     return (
-        f"fx_provenance: USDT->USD Yahoo daily Close from raw {FX_HISTORY} "
-        f"(sha256 {fx.sha256}; candidate FX generation {FX_CANDIDATE_GENERATION}, "
-        "pending owner selection per state/briefs/acceptance-inputs.json); the "
-        "contract binds source_segments[portfolio-fx-rates].current_generation "
-        f"{fx.contract_generation} observed through {fx.contract_observed_end}, and "
-        "matrixport-account-generation splice_policy admits USD conversion "
-        f"{fx.splice_rule}; rates used "
+        "fx_provenance: USDT->USD Yahoo daily Close from the contract-bound "
+        f"{fx.contract_generation[:8]} raw capture {FX_HISTORY} (sha256 {fx.sha256}; "
+        "contract source_segments[portfolio-fx-rates].current_generation "
+        f"{fx.contract_generation} observed through {fx.contract_observed_end}); "
+        f"matrixport-account-generation splice_policy {fx.splice_rule}; admitted "
+        f"boundary {_day(fx.admitted_through) if fx.admitted_through else 'NONE'}, "
+        f"{fx.dropped_after_boundary} raw rate(s) after it ignored; rates used "
         f"{_day(min(used)) if used else '-'}..{_day(max(used)) if used else '-'}, "
         f"{len(after)} after the admitted boundary"
     )
@@ -708,6 +711,7 @@ class FxSource:
     contract_observed_end: str
     admitted_through: dt.date | None
     splice_rule: str
+    dropped_after_boundary: int = 0
 
 
 def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
@@ -730,13 +734,18 @@ def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
     through: dt.date | None = None
     if "THROUGH_" in rule:
         through = iso_date(rule.rsplit("THROUGH_", 1)[1].replace("_", "-"))
+    through = through or iso_date(observed_end)
+    raw = parse_fx_history(fx_file.data, "USDT-USD")
+    # Fail closed: without an admitted boundary in the contract no rate is used.
+    admitted = {day: rate for day, rate in raw.items() if through and day <= through}
     return FxSource(
-        rates=parse_fx_history(fx_file.data, "USDT-USD"),
+        rates=admitted,
         sha256=fx_file.sha256,
         contract_generation=generation,
         contract_observed_end=observed_end,
         admitted_through=through,
         splice_rule=rule or "-",
+        dropped_after_boundary=len(raw) - len(admitted),
     )
 
 
@@ -880,9 +889,13 @@ def _matrixport_source(
     }
     common = sorted(set(ledger_rates).intersection(fx.rates).intersection(fx_days))
     differing = [day for day in common if ledger_rates[day] != fx.rates[day]]
+    largest = max(
+        (abs(ledger_rates[day] - fx.rates[day]) for day in common), default=ZERO
+    )
     source.value_notes.append(
         f"cross-check provider-ledger valuation_fx: {len(common) - len(differing)}/"
-        f"{len(common)} rates equal the raw Close"
+        f"{len(common)} rates equal the raw Close exactly, max |difference| "
+        f"{largest:.1E}"
     )
     source.flow_notes.append(
         f"raw wallet: {len(wallet.deposits)} confirmed deposit(s) "

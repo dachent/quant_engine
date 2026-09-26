@@ -386,7 +386,9 @@ SLEEVES = [
 ]
 
 
-def _synthetic_repo(root: Path, sleeves: list[Any] | None = None) -> Path:
+def _synthetic_repo(
+    root: Path, sleeves: list[Any] | None = None, fx_through: str = "2026_01_09"
+) -> Path:
     contracts = root / "repo" / "contracts"
     contracts.mkdir(parents=True, exist_ok=True)
     for name in (
@@ -415,7 +417,21 @@ def _synthetic_repo(root: Path, sleeves: list[Any] | None = None) -> Path:
                     SLEEVES if sleeves is None else sleeves
                 )
             ]
-        }
+        },
+        "source_segments": [
+            {
+                "source_id": "portfolio-fx-rates",
+                "current_generation": {"generation_id": "f" * 64},
+                "interval": {"observed_end": "2026-01-09"},
+            },
+            {
+                "source_id": "matrixport-account-generation",
+                "interval": {
+                    "splice_policy": "OTHER_RULE; "
+                    f"USD_CONVERSION_USES_SYNTHETIC_FX_THROUGH_{fx_through}"
+                },
+            },
+        ],
     }
     (contracts / "portfolio-financial-mvp-source-v1.json").write_bytes(
         json.dumps(census).encode("utf-8")
@@ -643,7 +659,10 @@ def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     mp_capital = metrics[("capital.account.cutoff", "acct-mp")]
     assert (mp_capital["value"], mp_capital["as_of"]) == ("55.00", "2026-01-09")
     # X1: the raw FX file supplies the rate; the ledger copy only cross-checks it.
-    assert "fx_provenance: USDT->USD Yahoo daily Close from raw" in mp_capital["notes"]
+    assert (
+        "fx_provenance: USDT->USD Yahoo daily Close from the contract-bound"
+        in (mp_capital["notes"])
+    )
     assert (
         "cross-check provider-ledger valuation_fx: 7/7 rates equal"
         in (mp_capital["notes"])
@@ -817,6 +836,19 @@ def test_quantbase_and_matrixport_metrics_never_read_ledger_values(
                 before["value"],
                 before["as_of"],
             ), (metric_id, account)
+
+
+def test_fx_rates_after_the_admitted_boundary_are_ignored(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    _synthetic_repo(tmp_path, fx_through="2026_01_08")
+    metrics = _index(_run(tmp_path))
+    capital = metrics[("capital.account.cutoff", "acct-mp")]
+    # The 01-09 raw NAV has no admitted rate, so the last valuation is 01-08.
+    assert (capital["value"], capital["as_of"]) == ("50.00", "2026-01-08")
+    assert (
+        "admitted boundary 2026-01-08, 3 raw rate(s) after it ignored"
+        in (capital["notes"])
+    )
 
 
 def test_fx_history_close_is_read_exactly(tmp_path: Path) -> None:
