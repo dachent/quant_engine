@@ -40,7 +40,12 @@ TEXT_SUFFIXES = frozenset(
 
 # FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS
 _PLACEHOLDER_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
-_COUNT_TEXT_NEEDLES = (b"current strateg", b"Current strateg", b"CURRENT STRATEG")
+# Rendered strategy-count text. Shell files (markup, scripts) are searched for any
+# "strateg" token; payload files only for prose " strategies" (JSON keys such as
+# eligible_strategies are preceded by "_", not a space).
+_SHELL_COUNT_NEEDLES = (b"strateg", b"Strateg", b"STRATEG")
+_PAYLOAD_COUNT_NEEDLES = (b" strategies", b" Strategies", b" STRATEGIES")
+PAYLOAD_FILES = frozenset({PANEL, PANEL_SCRIPT, REPORT, FRESHNESS})
 _EMBED_OPEN = b'<script type="application/octet-stream"'
 _EMBED_CLOSE = b"</script>"
 _MAX_HITS_PER_FILE = 2000
@@ -75,6 +80,7 @@ class ScanResult:
     release_id_counts: dict[str, int] = field(default_factory=dict)
     embedded_payloads: dict[str, EmbeddedPayload] = field(default_factory=dict)
     panel_script_payload_sha256: str | None = None
+    panel_script_global: str | None = None
 
 
 @dataclass
@@ -102,6 +108,7 @@ class Generation:
     report: dict[str, Any]
     freshness: dict[str, Any] | None
     app_js: str | None
+    index_shell: str | None
     scan: ScanResult
     external: External
 
@@ -248,14 +255,19 @@ def _iter_files(gen_dir: Path) -> list[Path]:
     return paths
 
 
+def _is_payload(rel: str) -> bool:
+    return rel in PAYLOAD_FILES or rel.startswith("qa/")
+
+
 def scan_generation(
     gen_dir: Path, release_id: str | None
-) -> tuple[ScanResult, dict[str, Any], str | None]:
-    """Hash and scan every file; return parsed JSON for the named payloads."""
+) -> tuple[ScanResult, dict[str, Any], str | None, str | None]:
+    """Hash and scan every file; return parsed JSON and the shell sources."""
 
     scan = ScanResult()
     parsed: dict[str, Any] = {}
     app_js: str | None = None
+    index_shell: str | None = None
     release_needle = release_id.encode("ascii") if release_id else None
     for path in _iter_files(gen_dir):
         rel = path.relative_to(gen_dir).as_posix()
@@ -270,15 +282,18 @@ def scan_generation(
                     scan.absolute_path_hits.append(
                         TextHit(rel, offset, _snippet(data, offset, 8, 120))
                     )
-            for needle in _COUNT_TEXT_NEEDLES:
+            needles = (
+                _PAYLOAD_COUNT_NEEDLES if _is_payload(rel) else _SHELL_COUNT_NEEDLES
+            )
+            for needle in needles:
                 start = 0
-                while True:
+                while len(scan.count_text_hits) < 50_000:
                     index = data.find(needle, start)
                     if index < 0:
                         break
                     start = index + 1
                     scan.count_text_hits.append(
-                        TextHit(rel, index, _snippet(data, index, 24, 24))
+                        TextHit(rel, index, _snippet(data, index, 64, 40))
                     )
             if release_needle is not None:
                 scan.release_id_counts[rel] = data.count(release_needle)
@@ -287,14 +302,25 @@ def scan_generation(
             scan.stripped_sha256[rel] = hashlib.sha256(stripped).hexdigest()
         if rel == INDEX:
             scan.embedded_payloads = _embedded_payloads(data)
+            cut = data.find(_EMBED_OPEN)
+            index_shell = data[: cut if cut >= 0 else len(data)].decode(
+                "utf-8", "replace"
+            )
         if rel == PANEL_SCRIPT:
             scan.panel_script_payload_sha256 = _script_payload_sha256(data)
+            head = data[:512].decode("utf-8", "replace")
+            binding = re.search(
+                r"window\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*[\"']([A-Za-z_$][\w$]*)[\"']\s*\])\s*=",
+                head,
+            )
+            if binding is not None:
+                scan.panel_script_global = binding.group(1) or binding.group(2)
         if rel in JSON_FILES:
             parsed[rel] = _load_json_bytes(data, rel)
         if rel == APP:
             app_js = data.decode("utf-8", "replace")
         del data
-    return scan, parsed, app_js
+    return scan, parsed, app_js, index_shell
 
 
 def _discover_external(
@@ -386,7 +412,7 @@ def load_generation(
         release_pointer_path=release_pointer_path,
     )
     release_id = (external.release_pointer or {}).get("release_id")
-    scan, parsed, app_js = scan_generation(
+    scan, parsed, app_js, index_shell = scan_generation(
         gen_dir, release_id if isinstance(release_id, str) else None
     )
     documents: dict[str, dict[str, Any]] = {}
@@ -405,6 +431,7 @@ def load_generation(
         report=documents[REPORT],
         freshness=freshness if isinstance(freshness, dict) else None,
         app_js=app_js,
+        index_shell=index_shell,
         scan=scan,
         external=external,
     )

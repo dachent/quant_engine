@@ -27,8 +27,10 @@ import math
 import re
 from typing import Any
 
+from . import shell
 from .generation import (
     APP,
+    PAYLOAD_FILES,
     CANDIDATE,
     FRESHNESS,
     GENERATION_MANIFEST,
@@ -82,10 +84,28 @@ _NUMBER_WORDS = {
     "ten": 10,
     "eleven": 11,
     "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
 }
-_COUNT_TEXT = re.compile(
-    r"(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)"
-    r"\s+current\s+strateg(?:y|ies)"
+_NUMBER = r"(\d+|" + "|".join(_NUMBER_WORDS) + r")"
+_UNIVERSE_QUALIFIERS = (
+    r"current|active|live|funded|included|systematic|tracked|product|portfolio|"
+    r"governed|mapped|running"
+)
+# "Nine current strategies", "9 active live strategies" (anywhere, payload prose too)
+_QUALIFIED_COUNT = re.compile(
+    rf"(?i)\b{_NUMBER}\s+(?:(?:{_UNIVERSE_QUALIFIERS})\s+){{1,2}}strateg(?:y|ies)\b"
+)
+# "7 strategies", "Strategies: 9", "strategies (9)", "strategy count = 9" (shell only)
+_BARE_COUNT = re.compile(rf"(?i)\b{_NUMBER}\s+strategies\b")
+_LABEL_COUNT = re.compile(
+    rf"(?i)\bstrateg(?:y|ies)(?:\s+count)?\s*(?:[:=(]|\bof\b)\s*{_NUMBER}\b"
 )
 _MACHINE_WORD = re.compile(
     r"\b[a-z]+(?:_[a-z]+)+:[A-Za-z0-9_:.-]+|\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b"
@@ -400,19 +420,27 @@ class Universe:
     known_accounts: frozenset[str]
 
 
-def universe(ctx: Context) -> Universe:
-    cached = ctx._cache.get("universe")
-    if isinstance(cached, Universe):
-        return cached
+def universe(ctx: Context) -> Universe | None:
+    """The active universe from the authoritative epoch crosswalk, or ``None``.
+
+    The generation's own ``strategy_summary``/``twr_mwr`` is never used as its own
+    universe authority: without a readable crosswalk the universe-derived checks do
+    not run and ``universe.authority_missing`` fails closed instead.
+    """
+
+    if "universe" in ctx._cache:
+        cached = ctx._cache["universe"]
+        return cached if isinstance(cached, Universe) else None
     crosswalk = ctx.gen.external.crosswalk
-    result: Universe
-    if isinstance(crosswalk, dict) and isinstance(crosswalk.get("rows"), list):
+    result: Universe | None = None
+    crosswalk_rows = rows(crosswalk, "rows") if isinstance(crosswalk, dict) else []
+    if crosswalk_rows:
         active_strategies: set[str] = set()
         active_accounts: set[str] = set()
         excluded_accounts: dict[str, str] = {}
         excluded_strategies: dict[str, str] = {}
         known: set[str] = set()
-        for row in rows(crosswalk, "rows"):
+        for row in crosswalk_rows:
             account = str(row.get("account_id"))
             strategy = str(row.get("strategy_id"))
             disposition = str(row.get("product_epoch_disposition"))
@@ -423,7 +451,7 @@ def universe(ctx: Context) -> Universe:
             ):
                 active_strategies.add(strategy)
                 active_accounts.add(account)
-        for row in rows(crosswalk, "rows"):
+        for row in crosswalk_rows:
             account = str(row.get("account_id"))
             strategy = str(row.get("strategy_id"))
             disposition = str(row.get("product_epoch_disposition"))
@@ -435,35 +463,66 @@ def universe(ctx: Context) -> Universe:
                 )
             if strategy not in active_strategies:
                 excluded_strategies[strategy] = disposition
-        result = Universe(
-            source=f"crosswalk:{ctx.gen.external.crosswalk_path}",
-            active_strategies=frozenset(active_strategies),
-            active_accounts=frozenset(active_accounts),
-            excluded_accounts=excluded_accounts,
-            excluded_strategies=excluded_strategies,
-            known_accounts=frozenset(known),
-        )
-    else:
-        strategies = {
-            str(row.get("strategy_id"))
-            for row in rows(ctx.report, "strategy_summary")
-            if row.get("lifecycle_status") == "ACTIVE"
-        }
-        accounts = {
-            str(row.get("account_id"))
-            for _, row in twr_rows(ctx)
-            if row.get("effective_end") is None
-        }
-        result = Universe(
-            source="in-generation:report.strategy_summary+twr_mwr (no crosswalk)",
-            active_strategies=frozenset(strategies),
-            active_accounts=frozenset(accounts),
-            excluded_accounts={},
-            excluded_strategies={},
-            known_accounts=frozenset(accounts),
-        )
+        if active_strategies:
+            result = Universe(
+                source=f"crosswalk:{ctx.gen.external.crosswalk_path}",
+                active_strategies=frozenset(active_strategies),
+                active_accounts=frozenset(active_accounts),
+                excluded_accounts=excluded_accounts,
+                excluded_strategies=excluded_strategies,
+                known_accounts=frozenset(known),
+            )
     ctx._cache["universe"] = result
     return result
+
+
+def reserve_accounts(ctx: Context) -> set[str]:
+    """Reserve/mandate buckets, recognised from the data rather than by id."""
+
+    accounts = {
+        str(row.get("account_id"))
+        for row in rows(ctx.report, "account_summary")
+        if row.get("role") == "RESERVE"
+    }
+    accounts |= {
+        str(row.get("account_id"))
+        for row in rows(ctx.report, "allocation_history")
+        if row.get("scope") == "RESERVE" and row.get("account_id") is not None
+    }
+    return accounts
+
+
+_UNIVERSE_CHECKS = (
+    "universe.active_set_consistent",
+    "universe.hardcoded_count_text",
+    "universe.retired_strategies_in_current",
+    "universe.inactive_accounts_in_current",
+    "dates.freshness_vs_cutoff (retired-subject rule)",
+)
+
+
+def check_universe_authority(ctx: Context) -> Iterator[Finding]:
+    """D5/D6/D9 need the authoritative crosswalk; without it, fail closed."""
+
+    if universe(ctx) is not None:
+        return
+    external = ctx.gen.external
+    yield _finding(
+        "universe.authority_missing",
+        BLOCKER_AUTHORITY,
+        "account-strategy-current-epoch-crosswalk",
+        {
+            "crosswalk_path": external.crosswalk_path,
+            "readable_rows_with_an_active_epoch": 0,
+            "checks_not_evaluated": list(_UNIVERSE_CHECKS),
+        },
+        "a readable crosswalk with at least one current INCLUDED_PRODUCT_EPOCH row",
+        "(crosswalk)",
+        "$.rows",
+        ("D5", "D6", "D9"),
+        "the active universe authority is missing; the generation is not used as "
+        "its own universe authority, so retired/inactive filtering is unverified",
+    )
 
 
 # ------------------------------------------------------------------ identity checks
@@ -983,77 +1042,129 @@ def check_cutoff_consistency(ctx: Context) -> Iterator[Finding]:
 
 # -------------------------------------------------------------- preservation checks
 
-_PRESERVED_TABLES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("account_summary", "account_summary", ("account_id",)),
-    ("allocation_history", "allocations", ("allocation_id",)),
-    ("strategy_summary", "strategies", ("strategy_id",)),
-    ("twr_mwr", "performance", ("account_id", "strategy_id", "effective_start")),
-    ("reconciliation_checks", "reconciliation_checks", ("check_id",)),
-    ("fact_coverage_matrix", "fact_coverage_matrix", ("account_id", "fact_type")),
+# Declared report -> panel mapping (truth-lineage section 1-6): each report table is
+# rendered from one panel table, rows are matched by the key fields, and EVERY field of
+# the report row is required in the matching panel row with an identical value, except
+# the declared exemptions (none today). The panel may add fields; it may not drop,
+# duplicate or change one.
+_PRESERVED_TABLES: tuple[tuple[str, str, tuple[str, ...], frozenset[str]], ...] = (
+    ("account_summary", "account_summary", ("account_id",), frozenset()),
+    ("allocation_history", "allocations", ("allocation_id",), frozenset()),
+    ("strategy_summary", "strategies", ("strategy_id",), frozenset()),
+    (
+        "twr_mwr",
+        "performance",
+        ("account_id", "strategy_id", "effective_start"),
+        frozenset(),
+    ),
+    ("reconciliation_checks", "reconciliation_checks", ("check_id",), frozenset()),
+    (
+        "fact_coverage_matrix",
+        "fact_coverage_matrix",
+        ("account_id", "fact_type"),
+        frozenset(),
+    ),
     (
         "attribution_dispositions",
         "attribution_dispositions",
         ("account_id", "effective_start"),
+        frozenset(),
     ),
     (
         "observation_windows",
         "observation_windows",
         ("window_type", "fact_type", "provider_id"),
+        frozenset(),
     ),
-    ("positions", "positions", ("account_id", "security_id", "as_of_date")),
-    ("provenance", "provenance", ("artifact", "sha256")),
-    ("coverage_data_quality", "coverage", ("category", "item")),
+    (
+        "positions",
+        "positions",
+        ("account_id", "security_id", "as_of_date"),
+        frozenset(),
+    ),
+    ("provenance", "provenance", ("artifact", "sha256"), frozenset()),
+    ("coverage_data_quality", "coverage", ("category", "item"), frozenset()),
 )
 _PRESERVED_OBJECTS = (
     "hwm_summary",
     "hwm_governed_proof",
     "invested_capital",
 )
+_ABSENT = "<absent in panel>"
 
 
 def _row_key(row: Mapping[str, Any], fields: Sequence[str]) -> tuple[str, ...]:
     return tuple(str(row.get(name)) for name in fields)
 
 
+def _grouped(
+    table: list[dict[str, Any]], key_fields: Sequence[str]
+) -> dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]]:
+    groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
+    for position, row in enumerate(table):
+        groups.setdefault(_row_key(row, key_fields), []).append((position, row))
+    return groups
+
+
 def check_report_to_panel(ctx: Context) -> Iterator[Finding]:
-    for report_key, panel_key, key_fields in _PRESERVED_TABLES:
+    for report_key, panel_key, key_fields, exempt in _PRESERVED_TABLES:
         if report_key not in ctx.report:
             continue
-        panel_rows: dict[tuple[str, ...], tuple[int, dict[str, Any]]] = {}
-        for position, row in enumerate(rows(ctx.panel, panel_key)):
-            panel_rows.setdefault(_row_key(row, key_fields), (position, row))
+        report_rows = rows(ctx.report, report_key)
+        if report_rows and panel_key not in ctx.panel:
+            yield _finding(
+                "preservation.report_to_panel",
+                BLOCKER_INVARIANT,
+                f"{report_key}->{panel_key}",
+                {"panel_table": None, "report_rows": len(report_rows)},
+                "the mapped panel table is present",
+                PANEL,
+                f"$.{panel_key}",
+                (),
+                "a mapped report table is missing from the panel",
+            )
+            continue
+        panel_groups = _grouped(rows(ctx.panel, panel_key), key_fields)
         mismatches: list[dict[str, Any]] = []
-        for position, row in enumerate(rows(ctx.report, report_key)):
-            key = _row_key(row, key_fields)
-            matched = panel_rows.get(key)
-            if matched is None:
+        for key, report_group in _grouped(report_rows, key_fields).items():
+            panel_group = panel_groups.get(key, [])
+            if len(panel_group) != len(report_group):
                 mismatches.append(
-                    {"report_row": position, "key": list(key), "panel": None}
+                    {
+                        "key": list(key),
+                        "report_rows": [position for position, _ in report_group],
+                        "panel_rows": [position for position, _ in panel_group],
+                    }
                 )
                 continue
-            panel_position, panel_row = matched
-            for name, value in row.items():
-                if name in panel_row and panel_row[name] != value:
-                    mismatches.append(
-                        {
-                            "report_row": position,
-                            "panel_row": panel_position,
-                            "field": name,
-                            "report": value,
-                            "panel": panel_row[name],
-                        }
-                    )
+            for (position, row), (panel_position, panel_row) in zip(
+                report_group, panel_group
+            ):
+                for name, value in row.items():
+                    if name in exempt:
+                        continue
+                    shown = panel_row[name] if name in panel_row else _ABSENT
+                    if shown != value:
+                        mismatches.append(
+                            {
+                                "report_row": position,
+                                "panel_row": panel_position,
+                                "field": name,
+                                "report": value,
+                                "panel": shown,
+                            }
+                        )
         if mismatches:
             yield _finding(
                 "preservation.report_to_panel",
                 BLOCKER_INVARIANT,
                 f"{report_key}->{panel_key}",
                 {"mismatch_count": len(mismatches), "first": mismatches[:5]},
-                "every report row preserved in the panel with equal shared fields",
+                "every report row and field preserved in the mapped panel row",
                 PANEL,
                 f"$.{panel_key}",
                 (),
-                "a report value was not preserved in the panel",
+                "a report value was dropped, duplicated or changed in the panel",
             )
     for section in _PRESERVED_OBJECTS:
         if section in ctx.report and ctx.report.get(section) != ctx.panel.get(section):
@@ -1292,37 +1403,97 @@ def _details(row: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def check_reconciliation_recompute(ctx: Context) -> Iterator[Finding]:
-    """B6/B13: recompute the arithmetic behind stamped PASS reconciliations."""
+def _capital_claims(row: Mapping[str, Any]) -> dict[str, Decimal]:
+    """USD totals a reconciliation claims (``value_usd`` and any ``*_usd`` field)."""
 
-    systematic, reserve, allocation_dates = _allocation_totals(ctx)
+    claims = {}
+    for key, value in _details(row).items():
+        if key == "value_usd" or key.endswith("_usd"):
+            amount = to_decimal(value)
+            if amount is not None:
+                claims[key] = amount
+    return claims
+
+
+def _itemized_candidates(
+    ctx: Context, row: Mapping[str, Any]
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Totals a capital reconciliation can legitimately equal: (allocation, cutoff).
+
+    Allocation candidates sum the itemized allocation rows; cutoff candidates sum the
+    current accounts' values at the cutoff. A stamped PASS total must equal one.
+    """
+
+    systematic, reserve, _ = _allocation_totals(ctx)
+    reserve_value = reserve or Decimal(0)
+    cutoff = cutoff_capital_by_strategy(ctx)
+    cutoff_systematic = sum((amount for amount, _ in cutoff.values()), Decimal(0))
+    allocation = {
+        "sum(allocation_history SYSTEMATIC)": systematic,
+        "sum(allocation_history SYSTEMATIC + RESERVE)": systematic + reserve_value,
+    }
+    at_cutoff = {
+        "sum(current account values at cutoff)": cutoff_systematic,
+        "sum(current account values at cutoff) + reserve": cutoff_systematic
+        + reserve_value,
+    }
+    strategy = row.get("strategy_id")
+    if isinstance(strategy, str):
+        for item in rows(ctx.report, "allocation_history"):
+            if item.get("strategy_id") == strategy:
+                amount = to_decimal(item.get("current_value_usd"))
+                if amount is not None:
+                    allocation[f"allocation_history[{strategy}]"] = amount
+        if strategy in cutoff:
+            at_cutoff[f"current account values at cutoff[{strategy}]"] = cutoff[
+                strategy
+            ][0]
+    return allocation, at_cutoff
+
+
+def _matches(value: Decimal, candidates: Mapping[str, Decimal]) -> list[str]:
+    return [
+        name
+        for name, amount in candidates.items()
+        if abs(value - amount) <= USD_TOLERANCE
+    ]
+
+
+def check_reconciliation_recompute(ctx: Context) -> Iterator[Finding]:
+    """B6/B13: every stamped-PASS capital reconciliation must be reproducible.
+
+    Bound to what a reconciliation claims (its ``*_usd`` totals), not to its id: any
+    PASS row whose claimed total equals no itemized allocation or cutoff-account total
+    is unexplained arithmetic, whatever the check is called.
+    """
+
     retained = summary_value(ctx, "Retained excluded systematic balance")
     retained_value = retained[1] if retained and retained[1] is not None else Decimal(0)
     for position, row in enumerate(rows(ctx.report, "reconciliation_checks")):
-        check_id = str(row.get("check_id"))
-        value = to_decimal(_details(row).get("value_usd"))
-        if value is None:
-            continue
-        if check_id == "allocation-to-audit-systematic-total":
-            recomputed = systematic
-        elif check_id == "allocation-plus-reserve-to-liquid-total":
-            recomputed = systematic + (reserve or Decimal(0))
-        else:
-            continue
         status = str(row.get("status"))
-        if status.startswith("PASS") and abs(value - recomputed) > USD_TOLERANCE:
+        if not status.startswith("PASS"):
+            continue
+        allocation, at_cutoff = _itemized_candidates(ctx, row)
+        for field_name, value in sorted(_capital_claims(row).items()):
+            if _matches(value, allocation) or _matches(value, at_cutoff):
+                continue
+            nearest = min(
+                ({**allocation, **at_cutoff}).items(),
+                key=lambda item: abs(value - item[1]),
+            )
             yield _finding(
                 "capital.reconciliation_recompute",
                 BLOCKER_INVARIANT,
-                check_id,
-                {"recorded_value_usd": value, "status": status},
-                {"recomputed_from_allocation_rows": recomputed},
+                str(row.get("check_id")),
+                {"recorded": {field_name: value}, "status": status},
+                {"reproducible_from": {**allocation, **at_cutoff}},
                 REPORT,
-                f"$.reconciliation_checks[{position}].details_json",
+                f"$.reconciliation_checks[{position}].details_json.{field_name}",
                 ("B6", "B13"),
-                f"reconciliation stamped {status} but its recorded total differs from "
-                f"the rows it reconciles by {value - recomputed} (retained excluded "
-                f"balance in the report: {format_decimal(retained_value)})",
+                f"reconciliation stamped {status} claims a total no itemized rows "
+                f"reproduce (nearest {nearest[0]}, off by {value - nearest[1]}; "
+                f"retained excluded balance in the report: "
+                f"{format_decimal(retained_value)})",
             )
 
 
@@ -1365,7 +1536,13 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
     if stale_allocations:
         for position, row in enumerate(rows(ctx.report, "reconciliation_checks")):
             check_id = str(row.get("check_id"))
-            if "allocation" in check_id and str(row.get("status")).startswith("PASS"):
+            claims = _capital_claims(row)
+            _, at_cutoff = _itemized_candidates(ctx, row)
+            if (
+                claims
+                and str(row.get("status")).startswith("PASS")
+                and not all(_matches(value, at_cutoff) for value in claims.values())
+            ):
                 yield _finding(
                     "capital.as_of_cutoff",
                     BLOCKER_AUTHORITY,
@@ -1383,8 +1560,9 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
                     REPORT,
                     f"$.reconciliation_checks[{position}]",
                     ("B13",),
-                    "reconciliation PASS is computed from pre-cutoff allocation rows "
-                    "(circular: stale rows reconciled against the same stale total)",
+                    "capital reconciliation stamped PASS does not tie to cutoff "
+                    "account values while allocation rows predate the cutoff "
+                    "(circular: stale rows reconciled against a stale total)",
                 )
 
 
@@ -1606,6 +1784,8 @@ def check_active_universe(ctx: Context) -> Iterator[Finding]:
     """D9: every current view carries exactly the active strategy universe."""
 
     reference = universe(ctx)
+    if reference is None:
+        return
     active = reference.active_strategies
     for label, file, path, key in _STRATEGY_VIEWS:
         ids = _view_ids(ctx, file, path, key)
@@ -1660,30 +1840,64 @@ def check_active_universe(ctx: Context) -> Iterator[Finding]:
         )
 
 
+@dataclass(frozen=True)
+class RenderedCount:
+    file: str
+    offset: int
+    text: str
+    number: int
+
+
+def rendered_strategy_counts(ctx: Context) -> list[RenderedCount]:
+    """Literal strategy totals in rendered text (markup, ARIA, labels, prose).
+
+    Shell files accept qualified ("9 active strategies"), bare ("7 strategies") and
+    label ("Strategies: 9") forms; payload prose only the qualified form, because
+    payload text also counts subsets ("0 strategies are excluded").
+    """
+
+    found: dict[tuple[str, int], RenderedCount] = {}
+    for hit in ctx.gen.scan.count_text_hits:
+        base = max(0, hit.offset - 64)
+        patterns = [_QUALIFIED_COUNT]
+        if hit.file not in PAYLOAD_FILES and not hit.file.startswith("qa/"):
+            patterns += [_BARE_COUNT, _LABEL_COUNT]
+        for pattern in patterns:
+            for match in pattern.finditer(hit.snippet):
+                word = match.group(1).lower()
+                number = _NUMBER_WORDS.get(word)
+                if number is None and word.isdigit():
+                    number = int(word)
+                if number is None:
+                    continue
+                position = base + match.start()
+                found.setdefault(
+                    (hit.file, position),
+                    RenderedCount(hit.file, position, match.group(0), number),
+                )
+    return [found[key] for key in sorted(found)]
+
+
 def check_hardcoded_count_text(ctx: Context) -> Iterator[Finding]:
     """D9: rendered text must not hard-code a strategy count that differs."""
 
-    active = len(universe(ctx).active_strategies)
-    for hit in ctx.gen.scan.count_text_hits:
-        match = _COUNT_TEXT.search(hit.snippet)
-        if match is None:
-            continue
-        word = match.group(1).lower()
-        number = _NUMBER_WORDS.get(word)
-        if number is None and word.isdigit():
-            number = int(word)
-        if number is not None and number != active:
+    reference = universe(ctx)
+    if reference is None:
+        return
+    active = len(reference.active_strategies)
+    for count in rendered_strategy_counts(ctx):
+        if count.number != active:
             yield _finding(
                 "universe.hardcoded_count_text",
                 BLOCKER_INVARIANT,
-                f"{hit.file}@{hit.offset}",
-                match.group(0),
-                f"{active} current strategies",
-                hit.file,
-                f"(byte offset {hit.offset})",
+                f"{count.file}@{count.offset}",
+                count.text,
+                f"{active} strategies (active universe, {reference.source})",
+                count.file,
+                f"(byte offset {count.offset})",
                 ("D9",),
-                "rendered text hard-codes a current-strategy count that differs from "
-                "the active universe",
+                "rendered text hard-codes a strategy count that differs from the "
+                "active universe",
             )
 
 
@@ -1691,6 +1905,8 @@ def check_retired_strategies(ctx: Context) -> Iterator[Finding]:
     """D5: retired or excluded strategies must not appear in current outputs."""
 
     reference = universe(ctx)
+    if reference is None:
+        return
     for label, file, path, key in _RETIRED_VIEWS:
         ids = _view_ids(ctx, file, path, key)
         if ids is None:
@@ -1725,7 +1941,9 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
     """D6: inactive, retired or excluded accounts in current coverage/leverage."""
 
     reference = universe(ctx)
-    allowed = set(reference.active_accounts) | {"reserve-classification"}
+    if reference is None:
+        return
+    allowed = set(reference.active_accounts) | reserve_accounts(ctx)
     for label, file, path, key in _ACCOUNT_VIEWS:
         ids = _view_ids(ctx, file, path, key)
         if ids is None:
@@ -2480,6 +2698,8 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
 
     cutoff = ctx.cutoff
     policies = _policies(ctx)
+    reference = universe(ctx)
+    active_strategies = reference.active_strategies if reference else None
     for position, row in enumerate(rows(ctx.gen.freshness, "assessments")):
         last = to_date(row.get("last_accepted_date"))
         state = row.get("state")
@@ -2492,7 +2712,8 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
         )
         subject_is_retired = (
             row.get("subject_type") == "STRATEGY"
-            and str(row.get("subject_id")) not in universe(ctx).active_strategies
+            and active_strategies is not None
+            and str(row.get("subject_id")) not in active_strategies
         )
         if row.get("required_for_current") is True and (
             subject_is_retired or (policy.get("mode") == "FINITE" and last < cutoff)
@@ -2916,169 +3137,163 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
 # -------------------------------------------------------------------- code checks
 
 
+def _payload_globals(ctx: Context) -> set[str]:
+    name = ctx.gen.scan.panel_script_global
+    if name:
+        return {name}
+    js = ctx.gen.app_js or ""
+    return set(re.findall(r"window\s*\.\s*([A-Z][A-Z0-9_]{2,})\b", js))
+
+
 def check_app_guard(ctx: Context) -> Iterator[Finding]:
-    """F2: the payload is dereferenced before the missing-payload guard can run."""
+    """F2: a payload binding dereferenced at load time before any null guard.
+
+    The payload global is read from the data script (``window.X = {...}``); every
+    binding of it is followed, whatever its name, and any equivalent guard form
+    (``!x``, ``x == null``, ``typeof x``, ``x &&``/``??``) counts. Dereferences inside
+    deferred function bodies are assumed to run after the guard.
+    """
 
     js = ctx.gen.app_js
     if not js:
         return
-    declaration = re.search(r"\bconst\s+data\s*=\s*window\.PORTFOLIO_DATA\s*;", js)
-    if declaration is None:
-        return
-    dereference = re.compile(r"(?<![\w$.?])data\s*[.\[]").search(js, declaration.end())
-    guard = re.search(r"if\s*\(\s*!\s*data\b", js)
-    if dereference is not None and (
-        guard is None or dereference.start() < guard.start()
-    ):
+    for item in shell.payload_dereferences_before_guard(js, _payload_globals(ctx)):
         yield _finding(
             "code.data_deref_before_guard",
             BLOCKER_INVARIANT,
+            f"{APP}:{item.binding}",
+            {"binding": item.binding, "first_eager_dereference_line": item.line},
+            {"guard_before_dereference": True, "first_guard_line": item.guard_line},
             APP,
-            {"first_dereference_line": js.count("\n", 0, dereference.start()) + 1},
-            {"guard_line": js.count("\n", 0, guard.start()) + 1 if guard else None},
-            APP,
-            f"line {js.count(chr(10), 0, dereference.start()) + 1}",
+            f"line {item.line}",
             ("F2",),
-            "payload dereferenced before the missing-payload guard; the error state "
-            "is unreachable",
+            "payload dereferenced at load time before the missing-payload guard; "
+            "the error state is unreachable",
         )
 
 
 def check_unescaped_dates(ctx: Context) -> Iterator[Finding]:
-    """F7: the date formatter's fallback returns raw text into innerHTML sinks."""
+    """F7: a date formatter whose fallback returns raw input into an HTML sink.
+
+    Date formatters are recognised by what they do (``new Date``/``Date.parse``/
+    ``toLocaleDateString``/``DateTimeFormat``), not by name; escape helpers by their
+    HTML-entity replacement. A return branch that hands back its argument unescaped,
+    used in markup without an escape wrapper, fires.
+    """
 
     js = ctx.gen.app_js
     if not js:
         return
-    definition = re.search(
-        r"const\s+formatDate\s*=\s*\(value\)\s*=>\s*\{(.*?)\n\s*\};", js, re.S
-    )
-    if definition is None:
-        return
-    body = definition.group(1)
-    if "String(value)" not in body or re.search(r"safe\(\s*String\(value\)", body):
-        return
-    sinks = [match.start() for match in re.finditer(r"\$\{\s*formatDate\(", js)]
-    if sinks:
+    for item in shell.unescaped_date_formatters(js):
         yield _finding(
             "code.unescaped_date_fallback",
             BLOCKER_INVARIANT,
-            APP,
+            f"{APP}:{item.name}",
             {
-                "unescaped_template_uses": len(sinks),
-                "lines": sorted(
-                    {js.count("\n", 0, position) + 1 for position in sinks}
-                )[:20],
+                "formatter": item.name,
+                "raw_fallback_returns": list(item.raw_returns),
+                "html_sink_lines": list(item.sink_lines)[:20],
+                "html_sinks": len(item.sink_lines),
             },
-            "formatDate fallback escaped (safe(String(value)))",
+            "every fallback branch escaped before reaching HTML",
             APP,
-            f"line {js.count(chr(10), 0, definition.start()) + 1}",
+            f"line {item.line}",
             ("F7",),
             "unparseable date values are interpolated into HTML unescaped",
         )
 
 
-def _inside_conditional_interpolation(js: str, offset: int) -> bool:
-    """True when ``offset`` sits inside an open ``${ ... ? ... }`` on its line.
-
-    A heuristic for single-line template literals (how the panel renders): walk the
-    line up to the offset, keep the ``${`` / ``{`` openings that are still open, and
-    call the text conditional when an open interpolation contains ``?`` or ``&&``.
-    """
-
-    line_start = js.rfind("\n", 0, offset) + 1
-    segment = js[line_start:offset]
-    opens: list[int] = []
-    position = 0
-    while position < len(segment):
-        if segment.startswith("${", position):
-            opens.append(position)
-            position += 2
-            continue
-        character = segment[position]
-        if character == "{":
-            opens.append(-1)
-        elif character == "}" and opens:
-            opens.pop()
-        position += 1
-    return any(
-        start >= 0 and ("?" in segment[start:] or "&&" in segment[start:])
-        for start in opens
-    )
-
-
 def check_stress_callout(ctx: Context) -> Iterator[Finding]:
-    """F1: the stress callout must be conditional on the governed threshold."""
+    """F1: a stress callout must render only when the payload says it applies.
+
+    Callouts are tied to the advisory stress payload by data flow (markup on a line
+    that uses ``advisory.*stress*`` or a value derived from it), whatever the wording;
+    the render condition and any literal percentage are compared to the payload.
+    """
 
     js = ctx.gen.app_js
     if not js:
         return
-    literal = re.search(r"Stress exceeds the (\d+(?:\.\d+)?)% HWM", js)
-    if literal is None:
-        return
-    unconditional = not _inside_conditional_interpolation(js, literal.start())
-    threshold = Decimal(literal.group(1)) / Decimal(100)
     limit = to_decimal(node(ctx.panel, "advisory", "hwm_limit"))
     stress = to_decimal(node(ctx.panel, "advisory", "correlation_one_stress"))
-    observed = {
-        "unconditional": unconditional,
-        "hardcoded_threshold": threshold,
-        "payload_hwm_limit": limit,
-        "payload_stress": stress,
-    }
-    line = f"line {js.count(chr(10), 0, literal.start()) + 1}"
-    if unconditional and stress is not None and limit is not None and stress <= limit:
-        klass, message = (
-            BLOCKER_INVARIANT,
-            "callout claims a breach the data does not show",
+    for callout in shell.stress_callouts(js):
+        thresholds = [
+            Decimal(value) / Decimal(100) for value in callout.literal_thresholds
+        ]
+        observed = {
+            "unconditional": callout.unconditional,
+            "literal_thresholds": thresholds,
+            "payload_hwm_limit": limit,
+            "payload_stress": stress,
+        }
+        mismatch = limit is not None and any(value != limit for value in thresholds)
+        if (
+            callout.unconditional
+            and stress is not None
+            and limit is not None
+            and stress <= limit
+        ):
+            klass, message = (
+                BLOCKER_INVARIANT,
+                "callout claims a breach the data does not show",
+            )
+        elif mismatch:
+            klass, message = (
+                BLOCKER_INVARIANT,
+                "hard-coded callout threshold differs from the payload",
+            )
+        elif callout.unconditional:
+            klass, message = (
+                WARNING,
+                "callout is unconditional (currently true); render it from the payload",
+            )
+        else:
+            continue
+        yield _finding(
+            "code.stress_callout",
+            klass,
+            f"{APP}:line {callout.line}",
+            observed,
+            "callout rendered only when stress > payload hwm_limit; no literal threshold",
+            APP,
+            f"line {callout.line}",
+            ("F1",),
+            message,
         )
-    elif limit is not None and threshold != limit:
-        klass, message = (
-            BLOCKER_INVARIANT,
-            "hard-coded callout threshold differs from the payload",
-        )
-    elif unconditional:
-        klass, message = (
-            WARNING,
-            "callout is unconditional and hard-codes its threshold",
-        )
-    else:
-        return
-    yield _finding(
-        "code.stress_callout",
-        klass,
-        APP,
-        observed,
-        "callout rendered only when stress > payload hwm_limit",
-        APP,
-        line,
-        ("F1",),
-        message,
-    )
 
 
 def check_hardcoded_status(ctx: Context) -> Iterator[Finding]:
-    """D8: the shell may not hard-code PUBLISHED while the data says NOT_READY."""
+    """D8: the shell may not render a literal positive status against the payload.
 
-    js = ctx.gen.app_js
-    if not js:
-        return
+    Any positive readiness word (PUBLISHED, VERIFIED, READY, ...) rendered from a
+    literal — text node, attribute, DOM text sink or a literal argument inside a
+    template interpolation — contradicts a payload that says NOT_READY/NOT_PERFORMED.
+    """
+
     readiness = _readiness(ctx)
     not_ready = {
-        k: v for k, v in readiness.items() if v in ("NOT_READY", "NOT_PERFORMED")
+        k: v
+        for k, v in readiness.items()
+        if v in ("NOT_READY", "NOT_PERFORMED", "REQUIRED_NOT_READY", "STAGED")
     }
-    match = re.search(r">\s*PUBLISHED\s*<", js)
-    if match is not None and not_ready:
+    if not not_ready:
+        return
+    literals = []
+    if ctx.gen.app_js:
+        literals += shell.hard_coded_statuses(APP, ctx.gen.app_js)
+    if ctx.gen.index_shell:
+        literals += shell.hard_coded_statuses(INDEX, ctx.gen.index_shell)
+    for item in literals:
         yield _finding(
             "code.hardcoded_status_literal",
             BLOCKER_AUTHORITY,
-            APP,
-            {"literal": "PUBLISHED", "payload": not_ready},
-            "status rendered from the payload",
-            APP,
-            f"line {js.count(chr(10), 0, match.start()) + 1}",
+            f"{item.file}:line {item.line}",
+            {"literal": item.literal, "context": item.context, "payload": not_ready},
+            "status rendered from the readiness payload",
+            item.file,
+            f"line {item.line}",
             ("D8",),
-            "panel shell hard-codes PUBLISHED while the payload says not ready",
+            "shell renders a literal positive status while the payload says not ready",
         )
 
 
@@ -3703,22 +3918,18 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 "$.strategy_summary",
             )
         )
-        for hit in ctx.gen.scan.count_text_hits:
-            match = _COUNT_TEXT.search(hit.snippet)
-            if match:
-                word = match.group(1).lower()
-                number = _NUMBER_WORDS.get(word, int(word) if word.isdigit() else None)
-                out.append(
-                    Observed(
-                        f"text:{hit.file}@{hit.offset}",
-                        number,
-                        None,
-                        None,
-                        None,
-                        hit.file,
-                        f"(byte offset {hit.offset})",
-                    )
+        for count in rendered_strategy_counts(ctx):
+            out.append(
+                Observed(
+                    f"text:{count.file}@{count.offset}",
+                    count.number,
+                    None,
+                    None,
+                    None,
+                    count.file,
+                    f"(byte offset {count.offset})",
                 )
+            )
     elif metric_id in (
         "twr.account",
         "mwr.account",
@@ -4147,6 +4358,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.as_of_cutoff", check_capital_as_of),
     ("capital.strategy_vs_cutoff_accounts", check_strategy_vs_cutoff_accounts),
     ("capital.account_identity", check_account_identity),
+    ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),
     ("universe.retired_strategies_in_current", check_retired_strategies),

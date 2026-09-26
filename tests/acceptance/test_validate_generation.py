@@ -247,6 +247,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "latest_value_usd": "400",
                 "status": "AVAILABLE_MANDATE_CLASSIFICATION",
+                "role": "RESERVE",
             }
         ],
         "allocation_history": [
@@ -532,16 +533,17 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
 GOOD_APP_JS = """(() => {
   "use strict";
   const data = window.PORTFOLIO_DATA;
-  const safe = (value) => String(value ?? "");
+  const safe = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
   const formatDate = (value) => {
     if (!value) return "-";
-    return safe(String(value));
+    const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+    return Number.isNaN(parsed.getTime()) ? safe(String(value)) : parsed.toLocaleDateString("en-US");
   };
   function init() {
     if (!data || data.panel_schema_version !== 21) throw new Error("missing");
     const stress = Number(data.advisory.correlation_one_stress);
     const passes = stress <= Number(data.advisory.hwm_limit);
-    document.body.innerHTML = `<p>${formatDate(data.meta.portfolio_as_of)}</p>${passes ? "" : `<div>Stress exceeds the 15% HWM boundary.</div>`}`;
+    document.body.innerHTML = `<p>${formatDate(data.meta.portfolio_as_of)}</p>${passes ? "" : `<div class="callout callout-danger">Stress exceeds the 15% HWM boundary.</div>`}`;
   }
   document.addEventListener("DOMContentLoaded", init);
 })();
@@ -844,6 +846,32 @@ def _delete(key: str) -> Mutator:
     return mutate
 
 
+def _pop(path: tuple[Any, ...], key: str) -> Mutator:
+    def mutate(document: dict[str, Any]) -> None:
+        target: Any = document
+        for part in path:
+            target = target[part]
+        del target[key]
+
+    return mutate
+
+
+def _duplicate(path: tuple[Any, ...], index: int) -> Mutator:
+    def mutate(document: dict[str, Any]) -> None:
+        target: Any = document
+        for part in path:
+            target = target[part]
+        target.append(copy.deepcopy(target[index]))
+
+    return mutate
+
+
+def _remove_crosswalk(gen_dir: Path) -> None:
+    root = gen_dir.parents[2]
+    path = root / "reporting" / "generations" / REPORT_GEN / "input"
+    (path / "account-strategy-current-epoch-crosswalk.json").unlink()
+
+
 def _rewrite(rel: str, data: bytes) -> Callable[[Path], None]:
     def hook(gen_dir: Path) -> None:
         (gen_dir / rel).write_bytes(data)
@@ -895,12 +923,51 @@ def _manifest_with_coverage(gen_dir: Path) -> None:
 BAD_APP_DEREF = GOOD_APP_JS.replace(
     "const safe =", "const early = data.meta;\n  const safe ="
 )
-BAD_APP_DATES = GOOD_APP_JS.replace(
-    "return safe(String(value));", "return String(value);"
-)
+BAD_APP_DATES = GOOD_APP_JS.replace("? safe(String(value)) :", "? String(value) :")
 BAD_APP_CALLOUT = GOOD_APP_JS.replace(
-    '${passes ? "" : `<div>Stress exceeds the 15% HWM boundary.</div>`}',
-    "<div>Stress exceeds the 15% HWM boundary.</div>",
+    '${passes ? "" : `<div class="callout callout-danger">Stress exceeds the 15% HWM boundary.</div>`}',
+    '<div class="callout callout-danger">Stress exceeds the 15% HWM boundary.</div>',
+)
+# Alternate spellings of the same defect classes (review round 1): renamed payload
+# binding with an equivalent (late) guard; a date formatter written as a function
+# declaration with a different name and fallback; a reworded stress callout; status
+# literals in an attribute and in a DOM text sink.
+BAD_APP_DEREF_RENAMED = (
+    GOOD_APP_JS.replace("data", "payload")
+    .replace("if (!payload ||", "if (payload == null ||")
+    .replace(
+        "const payload = window.PORTFOLIO_DATA;",
+        "const payload = window.PORTFOLIO_DATA;\n  const lineage = payload.meta.as_of;",
+    )
+)
+GOOD_APP_EAGER_GUARD = GOOD_APP_JS.replace(
+    "const data = window.PORTFOLIO_DATA;",
+    "const data = window.PORTFOLIO_DATA;\n"
+    '  if (typeof data === "undefined") throw new Error("no payload");\n'
+    "  const lineage = data.meta;",
+)
+BAD_APP_DATES_DECLARATION = GOOD_APP_JS.replace(
+    """  const formatDate = (value) => {
+    if (!value) return "-";
+    const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+    return Number.isNaN(parsed.getTime()) ? safe(String(value)) : parsed.toLocaleDateString("en-US");
+  };""",
+    """  function fmtDay(input) {
+    const parsed = new Date(input);
+    if (Number.isNaN(parsed.getTime())) return input;
+    return parsed.toISOString().slice(0, 10);
+  }""",
+).replace("${formatDate(", "${fmtDay(")
+BAD_APP_CALLOUT_REWORDED = BAD_APP_CALLOUT.replace(
+    "Stress exceeds the 15% HWM boundary.",
+    "Risk budget breached: portfolio loss above the 12% ceiling (${stress}).",
+)
+BAD_APP_STATUS_ATTRIBUTE = GOOD_APP_JS.replace(
+    "<p>${formatDate", '<span data-release-state="VERIFIED"></span><p>${formatDate'
+)
+BAD_APP_STATUS_DOM = GOOD_APP_JS.replace(
+    "  function init() {",
+    '  function init() {\n    document.title = "x";\n    badge.textContent = "Published";',
 )
 BAD_APP_STATUS = GOOD_APP_JS.replace("<p>", '<p class="score">PUBLISHED</p><p>')
 ABSOLUTE = ("C:" + "\\\\" + "Dev" + "\\\\" + "scratch" + "\\\\" + "qa.png").encode()
@@ -1565,6 +1632,105 @@ CASES: dict[str, tuple[str, str, Spec]] = {
             ]
         ),
     ),
+    # Round 1: the same defect classes in other spellings / on renamed inputs.
+    "app_guard_renamed_binding": (
+        "code.data_deref_before_guard",
+        checks.BLOCKER_INVARIANT,
+        Spec(app_js=BAD_APP_DEREF_RENAMED),
+    ),
+    "app_dates_function_declaration": (
+        "code.unescaped_date_fallback",
+        checks.BLOCKER_INVARIANT,
+        Spec(app_js=BAD_APP_DATES_DECLARATION),
+    ),
+    "app_callout_reworded": (
+        "code.stress_callout",
+        checks.BLOCKER_INVARIANT,
+        Spec(app_js=BAD_APP_CALLOUT_REWORDED),
+    ),
+    "app_status_attribute": (
+        "code.hardcoded_status_literal",
+        checks.BLOCKER_AUTHORITY,
+        Spec(
+            app_js=BAD_APP_STATUS_ATTRIBUTE,
+            panel=[
+                _set(
+                    (
+                        "account_manifest",
+                        "authority_readiness",
+                        "publication_readiness",
+                    ),
+                    "NOT_READY",
+                )
+            ],
+        ),
+    ),
+    "app_status_dom_text": (
+        "code.hardcoded_status_literal",
+        checks.BLOCKER_AUTHORITY,
+        Spec(
+            app_js=BAD_APP_STATUS_DOM,
+            candidate=[_set(("state",), "STAGED")],
+        ),
+    ),
+    "count_active_wording": (
+        "universe.hardcoded_count_text",
+        checks.BLOCKER_INVARIANT,
+        Spec(shell_text="9 active strategies"),
+    ),
+    "count_label_form": (
+        "universe.hardcoded_count_text",
+        checks.BLOCKER_INVARIANT,
+        Spec(shell_text='<span aria-label="Strategies: 9"></span>'),
+    ),
+    "count_payload_prose": (
+        "universe.hardcoded_count_text",
+        checks.BLOCKER_INVARIANT,
+        Spec(panel=[_set(("limitations",), ["Seven live strategies are monitored."])]),
+    ),
+    "preservation_dropped_field": (
+        "preservation.report_to_panel",
+        checks.BLOCKER_INVARIANT,
+        Spec(panel=[_pop(("strategies", 0), "current_value_usd")]),
+    ),
+    "preservation_duplicated_row": (
+        "preservation.report_to_panel",
+        checks.BLOCKER_INVARIANT,
+        Spec(panel=[_duplicate(("positions",), 0)]),
+    ),
+    "reconciliation_renamed": (
+        "capital.reconciliation_recompute",
+        checks.BLOCKER_INVARIANT,
+        Spec(
+            report=[
+                _set(("reconciliation_checks", 0, "check_id"), "capital-tie-out-v2"),
+                _set(
+                    ("reconciliation_checks", 0, "details_json"),
+                    json.dumps({"total_usd": "6601.5"}),
+                ),
+            ]
+        ),
+    ),
+    "reconciliation_stale_circular": (
+        "capital.as_of_cutoff",
+        checks.BLOCKER_AUTHORITY,
+        Spec(
+            report=[
+                _set(("allocation_history", 1, "as_of_date"), "2026-08-16"),
+                _set(("allocation_history", 1, "current_value_usd"), "1200"),
+                _set(("reconciliation_checks", 0, "check_id"), "systematic-tie-out"),
+                _set(
+                    ("reconciliation_checks", 0, "details_json"),
+                    json.dumps({"value_usd": "6700"}),
+                ),
+            ]
+        ),
+    ),
+    "universe_authority_missing": (
+        "universe.authority_missing",
+        checks.BLOCKER_AUTHORITY,
+        Spec(post_write=[_remove_crosswalk]),
+    ),
 }
 
 
@@ -1615,18 +1781,25 @@ def test_check_error_fails_closed(tmp_path: Path) -> None:
     ]
 
 
-def test_without_crosswalk_uses_in_generation_universe(tmp_path: Path) -> None:
+def test_without_crosswalk_fails_closed_instead_of_self_reference(
+    tmp_path: Path,
+) -> None:
     gen_dir = build(tmp_path)
     generation = load_generation(gen_dir, discover=False)
     context = checks.Context(
         gen=generation, cutoff=checks.date(2026, 9, 17), cutoff_source="test"
     )
     findings = checks.run_checks(context)
-    assert {f.check_id for f in findings} == {
-        "expected.not_supplied",
-        "identity.release_pinned",
+    assert {(f.check_id, f.klass) for f in findings} == {
+        ("expected.not_supplied", checks.NOT_READY),
+        ("identity.release_pinned", checks.NOT_READY),
+        ("universe.authority_missing", checks.BLOCKER_AUTHORITY),
     }
-    assert all(f.klass == checks.NOT_READY for f in findings)
+
+
+def test_eager_guard_before_dereference_is_not_flagged(tmp_path: Path) -> None:
+    findings = run(build(tmp_path, Spec(app_js=GOOD_APP_EAGER_GUARD)))
+    assert not [f for f in findings if f.check_id == "code.data_deref_before_guard"]
 
 
 # ----------------------------------------------------------------------- CLI
