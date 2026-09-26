@@ -9,9 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 
-MODULE_PATH = (
-    Path(__file__).parents[2] / "tools" / "acceptance" / "derive_b" / "derive.py"
-)
+MODULE_PATH = Path(__file__).parents[2] / "acceptance" / "derive_b" / "derive.py"
 
 
 def load_derivation_module():

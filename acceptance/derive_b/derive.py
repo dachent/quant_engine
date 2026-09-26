@@ -60,7 +60,7 @@ def file_sha256(path: Path) -> str:
 
 def code_commit() -> str:
     """Read this checkout's commit without invoking repository tooling."""
-    dot_git = Path(__file__).resolve().parents[3] / ".git"
+    dot_git = Path(__file__).resolve().parents[2] / ".git"
     git_dir = dot_git
     if dot_git.is_file():
         pointer = dot_git.read_text(encoding="utf-8").strip()
