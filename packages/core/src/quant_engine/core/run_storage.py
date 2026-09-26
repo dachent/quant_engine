@@ -749,6 +749,20 @@ class AttendedStorage:
     def admit(self, *, resume: bool) -> dict[str, Any]:
         """Refuse an over-budget scratch root before this process writes anything."""
 
+        if self.output_root.is_dir():
+            # One writer per run root: a resume may not claim a root whose recorded
+            # runner is still working in it.
+            state = read_run_state(self.output_root)
+            if (
+                state is not None
+                and state["pid"] != os.getpid()
+                and state["state"] not in TERMINAL_STATES
+                and process_alive(int(state["pid"]), state.get("process_started"))
+            ):
+                raise RunStorageError(
+                    f"attended run root {self.output_root} is in use by live runner "
+                    f"process {state['pid']} ({state['state']}); wait for it to exit"
+                )
         usage = check_scratch_budget(self.scratch_root, self.budget)
         if resume and self.output_root.is_dir():
             write_run_state(self.output_root, "QUEUED")

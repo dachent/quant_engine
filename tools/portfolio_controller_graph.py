@@ -92,6 +92,10 @@ _PATH_STAGES = {
     "tools/portfolio_controller_graph.py": list(_STAGE_ORDER),
     _CORE: list(_STAGE_ORDER),
     _MATERIALIZER: list(_STAGE_ORDER),
+    # The attended runner's storage, retained-cache overlay and run-state gates. The
+    # materializer imports it and it can refuse or fail any stage, so it carries the
+    # controller's impact; it writes no delivery artifact itself.
+    "packages/core/src/quant_engine/core/run_storage.py": list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
