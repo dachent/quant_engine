@@ -4187,6 +4187,242 @@ def _row_window(
     return start, end
 
 
+# -------------------------------------------- recomputation over an expected window
+#
+# A critical expected value must never be undecidable. When the generation shows the
+# metric only over a different window, its own series are recomputed over the expected
+# window (daily strategy returns, per-epoch TWRs, capital-flow traces, MWR cash flows)
+# and compared; a view that runs past the expected row's authoritative as_of is itself
+# a finding (expected.as_of_beyond_authority).
+
+
+def _xirr(flows: Sequence[tuple[date, Decimal]]) -> Decimal | None:
+    """Annual IRR (ACTUAL_365) by bisection; ``None`` when no root is bracketed."""
+
+    if not any(a < 0 for _, a in flows) or not any(a > 0 for _, a in flows):
+        return None
+    origin = min(day for day, _ in flows)
+    points = [((day - origin).days / 365.0, float(amount)) for day, amount in flows]
+
+    def npv(rate: float) -> float:
+        return float(sum(amount / (1.0 + rate) ** years for years, amount in points))
+
+    low, high = -0.9999, 1.0
+    f_low, f_high = npv(low), npv(high)
+    while f_low * f_high > 0 and high < 1e6:
+        high *= 4
+        f_high = npv(high)
+    if f_low * f_high > 0:
+        return None
+    for _ in range(400):
+        middle = (low + high) / 2
+        f_middle = npv(middle)
+        if f_low * f_middle <= 0:
+            high, f_high = middle, f_middle
+        else:
+            low, f_low = middle, f_middle
+    return Decimal(repr((low + high) / 2)).quantize(Decimal("1e-12"))
+
+
+def _nav_at(ctx: Context, strategy: str, day: date) -> Decimal | None:
+    """Close-of-day capital from the next strategy-return row's beginning capital."""
+
+    later = sorted(
+        (
+            (to_date(row.get("date")), row)
+            for row in rows(ctx.report, "strategy_returns")
+            if row.get("strategy_id") == strategy
+        ),
+        key=lambda item: item[0] or date.min,
+    )
+    for row_day, row in later:
+        if row_day is not None and row_day > day:
+            return to_decimal(row.get("beginning_capital"))
+    return None
+
+
+def _cash_flows(row: Mapping[str, Any]) -> list[tuple[date, Decimal]]:
+    flows = []
+    for item in row.get("mwr_cashflows") or []:
+        if isinstance(item, dict):
+            day, amount = to_date(item.get("date")), to_decimal(item.get("amount"))
+            if day is not None and amount is not None:
+                flows.append((day, amount))
+    return flows
+
+
+def _single_account(ctx: Context, row: Mapping[str, Any]) -> bool:
+    accounts = current_accounts_by_strategy(ctx).get(str(row.get("strategy_id")), [])
+    return row.get("effective_end") is None and len(accounts) == 1
+
+
+def _terminal(
+    ctx: Context, row: Mapping[str, Any], end: date
+) -> tuple[date, Decimal] | None:
+    """The epoch's value at ``min(end, its terminal date)``."""
+
+    flows = _cash_flows(row)
+    terminal_day = to_date(row.get("mwr_terminal_date"))
+    if flows and terminal_day is not None and terminal_day <= end:
+        return flows[-1]
+    if _single_account(ctx, row):
+        nav = _nav_at(ctx, str(row.get("strategy_id")), end)
+        if nav is not None:
+            return end, nav
+    return None
+
+
+def recompute_metric(
+    ctx: Context, metric_id: str, entity: str, window: tuple[date | None, date | None]
+) -> list[Observed]:
+    """The generation's own value for ``metric_id`` over the expected window."""
+
+    start, end = window
+    if end is None:
+        return []
+    if metric_id == "twr.strategy":
+        value, count = compound_window(ctx, entity, start, end)
+        if not count:
+            return []
+        return [
+            Observed(
+                f"recomputed:compound(report.strategy_returns[{entity}]) to {end}",
+                value,
+                start,
+                end,
+                None,
+                REPORT,
+                "$.strategy_returns",
+            )
+        ]
+    epochs = sorted(
+        (
+            (position, row)
+            for position, row in twr_rows(ctx)
+            if (
+                str(row.get("strategy_id")) == entity
+                if metric_id == "mwr.strategy"
+                else str(row.get("account_id")) == entity
+            )
+        ),
+        key=lambda item: str(item[1].get("effective_start")),
+    )
+    if not epochs:
+        return []
+    first_start = to_date(epochs[0][1].get("observed_start"))
+    if start is None:
+        start = first_start
+    if start is None or first_start is None:
+        return []
+    if metric_id == "twr.account":
+        chain = Decimal(1)
+        parts = []
+        for position, row in epochs:
+            epoch_start = to_date(row.get("observed_start"))
+            epoch_end = to_date(row.get("observed_end"))
+            if epoch_start is None or epoch_end is None or epoch_start > end:
+                continue
+            if epoch_end <= end:
+                value = to_decimal(row.get("twr"))
+                if value is None:
+                    return []
+                parts.append(f"twr_mwr[{position}].twr")
+            elif _single_account(ctx, row):
+                compounded, count = compound_window(
+                    ctx,
+                    str(row.get("strategy_id")),
+                    epoch_start + timedelta(days=1),
+                    end,
+                )
+                if not count or compounded is None:
+                    return []
+                value = compounded
+                parts.append(f"compound(strategy_returns[{row.get('strategy_id')}])")
+            else:
+                return []
+            chain *= Decimal(1) + value
+        if not parts:
+            return []
+        return [
+            Observed(
+                "recomputed:" + " x ".join(parts),
+                chain - Decimal(1),
+                start,
+                end,
+                None,
+                REPORT,
+                "$.twr_mwr",
+            )
+        ]
+    if metric_id in ("flows.account.net", "flows.account.count"):
+        events = []
+        for key, (_, row) in manifest_rows(ctx).items():
+            if key[0] != entity:
+                continue
+            for item in row.get("capital_flow_trace") or []:
+                day = (
+                    to_date(item.get("event_date")) if isinstance(item, dict) else None
+                )
+                if day is not None and start <= day <= end:
+                    events.append(item)
+        if metric_id == "flows.account.count":
+            value_out: Any = len(events)
+        else:
+            total = Decimal(0)
+            for item in events:
+                amount = to_decimal(item.get("amount")) or Decimal(0)
+                kind = str(item.get("class", "")).upper()
+                total += -amount if kind.endswith("_OUT") else amount
+            value_out = total
+        return [
+            Observed(
+                f"recomputed:account_manifest.capital_flow_trace[{entity}] in window",
+                value_out,
+                start,
+                end,
+                None,
+                PANEL,
+                "$.account_manifest.rows[*].capital_flow_trace",
+            )
+        ]
+    if metric_id == "mwr.account":
+        flows = _cash_flows(epochs[0][1])[:1]
+        for _, row in epochs:
+            flows += [f for f in _cash_flows(row)[1:-1] if start <= f[0] <= end]
+        terminal = _terminal(ctx, epochs[-1][1], end)
+        if not flows or terminal is None:
+            return []
+        rate = _xirr(flows + [terminal])
+    elif metric_id == "mwr.strategy":
+        flows = []
+        for _, row in epochs:
+            epoch_flows = _cash_flows(row)
+            if not epoch_flows or epoch_flows[0][0] > end:
+                continue
+            flows.append(epoch_flows[0])
+            flows += [f for f in epoch_flows[1:-1] if f[0] <= end]
+            terminal = _terminal(ctx, row, end)
+            if terminal is None:
+                return []
+            flows.append(terminal)
+        rate = _xirr(flows) if flows else None
+    else:
+        return []
+    if rate is None:
+        return []
+    return [
+        Observed(
+            f"recomputed:xirr(twr_mwr.mwr_cashflows[{entity}]) to {end}",
+            rate,
+            start,
+            end,
+            None,
+            REPORT,
+            "$.twr_mwr[*].mwr_cashflows",
+        )
+    ]
+
+
 def check_expected(ctx: Context) -> Iterator[Finding]:
     if ctx.expected is None:
         yield _finding(
@@ -4222,20 +4458,25 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         defects = _METRIC_DEFECTS.get(metric_id, ())
         label = f"{entity}|{row.get('window') or row.get('as_of') or ''}"
         observed = resolve_metric(ctx, metric_id, entity)
+        wanted = _row_window(row, ctx.cutoff)
         if not observed:
-            yield _finding(
-                f"expected.{metric_id}",
-                NOT_READY,
-                label,
-                None,
-                expected,
-                "(expected baseline)",
-                f"$[{position}]",
-                defects,
-                "metric has no production view in this generation",
+            recomputed = recompute_metric(ctx, metric_id, entity, wanted)
+            if not recomputed:
+                yield _finding(
+                    f"expected.{metric_id}",
+                    NOT_READY,
+                    label,
+                    None,
+                    expected,
+                    "(expected baseline)",
+                    f"$[{position}]",
+                    defects,
+                    "metric has no production view and no series to recompute it from",
+                )
+            yield from _compare_views(
+                metric_id, label, row, recomputed, expected, unit, tolerance, defects
             )
             continue
-        wanted = _row_window(row, ctx.cutoff)
         has_window = any(view.end is not None for view in observed)
         if has_window:
             if wanted[0] is None:
@@ -4250,54 +4491,102 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         else:
             comparable = observed
         if not comparable:
-            yield _finding(
-                f"expected.{metric_id}",
-                NOT_READY,
-                label,
-                [
-                    {"view": view.view, "window": [view.start, view.end]}
-                    for view in observed
-                ],
-                {"expected": expected, "window": list(wanted)},
-                "(expected baseline)",
-                f"$[{position}]",
-                defects,
-                "no production view covers the expected window",
+            beyond = [
+                view
+                for view in observed
+                if view.end is not None
+                and wanted[1] is not None
+                and view.end > wanted[1]
+                and (
+                    view.start is None
+                    or wanted[0] is None
+                    or abs((view.start - wanted[0]).days) <= WINDOW_START_SLACK_DAYS
+                )
+            ]
+            if beyond:
+                yield _finding(
+                    "expected.as_of_beyond_authority",
+                    BLOCKER_AUTHORITY,
+                    f"{metric_id}:{label}",
+                    [
+                        {"view": view.view, "window": [view.start, view.end]}
+                        for view in beyond
+                    ],
+                    {"authoritative_as_of": wanted[1], "window": list(wanted)},
+                    beyond[0].file,
+                    beyond[0].json_path,
+                    tuple(defects) + ("C5",),
+                    "the output claims currency past its last authoritative observation",
+                )
+            recomputed = recompute_metric(ctx, metric_id, entity, wanted)
+            if not beyond and not recomputed:
+                yield _finding(
+                    f"expected.{metric_id}",
+                    NOT_READY,
+                    label,
+                    [
+                        {"view": view.view, "window": [view.start, view.end]}
+                        for view in observed
+                    ],
+                    {"expected": expected, "window": list(wanted)},
+                    "(expected baseline)",
+                    f"$[{position}]",
+                    defects,
+                    "no production view covers the expected window and its own "
+                    "series cannot be recomputed over it",
+                )
+            yield from _compare_views(
+                metric_id, label, row, recomputed, expected, unit, tolerance, defects
             )
             continue
-        for view in comparable:
-            if not _equal(unit, view.value, expected, tolerance):
-                yield _finding(
-                    f"expected.{metric_id}",
-                    BLOCKER_REGRESSION,
-                    label,
-                    {"view": view.view, "value": view.value, "as_of": view.as_of},
-                    {
-                        "value": expected,
-                        "authority_pointer": row.get("authority_pointer"),
-                    },
-                    view.file,
-                    view.json_path,
-                    defects,
-                    "fixed-baseline expected value differs",
-                )
-            elif (
-                view.as_of
-                and row.get("as_of")
-                and str(view.as_of)[:10] != str(row.get("as_of"))[:10]
-                and metric_id.startswith("capital.")
-            ):
-                yield _finding(
-                    f"expected.{metric_id}",
-                    BLOCKER_REGRESSION,
-                    label,
-                    {"view": view.view, "as_of": view.as_of},
-                    {"as_of": row.get("as_of")},
-                    view.file,
-                    view.json_path,
-                    defects,
-                    "value matches but is dated differently",
-                )
+        yield from _compare_views(
+            metric_id, label, row, comparable, expected, unit, tolerance, defects
+        )
+
+
+def _compare_views(
+    metric_id: str,
+    label: str,
+    row: Mapping[str, Any],
+    views: Sequence[Observed],
+    expected: Any,
+    unit: str,
+    tolerance: Decimal | None,
+    defects: Sequence[str],
+) -> Iterator[Finding]:
+    for view in views:
+        if not _equal(unit, view.value, expected, tolerance):
+            yield _finding(
+                f"expected.{metric_id}",
+                BLOCKER_REGRESSION,
+                label,
+                {"view": view.view, "value": view.value, "as_of": view.as_of},
+                {
+                    "value": expected,
+                    "authority_pointer": row.get("authority_pointer"),
+                },
+                view.file,
+                view.json_path,
+                defects,
+                "fixed-baseline expected value differs",
+            )
+        elif (
+            view.as_of
+            and row.get("as_of")
+            and str(view.as_of)[:10] != str(row.get("as_of"))[:10]
+            and metric_id.startswith("capital.")
+        ):
+            yield _finding(
+                f"expected.{metric_id}",
+                BLOCKER_REGRESSION,
+                label,
+                {"view": view.view, "as_of": view.as_of},
+                {"as_of": row.get("as_of")},
+                view.file,
+                view.json_path,
+                defects,
+                "value matches but is dated differently",
+            )
 
 
 # ------------------------------------------------------- corrections (#326 mapping)

@@ -1792,10 +1792,118 @@ def test_expected_regression_fires_on_mismatch(tmp_path: Path) -> None:
 def test_expected_unresolvable_metric_is_not_ready(tmp_path: Path) -> None:
     findings = run(
         build(tmp_path),
-        [{"metric_id": "mwr.strategy", "entity": "alpha", "expected": "0.1"}],
+        [{"metric_id": "capital.account.cutoff", "entity": "Z9", "expected": "1"}],
     )
     assert [(f.check_id, f.klass) for f in findings] == [
-        ("expected.mwr.strategy", checks.NOT_READY)
+        ("expected.capital.account.cutoff", checks.NOT_READY)
+    ]
+
+
+# A critical expected value must never be undecidable (orchestrator ruling, round 3):
+# views past the authoritative as_of are a blocker, and the generation's own series
+# are recomputed over the expected window where it carries them.
+ALPHA_XIRR = f"{1.1 ** (365 / 372) - 1:.12f}"
+EARLY = "2026-06-30"
+
+
+def _expected_findings(
+    tmp_path: Path, rows: list[dict[str, Any]]
+) -> list[tuple[str, str]]:
+    return [(f.check_id, f.klass) for f in run(build(tmp_path), rows)]
+
+
+def test_strategy_mwr_without_a_view_is_recomputed_and_matches(tmp_path: Path) -> None:
+    row = {"metric_id": "mwr.strategy", "entity": "alpha", "expected": ALPHA_XIRR}
+    assert _expected_findings(tmp_path, [row]) == []
+
+
+def test_strategy_mwr_without_a_view_is_recomputed_and_regresses(
+    tmp_path: Path,
+) -> None:
+    row = {"metric_id": "mwr.strategy", "entity": "alpha", "expected": "0.5"}
+    assert _expected_findings(tmp_path, [row]) == [
+        ("expected.mwr.strategy", checks.BLOCKER_REGRESSION)
+    ]
+
+
+def test_view_past_authoritative_as_of_blocks_and_recompute_agrees(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "metric_id": "twr.strategy",
+            "entity": "alpha",
+            "window": "ITD",
+            "window_start": PATH_START,
+            "as_of": EARLY,
+            "expected": "0.1",
+        },
+        {
+            "metric_id": "twr.account",
+            "entity": "A1",
+            "window": "ITD",
+            "as_of": EARLY,
+            "expected": "0.1",
+        },
+        {
+            "metric_id": "flows.account.count",
+            "entity": "B2",
+            "window": "ITD",
+            "as_of": "2025-11-30",
+            "expected": "0",
+        },
+        {
+            "metric_id": "flows.account.net",
+            "entity": "B2",
+            "window": "ITD",
+            "as_of": "2025-11-30",
+            "expected": "0",
+        },
+    ]
+    assert (
+        _expected_findings(tmp_path, rows)
+        == [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)] * 4
+    )
+
+
+def test_view_past_authoritative_as_of_and_recompute_regresses(tmp_path: Path) -> None:
+    rows = [
+        {
+            "metric_id": "twr.strategy",
+            "entity": "alpha",
+            "window": "ITD",
+            "window_start": PATH_START,
+            "as_of": EARLY,
+            "expected": "0.2",
+        },
+        {
+            "metric_id": "flows.account.count",
+            "entity": "B2",
+            "window": "ITD",
+            "as_of": "2025-11-30",
+            "expected": "1",
+        },
+    ]
+    assert sorted(_expected_findings(tmp_path, rows)) == sorted(
+        [
+            ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY),
+            ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY),
+            ("expected.twr.strategy", checks.BLOCKER_REGRESSION),
+            ("expected.flows.account.count", checks.BLOCKER_REGRESSION),
+        ]
+    )
+
+
+def test_view_past_as_of_without_a_series_is_still_decided(tmp_path: Path) -> None:
+    row = {
+        "metric_id": "mwr.account",
+        "entity": "B2",
+        "window": "ITD",
+        "as_of": EARLY,
+        "expected": "0.05",
+    }
+    assert _expected_findings(tmp_path, [row]) == [
+        ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)
     ]
 
 
