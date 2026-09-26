@@ -1126,9 +1126,10 @@ def check_report_to_panel(ctx: Context) -> Iterator[Finding]:
             continue
         panel_groups = _grouped(rows(ctx.panel, panel_key), key_fields)
         mismatches: list[dict[str, Any]] = []
+        duplicates: list[dict[str, Any]] = []
         for key, report_group in _grouped(report_rows, key_fields).items():
             panel_group = panel_groups.get(key, [])
-            if len(panel_group) != len(report_group):
+            if len(panel_group) < len(report_group):
                 mismatches.append(
                     {
                         "key": list(key),
@@ -1137,6 +1138,14 @@ def check_report_to_panel(ctx: Context) -> Iterator[Finding]:
                     }
                 )
                 continue
+            if len(panel_group) > len(report_group):
+                duplicates.append(
+                    {
+                        "key": list(key),
+                        "report_rows": [position for position, _ in report_group],
+                        "panel_rows": [position for position, _ in panel_group],
+                    }
+                )
             for (position, row), (panel_position, panel_row) in zip(
                 report_group, panel_group
             ):
@@ -1164,7 +1173,19 @@ def check_report_to_panel(ctx: Context) -> Iterator[Finding]:
                 PANEL,
                 f"$.{panel_key}",
                 (),
-                "a report value was dropped, duplicated or changed in the panel",
+                "a report value was dropped or changed in the panel",
+            )
+        if duplicates:
+            yield _finding(
+                "preservation.report_to_panel",
+                WARNING,
+                f"{report_key}->{panel_key}",
+                {"duplicated_keys": len(duplicates), "first": duplicates[:5]},
+                "each report row rendered once",
+                PANEL,
+                f"$.{panel_key}",
+                (),
+                "the panel repeats a report row (display duplication; disposition needed)",
             )
     for section in _PRESERVED_OBJECTS:
         if section in ctx.report and ctx.report.get(section) != ctx.panel.get(section):

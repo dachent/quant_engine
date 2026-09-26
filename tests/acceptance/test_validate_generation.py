@@ -1695,8 +1695,16 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     ),
     "preservation_duplicated_row": (
         "preservation.report_to_panel",
-        checks.BLOCKER_INVARIANT,
+        checks.WARNING,
         Spec(panel=[_duplicate(("positions",), 0)]),
+    ),
+    "preservation_dropped_duplicate": (
+        "preservation.report_to_panel",
+        checks.BLOCKER_INVARIANT,
+        Spec(
+            report=[_duplicate(("provenance",), 0)],
+            panel=[lambda panel: panel["provenance"].pop()],
+        ),
     ),
     "reconciliation_renamed": (
         "capital.reconciliation_recompute",
