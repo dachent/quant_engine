@@ -507,6 +507,14 @@ def _quantbase_source(
     )
     source.notes.extend([summary, anchor_check, ledger_check])
     source.flow_notes.extend([summary, anchor_check, ledger_check])
+    if sleeve.dividends:
+        source.flow_notes.append(
+            f"CAVEAT {len(sleeve.dividends)} account dividend row(s) totalling "
+            f"{_money(sum((cash for _, cash in sleeve.dividends), ZERO))} "
+            f"({_day(sleeve.dividends[0][0])}..{_day(sleeve.dividends[-1][0])}) are "
+            "investment results, not flows (DIVIDEND_INTEREST_REINVESTMENT); the listed "
+            "inputs do not show whether they were credited inside the sleeve value"
+        )
     if sleeve.coverage_end is not None and sleeve.snapshot_value is not None:
         around = [sleeve.coverage_end + dt.timedelta(days=offset) for offset in (0, 1)]
         compared = ", ".join(

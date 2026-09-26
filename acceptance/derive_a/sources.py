@@ -269,6 +269,7 @@ class QuantbaseSleeve:
     coverage_end: dt.date | None
     snapshot_value: Decimal | None
     other_types: tuple[str, ...]
+    dividends: tuple[tuple[dt.date, Decimal], ...] = ()
 
 
 def _utc_day(value: str) -> dt.date | None:
@@ -311,11 +312,17 @@ def parse_quantbase_sleeve(
     rebalances = 0
     other: set[str] = set()
     coverage_end: dt.date | None = None
+    dividends: list[tuple[dt.date, Decimal]] = []
     for row in rows:
         for key in ("time", "created_at", "date", "filled_at", "completed_at"):
             day = _utc_day(row.get(key, ""))
             if day is not None and (coverage_end is None or day > coverage_end):
                 coverage_end = day
+        if row.get("activity_type") == "dividend":
+            paid = _utc_day(row.get("date", ""))
+            cash = decimal_or_none(row.get("amount"))
+            if paid is not None and cash is not None:
+                dividends.append((paid, cash))
         if row.get("activity_type") != "filled_txn" or row.get("fund") != fund_id:
             continue
         kind = row.get("type", "")
@@ -360,6 +367,7 @@ def parse_quantbase_sleeve(
         coverage_end=coverage_end,
         snapshot_value=snapshot,
         other_types=tuple(sorted(other)),
+        dividends=tuple(sorted(dividends)),
     )
 
 
