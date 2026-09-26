@@ -1,0 +1,3074 @@
+{
+ "schema": "qe-cp-expected-baseline/1",
+ "cutoff": "2026-09-17",
+ "conventions": "R1-R7 per state/briefs/acceptance-metric-spec.md conventions section (orchestrator ruling 2026-09-26, after T2.3)",
+ "derivations": {
+  "a": {
+   "model": "claude-opus-5-5",
+   "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991",
+   "path": "acceptance/derive_a.json (scratch)"
+  },
+  "b": {
+   "model": "independent-standalone-python",
+   "code_commit": "23811704c9768f71067ed189b2e499bd220a171e",
+   "path": "acceptance/derive_b.json (scratch)"
+  }
+ },
+ "generated_utc": "2026-09-26T23:43:00Z",
+ "metrics": [
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-0acb9e17da731d0e",
+   "window": null,
+   "as_of": "2026-07-17",
+   "expected": "0.19",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.19",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.19",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-1b44c987969b9e47",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "57200.88",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "57200.88",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "57200.88",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-38b653b91ff43a10",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "48309.42",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "48309.42",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "48309.42",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": null,
+   "as_of": "2026-09-02",
+   "expected": "61433.30",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "61433.30",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "61433.30",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-61092059d066f056",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "51233.90",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "51233.90",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "51233.90",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-702c489650e59956",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "3.81",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "3.81",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "3.81",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-98f5986706ed53c5",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "10628.97",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "10628.97",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "10628.97",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-a13937e26b8ae46d",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "14520.86",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "14520.86",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "14520.86",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-c63d2a487e019790",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "74492.29",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "74492.29",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "74492.29",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "12054.51",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "12054.51",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "12054.51",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-d2e5821e608e25f1",
+   "window": null,
+   "as_of": "2026-09-03",
+   "expected": "52055.38",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "52055.38",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "52055.38",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-d69701da9143c430",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "45464.69",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "45464.69",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "45464.69",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.portfolio.systematic.cutoff",
+   "entity": "portfolio",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "427398.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "427398.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "427398.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "grizzlybears-vtma",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "51233.90",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "51233.90",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "51233.90",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "p123-ai-factor",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "57200.88",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "57200.88",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "57200.88",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "p123-eu",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "45464.69",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "45464.69",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "45464.69",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "qsi",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "58938.39",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "58938.39",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "58938.39",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "robuxio-crypto",
+   "window": null,
+   "as_of": "2026-09-03",
+   "expected": "52055.38",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "52055.38",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "52055.38",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "tt-portfolio",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "101071.47",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "101071.47",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "101071.47",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "capital.strategy.cutoff",
+   "entity": "volatis-strategy",
+   "window": null,
+   "as_of": "2026-09-02",
+   "expected": "61433.30",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "61433.30",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "61433.30",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-0acb9e17da731d0e",
+   "window": null,
+   "as_of": "2026-07-17",
+   "expected": "2026-07-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-07-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-07-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-1b44c987969b9e47",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-38b653b91ff43a10",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": null,
+   "as_of": "2026-09-02",
+   "expected": "2026-09-02",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-02",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-02",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-61092059d066f056",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-702c489650e59956",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-98f5986706ed53c5",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-a13937e26b8ae46d",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-c63d2a487e019790",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-d2e5821e608e25f1",
+   "window": null,
+   "as_of": "2026-09-03",
+   "expected": "2026-09-03",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-03",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-03",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-d69701da9143c430",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
+   "tolerance": null,
+   "unit": "date",
+   "authority_pointer": [
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    }
+   ],
+   "derivation_a": {
+    "value": "2026-09-17",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "2026-09-17",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-1b44c987969b9e47",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "5",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "5",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "5",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-38b653b91ff43a10",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "11",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "11",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "11",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-61092059d066f056",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-702c489650e59956",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "4",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "4",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "4",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-98f5986706ed53c5",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-a13937e26b8ae46d",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "1",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "1",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "1",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-c63d2a487e019790",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "4",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "4",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "4",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-d2e5821e608e25f1",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-d69701da9143c430",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "14",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "14",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "14",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-1b44c987969b9e47",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "20748.40",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "20748.40",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "20748.40",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-38b653b91ff43a10",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "47120.06",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "47120.06",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "47120.06",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-61092059d066f056",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-702c489650e59956",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "-72220.15",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "-72220.15",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "-72220.15",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-98f5986706ed53c5",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-a13937e26b8ae46d",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "7500.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "7500.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "7500.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-c63d2a487e019790",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "22050.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "22050.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "22050.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-d2e5821e608e25f1",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0.00",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.00",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.00",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-d69701da9143c430",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "34035.50",
+   "tolerance": "0.01",
+   "unit": "USD",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "34035.50",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "34035.50",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-1b44c987969b9e47",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.043211694123",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.043211694123",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0432116941",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-38b653b91ff43a10",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.206784222500",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.206784222500",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.2067842225",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "0.245729129016",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.245729129016",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.2457291290",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-61092059d066f056",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.035090482505",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.035090482505",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0350904825",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-702c489650e59956",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.050835289126",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.050835289126",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0508352891",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-98f5986706ed53c5",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.206349620449",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.206349620449",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.2063496204",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-a13937e26b8ae46d",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.002020725087",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.002020725087",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0020207251",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-c63d2a487e019790",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.016369796725",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.016369796725",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0163697967",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.037575884790",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.037575884790",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0375758848",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-d2e5821e608e25f1",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0.058366399911",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.058366399911",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0583663999",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-d69701da9143c430",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.405739236967",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.405739236967",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.4057392370",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "grizzlybears-vtma",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.035090482505",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.035090482505",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0350904825",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "p123-ai-factor",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.043211694123",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.043211694123",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0432116941",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "p123-eu",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.405739236967",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.405739236967",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.4057392370",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "qsi",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.206705826527",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.206705826527",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.2067058265",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "robuxio-crypto",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0.058366399911",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.058366399911",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0583663999",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "tt-portfolio",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.022676762040",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.022676762040",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0226767620",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.strategy",
+   "entity": "volatis-strategy",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "0.245729129016",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.245729129016",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.2457291290",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-1b44c987969b9e47",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.024531782896",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.024531782896",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0245317829",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-38b653b91ff43a10",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.140913076778",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.140913076778",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.1409130768",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-58e75e8d952fa1b8",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "0.742925737437",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.742925737437",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.7429257374",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-61092059d066f056",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.024678000000",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.024678000000",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0246780000",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-98f5986706ed53c5",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.140624882627",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.140624882627",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.1406248826",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-a13937e26b8ae46d",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.008541704507",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.008541704507",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0085417045",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-c63d2a487e019790",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.025740189555",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.025740189555",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0257401896",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-cff10c44aedcf5e8",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.030469983510",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.030469983510",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0304699835",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-d2e5821e608e25f1",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0.043017076433",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.043017076433",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0430170764",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-d69701da9143c430",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.330273816246",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.330273816246",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.3302738162",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "grizzlybears-vtma",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.024678000000",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.024678000000",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0246780000",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "p123-ai-factor",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.024531782896",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.024531782896",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0245317829",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "p123-eu",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.330273816246",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.330273816246",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.3302738162",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "qsi",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.140861092980",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.140861092980",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.1408610930",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "robuxio-crypto",
+   "window": "ITD",
+   "as_of": "2026-09-03",
+   "expected": "0.043017076433",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
+     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
+     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
+     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+    },
+    {
+     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
+     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
+     "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.043017076433",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0430170764",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "tt-portfolio",
+   "window": "ITD",
+   "as_of": "2026-09-17",
+   "expected": "0.028441498710",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.028441498710",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.0284414987",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "twr.strategy",
+   "entity": "volatis-strategy",
+   "window": "ITD",
+   "as_of": "2026-09-02",
+   "expected": "0.742925737437",
+   "tolerance": "0.00000001",
+   "unit": "ratio",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
+     "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
+     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
+     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+    },
+    {
+     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+    }
+   ],
+   "derivation_a": {
+    "value": "0.742925737437",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "0.7429257374",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "universe.active_strategy_count",
+   "entity": "portfolio",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": "7",
+   "tolerance": null,
+   "unit": "count",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": "7",
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": "7",
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  },
+  {
+   "metric_id": "universe.active_strategy_ids",
+   "entity": "portfolio",
+   "window": null,
+   "as_of": "2026-09-17",
+   "expected": [
+    "grizzlybears-vtma",
+    "p123-ai-factor",
+    "p123-eu",
+    "qsi",
+    "robuxio-crypto",
+    "tt-portfolio",
+    "volatis-strategy"
+   ],
+   "tolerance": null,
+   "unit": "list",
+   "authority_pointer": [
+    {
+     "path": "contracts/portfolio-financial-mvp-source-v1.json",
+     "sha256": null
+    },
+    {
+     "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
+     "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
+    }
+   ],
+   "derivation_a": {
+    "value": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ],
+    "code_commit": "6fc393e26b582c4dce9e16fc64e64de108edb991"
+   },
+   "derivation_b": {
+    "value": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ],
+    "code_commit": "23811704c9768f71067ed189b2e499bd220a171e"
+   },
+   "critical": true
+  }
+ ],
+ "not_derivable": [
+  {
+   "metric_id": "capital.account.cutoff",
+   "entity": "account-9cb2832ca2366f08",
+   "window": null,
+   "reason_a": "no value observation on or before the cutoff in listed inputs",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  },
+  {
+   "metric_id": "capital.portfolio.liquid.cutoff",
+   "entity": "portfolio",
+   "window": null,
+   "reason_a": "systematic + reserve; capital.reserve.cutoff is not derivable",
+   "reason_b": "liquid capital requires the non-derivable reserve balance",
+   "critical": true
+  },
+  {
+   "metric_id": "capital.reserve.cutoff",
+   "entity": "reserve",
+   "window": null,
+   "reason_a": "no listed input carries a reserve balance: the crosswalk has no reserve row, contracts/portfolio-financial-mvp-source-v1.json account_sleeves name reserve sleeves only by redacted alias (ibkr-reserve-01, ibkr-reserve-02, schwab-reserve-01, john-hancock-reserve-01) with no account_id mapping, and JOHN_HANCOCK has no source segment",
+   "reason_b": "provider-ledger.json:capital_anchors was inspected; it does not identify a reserve/bucket entity",
+   "critical": true
+  },
+  {
+   "metric_id": "capital.retained_excluded.cutoff",
+   "entity": "portfolio",
+   "window": null,
+   "reason_a": "excluded rows without any value observation in listed inputs: ['account-9cb2832ca2366f08']; observed part: ['account-0acb9e17da731d0e 0.19 at 2026-07-17']",
+   "reason_b": "excluded/retained accounts lack cutoff values: account-9cb2832ca2366f08",
+   "critical": true
+  },
+  {
+   "metric_id": "date.source_last_observation",
+   "entity": "account-9cb2832ca2366f08",
+   "window": null,
+   "reason_a": "no value observation on or before the cutoff in listed inputs",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-0acb9e17da731d0e",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_DEPRECATED_HISTORY_ONLY); it is outside the governed product window",
+   "reason_b": "excluded/retained account has no funded-membership performance interval",
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.count",
+   "entity": "account-9cb2832ca2366f08",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_IMMATERIAL); it is outside the governed product window",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-0acb9e17da731d0e",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_DEPRECATED_HISTORY_ONLY); it is outside the governed product window",
+   "reason_b": "excluded/retained account has no funded-membership performance interval",
+   "critical": true
+  },
+  {
+   "metric_id": "flows.account.net",
+   "entity": "account-9cb2832ca2366f08",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_IMMATERIAL); it is outside the governed product window",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-0acb9e17da731d0e",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_DEPRECATED_HISTORY_ONLY); it is outside the governed product window",
+   "reason_b": "excluded/retained account has no funded-membership performance interval",
+   "critical": true
+  },
+  {
+   "metric_id": "mwr.account",
+   "entity": "account-9cb2832ca2366f08",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_IMMATERIAL); it is outside the governed product window",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-0acb9e17da731d0e",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_DEPRECATED_HISTORY_ONLY); it is outside the governed product window",
+   "reason_b": "excluded/retained account has no funded-membership performance interval",
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-702c489650e59956",
+   "window": "ITD",
+   "reason_a": "R3 TWR undefined (fail closed): a sub-period starts at zero or negative capital without a same-day inflow in (2026-07-30, 2026-07-31] beginning 0+0 ending 3.81 EOD flow 0",
+   "reason_b": "zero beginning valuation without same-day funding",
+   "critical": true
+  },
+  {
+   "metric_id": "twr.account",
+   "entity": "account-9cb2832ca2366f08",
+   "window": "ITD",
+   "reason_a": "account has no FUNDED_MEMBERSHIP interval (EXCLUDED_IMMATERIAL); it is outside the governed product window",
+   "reason_b": "no available USD observation on or before cutoff",
+   "critical": true
+  }
+ ]
+}
