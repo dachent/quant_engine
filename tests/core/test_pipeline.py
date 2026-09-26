@@ -21,6 +21,7 @@ from quant_engine.core import (
     PipelineUnknownOutcomeError,
     PipelineValidationError,
     ReleaseState,
+    ReleaseValidationError,
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
@@ -1145,3 +1146,68 @@ def test_capture_stream_observes_a_trickle_before_the_pipe_fills(
     assert process.returncode == 0
     assert captured.size_bytes < 64 * 1024
     assert observed > 1
+
+
+def _write_release_validation_findings(root: Path, generation_id: str) -> None:
+    """A minimal clean findings.json per state/briefs/findings-contract.md."""
+    path = root / "validation" / generation_id / "findings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        json.dumps(
+            {
+                "schema": "qe-validate-generation/1",
+                "generation_id": generation_id,
+                "generation_dir": str(root / "generations" / generation_id),
+                "validator_commit": "c" * 40,
+                "expected_baseline_sha256": None,
+                "summary": {
+                    "BLOCKER_INVARIANT": 0,
+                    "BLOCKER_AUTHORITY": 0,
+                    "BLOCKER_REGRESSION": 0,
+                    "NOT_READY": 0,
+                    "WARNING": 0,
+                },
+                "findings": [],
+            }
+        ).encode("utf-8")
+    )
+
+
+def test_execute_pipeline_release_validation_refuses_without_findings(
+    tmp_path: Path,
+) -> None:
+    """Proves the `execute_pipeline` -> `commit_release` pass-through itself,
+    not just `commit_release` called directly: if `execute_pipeline` ever
+    dropped `skip_release_validation`/`release_validation_findings` on its
+    way to `commit_release`, or the gate were bypassed, this would start
+    passing when it must refuse. Named with `release_validation` so
+    `conftest.py`'s autouse fixture leaves the real gate enabled here by
+    default (a cross-family review flagged the blanket-neutered version)."""
+    raw, previous, proposed, target = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    execute_pipeline(spec)
+
+    with pytest.raises(ReleaseValidationError, match="release validation refuses"):
+        execute_pipeline(
+            spec,
+            commit=True,
+            commit_authorization=_commit_authorization(tmp_path, spec),
+        )
+
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_execute_pipeline_release_validation_succeeds_with_clean_findings(
+    tmp_path: Path,
+) -> None:
+    raw, previous, proposed, target = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    execute_pipeline(spec)
+    _write_release_validation_findings(target, proposed.generation_id)
+
+    committed = execute_pipeline(
+        spec, commit=True, commit_authorization=_commit_authorization(tmp_path, spec)
+    )
+
+    assert committed["release_state"] == "COMMITTED"
+    assert read_current(target).generation_id == proposed.generation_id

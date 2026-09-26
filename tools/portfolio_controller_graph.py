@@ -93,6 +93,13 @@ _PATH_STAGES = {
     _CORE: list(_STAGE_ORDER),
     _MATERIALIZER: list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
+    # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
+    # publication sink every stage's release commit reaches (directly, or via
+    # `execute_pipeline`/`tools/data_pipeline.py execute --commit`), so a
+    # change to either genuinely can affect every stage's delivery -- declared
+    # with real stage impact, not `[]`, unlike the audit/guard tools below.
+    "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
+    "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
@@ -105,7 +112,17 @@ _PATH_STAGES = {
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
+    # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
+    # against synthetic, fabricated releases (never real production data or a
+    # real delivery artifact); no producer imports it.
+    "packages/core/src/quant_engine/core/rehearsal.py": [],
+    # WS4 T1.4 (corrective program) scope note: this file is outside that
+    # brief's literal write scope, but this one-line declaration for each new
+    # `check_*.py` guard is forced by this gate itself -- an undeclared
+    # `tools/` path fails CI as "unmapped relevant production change" -- so it
+    # is the minimal change needed, not a broader edit to this file.
     "tools/check_retained_authority_pins.py": [],
+    "tools/check_release_validation_findings.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/merge_readiness.py": [],

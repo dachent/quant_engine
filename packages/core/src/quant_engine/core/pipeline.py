@@ -4477,8 +4477,16 @@ def execute_pipeline(
     command_runner: CommandRunner = _default_command_runner,
     fault_hook: Callable[[str, str], None] | None = None,
     evaluation_date: date | None = None,
+    skip_release_validation: bool = False,
+    release_validation_findings: Mapping[str, Path] | None = None,
 ) -> dict[str, object]:
-    """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
+    """Build, verify, prepare, and optionally commit one explicit-ID DAG.
+
+    ``skip_release_validation``/``release_validation_findings`` pass straight
+    through to :func:`commit_release`, which is where they are documented and
+    enforced -- release publication refuses without a clean, generation-matched
+    ``validate_generation`` findings file regardless of which caller reaches it.
+    """
 
     _validate_portfolio_orchestration(spec, verify_runtime=True)
     _require_executable_product(spec)
@@ -4558,6 +4566,8 @@ def execute_pipeline(
             roots={key: spec.roots[key] for key in spec.release_generations},
             companion_contents=companion_contents,
             fault_hook=fault_hook,
+            skip_release_validation=skip_release_validation,
+            release_validation_findings=release_validation_findings,
         )
         state = journal.state
         for root_id, generation_id in spec.release_generations.items():
