@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypedDict, cast
 
+from quant_engine.core import run_storage
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -2097,8 +2098,13 @@ def prepare_attended_inputs(
     evaluated_on: str,
     release_commit: str,
     resume: bool = False,
+    on_create: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
-    """Record actual preparation work before using its checkpointed producer path."""
+    """Record actual preparation work before using its checkpointed producer path.
+
+    `on_create` runs once, immediately after this call creates the output root, so
+    the runner can mark the root as its own before anything else lands in it.
+    """
 
     # Source and input QC deliberately precede output creation and operational
     # attempt observation.  A rejected input must not leave a resumable-looking
@@ -2114,6 +2120,8 @@ def prepare_attended_inputs(
             )
     else:
         root.mkdir(parents=True)
+        if on_create is not None:
+            on_create(root)
     import portfolio_pipeline_materialize as materializer
 
     attempt = materializer._attended_start_preparation_attempt(root)  # noqa: SLF001
@@ -2128,10 +2136,20 @@ def prepare_attended_inputs(
             observation_started=True,
             validated=(config, plan),
         )
-    except Exception:
-        materializer._attended_finish_preparation_attempt(  # noqa: SLF001
-            root, attempt, "FAILED"
+    except KeyboardInterrupt:
+        # The attempt stays open, as for any interruption; the run state says so.
+        run_storage.write_run_state(
+            root,
+            "CANCELLED",
+            phase="preparation",
+            attempt=attempt,
+            reason="interrupted",
         )
         raise
-    materializer._attended_finish_preparation_attempt(root, attempt, "COMPLETED")  # noqa: SLF001
+    except Exception as exc:
+        materializer._attended_finish_preparation_attempt(  # noqa: SLF001
+            root, attempt, "FAILED", reason=str(exc) or type(exc).__name__
+        )
+        raise
+    materializer._attended_finish_preparation_attempt(root, attempt, "PASSED")  # noqa: SLF001
     return result

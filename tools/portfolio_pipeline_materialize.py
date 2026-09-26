@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Final, Mapping, Sequence, cast
+from typing import Any, Callable, Final, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
@@ -24,6 +24,7 @@ from quant_engine.core import (
     read_generation_bundle,
     runtime_environment_sha256,
 )
+from quant_engine.core import run_storage
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
@@ -5401,12 +5402,21 @@ def _attended_request_identity(
     financial_stage_inputs: Mapping[str, Path],
     source_phase: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    retained_cache_base: Path | None = None,
 ) -> dict[str, Any]:
     # `evaluated_on` is a separate clock from `requested_as_of`: plan bundles consume it as
     # `evaluation_date`, the dependence spec as its `as_of_date`, and the governed HWM result
     # records it and derives freshness from it.  Without it here, a resume under a different
     # evaluation date reused every checkpoint and returned the earlier date's calculations.
+    # A shared read-only cache base is bound only when one is used, so the identity of a
+    # run that reads its retained cache directly is unchanged and stays resumable.
+    base = (
+        {"retained_cache_base": str(retained_cache_base)}
+        if retained_cache_base is not None
+        else {}
+    )
     return {
+        **base,
         "evaluated_on": evaluated_on,
         "output_root": str(output_root),
         "financial_stage_inputs": {
@@ -5511,6 +5521,20 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     workspace_root = Path(args.workspace_root).resolve()
     output_root = Path(args.output_root).resolve()
     retained_cache_root = Path(args.retained_cache_root).resolve()
+    base_argument = getattr(args, "retained_cache_base", None)
+    retained_cache_base = (
+        Path(base_argument).resolve() if base_argument is not None else None
+    )
+    # Location gate first: every attended run writes far more than 50 MB, and nothing
+    # below may create, probe-write or hydrate anything before a synced root is refused.
+    for label, root in (
+        ("output", output_root),
+        ("workspace", workspace_root),
+        ("retained cache", retained_cache_root),
+        ("retained cache base", retained_cache_base),
+    ):
+        if root is not None:
+            run_storage.refuse_synced_root(root, label)
     if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
         raise MaterializationError(
             "attended repository root differs from this entrypoint"
@@ -5518,8 +5542,26 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     runtime = _runtime_identity(python, repo_root)
     if workspace_root.is_symlink() or not workspace_root.is_dir():
         raise MaterializationError("attended workspace root is unavailable")
-    if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
-        raise MaterializationError("attended retained cache root is unavailable")
+    if retained_cache_base is None:
+        if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
+            raise MaterializationError("attended retained cache root is unavailable")
+    else:
+        # With a shared base the retained cache root is this run's overlay, which the
+        # runner creates as hard links to the base on its first execution.
+        if retained_cache_base.is_symlink() or not retained_cache_base.is_dir():
+            raise MaterializationError("attended retained cache base is unavailable")
+        if retained_cache_root.is_symlink() or (
+            retained_cache_root.exists() and not retained_cache_root.is_dir()
+        ):
+            raise MaterializationError("attended retained cache root is unavailable")
+        _attended_disjoint(
+            output_root, retained_cache_base, "output and retained cache base"
+        )
+        _attended_disjoint(
+            retained_cache_root,
+            retained_cache_base,
+            "retained cache and retained cache base",
+        )
     portfolio_root = workspace_root / "dataPortfolio"
     if portfolio_root.is_symlink() or not portfolio_root.is_dir():
         raise MaterializationError("attended workspace dataPortfolio is unavailable")
@@ -5535,6 +5577,7 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "python": python,
         "repo_root": repo_root,
         "requested_as_of": requested_as_of,
+        "retained_cache_base": retained_cache_base,
         "retained_cache_root": retained_cache_root,
         "runtime": runtime,
         "workspace_root": workspace_root,
@@ -5550,6 +5593,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
     workspace_root = cast(Path, basic["workspace_root"])
     output_root = cast(Path, basic["output_root"])
     retained_cache_root = cast(Path, basic["retained_cache_root"])
+    retained_cache_base = cast(Path | None, basic.get("retained_cache_base"))
     runtime = cast(Mapping[str, Any], basic["runtime"])
     portfolio_root = cast(Path, basic["portfolio_root"])
     requested_as_of = cast(str, basic["requested_as_of"])
@@ -5743,6 +5787,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         financial_stage_inputs=financial_stage_inputs,
         source_phase=source_phase,
         runtime=runtime,
+        retained_cache_base=retained_cache_base,
     )
     return {
         "financial_inputs": financial_inputs or {},
@@ -5755,6 +5800,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "repo_root": repo_root,
         "request_identity": request_identity,
         "required_stages": ATTENDED_STAGES,
+        "retained_cache_base": retained_cache_base,
         "retained_cache_root": retained_cache_root,
         "source_phase": source_phase,
         "source_run": source_run,
@@ -5784,10 +5830,59 @@ def _execution_timestamp() -> str:
     return datetime.now(UTC).isoformat()
 
 
+ATTENDED_ATTEMPT_KEYS: Final = frozenset({"attempt", "pid", "started_at", "status"})
+ATTENDED_ATTEMPT_OPTIONAL_KEYS: Final = frozenset({"ended_at", "reason", "storage"})
+
+
+def _attended_legacy_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a schema-1/2 attempt onto explicit run states; it recorded no PID."""
+
+    status = attempt.get("status")
+    required = (
+        {"attempt", "started_at", "status"}
+        if status in {"RUNNING", "INCOMPLETE"}
+        else {"attempt", "ended_at", "started_at", "status"}
+    )
+    if (
+        set(attempt) != required
+        or status not in run_storage.LEGACY_ATTEMPT_STATES
+        or not isinstance(attempt.get("started_at"), str)
+    ):
+        raise MaterializationError("attended execution observations differ")
+    mapped = {**attempt, "pid": None, "status": run_storage.attempt_state(status)}
+    return dict(mapped)
+
+
+def _attended_current_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one schema-3 attempt: an explicit run state and the runner's PID."""
+
+    keys = set(attempt)
+    status = attempt.get("status")
+    pid = attempt.get("pid")
+    if (
+        not ATTENDED_ATTEMPT_KEYS <= keys
+        or not keys <= ATTENDED_ATTEMPT_KEYS | ATTENDED_ATTEMPT_OPTIONAL_KEYS
+        or status not in run_storage.ATTEMPT_STATES
+        or not isinstance(attempt.get("started_at"), str)
+        or (pid is not None and (isinstance(pid, bool) or not isinstance(pid, int)))
+        or (status == "RUNNING" and "ended_at" in attempt)
+        or (status in {"PASSED", "FAILED"} and "ended_at" not in attempt)
+        or ("reason" in attempt and not isinstance(attempt["reason"], str))
+        or ("storage" in attempt and not isinstance(attempt["storage"], dict))
+    ):
+        raise MaterializationError("attended execution observations differ")
+    return dict(attempt)
+
+
 def _attended_execution_observations(
     output_root: Path,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Read prior operational attempts, rejecting malformed timing evidence."""
+    """Read prior operational attempts, rejecting malformed timing evidence.
+
+    Attempts carry the explicit run states RUNNING, CANCELLED, FAILED and PASSED.
+    Receipts written before those states existed are read with COMPLETED mapped to
+    PASSED and INCOMPLETE (an attempt its process abandoned) mapped to CANCELLED.
+    """
 
     receipt = _attended_execution_observations_receipt(output_root)
     if not receipt.exists():
@@ -5800,7 +5895,7 @@ def _attended_execution_observations(
             "execution_attempts": value.get("attempts"),
             "preparation_attempts": [],
         }
-    elif schema == 2 and set(value) == {
+    elif schema in {2, 3} and set(value) == {
         "execution_attempts",
         "preparation_attempts",
         "schema_version",
@@ -5816,24 +5911,17 @@ def _attended_execution_observations(
         if not isinstance(attempts, list):
             raise MaterializationError("attended execution observations differ")
         phase_attempts: list[dict[str, Any]] = []
-        for expected_attempt, attempt in enumerate(attempts, start=1):
+        for expected_attempt, recorded in enumerate(attempts, start=1):
             if (
-                not isinstance(attempt, dict)
-                or attempt.get("attempt") != expected_attempt
+                not isinstance(recorded, dict)
+                or recorded.get("attempt") != expected_attempt
             ):
                 raise MaterializationError("attended execution observations differ")
-            status = attempt.get("status")
-            required = (
-                {"attempt", "started_at", "status"}
-                if status in {"RUNNING", "INCOMPLETE"}
-                else {"attempt", "ended_at", "started_at", "status"}
+            attempt = (
+                _attended_current_attempt(recorded)
+                if schema == 3
+                else _attended_legacy_attempt(recorded)
             )
-            if (
-                set(attempt) != required
-                or status not in {"RUNNING", "INCOMPLETE", "COMPLETED", "FAILED"}
-                or not isinstance(attempt.get("started_at"), str)
-            ):
-                raise MaterializationError("attended execution observations differ")
             try:
                 started = datetime.fromisoformat(cast(str, attempt["started_at"]))
                 ended = (
@@ -5867,7 +5955,7 @@ def _attended_replace_execution_observations(
         "preparation_attempts": [
             dict(attempt) for attempt in attempts["preparation_attempts"]
         ],
-        "schema_version": 2,
+        "schema_version": 3,
     }
     if not receipt.exists():
         _write_exact(receipt, canonical_json_bytes(value))
@@ -5895,25 +5983,28 @@ def _attended_start_attempt(output_root: Path, phase: str) -> int:
     key = f"{phase}_attempts"
     phase_attempts = attempts[key]
     if phase_attempts and phase_attempts[-1]["status"] == "RUNNING":
-        phase_attempts[-1]["status"] = "INCOMPLETE"
+        # Its process stopped without recording an outcome: it was interrupted, and
+        # the true ending instant is unknown, so none is invented.
+        phase_attempts[-1]["status"] = "CANCELLED"
     attempt = len(phase_attempts) + 1
     phase_attempts.append(
-        {"attempt": attempt, "started_at": _execution_timestamp(), "status": "RUNNING"}
+        {
+            "attempt": attempt,
+            "pid": os.getpid(),
+            "started_at": _execution_timestamp(),
+            "status": "RUNNING",
+        }
     )
     _attended_replace_execution_observations(output_root, attempts)
+    run_storage.write_run_state(output_root, "RUNNING", phase=phase, attempt=attempt)
     return attempt
 
 
-def _attended_finish_attempt(
-    output_root: Path, phase: str, attempt: int, status: str
-) -> None:
-    """Terminal outcomes receive a real ending instant; interruption remains open."""
-
-    if status not in {"COMPLETED", "FAILED"}:
-        raise MaterializationError("attended execution status differs")
+def _attended_running_attempt(
+    attempts: Mapping[str, list[dict[str, Any]]], phase: str, attempt: int
+) -> dict[str, Any]:
     if phase not in {"execution", "preparation"}:
         raise MaterializationError("attended execution phase differs")
-    attempts = _attended_execution_observations(output_root)
     phase_attempts = attempts[f"{phase}_attempts"]
     if (
         not phase_attempts
@@ -5921,8 +6012,45 @@ def _attended_finish_attempt(
         or phase_attempts[-1].get("status") != "RUNNING"
     ):
         raise MaterializationError("attended execution attempt differs")
-    phase_attempts[-1]["ended_at"] = _execution_timestamp()
-    phase_attempts[-1]["status"] = status
+    return phase_attempts[-1]
+
+
+def _attended_finish_attempt(
+    output_root: Path,
+    phase: str,
+    attempt: int,
+    status: str,
+    *,
+    reason: str | None = None,
+) -> None:
+    """Terminal outcomes receive a real ending instant; interruption remains open."""
+
+    if status not in run_storage.TERMINAL_STATES:
+        raise MaterializationError("attended execution status differs")
+    attempts = _attended_execution_observations(output_root)
+    current = _attended_running_attempt(attempts, phase, attempt)
+    current["ended_at"] = _execution_timestamp()
+    current["status"] = status
+    if reason is not None:
+        current["reason"] = reason
+    _attended_replace_execution_observations(output_root, attempts)
+    # A passed preparation hands over to execution in the same process, so the run
+    # stays RUNNING; every other terminal outcome ends the runner's work.
+    if phase == "execution" or status != "PASSED":
+        run_storage.write_run_state(
+            output_root, status, phase=phase, attempt=attempt, reason=reason
+        )
+
+
+def _attended_record_attempt_storage(
+    output_root: Path, phase: str, attempt: int, storage: Mapping[str, Any]
+) -> None:
+    """Record the bytes a running attempt has written so far, stage by stage."""
+
+    attempts = _attended_execution_observations(output_root)
+    _attended_running_attempt(attempts, phase, attempt)["storage"] = _canonical_clone(
+        storage
+    )
     _attended_replace_execution_observations(output_root, attempts)
 
 
@@ -5931,9 +6059,9 @@ def _attended_start_execution_attempt(output_root: Path) -> int:
 
 
 def _attended_finish_execution_attempt(
-    output_root: Path, attempt: int, status: str
+    output_root: Path, attempt: int, status: str, *, reason: str | None = None
 ) -> None:
-    _attended_finish_attempt(output_root, "execution", attempt, status)
+    _attended_finish_attempt(output_root, "execution", attempt, status, reason=reason)
 
 
 def _attended_start_preparation_attempt(output_root: Path) -> int:
@@ -5941,9 +6069,9 @@ def _attended_start_preparation_attempt(output_root: Path) -> int:
 
 
 def _attended_finish_preparation_attempt(
-    output_root: Path, attempt: int, status: str
+    output_root: Path, attempt: int, status: str, *, reason: str | None = None
 ) -> None:
-    _attended_finish_attempt(output_root, "preparation", attempt, status)
+    _attended_finish_attempt(output_root, "preparation", attempt, status, reason=reason)
 
 
 def _attended_bind_qa(
@@ -5970,7 +6098,11 @@ def _attended_bind_qa(
 
 
 def _attended_start_or_resume(
-    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+    preflight: Mapping[str, Any],
+    output_root: Path,
+    *,
+    resume: bool,
+    on_create: Callable[[Path], None] | None = None,
 ) -> str | None:
     request_identity = preflight["request_identity"]
     if not isinstance(request_identity, dict):
@@ -5988,7 +6120,9 @@ def _attended_start_or_resume(
                 raise MaterializationError(
                     "attended run receipt is missing after execution started"
                 )
-            return _attended_start_or_resume(preflight, output_root, resume=False)
+            return _attended_start_or_resume(
+                preflight, output_root, resume=False, on_create=on_create
+            )
         value = _load(receipt, "attended run receipt")
         failed = value.get("failed_stage")
         if (
@@ -6055,6 +6189,8 @@ def _attended_start_or_resume(
             raise MaterializationError("attended preparation handoff differs")
     else:
         output_root.mkdir(parents=True, exist_ok=False)
+        if on_create is not None:
+            on_create(output_root)
     _write_exact(
         receipt,
         canonical_json_bytes(
@@ -6225,11 +6361,44 @@ def _attended_stage_command(
 
 
 def _attended_execute(
-    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+    preflight: Mapping[str, Any],
+    output_root: Path,
+    *,
+    resume: bool,
+    storage: run_storage.AttendedStorage | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    failed_stage = _attended_start_or_resume(preflight, output_root, resume=resume)
+    failed_stage = _attended_start_or_resume(
+        preflight,
+        output_root,
+        resume=resume,
+        on_create=storage.mark_created if storage is not None else None,
+    )
     attempt = _attended_start_execution_attempt(output_root)
+    measured: dict[str, Any] = {}
+    stage_bytes: list[dict[str, Any]] = []
+
+    def record_stage_bytes(role: str) -> None:
+        """Record what one child wrote, then refuse the run if it broke the budget."""
+
+        if storage is None:
+            return
+        row, breach = storage.after_stage(role)
+        stage_bytes.append(row)
+        _attended_record_attempt_storage(
+            output_root, "execution", attempt, {**measured, "stages": stage_bytes}
+        )
+        if breach is not None:
+            raise breach
+
     try:
+        if storage is not None:
+            # The overlay is created (or its base re-verified) before any child can
+            # read the cache, and the run is measured before any child can write.
+            measured["cache"] = storage.open_cache()
+            measured["start"] = storage.start()
+            _attended_record_attempt_storage(
+                output_root, "execution", attempt, {**measured, "stages": stage_bytes}
+            )
         if failed_stage is not None:
             _attended_preserve_failed_stage(output_root, failed_stage)
         completed = _attended_completed_stages(
@@ -6283,13 +6452,20 @@ def _attended_execute(
                 _attended_record_failed_stage(
                     output_root, preflight["request_identity"], role, result.returncode
                 )
-                _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+                record_stage_bytes(role)
+                _attended_finish_execution_attempt(
+                    output_root,
+                    attempt,
+                    "FAILED",
+                    reason=f"stage {role} exited {result.returncode}",
+                )
                 return result.returncode, _attended_view(
                     output_root,
                     preflight["required_stages"],
                     preflight["request_identity"],
                     completed,
                 )
+            record_stage_bytes(role)
             completed = _attended_completed_stages(
                 output_root,
                 preflight["required_stages"],
@@ -6301,12 +6477,33 @@ def _attended_execute(
             if failed_stage == role:
                 _attended_clear_failed_stage(output_root, preflight["request_identity"])
                 failed_stage = None
-        _attended_finish_execution_attempt(output_root, attempt, "COMPLETED")
+        if storage is not None:
+            end, breach = storage.finish()
+            measured["end"] = end
+            _attended_record_attempt_storage(
+                output_root, "execution", attempt, {**measured, "stages": stage_bytes}
+            )
+            if breach is not None:
+                raise breach
+        _attended_finish_execution_attempt(output_root, attempt, "PASSED")
         return 0, _attended_view(
             output_root, preflight["required_stages"], preflight["request_identity"]
         )
-    except Exception:
-        _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+    except KeyboardInterrupt:
+        # The attempt stays open, as for any interruption: its successor records it
+        # CANCELLED without inventing an ending instant. The run state says so now.
+        run_storage.write_run_state(
+            output_root,
+            "CANCELLED",
+            phase="execution",
+            attempt=attempt,
+            reason="interrupted",
+        )
+        raise
+    except Exception as exc:
+        _attended_finish_execution_attempt(
+            output_root, attempt, "FAILED", reason=str(exc) or type(exc).__name__
+        )
         raise
 
 
@@ -6343,6 +6540,61 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--qa-dir", type=Path)
     attended_cmd.add_argument("--resume", action="store_true")
     attended_cmd.add_argument("--execute", action="store_true")
+    attended_cmd.add_argument(
+        "--retained-cache-base",
+        type=Path,
+        help=(
+            "A shared retained cache the runner seals read-only. --retained-cache-root "
+            "then names this run's overlay: the runner builds it from hard links to "
+            "the base, so no cache byte is copied and every entry this run adds lands "
+            "in the overlay alone. Omit it to use --retained-cache-root directly."
+        ),
+    )
+    attended_cmd.add_argument(
+        "--max-run-growth",
+        default=run_storage.DEFAULT_MAX_RUN_GROWTH,
+        help=(
+            "Refuse the run once its output and retained-cache roots have grown by "
+            "more than this since the run root was created (default "
+            f"{run_storage.DEFAULT_MAX_RUN_GROWTH}; B, KB, MB, GB, KiB, MiB, GiB)."
+        ),
+    )
+    attended_cmd.add_argument(
+        "--max-scratch",
+        default=run_storage.DEFAULT_MAX_SCRATCH,
+        help=(
+            "Refuse to start, or to finish, while the scratch root holds more than "
+            f"this (default {run_storage.DEFAULT_MAX_SCRATCH})."
+        ),
+    )
+    attended_cmd.add_argument(
+        "--scratch-root",
+        type=Path,
+        help="The scratch root the --max-scratch budget measures (default: the "
+        "output root's parent).",
+    )
+    retire_cmd = commands.add_parser(
+        "retire",
+        help=(
+            "list, or with --apply remove, superseded attended run roots and overlays "
+            "this runner created"
+        ),
+    )
+    retire_cmd.add_argument("--runs-root", type=Path, required=True)
+    retire_cmd.add_argument("--keep", type=int, default=run_storage.DEFAULT_RETIRE_KEEP)
+    retire_cmd.add_argument(
+        "--current",
+        type=Path,
+        help="The current candidate run root (default: the newest PASSED run root).",
+    )
+    retire_cmd.add_argument("--apply", action="store_true")
+    wait_cmd = commands.add_parser(
+        "wait",
+        help="wait for an attended run's recorded runner process to exit",
+    )
+    wait_cmd.add_argument("run_root", type=Path)
+    wait_cmd.add_argument("--timeout", type=float)
+    wait_cmd.add_argument("--poll", type=float, default=5.0)
     semantic_cmd = commands.add_parser("semantic")
     semantic_cmd.add_argument("--recipe", type=Path, required=True)
     semantic_cmd.add_argument("--output", type=Path, required=True)
@@ -6425,13 +6677,53 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+WAIT_EXIT_CODES: Final = {"PASSED": 0, "FAILED": 1, "CANCELLED": 2}
+WAIT_TIMEOUT_EXIT_CODE: Final = 3
+
+
+def _attended_storage(args: argparse.Namespace) -> run_storage.AttendedStorage:
+    """The storage gates for one executing attended runner; nothing is written here."""
+
+    output_root = Path(args.output_root).resolve()
+    base = getattr(args, "retained_cache_base", None)
+    scratch = getattr(args, "scratch_root", None)
+    return run_storage.AttendedStorage(
+        output_root=output_root,
+        cache_root=Path(args.retained_cache_root).resolve(),
+        base=Path(base).resolve() if base is not None else None,
+        scratch_root=(
+            Path(scratch).resolve() if scratch is not None else output_root.parent
+        ),
+        budget=run_storage.StorageBudget.parse(
+            getattr(args, "max_run_growth", run_storage.DEFAULT_MAX_RUN_GROWTH),
+            getattr(args, "max_scratch", run_storage.DEFAULT_MAX_SCRATCH),
+        ),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    storage: run_storage.AttendedStorage | None = None
     try:
         exit_code = 0
-        if args.command == "attended":
+        if args.command == "retire":
+            result = run_storage.retire_run_roots(
+                args.runs_root, keep=args.keep, current=args.current, apply=args.apply
+            )
+        elif args.command == "wait":
+            result = run_storage.wait_for_run(
+                args.run_root, timeout=args.timeout, poll=args.poll
+            )
+            exit_code = (
+                WAIT_TIMEOUT_EXIT_CODE
+                if result["timed_out"]
+                else WAIT_EXIT_CODES.get(str(result["state"]), 1)
+            )
+        elif args.command == "attended":
             if args.resume and not args.execute:
                 raise MaterializationError("attended --resume requires --execute")
+            if args.execute:
+                storage = _attended_storage(args)
             if args.preparation_spec is not None:
                 if args.evaluated_on is None:
                     raise MaterializationError(
@@ -6451,6 +6743,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                     return 0
+                storage = storage or _attended_storage(args)
+                storage.admit(resume=args.resume)
                 prepared = preparation.prepare_attended_inputs(
                     preparation_spec_path=args.preparation_spec,
                     output_root=Path(args.output_root).resolve(),
@@ -6458,6 +6752,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     evaluated_on=args.evaluated_on,
                     release_commit=_git(REPOSITORY_ROOT, "rev-parse", "HEAD"),
                     resume=args.resume,
+                    on_create=storage.mark_created,
                 )
                 source_run = prepared.get("source_run")
                 financial = prepared.get("financial_stage_inputs")
@@ -6477,8 +6772,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
             if args.execute:
+                storage = storage or _attended_storage(args)
+                if args.preparation_spec is None:
+                    storage.admit(resume=args.resume)
                 exit_code, result = _attended_execute(
-                    preflight, Path(args.output_root).resolve(), resume=args.resume
+                    preflight,
+                    Path(args.output_root).resolve(),
+                    resume=args.resume,
+                    storage=storage,
                 )
             else:
                 result = _attended_view(
@@ -6537,6 +6838,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.predecessor_repair_gate,
             )
     except (OSError, RuntimeError, ValueError) as exc:
+        if storage is not None:
+            storage.fail_if_open(str(exc) or type(exc).__name__)
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

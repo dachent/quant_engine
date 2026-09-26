@@ -73,3 +73,15 @@ generation nobody touched. Inside a SharePoint sync root that gives the
 filesystem a vote on release validity, and it is what blocked the 2026-09-14
 release. Narrowing the hash to the declared file set would keep every guarantee
 above and remove that failure mode.
+
+## Run roots and retained-cache overlays
+
+This sweep covers generation stores under the data roots. Attended run roots in scratch
+and their retained-cache overlays are retired by the runner itself, which only removes
+roots it marked at creation:
+
+```
+python tools/portfolio_pipeline_materialize.py retire --runs-root <dir> [--keep 2] [--current <run-root>] [--apply]
+```
+
+It is a dry run unless `--apply` is given. See `docs/attended-run-storage.md`.
