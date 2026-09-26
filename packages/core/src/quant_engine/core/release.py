@@ -26,6 +26,8 @@ from quant_engine.core.publication import (
     CurrentPointer,
     PointerIntegrityError,
     PublicationRejectedError,
+    default_release_validation_findings_path,
+    evaluate_release_validation_findings,
     generation_inventory_sha256,
     publish_generation,
     read_current,
@@ -1836,6 +1838,44 @@ def recover_release(
         _close_directory_leases(directory_leases)
 
 
+def _verify_release_validation(
+    manifest: ReleaseManifest,
+    normalized_roots: Mapping[str, Path],
+    findings_overrides: Mapping[str, Path] | None,
+) -> None:
+    """Refuse to commit unless every target's generation has clean findings.
+
+    Cross-lane contract (`state/briefs/findings-contract.md`): each target's
+    findings file is expected at ``<root>/validation/<generation_id>/findings.json``
+    unless ``findings_overrides`` names an explicit path for that root. Missing,
+    unreadable, a non-resident placeholder, malformed, generation-id-mismatched,
+    or carrying any ``BLOCKER_*`` finding all refuse -- never treated as clean.
+    """
+    overrides = findings_overrides or {}
+    for target in manifest.targets:
+        path = overrides.get(
+            target.root_id
+        ) or default_release_validation_findings_path(
+            normalized_roots[target.root_id], target.proposed_generation_id
+        )
+        may_publish, blockers, reason = evaluate_release_validation_findings(
+            path, expected_generation_id=target.proposed_generation_id
+        )
+        if may_publish:
+            continue
+        if reason is not None:
+            raise ReleaseValidationError(
+                f"release validation refuses root {target.root_id!r}: {reason}"
+            )
+        summary = ", ".join(
+            f"{entry['class']}:{entry['check_id']}" for entry in blockers
+        )
+        raise ReleaseValidationError(
+            f"release validation refuses root {target.root_id!r}: "
+            f"blocking findings [{summary}]"
+        )
+
+
 def commit_release(
     *,
     coordination_root: Path,
@@ -1843,8 +1883,19 @@ def commit_release(
     roots: Mapping[str, Path],
     companion_contents: Mapping[str, bytes] | None = None,
     fault_hook: FaultHook | None = None,
+    skip_release_validation: bool = False,
+    release_validation_findings: Mapping[str, Path] | None = None,
 ) -> ReleaseJournal:
-    """Commit every pointer and companion or restore the prepared predecessor graph."""
+    """Commit every pointer and companion or restore the prepared predecessor graph.
+
+    Refuses (``ReleaseValidationError``) unless every target's generation has a
+    clean ``validate_generation`` findings file (see ``_verify_release_validation``)
+    -- a property of release publication itself, not of any one caller. Set
+    ``skip_release_validation=True`` only for a deliberately non-financial commit
+    (recovery rehearsal, or a release.py-mechanics test unrelated to this gate);
+    ``release_validation_findings`` overrides the default per-root findings path
+    when the caller already knows a different one.
+    """
 
     manifest, journal = read_release(coordination_root, release_id)
     normalized_roots = _normalize_roots(roots)
@@ -1883,6 +1934,10 @@ def commit_release(
             normalized_roots,
             coordination_root=coordination_root,
         )
+        if not skip_release_validation:
+            _verify_release_validation(
+                manifest, normalized_roots, release_validation_findings
+            )
         companion_contents = companion_contents or {}
         if set(companion_contents) != {
             item.companion_id for item in manifest.companions

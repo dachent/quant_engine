@@ -31,6 +31,13 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--commit", action="store_true")
             command.add_argument("--commit-authorization", type=Path)
             command.add_argument("--allow-external-read", action="store_true")
+            # Deliberately no CLI escape hatch for the release-validation
+            # gate: a flag on the primary publish command is a friction-free
+            # bypass that leaves no trail (journal, manifest, execute.json
+            # all look like a normal commit). `commit_release`'s
+            # `skip_release_validation` stays available as a Python-level
+            # parameter for legitimate non-CLI callers that justify it inline
+            # (rehearsal.py calls the API directly; see its 3 call sites).
         elif name == "recover":
             command.add_argument("--confirm-stale-lock", action="store_true")
     inventory = commands.add_parser("inventory")

@@ -5,7 +5,6 @@ set -euo pipefail
 
 REPO="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/.codex-bootstrap/mvp2-execution/repo"
 Q="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-A="$Q/audit/coding/2026-09-06_codex_mvp2-execution/source-integration-r6"
 PY="C:/Dev/scratch/quant-engine/.venv-mvp2/Scripts/python.exe"
 
 LEDGER="C:/Dev/scratch/quant-engine/pl12/provider-ledger"
@@ -13,7 +12,7 @@ LEDGER_GEN="59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
 MX="$Q/dataMatrixport"
 MX_GEN="3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc"
 MX_CSV="$MX/output/20260903T051029.331Z/csv"
-QB="$A/quantbase-private"
+QB="$Q/dataQuantbase"
 QB_GEN="d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe"
 QB_CSV="$QB/source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv"
 P123="$Q/dataPortfolio123"
@@ -44,7 +43,7 @@ PYTHONIOENCODING=utf-8 "$PY" tools/portfolio_target_series.py \
   --daily-holdings "$MX_CSV/daily_holdings.csv" \
   --subscriptions "$MX_CSV/subscription_details.csv" \
   --product-id 7361599360326447104 \
-  --quantbase-current "$QB/CURRENT.json" \
+  --quantbase-current "$QB/generations/$QB_GEN/CURRENT.json" \
   --quantbase-manifest "$QB/generations/$QB_GEN/generation.json" \
   --quantbase-history "$QB_CSV/dashboard_Volatis_Strategy_pricehistory.csv" \
   --quantbase-activity "$QB_CSV/account_activity.csv" \

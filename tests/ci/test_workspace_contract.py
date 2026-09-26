@@ -29,6 +29,29 @@ def test_example_config_keeps_portfolio_authority_outside_repository() -> None:
     assert isinstance(paths, dict)
     assert paths["portfolio"] == "../dataPortfolio"
     assert paths["portfolio123"] == "../dataPortfolio123"
+    assert paths["quantbase"] == "../dataQuantbase"
+
+
+def test_ops_scripts_resolve_quantbase_from_durable_root_not_audit_copy() -> None:
+    # WS1b promotion (corrective program): the only on-disk copy of admitted
+    # Quantbase generation d3a8f2da... used to live under the misplaced audit
+    # path `audit/coding/2026-09-06_codex_mvp2-execution/source-integration-r6/
+    # quantbase-private`. It has been promoted (copied, sha256-verified) to the
+    # durable location the repo config already names for QUANTBASE:
+    # `../dataQuantbase` (see config.example.toml `paths.quantbase`). Rebuild
+    # scripts must resolve it from there, not from the audit copy, so this
+    # guards against reintroducing the audit path as a literal reference.
+    forbidden_substrings = (
+        "quantbase-private",
+        "source-integration-r6",
+    )
+    ops_root = REPOSITORY_ROOT / "ops"
+    offending: list[str] = []
+    for script in ops_root.rglob("*.sh"):
+        text = script.read_text(encoding="utf-8")
+        if any(needle in text for needle in forbidden_substrings):
+            offending.append(str(script.relative_to(REPOSITORY_ROOT)))
+    assert offending == []
 
 
 def test_virtual_root_has_only_accepted_workspace_members() -> None:

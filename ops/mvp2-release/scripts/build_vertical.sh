@@ -78,6 +78,14 @@ echo "== resync the contract pins onto what the code now materializes =="
 RELEASE_SPEC="$LIVE/config/provider-ledger-spec-release.json"
 "$PY" "$E/sync_contract_pins.py" "$RELEASE_SPEC" "$RELEASE_SPEC"
 
+# #444 (GOV-CONSUMER-PROPAGATION-001): a contract/schema bump with no matching
+# refresh of the artifacts that pin it previously ran four stages before
+# surfacing (commit 47120f1). The resync above is the fix; this proves it
+# actually converged instead of trusting that it did. Exit 1 aborts the build
+# under `set -euo pipefail` -- this is a hard precondition, not advisory.
+echo "== verify no retained-authority pin under \$LIVE is stale after resync (#444) =="
+"$PY" tools/check_retained_authority_pins.py "$LIVE" --max-depth 6
+
 # The spec recipe validates a dependence source, and the ledger it stages is
 # what the layered history is rebuilt from, so this first pass reuses the
 # layered history the policy already pins. The final pass below rebuilds both.
@@ -162,14 +170,14 @@ if [ "$REBUILD_HISTORY" = "1" ]; then
   MX="$Q/dataMatrixport"
   MX_GEN="3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc"
   MX_CSV="$MX/output/20260903T051029.331Z/csv"
-  QB="$Q/audit/coding/2026-09-06_codex_mvp2-execution/source-integration-r6/quantbase-private"
+  QB="$Q/dataQuantbase"
   QB_GEN="d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe"
   QB_CSV="$QB/source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv"
   P123="$Q/dataPortfolio123"
   P123_GEN="80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8"
   P123_TABLES="$P123/generations/$P123_GEN/tables"
   P123_HISTORY_TABLES="$P123/generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables"
-  "$PY" tools/portfolio_target_series.py   --layered-history-generation   --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json   --repository-sha "$LH_SHA"   --as-of-date 2026-09-04   --provider-ledger-current "$PINNED_LEDGER_ROOT/CURRENT.json"   --provider-ledger-manifest "$PINNED_LEDGER_GEN/generation.json"   --provider-ledger-catalog "$PINNED_LEDGER_GEN/provider-ledger.json"   --matrixport-current "$MX/CURRENT.json"   --manifest "$MX/generations/$MX_GEN/generation.json"   --nav "$MX_CSV/nav_daily.csv"   --holdings "$MX_CSV/holdings.csv"   --daily-holdings "$MX_CSV/daily_holdings.csv"   --subscriptions "$MX_CSV/subscription_details.csv"   --product-id 7361599360326447104   --quantbase-current "$QB/CURRENT.json"   --quantbase-manifest "$QB/generations/$QB_GEN/generation.json"   --quantbase-history "$QB_CSV/dashboard_Volatis_Strategy_pricehistory.csv"   --quantbase-activity "$QB_CSV/account_activity.csv"   --quantbase-fund-id 107   --portfolio123-current "$P123/CURRENT.json"   --portfolio123-manifest "$P123/generations/$P123_GEN/generation.json"   --portfolio123-metadata "$P123_HISTORY_TABLES/har_managed_metadata.parquet"   --portfolio123-performance "$P123_HISTORY_TABLES/har_managed_performance.parquet"   --portfolio123-equity "$P123_HISTORY_TABLES/har_equity_curve.parquet"   --portfolio123-returns "$P123_TABLES/returns_daily.parquet"   --portfolio123-relationships "$P123_TABLES/strategy_relationships.parquet"   --portfolio-fx-rates-manifest "$Q/dataPortfolio/portfolio-fx-rates/generations/9812f2536a16da1b1e64f9030cca1bef22519333a4a8e19f3cb11ab32d39bc6e/generation.json"   --strategy-history-manifest "$HISTORY_BUNDLE/manifest.json"   --strategy-history-returns "$HISTORY_BUNDLE/returns.csv"   --strategy-backtests-generation "$BACKTESTS_GEN/generation.json"   --output-root "$LH_ROOT" > "$CYCLE/layered-history.json"
+  "$PY" tools/portfolio_target_series.py   --layered-history-generation   --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json   --repository-sha "$LH_SHA"   --as-of-date 2026-09-04   --provider-ledger-current "$PINNED_LEDGER_ROOT/CURRENT.json"   --provider-ledger-manifest "$PINNED_LEDGER_GEN/generation.json"   --provider-ledger-catalog "$PINNED_LEDGER_GEN/provider-ledger.json"   --matrixport-current "$MX/CURRENT.json"   --manifest "$MX/generations/$MX_GEN/generation.json"   --nav "$MX_CSV/nav_daily.csv"   --holdings "$MX_CSV/holdings.csv"   --daily-holdings "$MX_CSV/daily_holdings.csv"   --subscriptions "$MX_CSV/subscription_details.csv"   --product-id 7361599360326447104   --quantbase-current "$QB/generations/$QB_GEN/CURRENT.json"   --quantbase-manifest "$QB/generations/$QB_GEN/generation.json"   --quantbase-history "$QB_CSV/dashboard_Volatis_Strategy_pricehistory.csv"   --quantbase-activity "$QB_CSV/account_activity.csv"   --quantbase-fund-id 107   --portfolio123-current "$P123/CURRENT.json"   --portfolio123-manifest "$P123/generations/$P123_GEN/generation.json"   --portfolio123-metadata "$P123_HISTORY_TABLES/har_managed_metadata.parquet"   --portfolio123-performance "$P123_HISTORY_TABLES/har_managed_performance.parquet"   --portfolio123-equity "$P123_HISTORY_TABLES/har_equity_curve.parquet"   --portfolio123-returns "$P123_TABLES/returns_daily.parquet"   --portfolio123-relationships "$P123_TABLES/strategy_relationships.parquet"   --portfolio-fx-rates-manifest "$Q/dataPortfolio/portfolio-fx-rates/generations/9812f2536a16da1b1e64f9030cca1bef22519333a4a8e19f3cb11ab32d39bc6e/generation.json"   --strategy-history-manifest "$HISTORY_BUNDLE/manifest.json"   --strategy-history-returns "$HISTORY_BUNDLE/returns.csv"   --strategy-backtests-generation "$BACKTESTS_GEN/generation.json"   --output-root "$LH_ROOT" > "$CYCLE/layered-history.json"
   cat "$CYCLE/layered-history.json"
   HISTORY_ID="$(json_field "$CYCLE/layered-history.json" generation_id)"
 else
