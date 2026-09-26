@@ -105,6 +105,11 @@ _PATH_STAGES = {
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
+    # WS4 T1.4 (corrective program) scope note: this file is outside that
+    # brief's literal write scope, but this one-line declaration for each new
+    # `check_*.py` guard is forced by this gate itself -- an undeclared
+    # `tools/` path fails CI as "unmapped relevant production change" -- so it
+    # is the minimal change needed, not a broader edit to this file.
     "tools/check_retained_authority_pins.py": [],
     "tools/check_release_validation_findings.py": [],
     "tools/codex_scope_guard.py": [],

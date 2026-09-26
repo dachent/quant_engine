@@ -102,24 +102,20 @@ fi
 # #469/#326/#444, generalized: a detector already computes a signal that
 # should stop publication (conformance blocking reasons, an applicable open
 # correction, a stale retained pin) and nothing downstream refuses on it.
-# This is the one precondition that closes all three: publication refuses
-# unless validate_generation's findings for this exact generation show zero
-# BLOCKER_*. Missing findings refuse too -- a validator that has not run yet
-# is not evidence of readiness.
-#
-# Generation identity here is content-addressed from the exact production
-# spec being committed (its sha256), so a different candidate spec cannot
-# reuse another generation's clean findings. validate_generation.py (a
-# separate lane's tool) must publish its findings.json at
-# "$VALIDATION_ROOT/<that sha256>/findings.json" for this gate to see them;
-# until that lane's output lands at this path, this step fails closed, which
-# is the intended posture for an unimplemented validator, not a bug in the gate.
-VALIDATION_ROOT="${VALIDATION_ROOT:-$W/validation}"
-GENERATION_ID="$("$PY" -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$P/production-spec.json")"
-echo "== verify validate_generation findings show zero blockers for generation $GENERATION_ID =="
-"$PY" tools/check_release_validation_findings.py \
-  --generation-id "$GENERATION_ID" \
-  --findings-root "$VALIDATION_ROOT"
+# `execute --commit` below reaches `commit_release`
+# (packages/core/src/quant_engine/core/release.py), which now refuses -- for
+# every caller, not only this script -- unless every target root in the
+# release manifest has a clean validate_generation findings file for its own
+# `proposed_generation_id`, expected at
+# "<that root>/validation/<generation_id>/findings.json"
+# (state/briefs/findings-contract.md; `evaluate_release_validation_findings`,
+# packages/core/src/quant_engine/core/publication.py). Missing findings
+# refuse too -- a validator that has not run yet is not evidence of
+# readiness. There is deliberately no separate precondition step here: the
+# generation identity that matters is the one in the release manifest being
+# committed, not a spec-file hash invented by this script, so the check
+# belongs at the sink that reads that manifest, not in a wrapper that has to
+# guess it.
 
 echo "== execute --commit =="
 "$PY" tools/data_pipeline.py execute --spec "$P/production-spec.json" \

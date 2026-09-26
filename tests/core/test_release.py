@@ -1477,3 +1477,218 @@ def test_directory_lease_verifies_the_identity_it_acquired(tmp_path) -> None:
         assert lease.identity == _path_identity(target)
     finally:
         lease.close()
+
+
+def _write_release_validation_findings(
+    root: Path,
+    generation_id: str,
+    *,
+    findings: tuple[dict[str, object], ...] = (),
+    declared_generation_id: str | None = None,
+    path_generation_id: str | None = None,
+) -> None:
+    """A minimal well-formed findings.json per state/briefs/findings-contract.md.
+
+    Written at the path keyed by ``path_generation_id`` (default: ``generation_id``,
+    the real path the gate looks up), declaring ``declared_generation_id``
+    (default: ``generation_id``) inside the document -- distinct knobs so a test
+    can put a findings document at the right path while it names the wrong
+    generation, exercising the gate's content check rather than its path lookup.
+    """
+    declared_generation_id = declared_generation_id or generation_id
+    path_generation_id = path_generation_id or generation_id
+    summary = {
+        "BLOCKER_INVARIANT": 0,
+        "BLOCKER_AUTHORITY": 0,
+        "BLOCKER_REGRESSION": 0,
+        "NOT_READY": 0,
+        "WARNING": 0,
+    }
+    for entry in findings:
+        summary[str(entry["class"])] += 1
+    path = root / "validation" / path_generation_id / "findings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        json.dumps(
+            {
+                "schema": "qe-validate-generation/1",
+                "generation_id": declared_generation_id,
+                "generation_dir": str(root / "generations" / declared_generation_id),
+                "validator_commit": "c" * 40,
+                "expected_baseline_sha256": None,
+                "summary": summary,
+                "findings": list(findings),
+            }
+        ).encode("utf-8")
+    )
+
+
+def _enable_real_release_validation(
+    monkeypatch, real_verify_release_validation
+) -> None:
+    import quant_engine.core.release as release_module
+
+    monkeypatch.setattr(
+        release_module, "_verify_release_validation", real_verify_release_validation
+    )
+
+
+def test_commit_release_refuses_without_release_validation_findings(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """The gate: a real (non-rehearsal, non-mechanics) commit must refuse
+    without a clean validate_generation findings file for the exact generation
+    being published -- the property the corrective program's T1.4 gate exists
+    to enforce at the actual publication sink, not only in an operator script.
+    """
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    with pytest.raises(ReleaseValidationError, match="release validation refuses"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+
+    # Refused before any commit side effect: no journal transition, no publish.
+    _, journal = read_release(coordination, manifest.release_id)
+    assert journal.state is ReleaseState.PREPARED
+    assert read_current(root).generation_id != proposed.generation_id
+
+
+def test_commit_release_succeeds_with_clean_release_validation_findings(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-clean")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(root, proposed.generation_id)
+
+    journal = commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+
+    assert journal.state is ReleaseState.COMMITTED
+    assert read_current(root).generation_id == proposed.generation_id
+
+
+def test_commit_release_refuses_with_a_blocking_release_validation_finding(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-blocked")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    # An applicable open correction maps to BLOCKER_AUTHORITY, check_id prefix
+    # `correction.` (state/briefs/findings-contract.md, #326).
+    _write_release_validation_findings(
+        root,
+        proposed.generation_id,
+        findings=(
+            {
+                "check_id": "correction.applicable_open",
+                "class": "BLOCKER_AUTHORITY",
+                "entity": "root",
+                "observed": "open",
+                "expected": "resolved",
+                "pointer": "corrections/1.json",
+                "defect_ids": ["DEF-1"],
+            },
+        ),
+    )
+
+    with pytest.raises(ReleaseValidationError, match="blocking findings"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    assert read_current(root).generation_id != proposed.generation_id
+
+
+def test_commit_release_refuses_when_findings_generation_id_differs(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-mismatch")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(
+        root,
+        proposed.generation_id,
+        declared_generation_id="a-different-generation-id",
+    )
+
+    with pytest.raises(ReleaseValidationError, match="generation_id differs"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    assert read_current(root).generation_id != proposed.generation_id
+
+
+def test_commit_release_skip_release_validation_bypasses_the_gate(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """The explicit, narrow escape hatch: only for a deliberately non-financial
+    commit (recovery rehearsal); documented on `commit_release` itself."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-skip")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    journal = commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        skip_release_validation=True,
+    )
+
+    assert journal.state is ReleaseState.COMMITTED

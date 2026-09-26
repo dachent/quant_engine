@@ -97,3 +97,28 @@ out the alternative this decision rejects below.
 - `.github/workflows/quality.yml:72`
 - [#329](https://github.com/dachent/quant_engine/issues/329), [#468](https://github.com/dachent/quant_engine/issues/468), [#469](https://github.com/dachent/quant_engine/issues/469)
 - `tools/check_release_validation_findings.py` (this lane, T1.4 task 3)
+
+## Appendix: per-issue determination (T1.4 task 1)
+
+Recorded in-repo per cross-family review (PR #481, fix round 1): rule,
+enforcement point found, blocking vs. advisory, and the key file:line, for
+each issue this lane's brief named.
+
+| # | Rule | Enforcement found before this PR | Blocking? | Key file:line |
+|---|---|---|---|---|
+| **#444** GOV-CONSUMER-PROPAGATION-001 | AGENTS.md A1.3: a contract/schema change must enumerate consumers still reading the old meaning, in the same PR, with a regression test; widen to retained copies outside the repo. | `tools/check_retained_authority_pins.py` computed the right answer and had passing unit tests, but was invoked nowhere (no workflow, no `ops/` script). | Advisory / dead code (issue's own words: "no merge check, no test, nothing that fails when it is skipped"). | `tools/check_retained_authority_pins.py` (whole file, unused pre-PR); `tools/portfolio_controller_graph.py:108` |
+| **#469** REL-GATE-001 | Release must refuse when computed conformance/readiness reports a required outcome or source not-ready. | `pipeline.py:3759-3763`: `ready_for_execution` derives from only 3 reasons; conformance/HWM reasons go to `completion_blocking_reasons` (`:3756`), written to the summary (`:3866`) and read by nothing. | Advisory (issue's own text: "gates nothing"). | `packages/core/src/quant_engine/core/pipeline.py:3736-3763, 3866` |
+| **#326** RCCA-004 | Applicable unresolved corrections must block release; prove re-derivation. | `tools/portfolio_control_panel.py:479` reads a "#322/#326 producer envelope" at the panel consumer seam — a read, not a block. Disposition "NEXT" (not implemented). | Advisory / not implemented. | `tools/portfolio_control_panel.py:479` |
+| **#328** RCCA-005 | Restore 4 decomposition lenses for the MVP; governed by #355/#409. | Data/analytics-completeness defect, not a gate/enforcement issue. Out of WS4 scope; no code change made for it here. | N/A (not a gate) | — |
+| **#329** RCCA-006 | Claims no executable composition/outcome-acceptance authority exists. | Composition half is stale (see decision above); outcome-acceptance half is real, now closed by the release-validation-findings gate. | Blocking (composition half) — `.github/workflows/quality.yml:72`. | `docs/controller-graph.md`; `.github/workflows/quality.yml:72` |
+| **#421** OPS-SCAFFOLD-001 | Umbrella: known dev/run failures prevented/detected by the engine's own execution boundaries (8 sub-items). | Mixed/partial, owned piecemeal by numbered children; not one mechanism. | N/A (umbrella) | — |
+
+**#326 → finding class, pinned by the cross-lane contract**
+(`state/briefs/findings-contract.md`, echoed in
+`tools/check_release_validation_findings.py`'s module docstring): an
+applicable, unresolved correction for an output in the generation is a
+`BLOCKER_AUTHORITY` finding, `check_id` prefix `correction.`. This is the rule
+the acc-validator lane's `tools/validate_generation.py` must implement for
+#326 to actually close through the release-validation-findings gate; the gate
+enforces "zero `BLOCKER_*`" generically, and this is the specific mapping that
+makes #326 one of the things it enforces.

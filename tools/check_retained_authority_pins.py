@@ -208,11 +208,17 @@ def sweep(
     missing_findings: dict[str, list[str]] = defaultdict(list)
     documents = 0
     checked = 0
+    documents_skipped_placeholder: list[str] = []
+    targets_skipped_placeholder: dict[str, list[str]] = defaultdict(list)
 
     for document in iter_documents(roots, maximum_depth):
         if is_cloud_placeholder(document):
-            # Not resident: cannot be read without hydrating it. Skipped rather
-            # than reported, per AGENT-CONSTRAINTS OneDrive hydration safety.
+            # Not resident: cannot be read without hydrating it, per
+            # AGENT-CONSTRAINTS OneDrive hydration safety. Counted and reported,
+            # not silently dropped -- an unread document is not evidence the
+            # sweep found nothing (#444's own failure class: a computed signal
+            # silently skipped).
+            documents_skipped_placeholder.append(str(document))
             continue
         try:
             payload = json.loads(document.read_bytes())
@@ -236,7 +242,9 @@ def sweep(
                 continue
             if is_cloud_placeholder(target):
                 # Exists but not resident: verifying it would hydrate it, so
-                # this pin is left unverified rather than reported missing.
+                # this pin is left unverified rather than reported missing --
+                # but counted, for the same reason as above.
+                targets_skipped_placeholder[name].append(declared_path)
                 continue
             if digest_of(target) is None:
                 missing_findings[name].append(declared_path)
@@ -254,11 +262,20 @@ def sweep(
         "pins_checked": checked,
         "documents_pinning_superseded_authorities": len(superseded_findings),
         "documents_with_missing_targets": len(missing_findings),
+        "documents_skipped_as_placeholder": len(documents_skipped_placeholder),
+        "targets_skipped_as_placeholder": sum(
+            len(items) for items in targets_skipped_placeholder.values()
+        ),
         "superseded": {
             key: value for key, value in sorted(superseded_findings.items())
         },
         "missing": {
             key: sorted(set(value)) for key, value in sorted(missing_findings.items())
+        },
+        "skipped_placeholder_documents": sorted(documents_skipped_placeholder),
+        "skipped_placeholder_targets": {
+            key: sorted(set(value))
+            for key, value in sorted(targets_skipped_placeholder.items())
         },
     }
 
@@ -285,6 +302,16 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "repository whose authorities (contracts/schemas) are tracked; "
             "defaults to this tool's own repository"
+        ),
+    )
+    parser.add_argument(
+        "--allow-placeholder-skips",
+        action="store_true",
+        help=(
+            "do not fail when a document or pinned target under a swept root "
+            "was a non-resident cloud placeholder and could not be read "
+            "(default: fail, since the sweep read nothing there and a clean "
+            "report from an unread root is not evidence of anything)"
         ),
     )
     arguments = parser.parse_args(argv)
@@ -317,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
                     "pins_checked",
                     "documents_pinning_superseded_authorities",
                     "documents_with_missing_targets",
+                    "documents_skipped_as_placeholder",
+                    "targets_skipped_as_placeholder",
                 )
             },
             indent=2,
@@ -331,8 +360,27 @@ def main(argv: list[str] | None = None) -> int:
         for target in targets:
             print(f"      {target}")
 
-    failed = bool(report["missing"]) or (
-        bool(report["superseded"]) and not arguments.allow_superseded
+    placeholder_skips = (
+        report["documents_skipped_as_placeholder"]
+        + report["targets_skipped_as_placeholder"]
+    )
+    if placeholder_skips:
+        print(
+            f"SKIPPED  {report['documents_skipped_as_placeholder']} document(s) and "
+            f"{report['targets_skipped_as_placeholder']} pinned target(s) as "
+            "non-resident cloud placeholders (unread, not verified)"
+        )
+        for document in report["skipped_placeholder_documents"]:
+            print(f"      {document}")
+        for document, targets in report["skipped_placeholder_targets"].items():
+            print(f"      {document}")
+            for target in targets:
+                print(f"          -> {target}")
+
+    failed = (
+        bool(report["missing"])
+        or (bool(report["superseded"]) and not arguments.allow_superseded)
+        or (bool(placeholder_skips) and not arguments.allow_placeholder_skips)
     )
     return 1 if failed else 0
 
