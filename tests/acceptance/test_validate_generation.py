@@ -1829,6 +1829,21 @@ def test_without_crosswalk_fails_closed_instead_of_self_reference(
     }
 
 
+GOOD_APP_NEGATED_ATTRIBUTES = GOOD_APP_JS.replace(
+    "<p>${formatDate",
+    '<span title="NOT RELEASED" aria-label="not yet published" '
+    'data-state="UN-VERIFIED"></span><p>${formatDate',
+)
+
+
+def test_negated_status_attributes_are_not_flagged(tmp_path: Path) -> None:
+    spec = Spec(
+        app_js=GOOD_APP_NEGATED_ATTRIBUTES, candidate=[_set(("state",), "STAGED")]
+    )
+    findings = run(build(tmp_path, spec))
+    assert not [f for f in findings if f.check_id == "code.hardcoded_status_literal"]
+
+
 def test_readiness_conditioned_status_is_not_flagged(tmp_path: Path) -> None:
     spec = Spec(
         app_js=GOOD_APP_STATUS_FROM_READINESS,

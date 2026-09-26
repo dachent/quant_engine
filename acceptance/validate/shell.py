@@ -681,15 +681,10 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
         value = match.group(1)
         if "${" in value:
             value = re.sub(r"\$\{[^}]*\}", " ", value)
-        words = (
-            [w for w in _STATUS_WORD.findall(value)]
-            if not match.group(0).startswith("class")
-            else []
-        )
-        phrase = _PHRASE.match(value)
-        if phrase is not None and not match.group(0).startswith("class"):
-            words.append(phrase.group(1))
-        for word in words:
+        if match.group(0).startswith("class"):
+            continue
+        # Same negation filter as text nodes: title="NOT RELEASED" is not a claim.
+        for word in _positive_words(value):
             add(match.start(), "attribute", word)
     for match in re.finditer(
         r"\.\s*(?:textContent|innerText|innerHTML)\s*=\s*[\"'`]([^\"'`]{1,160})[\"'`]",
