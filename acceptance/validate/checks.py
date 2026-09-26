@@ -1424,15 +1424,29 @@ def _details(row: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+# A reconciliation detail declares a capital *total* when its name says so
+# (value_usd, total_usd, systematic_total_usd, liquid_value_usd, ...). Differences,
+# gaps, tolerances and residuals (difference_usd, delta_usd, tolerance_usd, ...) are
+# not totals and are never compared with itemized sums.
+_TOTAL_FIELD = re.compile(r"(?:^|_)(?:value|total|sum|balance|amount|capital)(?:_|$)")
+_NON_TOTAL_FIELD = re.compile(
+    r"(?:^|_)(?:diff|difference|delta|gap|tolerance|residual|error|variance|"
+    r"mismatch|change|adjustment|max_abs|absolute_difference)(?:_|$)"
+)
+
+
 def _capital_claims(row: Mapping[str, Any]) -> dict[str, Decimal]:
-    """USD totals a reconciliation claims (``value_usd`` and any ``*_usd`` field)."""
+    """USD totals a reconciliation declares (never its differences or tolerances)."""
 
     claims = {}
     for key, value in _details(row).items():
-        if key == "value_usd" or key.endswith("_usd"):
-            amount = to_decimal(value)
-            if amount is not None:
-                claims[key] = amount
+        if not key.endswith("_usd") or _NON_TOTAL_FIELD.search(key):
+            continue
+        if not _TOTAL_FIELD.search(key[: -len("_usd")] + "_"):
+            continue
+        amount = to_decimal(value)
+        if amount is not None:
+            claims[key] = amount
     return claims
 
 

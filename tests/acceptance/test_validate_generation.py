@@ -965,6 +965,20 @@ BAD_APP_CALLOUT_REWORDED = BAD_APP_CALLOUT.replace(
 BAD_APP_STATUS_ATTRIBUTE = GOOD_APP_JS.replace(
     "<p>${formatDate", '<span data-release-state="VERIFIED"></span><p>${formatDate'
 )
+BAD_APP_STATUS_FALLBACK = GOOD_APP_JS.replace(
+    "<p>${formatDate",
+    '<span class="badge">${data.meta.release_badge || "Ready for release"}</span>'
+    "<p>${formatDate",
+)
+BAD_APP_STATUS_WORD = GOOD_APP_JS.replace(
+    "<p>${formatDate", '<div class="state-chip">Available</div><p>${formatDate'
+)
+GOOD_APP_STATUS_FROM_READINESS = GOOD_APP_JS.replace(
+    "<p>${formatDate",
+    '<span class="badge">${data.account_manifest.authority_readiness'
+    '.publication_readiness === "READY" ? "Published" : "Not published"}</span>'
+    "<p>${formatDate",
+)
 BAD_APP_STATUS_DOM = GOOD_APP_JS.replace(
     "  function init() {",
     '  function init() {\n    document.title = "x";\n    badge.textContent = "Published";',
@@ -1673,6 +1687,16 @@ CASES: dict[str, tuple[str, str, Spec]] = {
             candidate=[_set(("state",), "STAGED")],
         ),
     ),
+    "app_status_fallback_literal": (
+        "code.hardcoded_status_literal",
+        checks.BLOCKER_AUTHORITY,
+        Spec(app_js=BAD_APP_STATUS_FALLBACK, candidate=[_set(("state",), "STAGED")]),
+    ),
+    "app_status_whole_word": (
+        "code.hardcoded_status_literal",
+        checks.BLOCKER_AUTHORITY,
+        Spec(app_js=BAD_APP_STATUS_WORD, candidate=[_set(("state",), "STAGED")]),
+    ),
     "count_active_wording": (
         "universe.hardcoded_count_text",
         checks.BLOCKER_INVARIANT,
@@ -1803,6 +1827,31 @@ def test_without_crosswalk_fails_closed_instead_of_self_reference(
         ("identity.release_pinned", checks.NOT_READY),
         ("universe.authority_missing", checks.BLOCKER_AUTHORITY),
     }
+
+
+def test_readiness_conditioned_status_is_not_flagged(tmp_path: Path) -> None:
+    spec = Spec(
+        app_js=GOOD_APP_STATUS_FROM_READINESS,
+        candidate=[_set(("state",), "STAGED")],
+    )
+    findings = run(build(tmp_path, spec))
+    assert not [f for f in findings if f.check_id == "code.hardcoded_status_literal"]
+
+
+def test_zero_difference_detail_on_a_pass_reconciliation_is_not_a_total(
+    tmp_path: Path,
+) -> None:
+    details = json.dumps(
+        {"value_usd": "6600", "difference_usd": "0", "tolerance_usd": "0.01"}
+    )
+    spec = Spec(report=[_set(("reconciliation_checks", 0, "details_json"), details)])
+    findings = run(build(tmp_path, spec))
+    assert not [
+        f
+        for f in findings
+        if f.check_id in ("capital.reconciliation_recompute", "capital.as_of_cutoff")
+    ]
+    assert [f.check_id for f in findings] == ["expected.not_supplied"]
 
 
 def test_eager_guard_before_dereference_is_not_flagged(tmp_path: Path) -> None:

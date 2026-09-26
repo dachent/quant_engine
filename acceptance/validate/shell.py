@@ -595,27 +595,54 @@ def stress_callouts(js: str) -> list[StressCallout]:
 
 # ------------------------------------------------------- hard-coded statuses (D8)
 
-POSITIVE_STATUS_WORDS = (
+# Positive availability/publication statuses. Upper-case tokens are matched anywhere in
+# rendered text (status tokens are upper case by convention); the phrase list is
+# matched only when it is the whole rendered value, so prose such as "Account live"
+# is not mistaken for a status.
+POSITIVE_STATUS_TOKENS = (
     "PUBLISHED",
+    "PUBLICATION_READY",
     "VERIFIED",
     "READY",
+    "READY_FOR_RELEASE",
+    "RELEASE_READY",
+    "PRODUCTION_READY",
     "APPROVED",
     "CERTIFIED",
     "RELEASED",
+    "AVAILABLE",
+    "ACCEPTED",
+    "CLEARED",
+    "PASSED",
+    "GO_LIVE",
 )
-_NEGATED = re.compile(r"(?i)\b(?:NOT|UN|NON|PRE)[\s_-]*$")
+_TOKEN = re.compile(r"\b(" + "|".join(POSITIVE_STATUS_TOKENS) + r")\b")
+_PHRASE = re.compile(
+    r"(?i)^\s*(?:status\s*[:=-]\s*)?("
+    r"published|verified|ready|ready\s+(?:for|to)\s+(?:release|publish|publication)|"
+    r"(?:release|publication|production)[\s_-]+ready|approved|certified|released|"
+    r"available|accepted|cleared|passed|live|go[\s_-]+live|signed[\s_-]+off"
+    r")\s*[.!]?\s*$"
+)
+# "NOT READY", "UN-VERIFIED", "NOT PM-ACCEPTED": a negation within the two words
+# (or 16 characters) before the status word.
+_NEGATED = re.compile(
+    r"(?i)(?:\b(?:NOT|NO|NON|UN|PRE)\b|\b(?:UN|NON|PRE)-)[\s\w-]{0,16}$"
+)
+_READINESS_SOURCE = re.compile(r"(?i)readiness|publication|verification|release_state")
 
 
-def _positive_words(text: str, whole_node: bool) -> list[str]:
-    found = []
-    for word in POSITIVE_STATUS_WORDS:
-        flags = re.IGNORECASE if whole_node else 0
-        for match in re.finditer(rf"\b{word}\b", text, flags):
-            if whole_node and text.strip().upper() != word:
-                continue
-            if _NEGATED.search(text[: match.start()]):
-                continue
-            found.append(word)
+def _positive_words(text: str) -> list[str]:
+    """Positive statuses a rendered literal asserts (token anywhere, or whole phrase)."""
+
+    found = [
+        match.group(1)
+        for match in _TOKEN.finditer(text)
+        if not _NEGATED.search(text[: match.start()])
+    ]
+    phrase = _PHRASE.match(text)
+    if phrase is not None:
+        found.append(phrase.group(1))
     return found
 
 
@@ -628,42 +655,67 @@ class StatusLiteral:
 
 
 def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
-    """Positive status words rendered from literals (text, attributes, DOM sinks)."""
+    """Positive statuses rendered from literals rather than from the payload.
+
+    Contexts: HTML text nodes, status-bearing attributes, DOM text sinks, and string
+    literals inside template interpolations (arguments, ``||``/``??`` fallbacks,
+    ternary branches) unless that interpolation reads the readiness payload.
+    """
 
     results: list[StatusLiteral] = []
 
     def add(position: int, context: str, literal: str) -> None:
         results.append(StatusLiteral(file, line_of(text, position), context, literal))
 
-    for match in re.finditer(r">([^<>]{1,120})<", text):
+    for match in re.finditer(r">([^<>]{1,160})<", text):
         node_text = re.sub(r"\$\{[^}]*\}", " ", match.group(1))
-        words = _positive_words(node_text, whole_node=False) or _positive_words(
-            node_text, whole_node=True
-        )
-        for word in words:
+        if not node_text.strip():
+            continue
+        for word in _positive_words(node_text):
             add(match.start(), "text-node", word)
     for match in re.finditer(
-        r"\b(?:data-[\w-]+|aria-label|title|value|alt)\s*=\s*\\?[\"']([^\"'<>]{1,120})\\?[\"']",
+        r"\b(?:data-[\w-]+|aria-label|title|value|alt|class)\s*=\s*\\?[\"']"
+        r"([^\"'<>]{1,160})\\?[\"']",
         text,
     ):
-        for word in _positive_words(
-            match.group(1), whole_node=False
-        ) or _positive_words(match.group(1), whole_node=True):
+        value = match.group(1)
+        if "${" in value:
+            value = re.sub(r"\$\{[^}]*\}", " ", value)
+        words = (
+            [w for w in _TOKEN.findall(value)]
+            if not match.group(0).startswith("class")
+            else []
+        )
+        phrase = _PHRASE.match(value)
+        if phrase is not None and not match.group(0).startswith("class"):
+            words.append(phrase.group(1))
+        for word in words:
             add(match.start(), "attribute", word)
     for match in re.finditer(
-        r"\.\s*(?:textContent|innerText|innerHTML)\s*=\s*[\"'`]([^\"'`]{1,120})[\"'`]",
+        r"\.\s*(?:textContent|innerText|innerHTML)\s*=\s*[\"'`]([^\"'`]{1,160})[\"'`]",
         text,
     ):
-        for word in _positive_words(
-            match.group(1), whole_node=False
-        ) or _positive_words(match.group(1), whole_node=True):
+        for word in _positive_words(match.group(1)):
             add(match.start(), "dom-text", word)
-    for match in re.finditer(
-        r"\$\{\s*[A-Za-z_$][\w$]*\(\s*[\"']([A-Za-z_]{3,40})[\"']\s*\)", text
-    ):
-        for word in _positive_words(match.group(1), whole_node=True) or _positive_words(
-            match.group(1), whole_node=False
-        ):
-            add(match.start(), "template-literal-argument", word)
+    masked = mask(text)
+    pairs = brace_pairs(masked)
+    for index in range(len(masked) - 1):
+        if masked[index] != "$" or masked[index + 1] != "{":
+            continue
+        close = pairs.get(index + 1)
+        if close is None:
+            continue
+        expression = text[index + 2 : close]
+        if _READINESS_SOURCE.search(expression):
+            continue
+        for literal in re.finditer(r"([\"'])((?:(?!\1)[^\\\n]){1,60})\1", expression):
+            before = expression[: literal.start()].rstrip()
+            after = expression[literal.end() :].lstrip()
+            # A literal compared against (x === "AVAILABLE") is not rendered.
+            operators = ("===", "!==", "==", "!=", "case")
+            if before.endswith(operators) or after.startswith(operators[:4]):
+                continue
+            if _PHRASE.match(literal.group(2)) or _TOKEN.fullmatch(literal.group(2)):
+                add(index, "template-expression-literal", literal.group(2))
     unique = {(item.line, item.context, item.literal): item for item in results}
     return [unique[key] for key in sorted(unique)]
