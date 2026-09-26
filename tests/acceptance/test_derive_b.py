@@ -114,6 +114,7 @@ def flow(
     flow_type: str,
     *,
     occurred_on: str = "2026-01-02",
+    recognized_on: str | None = None,
     provider_activity_id: str | None = None,
 ) -> dict[str, object]:
     """Create the smallest permitted-ledger flow row needed by flow tests."""
@@ -130,6 +131,8 @@ def flow(
         row["provider_activity_id_sha256"] = provider_activity_id
         row["mapping_basis"] = "CURRENT_SOURCE_PAIRED_PROVIDER_JOURNAL"
         row["source_classification"] = "PAIRED_INTERNAL_JOURNAL"
+    if recognized_on is not None:
+        row["nav_recognition_date"] = recognized_on
     return row
 
 
@@ -139,17 +142,16 @@ def write_selected_inputs(
     ledger: dict[str, object],
     crosswalk_rows: list[dict[str, object]],
 ) -> None:
-    """Write only the three selected upstream JSON inputs for a tiny derive() test."""
+    """Write only the selected authoritative JSON inputs for a tiny derive() test."""
     derivation.LEDGER_PATH = Path("ledger.json")
     derivation.CROSSWALK_PATH = Path("crosswalk.json")
-    derivation.MANIFEST_PATH = Path("manifest.json")
+    ledger.setdefault("as_of_date", "2026-09-17")
     fixtures = {
         derivation.LEDGER_PATH: ledger,
-        derivation.CROSSWALK_PATH: {"rows": crosswalk_rows},
-        derivation.MANIFEST_PATH: {
+        derivation.CROSSWALK_PATH: {
+            "as_of_date": "2026-09-17",
             "calculation_cutoff_date": "2026-09-17",
-            "rows": [],
-            "source_identities": [],
+            "rows": crosswalk_rows,
         },
     }
     for relative_path, contents in fixtures.items():
@@ -447,7 +449,7 @@ def test_derive_keeps_crosswalk_listed_strategy_when_all_members_are_conflicted(
         if row["metric_id"] == "universe.active_strategy_ids"
     )
 
-    assert strategy_ids["value"] == '["strategy-listed"]'
+    assert strategy_ids["value"] == ["strategy-listed"]
     assert {
         row["metric_id"]
         for row in output["not_derivable"]
@@ -455,8 +457,8 @@ def test_derive_keeps_crosswalk_listed_strategy_when_all_members_are_conflicted(
     } == {"capital.strategy.cutoff", "twr.strategy", "mwr.strategy"}
 
 
-def test_paired_prefix_flows_reject_unbalanced_three_row_group():
-    """All-pairs matching would erase a real external credit in this ambiguous group."""
+def test_paired_prefix_flows_remain_entity_flows_when_grouping_is_ambiguous():
+    """Pairing ambiguity cannot erase the account-level transfer that moves its NAV."""
     derivation = load_derivation_module()
     ledger_flows = [
         flow("credit-a", "account-a", "10", "TRANSFER:INTERNAL:JOURNAL"),
@@ -468,10 +470,7 @@ def test_paired_prefix_flows_reject_unbalanced_three_row_group():
         ledger_flows, "account-a", date(2026, 1, 1), date(2026, 9, 17)
     )
 
-    assert flows == {}
-    assert count == 0
-    assert problem is not None
-    assert "ambiguous" in problem
+    assert (flows, count, problem) == ({date(2026, 1, 2): Decimal("10")}, 1, None)
 
 
 def test_unpaired_prefix_flow_is_classified_external_under_policy():
@@ -488,8 +487,8 @@ def test_unpaired_prefix_flow_is_classified_external_under_policy():
     assert (flows, count, problem) == ({date(2026, 1, 2): Decimal("10")}, 1, None)
 
 
-def test_account_transfer_with_matching_source_identity_is_internal():
-    """A matching provider activity is the policy-required counterparty evidence."""
+def test_account_transfer_with_matching_source_identity_is_an_account_flow():
+    """Dropping an internal transfer books its receiving-account NAV jump as return."""
     derivation = load_derivation_module()
     ledger_flows = [
         flow(
@@ -512,11 +511,11 @@ def test_account_transfer_with_matching_source_identity_is_internal():
         ledger_flows, "account-a", date(2026, 1, 1), date(2026, 9, 17)
     )
 
-    assert (flows, count, problem) == ({}, 0, None)
+    assert (flows, count, problem) == ({date(2026, 1, 2): Decimal("10")}, 1, None)
 
 
-def test_account_transfer_without_source_identity_pairing_is_not_derivable():
-    """An equal and opposite amount alone does not satisfy the identity-qualified policy rule."""
+def test_account_transfer_without_source_identity_pairing_is_an_account_flow():
+    """An account-level transfer still crosses the account boundary when unpaired."""
     derivation = load_derivation_module()
     ledger_flows = [
         flow(
@@ -539,7 +538,263 @@ def test_account_transfer_without_source_identity_pairing_is_not_derivable():
         ledger_flows, "account-a", date(2026, 1, 1), date(2026, 9, 17)
     )
 
-    assert flows == {}
-    assert count == 0
-    assert problem is not None
-    assert "source-identity" in problem
+    assert (flows, count, problem) == ({date(2026, 1, 2): Decimal("10")}, 1, None)
+
+
+def test_flow_recognition_date_overrides_event_date():
+    """Using the event date would subtract a flow before the NAV actually recognizes it."""
+    derivation = load_derivation_module()
+
+    flows, count, problem = derivation.classified_external_flows(
+        [
+            flow(
+                "credit-a",
+                "account-a",
+                "10",
+                "EXTERNAL_CONTRIBUTION",
+                occurred_on="2026-01-02",
+                recognized_on="2026-01-03",
+            )
+        ],
+        "account-a",
+        date(2026, 1, 1),
+        date(2026, 9, 17),
+    )
+
+    assert (flows, count, problem) == ({date(2026, 1, 3): Decimal("10")}, 1, None)
+
+
+def test_twr_treats_zero_to_zero_subperiod_and_same_day_funding_as_neutral():
+    """Raising on every zero opening would discard a funded account's valid later return."""
+    derivation = load_derivation_module()
+
+    result = derivation.time_weighted_return(
+        [
+            (date(2026, 1, 1), Decimal("0")),
+            (date(2026, 1, 2), Decimal("0")),
+            (date(2026, 1, 3), Decimal("100")),
+            (date(2026, 1, 4), Decimal("110")),
+        ],
+        {date(2026, 1, 3): Decimal("100")},
+    )
+
+    assert result == Decimal("0.10")
+
+
+def test_xirr_accepts_single_partial_sum_sign_change_proof():
+    """A simple cash-flow sign-count gate rejects a uniquely proved positive-rate XIRR."""
+    derivation = load_derivation_module()
+
+    result = derivation.xirr(
+        [
+            (date(2025, 1, 1), Decimal("-100")),
+            (date(2026, 1, 1), Decimal("200")),
+            (date(2027, 1, 1), Decimal("-50")),
+            (date(2028, 1, 1), Decimal("10")),
+        ]
+    )
+
+    assert result is not None
+    assert result > Decimal("0")
+
+
+def test_membership_window_starts_at_first_funded_interval():
+    """Keeping pre-funding observations would report returns before the accepted account start."""
+    derivation = load_derivation_module()
+
+    result = derivation.window_observations(
+        [
+            (date(2026, 1, 1), Decimal("0")),
+            (date(2026, 1, 2), Decimal("100")),
+            (date(2026, 1, 3), Decimal("110")),
+        ],
+        date(2026, 1, 2),
+        None,
+    )
+
+    assert result == [
+        (date(2026, 1, 2), Decimal("100")),
+        (date(2026, 1, 3), Decimal("110")),
+    ]
+
+
+def test_strategy_composite_uses_union_dates_and_member_intervals():
+    """Intersecting member dates drops a valid funded-member return when an account enters later."""
+    derivation = load_derivation_module()
+
+    observations, flows = derivation.composite_series(
+        {
+            "account-a": [
+                (date(2026, 1, 1), Decimal("100")),
+                (date(2026, 1, 2), Decimal("110")),
+                (date(2026, 1, 3), Decimal("121")),
+            ],
+            "account-b": [
+                (date(2026, 1, 2), Decimal("50")),
+                (date(2026, 1, 3), Decimal("55")),
+            ],
+        },
+        {"account-a": {}, "account-b": {date(2026, 1, 2): Decimal("50")}},
+    )
+
+    assert observations == [
+        (date(2026, 1, 1), Decimal("100")),
+        (date(2026, 1, 2), Decimal("160")),
+        (date(2026, 1, 3), Decimal("176")),
+    ]
+    assert flows == {date(2026, 1, 2): Decimal("50")}
+    assert derivation.time_weighted_return(observations, flows) == Decimal("0.21")
+
+
+def test_quantbase_buy_uses_the_next_valuation_after_its_exact_timestamp():
+    """Dating a filled sleeve buy to the prior day treats new capital as if it earned that return."""
+    derivation = load_derivation_module()
+
+    flows, count = derivation.quantbase_sleeve_flows(
+        [
+            {
+                "activity_type": "filled_txn",
+                "fund": "107",
+                "type": "BUY",
+                "amount": "50",
+                "time": "2026-01-02T20:32:52Z",
+                "created_to_cover_fees": "False",
+                "is_rebalance": "False",
+            }
+        ],
+        [
+            (date(2026, 1, 2), Decimal("100")),
+            (date(2026, 1, 3), Decimal("160")),
+        ],
+    )
+
+    assert (flows, count) == ({date(2026, 1, 3): Decimal("50")}, 1)
+
+
+def test_quantbase_raw_account_value_replaces_ledger_observation():
+    """Using a later ledger value for Quantbase would violate the raw-capture source boundary."""
+    derivation = load_derivation_module()
+
+    observations = derivation.quantbase_raw_observations(
+        [
+            {
+                "funds": '[{"fund_id": 107, "value": "123.45"}]',
+            }
+        ],
+        "account-quantbase",
+    )
+
+    assert observations == [(date(2026, 9, 2), Decimal("123.45"))]
+
+
+def test_matrixport_raw_nav_and_deposits_define_value_and_flow_timing():
+    """Using ledger substitutes would hide the raw Matrixport observation and wallet deposit date."""
+    derivation = load_derivation_module()
+    nav_rows = [
+        {"day_timestamp_utc": "2026-01-02T00:00:00+00:00", "nav": "1"},
+        {"day_timestamp_utc": "2026-01-03T00:00:00+00:00", "nav": "1.1"},
+    ]
+    deposits = [
+        {
+            "state": "confirmed",
+            "currency": "USDC",
+            "amount": "100",
+            "created_at_utc": "2026-01-01T20:00:00+00:00",
+        }
+    ]
+
+    observations = derivation.matrixport_raw_observations(
+        nav_rows, deposits, "account-m"
+    )
+    flows, count = derivation.matrixport_raw_flows(deposits, observations)
+
+    assert observations == [
+        (date(2026, 1, 2), Decimal("100")),
+        (date(2026, 1, 3), Decimal("110.0")),
+    ]
+    assert (flows, count) == ({date(2026, 1, 2): Decimal("100")}, 1)
+
+
+def test_derive_has_no_reporting_manifest_dependency(tmp_path: Path):
+    """A missing reporting-generation manifest must not block the independent oracle."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [nav("account-a", "2026-09-17", "100")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [included_row("account-a", "strategy-a")],
+    )
+
+    output = derivation.derive(tmp_path)
+
+    assert all(
+        "account-strategy-manifest" not in item["path"] for item in output["inputs"]
+    )
+
+
+def test_derive_emits_excluded_capital_and_explicit_window_not_derivable(
+    tmp_path: Path,
+):
+    """Omitting a retained account hides both its known cutoff capital and unavailable history."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "as_of_date": "2026-09-17",
+            "nav_observations": [nav("account-x", "2026-09-16", "0.19")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                "account_id": "account-x",
+                "strategy_id": "legacy",
+                "product_epoch_disposition": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+                "effective_start": "2025-09-27",
+                "effective_end": "2025-11-24",
+            }
+        ],
+    )
+
+    output = derivation.derive(tmp_path)
+
+    assert any(
+        row["metric_id"] == "capital.account.cutoff"
+        and row["entity"] == "account-x"
+        and row["value"] == "0.19"
+        for row in output["metrics"]
+    )
+    assert any(
+        row["metric_id"] == "twr.account" and row["entity"] == "account-x"
+        for row in output["not_derivable"]
+    )
+
+
+def test_derive_fails_closed_for_crosswalk_cutoff_mismatch(tmp_path: Path):
+    """Accepting a mismatched selected crosswalk would silently change the financial cutoff."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "as_of_date": "2026-09-17",
+            "nav_observations": [nav("account-a", "2026-09-17", "100")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [included_row("account-a", "strategy-a")],
+    )
+    crosswalk_path = tmp_path / derivation.CROSSWALK_PATH
+    payload = json.loads(crosswalk_path.read_text(encoding="utf-8"))
+    payload["calculation_cutoff_date"] = "2026-09-16"
+    crosswalk_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    output = derivation.derive(tmp_path)
+
+    assert output["metrics"] == []
+    assert any("cutoff" in row["reason"] for row in output["not_derivable"])
