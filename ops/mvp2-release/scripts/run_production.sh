@@ -99,6 +99,28 @@ if [ "${PUBLISH:-0}" != "1" ]; then
   exit 0
 fi
 
+# #469/#326/#444, generalized: a detector already computes a signal that
+# should stop publication (conformance blocking reasons, an applicable open
+# correction, a stale retained pin) and nothing downstream refuses on it.
+# This is the one precondition that closes all three: publication refuses
+# unless validate_generation's findings for this exact generation show zero
+# BLOCKER_*. Missing findings refuse too -- a validator that has not run yet
+# is not evidence of readiness.
+#
+# Generation identity here is content-addressed from the exact production
+# spec being committed (its sha256), so a different candidate spec cannot
+# reuse another generation's clean findings. validate_generation.py (a
+# separate lane's tool) must publish its findings.json at
+# "$VALIDATION_ROOT/<that sha256>/findings.json" for this gate to see them;
+# until that lane's output lands at this path, this step fails closed, which
+# is the intended posture for an unimplemented validator, not a bug in the gate.
+VALIDATION_ROOT="${VALIDATION_ROOT:-$W/validation}"
+GENERATION_ID="$("$PY" -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$P/production-spec.json")"
+echo "== verify validate_generation findings show zero blockers for generation $GENERATION_ID =="
+"$PY" tools/check_release_validation_findings.py \
+  --generation-id "$GENERATION_ID" \
+  --findings-root "$VALIDATION_ROOT"
+
 echo "== execute --commit =="
 "$PY" tools/data_pipeline.py execute --spec "$P/production-spec.json" \
   --commit --commit-authorization "$P/commit-authorization.json" > "$P/execute.json"

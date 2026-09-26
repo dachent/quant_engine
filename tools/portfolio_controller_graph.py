@@ -106,6 +106,7 @@ _PATH_STAGES = {
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
     "tools/check_retained_authority_pins.py": [],
+    "tools/check_release_validation_findings.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/merge_readiness.py": [],

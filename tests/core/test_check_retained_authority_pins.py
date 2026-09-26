@@ -7,10 +7,12 @@ project four completed stages: the copy still hashes to the value recorded for i
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -206,3 +208,117 @@ def test_line_ending_renderings_both_match(tmp_path: Path, repository: Path) -> 
     report = checker.sweep([frozen], repository_root=repository)
 
     assert report["documents_pinning_superseded_authorities"] == 1
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(MODULE_PATH), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_main_exits_nonzero_when_a_pin_is_superseded(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The gate contract: `#444`'s "no merge check" complaint means the CLI itself
+    must fail closed, not just the ``sweep()`` function underneath it."""
+    frozen = tmp_path / "retained"
+    frozen.mkdir()
+    copy = frozen / "financial-contract.json"
+    copy.write_bytes(
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "show",
+                "HEAD~1:contracts/portfolio-financial-mvp-source-v1.json",
+            ]
+        )
+    )
+    digest = hashlib.sha256(copy.read_bytes()).hexdigest()
+    (frozen / "runner-input-config.json").write_text(
+        json.dumps({"contract": {"path": str(copy), "sha256": digest}}),
+        encoding="utf-8",
+    )
+
+    result = _run_cli(str(frozen), "--repository-root", str(repository))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "documents pin superseded" in result.stdout
+
+
+def test_main_exits_zero_when_pins_are_current(
+    tmp_path: Path, repository: Path
+) -> None:
+    frozen = tmp_path / "retained"
+    frozen.mkdir()
+    copy = frozen / "financial-contract.json"
+    copy.write_bytes(
+        (
+            repository / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
+    (frozen / "config.json").write_text(
+        json.dumps(
+            {
+                "contract": {
+                    "path": str(copy),
+                    "sha256": hashlib.sha256(copy.read_bytes()).hexdigest(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_cli(str(frozen), "--repository-root", str(repository))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file-attribute API only")
+def test_cloud_placeholder_document_is_skipped_not_reported(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A document marked FILE_ATTRIBUTE_OFFLINE is never read.
+
+    This stands in for a OneDrive Files-On-Demand placeholder: reading it would
+    hydrate it through the sync filter driver. AGENT-CONSTRAINTS requires
+    checking residency first and skipping, never reading through it -- even
+    though (as here) the file's actual bytes would otherwise be reported.
+    """
+    frozen = tmp_path / "retained"
+    frozen.mkdir()
+    copy = frozen / "financial-contract.json"
+    copy.write_bytes(
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "show",
+                "HEAD~1:contracts/portfolio-financial-mvp-source-v1.json",
+            ]
+        )
+    )
+    digest = hashlib.sha256(copy.read_bytes()).hexdigest()
+    config = frozen / "runner-input-config.json"
+    config.write_text(
+        json.dumps({"contract": {"path": str(copy), "sha256": digest}}),
+        encoding="utf-8",
+    )
+
+    FILE_ATTRIBUTE_OFFLINE = 0x00001000
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    assert kernel32.SetFileAttributesW(str(config), FILE_ATTRIBUTE_OFFLINE)
+    try:
+        assert checker.is_cloud_placeholder(config) is True
+
+        report = checker.sweep([frozen], repository_root=repository)
+
+        assert report["documents_pinning_superseded_authorities"] == 0
+        assert report["documents_with_missing_targets"] == 0
+    finally:
+        # Restore a normal attribute so tmp_path cleanup can delete the file.
+        kernel32.SetFileAttributesW(str(config), 0x00000080)  # FILE_ATTRIBUTE_NORMAL

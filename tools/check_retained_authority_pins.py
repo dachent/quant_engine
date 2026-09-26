@@ -65,6 +65,33 @@ class AuthorityPinError(RuntimeError):
     """The sweep could not be carried out."""
 
 
+# Windows FILE_ATTRIBUTE_* flags for OneDrive Files-On-Demand placeholders.
+_FILE_ATTRIBUTE_OFFLINE = 0x00001000
+_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+_CLOUD_PLACEHOLDER_ATTRIBUTES = (
+    _FILE_ATTRIBUTE_OFFLINE
+    | _FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
+
+
+def is_cloud_placeholder(path: Path) -> bool:
+    """True when ``path`` is a cloud-sync placeholder: metadata only, no local bytes.
+
+    Reading such a file hydrates it through the sync provider's filter driver
+    (``cldflt`` for OneDrive/SharePoint). AGENT-CONSTRAINTS requires checking
+    residency before ever opening a file under a synced root, and never
+    hashing/reading one that is not already resident. ``stat`` alone does not
+    hydrate, so checking attributes first is always safe.
+    """
+    try:
+        attributes = path.stat().st_file_attributes
+    except (OSError, AttributeError):
+        return False
+    return bool(attributes & _CLOUD_PLACEHOLDER_ATTRIBUTES)
+
+
 def _run_git(root: Path, *arguments: str) -> bytes:
     try:
         return subprocess.check_output(
@@ -183,6 +210,10 @@ def sweep(
     checked = 0
 
     for document in iter_documents(roots, maximum_depth):
+        if is_cloud_placeholder(document):
+            # Not resident: cannot be read without hydrating it. Skipped rather
+            # than reported, per AGENT-CONSTRAINTS OneDrive hydration safety.
+            continue
         try:
             payload = json.loads(document.read_bytes())
         except (OSError, ValueError):
@@ -201,7 +232,13 @@ def sweep(
             if not declared_path:
                 continue
             target = Path(declared_path)
-            if target.is_absolute() and digest_of(target) is None:
+            if not target.is_absolute():
+                continue
+            if is_cloud_placeholder(target):
+                # Exists but not resident: verifying it would hydrate it, so
+                # this pin is left unverified rather than reported missing.
+                continue
+            if digest_of(target) is None:
                 missing_findings[name].append(declared_path)
 
     return {
@@ -241,10 +278,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report superseded pins without failing (missing targets still fail)",
     )
+    parser.add_argument(
+        "--repository-root",
+        type=Path,
+        default=REPOSITORY_ROOT,
+        help=(
+            "repository whose authorities (contracts/schemas) are tracked; "
+            "defaults to this tool's own repository"
+        ),
+    )
     arguments = parser.parse_args(argv)
 
     report = sweep(
-        [root.resolve() for root in arguments.roots], maximum_depth=arguments.max_depth
+        [root.resolve() for root in arguments.roots],
+        repository_root=arguments.repository_root.resolve(),
+        maximum_depth=arguments.max_depth,
     )
     if arguments.json_out is not None:
         arguments.json_out.write_text(
