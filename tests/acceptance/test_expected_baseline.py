@@ -57,6 +57,21 @@ def test_every_row_has_metric_id_and_entity() -> None:
         assert "expected" in row
 
 
+def test_no_null_authority_pointer_sha256() -> None:
+    """Fix round 1 (Kimi K3 review of PR #485): every authority_pointer must
+    carry a real sha256 -- a missing one (e.g. a contract file whose digest
+    lives in derive_a.json's separate top-level "contracts" list rather than
+    "inputs") must fail this test, not silently pass through as null."""
+    doc = _load()
+    offenders = [
+        (row["metric_id"], row["entity"], pointer["path"])
+        for row in doc["metrics"]
+        for pointer in row.get("authority_pointer", [])
+        if not pointer.get("sha256")
+    ]
+    assert not offenders, offenders
+
+
 def test_tolerance_classes_match_spec() -> None:
     """USD +/-0.01, ratio +/-1e-8, everything else exact (no tolerance)."""
     doc = _load()

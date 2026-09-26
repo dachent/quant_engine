@@ -14,7 +14,7 @@
    "path": "acceptance/derive_b.json (scratch)"
   }
  },
- "generated_utc": "2026-09-26T23:43:00Z",
+ "generated_utc": "2026-09-26T23:59:12Z",
  "metrics": [
   {
    "metric_id": "capital.account.cutoff",
@@ -331,7 +331,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -383,7 +383,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -415,7 +415,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -447,7 +447,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -479,7 +479,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -511,7 +511,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -551,7 +551,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -583,7 +583,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -927,7 +927,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -959,7 +959,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -991,7 +991,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1027,7 +1027,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1059,7 +1059,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1091,7 +1091,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1123,7 +1123,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1155,7 +1155,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1187,7 +1187,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1219,7 +1219,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -1267,7 +1267,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1299,7 +1299,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1331,7 +1331,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1363,7 +1363,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1399,7 +1399,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1431,7 +1431,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1463,7 +1463,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1495,7 +1495,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1527,7 +1527,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1559,7 +1559,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1591,7 +1591,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -1639,7 +1639,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1671,7 +1671,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1703,7 +1703,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1735,7 +1735,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1771,7 +1771,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1803,7 +1803,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1835,7 +1835,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1867,7 +1867,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1899,7 +1899,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1931,7 +1931,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -1963,7 +1963,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -2011,7 +2011,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2043,7 +2043,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2075,7 +2075,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2107,7 +2107,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2139,7 +2139,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2171,7 +2171,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -2219,7 +2219,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2251,7 +2251,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2295,7 +2295,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2327,7 +2327,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2359,7 +2359,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -2395,7 +2395,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2427,7 +2427,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2459,7 +2459,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2491,7 +2491,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2523,7 +2523,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2555,7 +2555,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -2603,7 +2603,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2635,7 +2635,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2667,7 +2667,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2699,7 +2699,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2731,7 +2731,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2763,7 +2763,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
@@ -2811,7 +2811,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2843,7 +2843,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -2887,7 +2887,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -2923,7 +2923,7 @@
    "authority_pointer": [
     {
      "path": "contracts/portfolio-financial-mvp-source-v1.json",
-     "sha256": null
+     "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
