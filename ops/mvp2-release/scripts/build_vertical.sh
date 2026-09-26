@@ -78,6 +78,14 @@ echo "== resync the contract pins onto what the code now materializes =="
 RELEASE_SPEC="$LIVE/config/provider-ledger-spec-release.json"
 "$PY" "$E/sync_contract_pins.py" "$RELEASE_SPEC" "$RELEASE_SPEC"
 
+# #444 (GOV-CONSUMER-PROPAGATION-001): a contract/schema bump with no matching
+# refresh of the artifacts that pin it previously ran four stages before
+# surfacing (commit 47120f1). The resync above is the fix; this proves it
+# actually converged instead of trusting that it did. Exit 1 aborts the build
+# under `set -euo pipefail` -- this is a hard precondition, not advisory.
+echo "== verify no retained-authority pin under \$LIVE is stale after resync (#444) =="
+"$PY" tools/check_retained_authority_pins.py "$LIVE" --max-depth 6
+
 # The spec recipe validates a dependence source, and the ledger it stages is
 # what the layered history is rebuilt from, so this first pass reuses the
 # layered history the policy already pins. The final pass below rebuilds both.
