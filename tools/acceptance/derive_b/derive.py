@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, getcontext
+from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
 from pathlib import Path
 from typing import Iterable
 
@@ -56,6 +56,48 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def code_commit() -> str:
+    """Read this checkout's commit without invoking repository tooling."""
+    dot_git = Path(__file__).resolve().parents[3] / ".git"
+    git_dir = dot_git
+    if dot_git.is_file():
+        pointer = dot_git.read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir: "):
+            raise ValueError("unreadable .git directory pointer")
+        git_dir = Path(pointer.removeprefix("gitdir: "))
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if head.startswith("ref: "):
+        ref = head.removeprefix("ref: ")
+        ref_path = git_dir / ref
+        if not ref_path.is_file():
+            common_dir = (
+                git_dir / (git_dir / "commondir").read_text(encoding="utf-8").strip()
+            ).resolve()
+            ref_path = common_dir / ref
+        head = ref_path.read_text(encoding="utf-8").strip()
+    if len(head) != 40 or any(
+        character not in "0123456789abcdef" for character in head
+    ):
+        raise ValueError("checkout HEAD is not a full lowercase SHA-1")
+    return head
+
+
+def has_reserve_or_bucket_identifier(value: object) -> bool:
+    """Inspect every selected capital/manifest value for a reserve entity marker."""
+    if isinstance(value, dict):
+        return any(
+            "reserve" in str(key).lower()
+            or "bucket" in str(key).lower()
+            or has_reserve_or_bucket_identifier(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(has_reserve_or_bucket_identifier(item) for item in value)
+    return isinstance(value, str) and (
+        "reserve" in value.lower() or "bucket" in value.lower()
+    )
 
 
 def time_weighted_return(
@@ -111,12 +153,12 @@ def xirr(cash_flows: Iterable[tuple[date, Decimal]]) -> Decimal | None:
         while low_value * high_value > 0 and high < Decimal("1000000"):
             high *= 2
             high_value = npv(high)
-    except (InvalidOperation, OverflowError):
+    except DecimalException:
         return None
     if low_value == 0:
-        return low
+        return None
     if high_value == 0:
-        return high
+        return None
     if low_value * high_value > 0:
         return None
     for _ in range(250):
@@ -155,28 +197,45 @@ def aggregate_capital(
     }
 
 
-def current_crosswalk(rows: list[dict[str, object]]) -> tuple[dict[str, str], set[str]]:
+def current_crosswalk(
+    rows: list[dict[str, object]],
+) -> tuple[dict[str, str], set[str], dict[str, str]]:
+    """Return current mappings and explicit failures for unusable crosswalk rows."""
     account_strategies: dict[str, str] = {}
     excluded: set[str] = set()
+    problems: dict[str, str] = {}
+    in_effect_rows: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in rows:
         account_id = str(row["account_id"])
-        disposition = row["product_epoch_disposition"]
         effective_start = parse_date(str(row["effective_start"]))
         effective_end = row.get("effective_end")
         in_effect = effective_start <= CUTOFF and (
             effective_end is None or parse_date(str(effective_end)) >= CUTOFF
         )
-        if disposition == "INCLUDED_PRODUCT_EPOCH" and in_effect:
+        if in_effect:
+            in_effect_rows[account_id].append(row)
+        elif row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH":
+            problems[account_id] = "included crosswalk row is out of effect at cutoff"
+    for account_id, account_rows in in_effect_rows.items():
+        if len(account_rows) != 1:
+            problems[account_id] = "multiple crosswalk rows are in effect at cutoff"
+            continue
+        row = account_rows[0]
+        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH":
             account_strategies[account_id] = str(row["strategy_id"])
-        elif disposition != "INCLUDED_PRODUCT_EPOCH":
+        else:
             excluded.add(account_id)
-    return account_strategies, excluded
+    for account_id in problems:
+        account_strategies.pop(account_id, None)
+        excluded.discard(account_id)
+    return account_strategies, excluded, problems
 
 
 def latest_observations(
     ledger: dict[str, object],
-) -> dict[str, list[tuple[date, Decimal]]]:
+) -> tuple[dict[str, list[tuple[date, Decimal]]], set[str]]:
     observations: dict[str, dict[date, Decimal]] = defaultdict(dict)
+    conflicts: set[str] = set()
     for row in ledger["nav_observations"]:
         nav = row["nav"]
         observed_on = parse_date(row["as_of_date"])
@@ -190,43 +249,97 @@ def latest_observations(
         value = Decimal(nav["value"])
         prior = observations[account_id].get(observed_on)
         if prior is not None and prior != value:
-            raise ValueError(
-                f"conflicting valuations for {account_id} on {observed_on}"
-            )
+            conflicts.add(account_id)
+            continue
         observations[account_id][observed_on] = value
-    return {
-        account_id: sorted(values.items())
-        for account_id, values in observations.items()
-    }
+    return (
+        {
+            account_id: sorted(values.items())
+            for account_id, values in observations.items()
+            if account_id not in conflicts
+        },
+        conflicts,
+    )
 
 
-def paired_prefix_internal_flows(flows: list[dict[str, object]]) -> set[str]:
-    """Identify policy-permitted prefix transfers paired by date, account, and exact amount."""
-    paired: set[str] = set()
+def paired_internal_flows(
+    flows: list[dict[str, object]], flow_type: str
+) -> tuple[set[str], dict[str, str]]:
+    """Pair an internal-flow class one-to-one, retaining ambiguity as a failure."""
     candidates = [
         row
         for row in flows
-        if row["flow_type"].startswith("TRANSFER:INTERNAL:")
-        and row["amount"]["status"] == "AVAILABLE"
-        and row["amount"]["currency"] == "USD"
+        if row["flow_type"] == flow_type
+        or (
+            flow_type == "TRANSFER:INTERNAL:" and row["flow_type"].startswith(flow_type)
+        )
+        if row["amount"]["status"] == "AVAILABLE" and row["amount"]["currency"] == "USD"
     ]
-    for left_index, left in enumerate(candidates):
-        for right in candidates[left_index + 1 :]:
-            if (
-                left["event_date"] == right["event_date"]
-                and left["account_id"] != right["account_id"]
-                and Decimal(left["amount"]["value"])
-                == -Decimal(right["amount"]["value"])
-            ):
-                paired.add(left["record_id"])
-                paired.add(right["record_id"])
-    return paired
+    groups: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+    for row in candidates:
+        amount = Decimal(row["amount"]["value"])
+        if flow_type == "ACCOUNT_TRANSFER":
+            activity_id = row.get("provider_activity_id_sha256")
+            if not activity_id:
+                groups[("missing-identity", row["record_id"])].append(row)
+                continue
+            groups[
+                (
+                    row["event_date"],
+                    abs(amount),
+                    row.get("provider_id"),
+                    row.get("generation_id"),
+                    activity_id,
+                )
+            ].append(row)
+        else:
+            groups[(row["event_date"], abs(amount))].append(row)
+    paired: set[str] = set()
+    problems: dict[str, str] = {}
+    for group in groups.values():
+        if len(group) == 1:
+            if flow_type == "ACCOUNT_TRANSFER":
+                problems[group[0]["record_id"]] = (
+                    "ACCOUNT_TRANSFER lacks a unique source-identity counterparty"
+                )
+            continue
+        if len(group) != 2:
+            reason = f"ambiguous or unbalanced {flow_type} transfer group"
+            problems.update({row["record_id"]: reason for row in group})
+            continue
+        left, right = group
+        left_amount = Decimal(left["amount"]["value"])
+        right_amount = Decimal(right["amount"]["value"])
+        if left["account_id"] == right["account_id"] or left_amount != -right_amount:
+            reason = f"ambiguous or unbalanced {flow_type} transfer group"
+            problems.update({row["record_id"]: reason for row in group})
+            continue
+        if flow_type == "ACCOUNT_TRANSFER" and not all(
+            row.get("mapping_basis") or row.get("source_classification")
+            for row in group
+        ):
+            problems.update(
+                {
+                    row[
+                        "record_id"
+                    ]: "ACCOUNT_TRANSFER lacks source-identity pairing assertion"
+                    for row in group
+                }
+            )
+            continue
+        paired.update(row["record_id"] for row in group)
+    return paired, problems
 
 
 def classified_external_flows(
     ledger_flows: list[dict[str, object]], account_id: str, start: date, end: date
 ) -> tuple[dict[date, Decimal], int, str | None]:
-    paired_prefix = paired_prefix_internal_flows(ledger_flows)
+    paired_prefix, prefix_problems = paired_internal_flows(
+        ledger_flows, "TRANSFER:INTERNAL:"
+    )
+    paired_account, account_problems = paired_internal_flows(
+        ledger_flows, "ACCOUNT_TRANSFER"
+    )
     by_date: dict[date, Decimal] = defaultdict(Decimal)
     count = 0
     for row in ledger_flows:
@@ -243,18 +356,20 @@ def classified_external_flows(
             by_date[occurred_on] += Decimal(amount["value"])
             count += 1
         elif flow_type.startswith("TRANSFER:INTERNAL:"):
+            if row["record_id"] in prefix_problems:
+                return {}, 0, prefix_problems[row["record_id"]]
             if row["record_id"] not in paired_prefix:
                 by_date[occurred_on] += Decimal(amount["value"])
                 count += 1
         elif flow_type == "ACCOUNT_TRANSFER":
-            return (
-                {},
-                0,
-                (
-                    f"flow {row['record_id']} is ACCOUNT_TRANSFER; the required source-identity "
-                    "counterparty proof is not present in the permitted input"
-                ),
-            )
+            if row["record_id"] in account_problems:
+                return {}, 0, account_problems[row["record_id"]]
+            if row["record_id"] not in paired_account:
+                return (
+                    {},
+                    0,
+                    "ACCOUNT_TRANSFER lacks a unique source-identity counterparty",
+                )
         else:
             return {}, 0, f"unclassified flow type {flow_type} in {row['record_id']}"
     return dict(by_date), count, None
@@ -312,8 +427,10 @@ def derive(qe_root: Path) -> dict[str, object]:
     manifest = json.loads((qe_root / MANIFEST_PATH).read_text(encoding="utf-8"))
     if manifest["calculation_cutoff_date"] != CUTOFF.isoformat():
         raise ValueError("the selected manifest does not declare the fixed cutoff")
-    account_strategies, excluded_accounts = current_crosswalk(crosswalk["rows"])
-    observations = latest_observations(ledger)
+    account_strategies, excluded_accounts, crosswalk_problems = current_crosswalk(
+        crosswalk["rows"]
+    )
+    observations, observation_conflicts = latest_observations(ledger)
     inputs = [
         {
             "path": path.as_posix(),
@@ -331,14 +448,15 @@ def derive(qe_root: Path) -> dict[str, object]:
         "schema": "qe-cp-derivation/1",
         "derivation": "b",
         "model": "independent-standalone-python",
-        "code_commit": "not-read-by-derivation-b",
+        "code_commit": code_commit(),
         "inputs": inputs,
         "convention_notes": [
             "ITD is the only window emitted: contracts/portfolio-performance-policy-v1.json has no window-id field beyond its synthetic cases.",
             "TWR uses contracts/portfolio-performance-policy-v1.json:twr_cases[case_id=date_only_end_of_day]: (ending value - same-date external flow) / prior value, compounded and not annualized.",
             "MWR uses contracts/portfolio-performance-policy-v1.json:mwr_cases.day_count=ACTUAL_365 and an annualized XIRR; investor cash flows are the inverse of portfolio external flows.",
-            "contracts/account-strategy-flow-classification-policy-v1.json:event_dispositions governs external-flow classification; unproved ACCOUNT_TRANSFER source-identity pairing is not derived.",
-            "No permitted input identifies a reserve bucket, so reserve and liquid capital are reported not_derivable rather than inferred as zero.",
+            "contracts/account-strategy-flow-classification-policy-v1.json:event_dispositions governs external-flow classification; ACCOUNT_TRANSFER is internal only after unique same-date, different-account, exact-opposite source-identity pairing.",
+            "Strategy TWR uses the intersection of member valuation dates, summed member values, and summed same-date external flows; this is equivalent to the policy's beginning_capital_weighted composite case when member subperiod dates are common, and otherwise fails closed.",
+            "Reserve discovery inspects provider-ledger.json:capital_anchors and account-strategy-manifest.json:rows/source_identities; no reserve/bucket identifier permits a reserve balance to be inferred.",
         ],
         "metrics": [],
         "not_derivable": [],
@@ -347,7 +465,41 @@ def derive(qe_root: Path) -> dict[str, object]:
     account_values: dict[str, Decimal] = {}
     account_flow_data: dict[str, tuple[dict[date, Decimal], int] | None] = {}
 
+    for account_id, reason in sorted(crosswalk_problems.items()):
+        for metric_id in (
+            "capital.account.cutoff",
+            "date.source_last_observation",
+            "flows.account.net",
+            "flows.account.count",
+            "twr.account",
+            "mwr.account",
+        ):
+            add_not_derivable(
+                output,
+                metric_id,
+                account_id,
+                reason,
+                "ITD" if metric_id.startswith(("flows", "twr", "mwr")) else None,
+            )
+
     for account_id in sorted(account_strategies):
+        if account_id in observation_conflicts:
+            for metric_id in (
+                "capital.account.cutoff",
+                "date.source_last_observation",
+                "flows.account.net",
+                "flows.account.count",
+                "twr.account",
+                "mwr.account",
+            ):
+                add_not_derivable(
+                    output,
+                    metric_id,
+                    account_id,
+                    "conflicting available USD valuations on one observation date",
+                    "ITD" if metric_id.startswith(("flows", "twr", "mwr")) else None,
+                )
+            continue
         account_observations = observations.get(account_id, [])
         if not account_observations:
             for metric_id in (
@@ -389,7 +541,7 @@ def derive(qe_root: Path) -> dict[str, object]:
             )
         )
         flows, flow_count, flow_problem = classified_external_flows(
-            ledger["flows"], account_id, account_observations[0][0], end_date
+            ledger["flows"], account_id, account_observations[0][0], CUTOFF
         )
         if flow_problem is not None:
             account_flow_data[account_id] = None
@@ -437,12 +589,15 @@ def derive(qe_root: Path) -> dict[str, object]:
                     window="ITD",
                 )
             )
-        mwr_flows = [(account_observations[0][0], -account_observations[0][1])]
-        mwr_flows.extend(
-            (occurred_on, -amount) for occurred_on, amount in flows.items()
-        )
-        mwr_flows.append((end_date, end_value))
-        mwr = xirr(mwr_flows)
+        if end_date < CUTOFF and any(occurred_on > end_date for occurred_on in flows):
+            mwr = None
+        else:
+            mwr_flows = [(account_observations[0][0], -account_observations[0][1])]
+            mwr_flows.extend(
+                (occurred_on, -amount) for occurred_on, amount in flows.items()
+            )
+            mwr_flows.append((end_date, end_value))
+            mwr = xirr(mwr_flows)
         if mwr is None:
             add_not_derivable(
                 output,
@@ -477,17 +632,31 @@ def derive(qe_root: Path) -> dict[str, object]:
         excluded_accounts,
         Decimal("0"),
     )
-    for strategy_id, capital in sorted(aggregate["strategies"].items()):
-        metrics.append(
-            metric(
+    missing_included = set(account_strategies).difference(account_values)
+    for strategy_id in sorted(set(account_strategies.values())):
+        members = {
+            account_id
+            for account_id, assigned in account_strategies.items()
+            if assigned == strategy_id
+        }
+        if members.intersection(missing_included):
+            add_not_derivable(
+                output,
                 "capital.strategy.cutoff",
                 strategy_id,
-                money(capital),
-                "USD",
-                used_inputs,
+                "one or more included member accounts lacks a cutoff value",
             )
-        )
-    if set(account_strategies).difference(account_values):
+        else:
+            metrics.append(
+                metric(
+                    "capital.strategy.cutoff",
+                    strategy_id,
+                    money(aggregate["strategies"][strategy_id]),
+                    "USD",
+                    used_inputs,
+                )
+            )
+    if missing_included:
         add_not_derivable(
             output,
             "capital.portfolio.systematic.cutoff",
@@ -522,11 +691,22 @@ def derive(qe_root: Path) -> dict[str, object]:
                 used_inputs,
             )
         )
+    reserve_identified = has_reserve_or_bucket_identifier(
+        ledger["capital_anchors"]
+    ) or (
+        has_reserve_or_bucket_identifier(manifest["rows"])
+        or has_reserve_or_bucket_identifier(manifest["source_identities"])
+    )
+    reserve_reason = (
+        "provider-ledger.json:capital_anchors and account-strategy-manifest.json:rows/source_identities were inspected; a reserve/bucket identifier was found but no cutoff reserve balance is supplied"
+        if reserve_identified
+        else "provider-ledger.json:capital_anchors and account-strategy-manifest.json:rows/source_identities were inspected; neither identifies a reserve/bucket entity"
+    )
     add_not_derivable(
         output,
         "capital.reserve.cutoff",
         "reserve",
-        "no reserve bucket identifier exists in the permitted inputs",
+        reserve_reason,
     )
     add_not_derivable(
         output,
