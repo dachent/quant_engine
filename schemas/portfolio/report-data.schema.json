@@ -466,7 +466,7 @@
         },
         "mwr_label": {"enum": ["STRATEGY_EPOCH_MWR", "ACCOUNT_EPOCH_MWR", null]},
         "mwr_value_basis": {"enum": ["STRATEGY_NAV", "ACCOUNT_TOTAL", "ACCOUNT_VALUE", null]},
-        "mwr_valuation_timing": {"enum": ["ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
+        "mwr_valuation_timing": {"enum": ["NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE", "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
         "mwr_day_count": {"enum": ["ACTUAL_365", null]},
         "mwr_unit": {"enum": ["ANNUALIZED_RETURN", null]},
         "mwr_source_binding": {"enum": ["GOVERNED_SOURCE_IDENTITIES", null]},
