@@ -614,14 +614,17 @@ def _retained_history_requires_rebuild(
 ) -> bool:
     """Distinguish stale code- or ledger-bound derived history from invalid evidence.
 
-    Every TargetSeriesError out of the verifier is a semantic validation
-    failure of a well-formed retained generation: the code that defines it
-    changed, its return content no longer matches the provider ledger after a
-    semantics change, or its source-admission proof binds a previous ledger
-    generation. The layered history is one cycle behind by design in each
-    case, so the generation is rebuilt. Corrupt or unreadable input evidence
-    surfaces as an OSError or JSON/decoding error instead; that is invalid
-    source evidence and fails closed without rebuilding.
+    The verifier marks a TargetSeriesError as ``kind="staleness"`` only when a
+    well-formed retained generation is one cycle behind by design: the code
+    that defines it moved on (a recorded repository dependency differs), its
+    current source admission proof binds a previous ledger generation, or its
+    account-live returns no longer match the provider ledger after a
+    semantics change. Each such generation is rebuilt from the frozen
+    selected bytes. Every other TargetSeriesError is an integrity failure of
+    the retained evidence itself (tampered artifact bytes, an invalid or
+    non-canonical manifest, a differing inventory, an unreadable generation),
+    and raw OSError/ValueError escapes are unreadable evidence; both fail
+    closed without rebuilding.
     """
 
     import portfolio_target_series as history
@@ -631,8 +634,12 @@ def _retained_history_requires_rebuild(
             history.verify_layered_history_generation(
                 history_root, contract_path, require_mode=mode, **authorities
             )
-        except history.TargetSeriesError:
-            return True
+        except history.TargetSeriesError as exc:
+            if exc.kind == "staleness":
+                return True
+            raise AttendedPreparationError(
+                "retained layered history is invalid"
+            ) from exc
         except (OSError, ValueError) as exc:
             raise AttendedPreparationError(
                 "retained layered history is invalid"

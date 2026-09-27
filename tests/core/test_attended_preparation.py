@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import csv
+from datetime import date
+from decimal import Decimal, localcontext
 import hashlib
+import importlib.util
+import io
 import os
 from pathlib import Path
 import json
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
 
@@ -16,6 +22,22 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_attended_preparation as preparation
 import portfolio_pipeline_materialize as materializer
+
+
+HISTORY_TEST_PATH = (
+    preparation.ROOT
+    / "tests"
+    / "portfolio_analytics"
+    / "test_portfolio_layered_history.py"
+)
+HISTORY_TEST_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_layered_history_fixture_for_attended_preparation", HISTORY_TEST_PATH
+)
+if HISTORY_TEST_SPEC is None or HISTORY_TEST_SPEC.loader is None:
+    raise RuntimeError("unable to load the shared layered-history fixture module")
+history_tests = importlib.util.module_from_spec(HISTORY_TEST_SPEC)
+sys.modules[HISTORY_TEST_SPEC.name] = history_tests
+HISTORY_TEST_SPEC.loader.exec_module(history_tests)
 
 
 @pytest.mark.parametrize("resume", [False, True])
@@ -538,99 +560,581 @@ def test_attended_basic_preflight_probes_configured_runtime_before_source_qc(
     assert calls == [Path(sys.executable).resolve()]
 
 
-def test_history_semantic_validation_failure_requires_rebuild_regardless_of_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Any TargetSeriesError from the verifier means the basis is stale.
+def _install_verifier_history_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install the shared synthetic contract parse on both module copies.
 
-    The verifier only raises TargetSeriesError for semantic validation of a
-    well-formed retained generation: a trusted-code change, a return-content
-    mismatch against the provider ledger, or a source-admission proof bound to
-    a previous ledger generation. Matching message variants chases the tail;
-    every such failure is a rebuild.
+    The layered-history fixture module imports ``portfolio_target_series``
+    under its own private module name, while ``portfolio_attended_preparation``
+    resolves the normally imported module; the sanctioned synthetic producer
+    parse must cover both or the fixture builds against a different module
+    than the verifier the rebuild decision drives.
     """
 
     import portfolio_target_series as history
 
-    for message in (
-        "layered history repository dependency differs: "
-        "schemas/portfolio/financial-mvp-source-contract.schema.json",
-        "current source admission proof differs",
-    ):
-        calls: list[str] = []
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    history_tests._install_synthetic_history_authority(monkeypatch, history)
 
-        def changed(*_args: object, **kwargs: object) -> dict[str, object]:
-            calls.append(str(kwargs["require_mode"]))
-            raise history.TargetSeriesError(message)
 
-        monkeypatch.setattr(history, "verify_layered_history_generation", changed)
-        assert (
-            preparation._retained_history_requires_rebuild(
-                tmp_path / "history", tmp_path / "contract.json", {}
-            )
-            is True
+def _retained_layered_history(
+    tmp_path: Path,
+    *,
+    fixture: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Build one real retained generation through the real builder and writer."""
+
+    fixture = (
+        fixture if fixture is not None else history_tests._history_fixture(tmp_path)
+    )
+    artifacts, manifest_content = history_tests._build(fixture)
+    generation = history_tests.write_layered_history_generation(
+        tmp_path / "retained-history", artifacts, manifest_content
+    )
+    return fixture, generation
+
+
+def test_stale_repository_dependency_kind_rebuilds_retained_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded repository dependency that moved on is staleness, not corruption.
+
+    The verifier keeps its real trusted-dependency gate: the retained
+    generation records the repository SHA it was built at, and when a
+    dependency committed at that recorded SHA no longer matches the code that
+    defines the history, the retained generation is one code cycle behind
+    and is rebuilt rather than failed closed.
+    """
+
+    import portfolio_target_series as history
+
+    def gated_synthetic_parse(
+        path: Path, repository_sha: str | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        history._require_trusted_layered_history_dependencies(repository_sha)
+        return cast(
+            "tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]",
+            history_tests._synthetic_history_contract(path),
         )
-        assert calls == ["LIVE_ONLY"]
-        monkeypatch.undo()
 
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    monkeypatch.setattr(history, "_history_contract", gated_synthetic_parse)
 
-def test_history_ledger_basis_change_requires_rebuild_but_corrupt_input_does_not(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A retained history built from the prior ledger basis is stale, not invalid.
+    fixture, generation = _retained_layered_history(tmp_path)
+    assert (
+        history.verify_layered_history_generation(generation, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
 
-    The layered history is one cycle behind by design: when the admitted
-    ACCOUNT_LIVE returns change under a semantics change, verification of the
-    retained generation fails with the content-diff class against the provider
-    ledger, and the generation must be rebuilt from the corrected basis. A
-    corrupt or unreadable input instead surfaces as an OSError or JSON error,
-    which is invalid source evidence and fails closed.
-    """
-
-    import json
-
-    import portfolio_target_series as history
-
-    authorities: preparation._HistoryAuthorities = {
-        "financial_input_contract_path": tmp_path / "contract.json",
-        "portfolio123_version_evidence_path": tmp_path / "versions.json",
-        "provider_admission_receipt_path": tmp_path / "admission.json",
-        "provider_ledger_catalog_path": tmp_path / "ledger-catalog.json",
-        "provider_ledger_manifest_path": tmp_path / "ledger-manifest.json",
+    committed = {
+        relative_path: hashlib.sha256(
+            preparation.ROOT.joinpath(*relative_path.split("/")).read_bytes()
+        ).hexdigest()
+        for relative_path in history.LAYERED_HISTORY_REPOSITORY_DEPENDENCIES
     }
-    calls: list[str] = []
+    committed["tools/portfolio_financial_mvp_contract.py"] = "0" * 64
+    monkeypatch.setattr(
+        history,
+        "_committed_layered_history_dependency_sha256s",
+        lambda _repository_sha=None: committed,
+    )
 
-    def rebased(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(str(kwargs["require_mode"]))
-        raise history.TargetSeriesError(
-            "Quantbase account-live return differs from provider ledger"
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="layered history repository dependency differs",
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
         )
-
-    monkeypatch.setattr(history, "verify_layered_history_generation", rebased)
+    assert raised.value.kind == "staleness"
     assert (
         preparation._retained_history_requires_rebuild(
-            tmp_path / "history", tmp_path / "contract.json", authorities
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
         )
         is True
     )
-    assert calls == ["LIVE_ONLY"]
 
-    def corrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise OSError("retained history artifact is unreadable")
 
-    def unparseable(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise json.JSONDecodeError("Expecting value", "<manifest>", 0)
+def test_stale_source_admission_proof_kind_rebuilds_retained_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained proof bound to the previous ledger admission is staleness.
 
-    for broken in (corrupted, unparseable):
-        monkeypatch.setattr(history, "verify_layered_history_generation", broken)
-        with pytest.raises(
-            preparation.AttendedPreparationError,
-            match="retained layered history is invalid",
-        ):
-            preparation._retained_history_requires_rebuild(
-                tmp_path / "history", tmp_path / "contract.json", authorities
+    The verifier's current-source-admission comparison, the receipt and
+    contract identities on disk, and the rebuild decision all stay real. The
+    synthetic producer below stands in for the real admission replay only,
+    because the real replay loads the admission contract through the real
+    financial-MVP loader, which rejects every synthetic provider fixture;
+    it is the same documented seam the layered-history fixture module uses
+    for contract parsing. One admission cycle later the recomputed proof
+    differs from the proof the retained manifest recorded, so the retained
+    generation is one ledger cycle behind and is rebuilt.
+    """
+
+    import portfolio_target_series as history
+
+    admitted_sources = (
+        "owner-account-live-history",
+        "matrixport-account-generation",
+        "quantbase-account-generation",
+        "portfolio123-model-generation",
+    )
+
+    def synthetic_admission_authority(**kwargs: object) -> dict[str, object] | None:
+        receipt_path = cast(Path, kwargs["provider_admission_receipt_path"])
+        if receipt_path is None:
+            return None
+        contract_path = cast(Path, kwargs["contract_path"])
+        financial_input = kwargs["financial_input_contract_path"]
+        receipt_bytes = receipt_path.read_bytes()
+        contract_bytes = cast(Path, financial_input or contract_path).read_bytes()
+        manifest_path = cast(Path, kwargs["provider_ledger_manifest_path"])
+        manifest_bytes = manifest_path.read_bytes()
+        _contract, _strategies, sources, _corrections = (
+            history_tests._synthetic_history_contract(contract_path)
+        )
+        generations = {
+            source_id: {
+                "as_of": sources[source_id]["current_generation"]["as_of"],
+                "generation_id": sources[source_id]["current_generation"][
+                    "generation_id"
+                ],
+                "sha256": sources[source_id]["current_generation"]["sha256"],
+            }
+            for source_id in admitted_sources
+        }
+        receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        contract_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+        accepted_as_of = cast("date", kwargs["accepted_as_of"]).isoformat()
+        proof = {
+            "admission_receipt_sha256": receipt_sha256,
+            "admission_receipt_size_bytes": len(receipt_bytes),
+            "admission_observation_cutoff": accepted_as_of,
+            "financial_cutoff": accepted_as_of,
+            "financial_input_contract_census_sha256": contract_sha256,
+            "financial_input_contract_raw_sha256": contract_sha256,
+            "financial_input_contract_semantic_sha256": contract_sha256,
+            "ledger_catalog_sha256": hashlib.sha256(
+                cast(Path, kwargs["provider_ledger_catalog_path"]).read_bytes()
+            ).hexdigest(),
+            "ledger_generation_id": json.loads(manifest_bytes)["generation_id"],
+            "ledger_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "run_observation_sha256": receipt_sha256,
+            "schema_version": 1,
+            "source_generations": [
+                {"source_id": source_id, **generations[source_id]}
+                for source_id in sorted(generations)
+            ],
+        }
+        return {"proof": proof, "source_generations": generations}
+
+    _install_verifier_history_seams(monkeypatch)
+    monkeypatch.setattr(
+        history, "_current_source_admission_authority", synthetic_admission_authority
+    )
+    monkeypatch.setattr(
+        history_tests.target_series,
+        "_current_source_admission_authority",
+        synthetic_admission_authority,
+    )
+
+    fixture = history_tests._history_fixture(tmp_path)
+    # The synthetic ledger must not fabricate returns on the declared NAV-gap
+    # dates: the real admission comparison replays the ledger targets and
+    # requires the retained account-live rows to match them exactly.
+    catalog = json.loads(fixture["provider_ledger_catalog_path"].read_bytes())
+    catalog["strategy_returns"] = [
+        row
+        for row in catalog["strategy_returns"]
+        if not (
+            row["strategy_id"] == "robuxio-crypto"
+            and row["date"] in {"2025-12-09", "2025-12-10"}
+        )
+    ]
+    for row in catalog["strategy_evidence"]:
+        if row["strategy_id"] == "robuxio-crypto":
+            row["account"]["return_observations"] = 3
+    history_tests._write_json(fixture["provider_ledger_catalog_path"], catalog)
+    ledger_generation_id = history_tests._core_generation_manifest(
+        fixture["provider_ledger_manifest_path"],
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [
+            history_tests._artifact(
+                fixture["provider_ledger_catalog_path"],
+                "normalized/provider-ledger.json",
             )
-        monkeypatch.undo()
+        ],
+    )
+    history_tests._pointer(
+        fixture["provider_ledger_pointer_path"],
+        ledger_generation_id,
+        fixture["provider_ledger_manifest_path"],
+    )
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    history_tests._update_source_generation(
+        contract,
+        "owner-account-live-history",
+        fixture["provider_ledger_manifest_path"],
+        fixture["as_of_date"],
+    )
+    history_tests._update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        fixture["provider_ledger_manifest_path"],
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    history_tests._restore_retained_echo_correction(contract)
+    history_tests._write_json(fixture["contract_path"], contract)
+    history_tests._refresh_materialized_segment_identities(fixture)
+
+    receipt = (
+        fixture["provider_ledger_manifest_path"].parent
+        / "admit-or-declare-receipt.json"
+    )
+    receipt.write_bytes(
+        canonical_json_bytes(
+            {
+                "admission_gate_status": "PASS",
+                "provider_generations": [],
+                "run_observation": {"financial_cutoff": "2026-01-10"},
+            }
+        )
+    )
+    financial_input = tmp_path / "admitted-financial-input-contract.json"
+    financial_input.write_bytes(fixture["contract_path"].read_bytes())
+    authorities = cast(
+        "preparation._HistoryAuthorities",
+        {
+            "financial_input_contract_path": financial_input,
+            "portfolio123_version_evidence_path": None,
+            "provider_admission_receipt_path": receipt,
+            "provider_ledger_catalog_path": fixture["provider_ledger_catalog_path"],
+            "provider_ledger_manifest_path": fixture["provider_ledger_manifest_path"],
+        },
+    )
+    artifacts, manifest_content = history_tests.build_layered_history_generation(
+        repository_sha=history._trusted_layered_history_code_identity()[0],
+        **fixture,
+        provider_admission_receipt_path=receipt,
+        financial_input_contract_path=financial_input,
+    )
+    generation = history_tests.write_layered_history_generation(
+        tmp_path / "retained-history", artifacts, manifest_content
+    )
+    assert (
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], **authorities
+        )["verification"]
+        == "VALID"
+    )
+
+    # One admission cycle later, a new run observation is admitted.
+    receipt.write_bytes(
+        canonical_json_bytes(
+            {
+                "admission_gate_status": "PASS",
+                "provider_generations": [],
+                "run_observation": {"financial_cutoff": "2026-01-11"},
+            }
+        )
+    )
+    with pytest.raises(
+        history.TargetSeriesError, match="current source admission proof differs"
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], **authorities
+        )
+    assert raised.value.kind == "staleness"
+    assert (
+        preparation._retained_history_requires_rebuild(
+            generation, fixture["contract_path"], authorities
+        )
+        is True
+    )
+
+
+def test_stale_account_live_ledger_kind_rebuilds_retained_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Account-live rows left on the previous ledger basis are staleness.
+
+    The retained generation below holds the native (unconverted) Robuxio
+    account-live rows while its manifest-bound conversion proof replays the
+    USD basis, so it is one conversion-basis cycle behind and is rebuilt
+    rather than failed. The Quantbase twin of this comparison cannot fire
+    from the verifier (it is a builder-side check), so its raise site is
+    asserted directly.
+    """
+
+    import portfolio_target_series as history
+
+    _install_verifier_history_seams(monkeypatch)
+    fixture = history_tests._matrixport_fx_fixture(tmp_path)
+    artifacts, manifest_content = history_tests._build(fixture)
+    generation = history_tests.write_layered_history_generation(
+        tmp_path / "retained-history", artifacts, manifest_content
+    )
+    assert (
+        history.verify_layered_history_generation(generation, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+
+    segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    with localcontext() as context:
+        context.prec = 28
+        native_returns = {
+            "2025-12-07": format((Decimal("106") / Decimal("105") - 1), "f"),
+            "2025-12-08": format((Decimal("107") / Decimal("106") - 1), "f"),
+            "2025-12-11": format((Decimal("110") / Decimal("109") - 1), "f"),
+        }
+    for row in segments:
+        if row["segment_id"] == "robuxio-crypto:account-live":
+            row["return"] = native_returns[row["date"]]
+
+    fields = history.CORRELATION_FIELDS_V2
+    live_only = [
+        {field: row[field] for field in fields}
+        for row in segments
+        if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    ]
+    live_only.sort(key=lambda row: (row["series_id"], row["date"]))
+    hybrid = [
+        {field: row[field] for field in fields}
+        for row in segments
+        if row["mode_admission"]
+        in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+    ]
+    hybrid.sort(
+        key=lambda row: (
+            row["series_id"],
+            row["date"],
+            0 if row["evidence_layer"] == "BACKTEST" else 1,
+        )
+    )
+
+    manifest = json.loads(manifest_content)
+    coverage = json.loads(artifacts["coverage.json"])
+    selected = [
+        row for row in segments if row["segment_id"] == "robuxio-crypto:account-live"
+    ]
+    identity = history._row_identity(selected)
+    for strategy in coverage["strategies"]:
+        if strategy["strategy_id"] != "robuxio-crypto":
+            continue
+        for summary in strategy["segments"]:
+            if summary["segment_id"] == "robuxio-crypto:account-live":
+                summary["sha256"] = identity["sha256"]
+
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+    contract["history_corrections"]["materialized_segment_identities"] = (
+        history._materialized_segment_identities(segments, sources)
+    )
+    history_tests._write_json(fixture["contract_path"], contract)
+    contract_bytes = fixture["contract_path"].read_bytes()
+    manifest["product"]["contract_sha256"] = hashlib.sha256(
+        canonical_json_bytes(json.loads(contract_bytes))
+    ).hexdigest()
+    for row in manifest["inputs"]:
+        if row["input_id"] == "financial-mvp-contract":
+            row["sha256"] = hashlib.sha256(contract_bytes).hexdigest()
+            row["size_bytes"] = len(contract_bytes)
+
+    history_tests._replace_output(
+        artifacts, manifest, "segments.csv", history._segment_view_bytes(segments)
+    )
+    history_tests._replace_output(
+        artifacts, manifest, "coverage.json", canonical_json_bytes(coverage)
+    )
+    history_tests._replace_output(
+        artifacts, manifest, "live-only.csv", history._correlation_view_bytes(live_only)
+    )
+    history_tests._replace_output(
+        artifacts,
+        manifest,
+        "live-plus-backtest.csv",
+        history._correlation_view_bytes(hybrid),
+    )
+    history_tests._replace_output(
+        artifacts, manifest, "returns.csv", history._correlation_view_bytes(hybrid)
+    )
+    stale_manifest_content = history_tests._reidentify_manifest(manifest)
+    stale_generation = history_tests.write_layered_history_generation(
+        tmp_path / "stale-history", artifacts, stale_manifest_content
+    )
+
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="Matrixport account-live return differs from provider ledger",
+    ) as raised:
+        history.verify_layered_history_generation(
+            stale_generation, fixture["contract_path"]
+        )
+    assert raised.value.kind == "staleness"
+    assert (
+        preparation._retained_history_requires_rebuild(
+            stale_generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+        is True
+    )
+
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="Quantbase account-live return differs from provider ledger",
+    ) as quantbase:
+        history._quantbase_account_live_from_ledger(
+            [{"date": "2024-10-16", "return": "0.01"}],
+            [{"date": "2024-10-16", "return": "0.02"}],
+            (),
+        )
+    assert quantbase.value.kind == "staleness"
+
+
+def test_corrupt_retained_generation_fails_closed_from_real_tampered_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tampered artifact bytes hard-fail the retained history; no silent rebuild.
+
+    One byte flipped inside a real retained artifact is corruption of the
+    retained evidence, not a code or ledger cycle: the rebuild decision must
+    raise instead of rebuilding over the corruption.
+    """
+
+    import portfolio_target_series as history
+
+    _install_verifier_history_seams(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+    assert (
+        history.verify_layered_history_generation(generation, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+
+    corrupted = bytearray((generation / "returns.csv").read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    (generation / "returns.csv").write_bytes(bytes(corrupted))
+
+    with pytest.raises(
+        history.TargetSeriesError, match="layered history output differs: returns.csv"
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert raised.value.kind == "integrity"
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+
+
+def test_retained_inventory_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A differing generation inventory is corruption and never rebuilds."""
+
+    import portfolio_target_series as history
+
+    _install_verifier_history_seams(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+    (generation / "coverage.json").unlink()
+
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="layered history generation inventory differs",
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert raised.value.kind == "integrity"
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+
+
+@pytest.mark.parametrize("primitive", ["iterdir", "read_bytes"])
+def test_unreadable_retained_generation_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primitive: str,
+) -> None:
+    """Unreadable retained evidence is wrapped or raw, and never rebuilds.
+
+    An unreadable generation directory is wrapped by the verifier into an
+    integrity TargetSeriesError; an unreadable artifact file escapes as a raw
+    OSError, which the decision still fails closed on. Both OS failures are
+    injected at the filesystem primitive scoped to the retained generation,
+    because a real unreadable directory cannot be produced portably (Windows
+    directory ACLs do not map to POSIX mode bits); every wrap, classification,
+    and decision below them is real code.
+    """
+
+    import portfolio_target_series as history
+
+    _install_verifier_history_seams(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+
+    if primitive == "iterdir":
+        real_iterdir = Path.iterdir
+
+        def unreadable(self: Path) -> Any:
+            if self == generation:
+                raise PermissionError("generation inventory is unreadable")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", unreadable)
+        expected = "layered history generation inventory is unreadable"
+    else:
+        real_read_bytes = Path.read_bytes
+
+        def unreadable(self: Path) -> Any:
+            if self == generation / "coverage.json":
+                raise PermissionError("coverage bytes are unreadable")
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", unreadable)
+        expected = "retained layered history is invalid"
+
+    with pytest.raises(
+        (history.TargetSeriesError, OSError),
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert not isinstance(raised.value, history.TargetSeriesError) or (
+        str(raised.value) == expected and raised.value.kind == "integrity"
+    )
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
 
 
 def test_rebuild_layered_history_uses_selected_builder_kwargs_and_current_commit(

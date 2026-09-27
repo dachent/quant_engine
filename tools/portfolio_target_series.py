@@ -266,7 +266,8 @@ def _require_trusted_layered_history_dependencies(
             or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
         ):
             raise TargetSeriesError(
-                f"layered history repository dependency differs: {relative_path}"
+                f"layered history repository dependency differs: {relative_path}",
+                kind="staleness",
             )
     imported_core_path = inspect.getsourcefile(canonical_json_bytes)
     core_dependency = "packages/core/src/quant_engine/core/contracts.py"
@@ -312,7 +313,18 @@ STRATEGY_HISTORY_STATUSES: Final = frozenset(
 
 
 class TargetSeriesError(ValueError):
-    """A source or requested target-series build violates the contract."""
+    """A source or requested target-series build violates the contract.
+
+    ``kind`` separates the two failure classes a retained generation can
+    raise: ``"staleness"`` marks a well-formed generation that is one code
+    or ledger cycle behind by design, while ``"integrity"`` (the default)
+    marks every other failure, including tampered artifacts, non-canonical
+    manifests, and unreadable evidence.
+    """
+
+    def __init__(self, message: str, *, kind: str = "integrity") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -2592,7 +2604,8 @@ def _matrixport_account_live_from_ledger(
             )
             if difference > MATRIXPORT_ACCOUNT_RETURN_RECONCILIATION_MAX_ERROR:
                 raise TargetSeriesError(
-                    "Matrixport account-live return differs from provider ledger"
+                    "Matrixport account-live return differs from provider ledger",
+                    kind="staleness",
                 )
             selected.append(dict(ledger_row))
     return selected
@@ -2956,7 +2969,8 @@ def _quantbase_account_live_from_ledger(
             and observed not in allowed_flow_dates
         ):
             raise TargetSeriesError(
-                "Quantbase account-live return differs from provider ledger"
+                "Quantbase account-live return differs from provider ledger",
+                kind="staleness",
             )
         selected.append(dict(recalculated_row))
     return selected
@@ -6167,7 +6181,9 @@ def validate_layered_history_generation(
         current_admission is not None
         and manifest.get("current_source_admission") != (current_admission["proof"])
     ):
-        raise TargetSeriesError("current source admission proof differs")
+        raise TargetSeriesError(
+            "current source admission proof differs", kind="staleness"
+        )
     repository_sha = str(manifest.get("repository_sha", ""))
     tool_sha256 = str(manifest.get("tool_sha256", ""))
     if (
