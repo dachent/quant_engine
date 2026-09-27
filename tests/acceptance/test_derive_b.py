@@ -1642,11 +1642,14 @@ def test_derive_with_manifest_uses_selected_paths_and_notes_verification(
         "sha256/bytes pin was verified" in note for note in output["convention_notes"]
     )
     assert {item["path"] for item in output["inputs"]} == {
-        str(fixtures["provider-ledger.json"]).replace("\\", "/"),
-        str(fixtures["account-strategy-current-epoch-crosswalk.json"]).replace(
-            "\\", "/"
-        ),
+        "provider-ledger.json",
+        "account-strategy-current-epoch-crosswalk.json",
     }
+    assert all(
+        not Path(item).is_absolute()
+        for row in output["metrics"]
+        for item in row["inputs_used"]
+    )
 
 
 def test_derive_default_mode_uses_builtin_v1_paths(tmp_path: Path):
@@ -1782,3 +1785,60 @@ def test_derive_source_last_observation_uses_raw_date_past_fx_boundary(tmp_path:
         "FX-unconverted" in row["notes"] and "2026-09-17" in row["notes"]
         for row in (capital, last_observation)
     )
+
+
+def test_fx_unconverted_note_reports_sorted_dates_for_unsorted_nav_rows(
+    tmp_path: Path,
+):
+    """An unsorted nav_daily capture must not invert the disclosed FX-unconverted range."""
+    derivation = load_derivation_module()
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
+        "day_timestamp_utc,nav\n"
+        "2026-09-17T00:00:00+00:00,1.3\n"
+        "2026-09-03T00:00:00+00:00,1.0\n"
+        "2026-09-04T00:00:00+00:00,1.2\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-09-01T16:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-09-02T20:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.FX_PATH).write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-09-03T00:00:00",
+                        "Close": 0.99,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observations, flows, used, failures, notes = derivation.raw_provider_data(
+        tmp_path,
+        [
+            {
+                "account_id": "account-m",
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-09-03",
+            }
+        ],
+    )
+
+    assert failures == {}
+    assert observations == {"account-m": [(date(2026, 9, 3), Decimal("8.91"))]}
+    assert "from 2026-09-04 to 2026-09-17" in notes["account-m"]

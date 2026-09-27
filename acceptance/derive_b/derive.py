@@ -120,6 +120,21 @@ def resolve_input_path(qe_root: Path, raw_path: str) -> Path:
     return candidate if candidate.is_absolute() else qe_root / candidate
 
 
+def output_input_path(qe_root: Path, path: Path) -> str:
+    """Emit a machine-independent provenance path string.
+
+    A relative path is emitted as declared.  A manifest-declared absolute
+    path is relativized against qe_root so the emitted derivation stays
+    byte-reproducible across machines.
+    """
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(qe_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.as_posix()
+
+
 def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, Path]:
     """Select declared inputs by basename and verify every pinned hash fail-closed.
 
@@ -1143,8 +1158,8 @@ def raw_provider_data(
                 if fx_unconverted:
                     notes[account_id] = (
                         f"R6 v2: {len(fx_unconverted)} raw Matrixport NAV date(s) "
-                        f"from {fx_unconverted[0].isoformat()} to "
-                        f"{fx_unconverted[-1].isoformat()} follow the admitted FX "
+                        f"from {min(fx_unconverted).isoformat()} to "
+                        f"{max(fx_unconverted).isoformat()} follow the admitted FX "
                         f"boundary {FX_LAST_ADMITTED_DATE.isoformat()} and are "
                         "FX-unconverted; no converted value is emitted for them, "
                         "and date.source_last_observation reports the last raw "
@@ -1244,7 +1259,7 @@ def derive(
             "code_commit": code_commit(),
             "inputs": [
                 {
-                    "path": path.as_posix(),
+                    "path": output_input_path(qe_root, path),
                     "sha256": file_sha256(qe_root / path),
                     "bytes": (qe_root / path).stat().st_size,
                 }
@@ -1292,13 +1307,13 @@ def derive(
     paths.extend(raw_paths)
     inputs = [
         {
-            "path": path.as_posix(),
+            "path": output_input_path(qe_root, path),
             "sha256": file_sha256(qe_root / path),
             "bytes": (qe_root / path).stat().st_size,
         }
         for path in paths
     ]
-    used_inputs = [path.as_posix() for path in paths]
+    used_inputs = [output_input_path(qe_root, path) for path in paths]
     output: dict[str, object] = {
         "schema": "qe-cp-derivation/1",
         "derivation": "b",
