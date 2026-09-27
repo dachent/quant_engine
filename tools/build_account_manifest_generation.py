@@ -33,6 +33,7 @@ from quant_engine.core.contracts import (
     canonical_json_bytes,
 )
 from tools.account_strategy_manifest import (
+    PERFORMANCE_ROW_FIELDS,
     ManifestCandidateSnapshots,
     ManifestError,
     build_manifest_candidate_from_snapshots,
@@ -3006,7 +3007,28 @@ def _mixed_admitted_fact_projection(
         raise AccountAssignmentPerimeterError(
             "receipt-routed calculation projection is incomplete"
         )
-    projected_navs = [nav for nav in navs if in_funded_epoch(nav, "as_of_date")]
+    # R1: each funded epoch opens at its account's last observation before the
+    # funded start, so that one observation (of any status) is projected too.
+    opening_record_ids: set[object] = set()
+    for route in funded_routes:
+        route_account = route["assignment"]["account_id"]
+        route_start = str(route["assignment"]["effective_start"])
+        prior = [
+            nav
+            for nav in navs
+            if nav.get("account_id") == route_account
+            and str(nav.get("as_of_date")) < route_start
+        ]
+        if prior:
+            opening_record_ids.add(
+                max(prior, key=lambda nav: str(nav.get("as_of_date"))).get("record_id")
+            )
+    projected_navs = [
+        nav
+        for nav in navs
+        if in_funded_epoch(nav, "as_of_date")
+        or nav.get("record_id") in opening_record_ids
+    ]
 
     def anchor_membership_date(anchor: Mapping[str, object]) -> str:
         if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
@@ -3522,6 +3544,7 @@ def _build_mixed_account_manifest_payloads(
         "capital_flow_trace",
         "nav_observation_trace",
         "nav_observations",
+        *PERFORMANCE_ROW_FIELDS,
     }
     cutoff_excluded_keys = (
         cutoff_excluded_opening_anchor_keys
@@ -3764,6 +3787,7 @@ def _build_mixed_account_manifest_payloads(
         "capital_flow_trace",
         "nav_observation_trace",
         "nav_observations",
+        *PERFORMANCE_ROW_FIELDS,
     }
     if any(
         forbidden & set(row)

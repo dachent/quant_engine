@@ -4068,8 +4068,9 @@ def test_source_bound_strategy_mwr_uses_strategy_nav_and_allocation_not_brokerag
         "opening_capital": "60",
         "current_value": "66",
         "funded_nav_record_ids": ["synthetic-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-01",
+        "performance_opening_value": "60",
+        "performance_flow_legs": [],
     }
     manifest = {"rows": [row]}
     ledger = {
@@ -4125,8 +4126,9 @@ def test_source_bound_strategy_mwr_accepts_in_memory_decimal_manifest_values(
         "opening_capital": manifest_module.Decimal("60"),
         "current_value": manifest_module.Decimal("66"),
         "funded_nav_record_ids": ["synthetic-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-01",
+        "performance_opening_value": manifest_module.Decimal("60"),
+        "performance_flow_legs": [],
     }
     manifest = {"rows": [row]}
     ledger = {
@@ -4155,41 +4157,51 @@ def test_source_bound_strategy_mwr_accepts_in_memory_decimal_manifest_values(
     assert row["mwr_terminal_value"] == manifest_module.Decimal("66")
 
 
-def test_source_bound_strategy_mwr_uses_opening_anchor_at_economic_date(
-    manifest_module: Any,
-) -> None:
-    """A capital event can predate the first NAV that recognizes it."""
-    row = {
+def _mwr_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "account_id": "synthetic-account",
         "strategy_id": "synthetic-strategy",
         "status": "OK",
-        "start": "2025-01-01",
-        "end": "2026-01-01",
+        "effective_start": "2025-01-02",
+        "start": "2025-01-02",
+        "end": "2026-01-02",
         "opening_capital": "100",
         "current_value": "110",
         "funded_nav_record_ids": ["recognized-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-02",
+        "performance_opening_value": "100",
+        "performance_flow_legs": [],
     }
-    manifest = {"rows": [row]}
-    ledger = {
+    row.update(overrides)
+    return row
+
+
+def _mwr_ledger(*dates: str) -> dict[str, Any]:
+    return {
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
-                "as_of_date": "2025-01-02",
-                "record_id": "recognized-opening-nav",
-                "value_basis": "STRATEGY_NAV",
+                "as_of_date": day,
+                "record_id": f"nav-{day}",
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {"currency": "USD"},
-            },
-            {
-                "account_id": "synthetic-account",
-                "as_of_date": "2026-01-01",
-                "record_id": "synthetic-terminal-nav",
-                "value_basis": "STRATEGY_NAV",
-                "nav": {"currency": "USD"},
-            },
+            }
+            for day in dates
         ]
     }
+
+
+def test_source_bound_mwr_opens_at_the_performance_opening_not_the_anchor_event(
+    manifest_module: Any,
+) -> None:
+    """R1/B8: the MWR opening is the valuation at the performance opening.
+
+    The pre-change producer dated the opening cash flow at the anchor event
+    date and valued it at the anchor amount (1b44: -39,508.85 on 01-22 instead
+    of the opening valuation).  The anchor stays provenance of the opening.
+    """
+    row = _mwr_row()
+    manifest = {"rows": [row]}
     anchors = [
         {
             "account_id": "synthetic-account",
@@ -4201,14 +4213,131 @@ def test_source_bound_strategy_mwr_uses_opening_anchor_at_economic_date(
         }
     ]
 
-    manifest_module._mwr_payloads_from_governed_inputs(manifest, ledger, [], anchors)
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], anchors
+    )
 
     assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_opening_date"] == "2025-01-02"
+    assert row["mwr_valuation_timing"] == "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE"
     assert row["mwr_cashflows"][0] == {
-        "date": "2025-01-01",
-        "amount": manifest_module.Decimal("-100"),
-        "source_record_ids": ["synthetic-opening-capital"],
+        "date": "2025-01-02",
+        "amount": Decimal("-100"),
+        "source_record_ids": ["nav-2025-01-02", "synthetic-opening-capital"],
     }
+
+
+def _date_only_leg(event: str, recognition: str, amount: str) -> dict[str, Any]:
+    return {
+        "class": "EXTERNAL_IN",
+        "event_date": event,
+        "nav_recognition_date": recognition,
+        "economic_date": None,
+        "timing": "DATE_ONLY",
+        "amount": amount,
+        "source_record_id": f"flow-{event}",
+    }
+
+
+def _classified_event(event: str, recognition: str, amount: str) -> dict[str, Any]:
+    return {
+        "account_id": "synthetic-account",
+        "event_date": event,
+        "nav_recognition_date": recognition,
+        "amount": Decimal(amount),
+        "disposition": "EXTERNAL",
+        "source_record_id": f"flow-{event}",
+    }
+
+
+def test_source_bound_mwr_dates_a_date_only_flow_at_its_nav_recognition(
+    manifest_module: Any,
+) -> None:
+    """R4: a date-only flow is investor cash when the NAV first shows it.
+
+    Pre-change an event recognized one day later was dated at its event and
+    merged into the opening leg; it now stands alone on its recognition date.
+    """
+    row = _mwr_row(
+        performance_flow_legs=[_date_only_leg("2025-01-02", "2025-01-03", "50")]
+    )
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest,
+        _mwr_ledger("2025-01-02", "2026-01-02"),
+        [_classified_event("2025-01-02", "2025-01-03", "50")],
+        [],
+    )
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert [flow["date"] for flow in row["mwr_cashflows"]] == [
+        "2025-01-02",
+        "2025-01-03",
+        "2026-01-02",
+    ]
+    assert row["mwr_cashflows"][1] == {
+        "date": "2025-01-03",
+        "amount": Decimal("-50"),
+        "source_record_ids": ["flow-2025-01-02"],
+    }
+
+
+def _allocation_leg(economic: str | None) -> dict[str, Any]:
+    return {
+        "class": "INTERNAL_IN",
+        "event_date": "2025-03-01",
+        "nav_recognition_date": "2025-03-05",
+        "economic_date": economic,
+        "timing": "EXACT_TIMESTAMP",
+        "amount": "40",
+        "source_record_id": "fill-1",
+    }
+
+
+_ALLOCATION_ANCHOR = {
+    "account_id": "synthetic-account",
+    "strategy_id": "synthetic-strategy",
+    "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+    "event_date": "2025-03-01",
+    "nav_recognition_date": "2025-03-05",
+    "source_record_id": "fill-1",
+}
+
+
+def test_source_bound_mwr_dates_an_exact_fill_at_its_economic_date(
+    manifest_module: Any,
+) -> None:
+    row = _mwr_row(performance_flow_legs=[_allocation_leg("2025-03-04")])
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], [_ALLOCATION_ANCHOR]
+    )
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_cashflows"][1] == {
+        "date": "2025-03-04",
+        "amount": Decimal("-40"),
+        "source_record_ids": ["fill-1"],
+    }
+
+
+def test_source_bound_mwr_fails_closed_without_an_exact_fill_date(
+    manifest_module: Any,
+) -> None:
+    """The allocation date is not the fill date: no fill date, no MWR."""
+    row = _mwr_row(performance_flow_legs=[_allocation_leg(None)])
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], [_ALLOCATION_ANCHOR]
+    )
+
+    assert row["mwr_status"] == "BLOCKED_ADMISSION"
+    assert row["mwr_reason"] == "EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE"
+    assert row["mwr_xirr"] is None
+    assert row["mwr_cashflows"] == []
 
 
 @pytest.mark.parametrize(
@@ -4893,6 +5022,7 @@ def test_missing_predecessor_block_is_impossible_after_ok_predecessor(
         "observation_trace",
         "capital_flow_trace",
         "nav_observations",
+        *manifest_module.PERFORMANCE_ROW_FIELDS,
     ):
         successor.pop(field)
 
@@ -5063,6 +5193,7 @@ def test_schema_forbids_metrics_on_undefined_return_block(
         "observation_trace",
         "capital_flow_trace",
         "nav_observations",
+        *manifest_module.PERFORMANCE_ROW_FIELDS,
     ):
         row.pop(field)
 
@@ -6030,9 +6161,17 @@ def test_epoch_fails_closed_when_recognition_cannot_attach_to_observed_interval(
     }
 
 
-def test_provider_opening_anchor_sets_basis_and_first_observation_factor(
+def test_provider_opening_anchor_sets_capital_basis_but_never_a_return_value(
     manifest_module: Any,
 ) -> None:
+    """R1 (A1 mechanism 3): the anchor amount is contributed capital only.
+
+    The pre-change engine pre-linked the 1000 anchor to the first 985.44
+    observation, booking a -1.456 % "return" before membership began.  The
+    performance opening is the first observation; the anchor keeps its
+    meaning as the capital basis dated at its economic event.
+    """
+
     stats = manifest_module.analyze_epoch(
         {
             "2024-10-15": Decimal("985.44"),
@@ -6050,25 +6189,59 @@ def test_provider_opening_anchor_sets_basis_and_first_observation_factor(
             "event_date": "2024-10-13",
             "nav_recognition_date": "2024-10-15",
             "amount": Decimal("1000"),
+            "opening_nav": Decimal("985.44"),
         },
     )
 
     assert stats is not None
     assert stats["opening_basis"] == "PROVIDER_CAPITAL_ANCHOR"
     assert stats["opening_capital"] == Decimal("1000")
+    assert stats["opening_capital_date"] == "2024-10-13"
     assert stats["deposits"] == Decimal("0")
     assert stats["internal_in"] == Decimal("0")
-    assert stats["observation_trace"]["links"][0] == {
-        "start_date": "2024-10-13",
-        "end_date": "2024-10-15",
-        "base_nav": Decimal("1000"),
-        "ending_nav": Decimal("985.44"),
-        "net_flow": Decimal("0"),
-        "factor": Decimal("0.98544"),
-        "cumulative_index": Decimal("98.54400"),
-        "running_hwm_index": Decimal("100"),
-        "drawdown": Decimal("0.01456"),
+    assert stats["performance_opening_date"] == "2024-10-15"
+    assert stats["performance_opening_value"] == Decimal("985.44")
+    assert (
+        stats["performance_opening_basis"]
+        == "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+    )
+    assert stats["observation_trace"]["links"][0]["start_date"] == "2024-10-15"
+    assert stats["observation_trace"]["links"][0]["base_nav"] == Decimal("985.44")
+    assert stats["observation_linked_return"] == Decimal("0")
+    assert len(stats["observation_trace"]["links"]) == 2
+
+
+def test_provider_opening_anchor_nav_must_confirm_the_performance_opening(
+    manifest_module: Any,
+) -> None:
+    anchor = {
+        "event_date": "2024-10-13",
+        "nav_recognition_date": "2024-10-15",
+        "amount": Decimal("1000"),
+        "opening_nav": Decimal("985.45"),
     }
+    stats = manifest_module.analyze_epoch(
+        {
+            "2024-10-15": Decimal("985.44"),
+            "2024-10-16": Decimal("985.44"),
+            "2024-10-17": Decimal("985.44"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2024-10-15",
+        None,
+        opening_anchor=anchor,
+    )
+
+    assert stats is not None
+    assert stats["opening_capital"] == Decimal("1000")
+    assert stats["performance_status"] == "UNAVAILABLE"
+    assert stats["performance_reason"] == "OPENING_ANCHOR_NAV_DIFFERS"
+    assert stats["observation_linked_return"] is None
+    assert stats["observation_trace"] == {"links": []}
 
 
 def test_provider_strategy_allocation_before_epoch_is_not_admitted_by_recognition(
