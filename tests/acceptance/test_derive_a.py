@@ -512,7 +512,7 @@ def _ledger(extra_flows: tuple[dict[str, object], ...] = ()) -> dict[str, object
     }
 
 
-def _crosswalk(**overrides: str) -> dict[str, object]:
+def _crosswalk(**overrides: object) -> dict[str, object]:
     document: dict[str, object] = {
         "calculation_cutoff_date": CUTOFF,
         "as_of_date": CUTOFF,
@@ -859,6 +859,156 @@ def test_fx_history_close_is_read_exactly(tmp_path: Path) -> None:
     )
     rates = sources.parse_fx_history(text.encode("utf-8"), "USDT-USD")
     assert rates == {day("2026-01-02"): D("1.0003390312194824")}
+
+
+# ------------------------------------------- final review: fail closed on bad inputs
+
+
+@pytest.mark.parametrize(
+    ("target", "text", "message"),
+    [
+        (
+            "MP_NAV",
+            "day_timestamp_utc,day_timestamp_ms,nav\n"
+            "2026-01-03T00:00:00+00:00,1767398400000,1\n"
+            "not-a-date,1767484800000,1\n",
+            "unparseable Matrixport nav_daily row",
+        ),
+        (
+            "MP_NAV",
+            "day_timestamp_utc,day_timestamp_ms,nav\n"
+            "2026-01-03T00:00:00+00:00,1767398400000,oops\n",
+            "unparseable Matrixport nav_daily row",
+        ),
+        (
+            "MP_DEPOSITS",
+            "amount,created_at_utc,currency,state\nabc,2026-01-02T10:00:00+00:00,"
+            "USDC,confirmed\n",
+            "unparseable confirmed Matrixport wallet deposit",
+        ),
+        ("QB_ACCOUNTS", 'id,funds\nx,"[{not json"\n', "is not JSON"),
+        (
+            "QB_ACTIVITY",
+            ACTIVITY + ",order,,False,Y,,,7,,903,,,11,\n",
+            "has no valid filled_at",
+        ),
+        (
+            "QB_ACTIVITY",
+            ACTIVITY + ",dividend,1.5,,,,,,,904,,,,\n",
+            "dividend 904 does not parse",
+        ),
+    ],
+)
+def test_malformed_raw_rows_raise(
+    tmp_path: Path, target: str, text: str, message: str
+) -> None:
+    _synthetic_root(tmp_path)
+    _write(tmp_path, getattr(derive, target), text)
+    with pytest.raises(sources.InputError, match=message):
+        _run(tmp_path)
+
+
+def test_malformed_crosswalk_effective_end_raises(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    rows = [dict(row) for row in CROSSWALK_ROWS]
+    rows[1]["effective_end"] = "2026-13-45"
+    _write(tmp_path, derive.CROSSWALK, json.dumps(_crosswalk(rows=rows)))
+    with pytest.raises(sources.InputError, match="invalid crosswalk effective_end"):
+        _run(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        # Conflicting value for an observed date (never resolved last-wins).
+        {"as_of_date": "2026-01-05", "value": "1201", "currency": "USD"},
+        # Non-USD observation.
+        {"as_of_date": "2026-01-07", "value": "1250", "currency": "EUR"},
+        # Unparseable date.
+        {"as_of_date": "2026-01-xx", "value": "1250", "currency": "USD"},
+    ],
+)
+def test_unusable_ledger_nav_row_fails_the_account_closed(
+    tmp_path: Path, bad_row: dict[str, str]
+) -> None:
+    _synthetic_root(tmp_path)
+    ledger = _ledger()
+    nav_rows = ledger["nav_observations"]
+    assert isinstance(nav_rows, list)
+    nav_rows.append(
+        {
+            "account_id": "acct-ib",
+            "as_of_date": bad_row["as_of_date"],
+            "nav": {
+                "currency": bad_row["currency"],
+                "status": "AVAILABLE",
+                "value": bad_row["value"],
+            },
+            "provider_id": "ibkr",
+            "record_id": "ibkr:bad",
+        }
+    )
+    _write(tmp_path, derive.LEDGER, json.dumps(ledger))
+    document = _run(tmp_path)
+    reasons = _reasons(document)
+    for key in (
+        ("capital.account.cutoff", "acct-ib"),
+        ("date.source_last_observation", "acct-ib"),
+        ("twr.account", "acct-ib"),
+        ("mwr.account", "acct-ib"),
+        ("capital.strategy.cutoff", "strat-one"),
+        ("twr.strategy", "strat-one"),
+        ("capital.portfolio.systematic.cutoff", "portfolio"),
+    ):
+        assert key in reasons, key
+    assert (
+        "provider-ledger nav row(s) unusable or conflicting"
+        in (reasons[("capital.account.cutoff", "acct-ib")])
+    )
+    # Other accounts are unaffected.
+    assert ("twr.account", "acct-sw") in _index(document)
+
+
+def test_bod_flow_on_the_final_window_day_fails_closed(tmp_path: Path) -> None:
+    # Quantbase raw values end 01-08 and the window runs to the 01-10 cutoff; a fill
+    # on 01-10 (effective date == window limit) is in no observed value, so it must
+    # fail closed rather than drop out of the flows.
+    _synthetic_root(tmp_path)
+    _write(
+        tmp_path,
+        derive.QB_ACTIVITY,
+        ACTIVITY
+        + ",filled_txn,40,False,,Y,,7,Demo Fund,14,False,2026-01-10T01:00:00Z,,BUY\n"
+        + ",order,,False,Y,,2026-01-10T20:00:00Z,7,,905,,,14,\n",
+    )
+    reasons = _reasons(_run(tmp_path))
+    assert (
+        "inside the window after the last value observation 2026-01-08"
+        in (reasons[("twr.account", "acct-qb")])
+    )
+    assert ("flows.account.net", "acct-qb") in reasons
+
+
+def test_usdt_to_usdc_conversion_is_not_a_subscription(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    baseline = _index(_run(tmp_path))
+    # A USDT debit followed within 10 minutes by a USDC credit is a conversion that
+    # stays in the wallet; it must not become a holding inflow.
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("20", "USDT", "2", "2026-01-05T12:00:00", "2008")
+        + _bill("20", "USDC", "1", "2026-01-05T12:01:00", "2557"),
+    )
+    metrics = _index(_run(tmp_path))
+    assert metrics[("flows.account.count", "acct-mp")]["value"] == "0"
+    for metric_id in ("twr.account", "mwr.account", "capital.account.cutoff"):
+        assert (
+            metrics[(metric_id, "acct-mp")]["value"]
+            == (baseline[(metric_id, "acct-mp")]["value"])
+        )
 
 
 def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:

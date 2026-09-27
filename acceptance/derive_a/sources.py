@@ -61,6 +61,17 @@ def iso_date(value: object) -> dt.date | None:
         return None
 
 
+def optional_date(value: object, what: str) -> dt.date | None:
+    """A missing (null/empty) date is None; a present but invalid one is an error."""
+
+    if value is None or value == "":
+        return None
+    day = iso_date(value)
+    if day is None:
+        raise InputError(f"invalid {what}: {value!r}")
+    return day
+
+
 def decimal_or_none(value: object) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
@@ -112,7 +123,10 @@ def parse_crosswalk(data: bytes) -> Crosswalk:
                 provider=str(raw["provider"]),
                 label=str(raw.get("account_label") or ""),
                 effective_start=start,
-                effective_end=iso_date(raw.get("effective_end")),
+                effective_end=optional_date(
+                    raw.get("effective_end"),
+                    f"crosswalk effective_end of {raw.get('assignment_id')}",
+                ),
                 disposition=str(raw["product_epoch_disposition"]),
             )
         )
@@ -271,6 +285,7 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
             issues.setdefault(account, []).append(
                 f"conflicting nav rows on {day.isoformat()}"
             )
+            continue
         series[day] = value
         nav_rows.setdefault(account, {})[day] = row
     flows: dict[str, AccountFlows] = {}
@@ -403,8 +418,11 @@ def parse_quantbase_sleeve(
     for row in rows:
         if row.get("activity_type") == "order" and row.get("executed") == "Y":
             day = _utc_day(row.get("filled_at", ""))
-            if day is not None:
-                fills.setdefault(row.get("transaction", ""), []).append(day)
+            if day is None:
+                raise InputError(
+                    f"Quantbase executed order {row.get('id')} has no valid filled_at"
+                )
+            fills.setdefault(row.get("transaction", ""), []).append(day)
     bucket = AccountFlows()
     fee_sales: list[tuple[dt.date, Decimal]] = []
     rebalances = 0
@@ -419,8 +437,9 @@ def parse_quantbase_sleeve(
         if row.get("activity_type") == "dividend":
             paid = _utc_day(row.get("date", ""))
             cash = decimal_or_none(row.get("amount"))
-            if paid is not None and cash is not None:
-                dividends.append((paid, cash))
+            if paid is None or cash is None:
+                raise InputError(f"Quantbase dividend {row.get('id')} does not parse")
+            dividends.append((paid, cash))
         if row.get("activity_type") != "filled_txn" or row.get("fund") != fund_id:
             continue
         kind = row.get("type", "")
@@ -460,11 +479,17 @@ def parse_quantbase_sleeve(
     for row in csv_rows(accounts):
         try:
             funds = json.loads(row.get("funds") or "[]")
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise InputError(
+                f"Quantbase accounts.csv funds of {row.get('id', '')[:6]} is not JSON"
+            ) from exc
+        if not isinstance(funds, list):
+            raise InputError("Quantbase accounts.csv funds is not a list")
         for fund in funds:
             if str(fund.get("fund_id")) == fund_id:
                 snapshot = decimal_or_none(fund.get("value"))
+                if snapshot is None:
+                    raise InputError("Quantbase accounts.csv fund value does not parse")
     bucket.flows.sort(key=lambda flow: (flow.effective_date, flow.record_id))
     return QuantbaseSleeve(
         fund_id=fund_id,
@@ -527,10 +552,13 @@ def parse_matrixport_wallet(
 ) -> MatrixportWallet:
     deposit_rows: list[tuple[dt.date, Decimal, str]] = []
     for row in csv_rows(deposits):
+        if row.get("state") != "confirmed":
+            continue
         day = _utc_day(row.get("created_at_utc", ""))
         amount = decimal_or_none(row.get("amount"))
-        if row.get("state") == "confirmed" and day is not None and amount is not None:
-            deposit_rows.append((day, amount, row.get("currency", "")))
+        if day is None or amount is None or not row.get("currency"):
+            raise InputError("unparseable confirmed Matrixport wallet deposit")
+        deposit_rows.append((day, amount, row.get("currency", "")))
     bill_rows: list[Bill] = []
     for row in csv_rows(bills):
         day = _utc_day(row.get("timestamp_utc", ""))
@@ -571,12 +599,14 @@ def parse_matrixport_wallet(
         day = _utc_day(row.get("day_timestamp_utc", ""))
         value = decimal_or_none(row.get("nav"))
         stamp = row.get("day_timestamp_ms", "")
-        if day is not None and value is not None:
-            if day in per_unit and per_unit[day] != value:
-                raise InputError(f"conflicting Matrixport NAV on {day.isoformat()}")
-            per_unit[day] = value
-            if stamp.isdigit():
-                nav_times.append((int(stamp), day))
+        if day is None or value is None or not stamp.isdigit():
+            raise InputError(
+                f"unparseable Matrixport nav_daily row {row.get('day_timestamp_utc')!r}"
+            )
+        if day in per_unit and per_unit[day] != value:
+            raise InputError(f"conflicting Matrixport NAV on {day.isoformat()}")
+        per_unit[day] = value
+        nav_times.append((int(stamp), day))
     return MatrixportWallet(
         deposits=tuple(sorted(deposit_rows)),
         bills=tuple(sorted(bill_rows, key=lambda bill: (bill.moment_ms, bill.tx_type))),

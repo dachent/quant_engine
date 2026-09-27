@@ -330,6 +330,8 @@ class AccountSource:
     flow_coverage_end: dt.date | None = None
     flow_notes: list[str] = field(default_factory=list)
     value_notes: list[str] = field(default_factory=list)
+    # Non-empty: the value series itself is unusable (fail closed, never thinned).
+    value_issue: str = ""
     anchor: tuple[dt.date, Decimal] | None = None
 
 
@@ -340,6 +342,8 @@ class NotDerivableError(RuntimeError):
 def opening_point(
     values: Mapping[dt.date, Decimal], start: dt.date, limit: dt.date
 ) -> tuple[dt.date, str] | None:
+    # R1 (orchestrator ruling): the prior-day EOD close is the opening value at the
+    # funded boundary; T2.3 verified these openings equal OPENING_CAPITAL_ANCHORs.
     prior = [day for day in values if day < start]
     if prior:
         day = max(prior)
@@ -349,6 +353,14 @@ def opening_point(
     if later:
         return later[0], "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
     return None
+
+
+def _in_limit(flow: Flow, open_day: dt.date, limit: dt.date) -> bool:
+    """Whether ``flow`` belongs to the membership window ``(open, limit]``."""
+
+    if flow.timing == BOD:
+        return open_day <= flow.effective_date <= limit
+    return open_day < flow.effective_date <= limit
 
 
 def _within(flow: Flow, start: dt.date, end: dt.date) -> bool:
@@ -370,6 +382,8 @@ def build_member(
             f"[{_day(segment.start)}, {_day(limit)}]"
         )
     open_day, basis = opening
+    if source.value_issue:
+        raise NotDerivableError(f"{source.account_id}: {source.value_issue}")
     close_day = max(day for day in source.values if open_day <= day <= limit)
     for event_day, description in source.raw_events:
         if open_day < event_day <= limit:
@@ -389,15 +403,13 @@ def build_member(
     in_window = [
         flow for flow in source.flows.flows if _within(flow, open_day, close_day)
     ]
-    after_close = [
-        flow
-        for flow in source.flows.flows
-        if _within(flow, close_day, limit) and not _within(flow, open_day, close_day)
-    ]
-    if after_close:
+    in_limit = [flow for flow in source.flows.flows if _in_limit(flow, open_day, limit)]
+    stranded = [flow for flow in in_limit if flow not in in_window]
+    if stranded:
         raise NotDerivableError(
-            f"{source.account_id}: {len(after_close)} flow(s) after the last value "
-            f"observation {_day(close_day)} and on or before {_day(limit)}"
+            f"{source.account_id}: {len(stranded)} flow(s) inside the window after the "
+            f"last value observation {_day(close_day)} (not reflected in any value), "
+            f"first {_day(stranded[0].effective_date)} {stranded[0].timing}"
         )
     values = {
         day: v for day, v in source.values.items() if open_day <= day <= close_day
@@ -606,8 +618,15 @@ def _account_sources(
                 (LEDGER,),
             )
         issues = sorted(set(ledger.nav_issues.get(account_id, ())))
-        if issues:
-            source.notes.append("ledger nav issues: " + ", ".join(issues))
+        if issues and source.value_inputs == (LEDGER,):
+            source.value_issue = (
+                f"{len(issues)} provider-ledger nav row(s) unusable or conflicting: "
+                + ", ".join(issues[:3])
+            )
+        elif issues:
+            source.notes.append(
+                "ledger nav issues (cross-check only): " + ", ".join(issues)
+            )
         source.anchor = _opening_anchor(ledger, account_id)
         sources[account_id] = source
     return sources
@@ -754,30 +773,44 @@ def _classify_bills(
 ) -> tuple[list[Bill], list[tuple[Bill, str]], list[Bill]]:
     """Split raw wallet bills for the strategy-holding entity.
 
-    - product-currency (USDT) debits are strategy subscriptions: capital into the
-      holding;
-    - bills in any other currency, and a USDT credit within 10 minutes after a
-      debit in another currency (a conversion), stay in the wallet: no holding
-      effect;
-    - any other USDT credit (e.g. a redemption) is unsupported and fails closed
+    - a conversion pairs a debit in one currency with a credit in another within
+      10 minutes after it (one-to-one, either direction: USDC->USDT or
+      USDT->USDC); both legs stay in the wallet;
+    - an unpaired product-currency (USDT) debit is a strategy subscription:
+      capital into the holding;
+    - an unpaired bill in any other currency is wallet-level (deposit/withdrawal
+      outside the holding);
+    - an unpaired USDT credit (e.g. a redemption) is unsupported and fails closed
       when it falls inside a window.
     """
 
+    paired: dict[int, str] = {}
+    bills = list(wallet.bills)
+    for index, debit in enumerate(bills):
+        if debit.direction != "2" or index in paired:
+            continue
+        for other, credit in enumerate(bills):
+            if (
+                other not in paired
+                and other != index
+                and credit.direction == "1"
+                and credit.currency != debit.currency
+                and MATRIXPORT_PRODUCT_CURRENCY in {credit.currency, debit.currency}
+                and 0 <= credit.moment_ms - debit.moment_ms <= 600_000
+            ):
+                paired[index] = "conversion debit"
+                paired[other] = "conversion credit"
+                break
     subscriptions: list[Bill] = []
     wallet_level: list[tuple[Bill, str]] = []
     unsupported: list[Bill] = []
-    for bill in wallet.bills:
-        if bill.currency != MATRIXPORT_PRODUCT_CURRENCY:
+    for index, bill in enumerate(bills):
+        if index in paired:
+            wallet_level.append((bill, paired[index]))
+        elif bill.currency != MATRIXPORT_PRODUCT_CURRENCY:
             wallet_level.append((bill, "non-product currency"))
         elif bill.direction == "2":
             subscriptions.append(bill)
-        elif any(
-            other.currency != MATRIXPORT_PRODUCT_CURRENCY
-            and other.direction == "2"
-            and 0 <= bill.moment_ms - other.moment_ms <= 600_000
-            for other in wallet.bills
-        ):
-            wallet_level.append((bill, "conversion credit"))
         else:
             unsupported.append(bill)
     return subscriptions, wallet_level, unsupported
@@ -1087,6 +1120,8 @@ def _account_span(rows: Sequence[Assignment]) -> Segment | None:
 def _last_value(
     source: AccountSource, cutoff: dt.date
 ) -> tuple[dt.date, Decimal] | None:
+    if source.value_issue:
+        return None
     days = [day for day in source.values if day <= cutoff]
     if not days:
         return None
@@ -1119,7 +1154,10 @@ def _derive_accounts(
             "disposition " + "/".join(dispositions),
         ]
         if last is None:
-            reason = "no value observation on or before the cutoff in listed inputs"
+            reason = (
+                source.value_issue
+                or "no value observation on or before the cutoff in listed inputs"
+            )
             output.missing("capital.account.cutoff", account_id, None, reason)
             output.missing("date.source_last_observation", account_id, None, reason)
         else:
@@ -1351,7 +1389,12 @@ def _derive_strategies_and_portfolio(
                 "capital.strategy.cutoff",
                 strategy_id,
                 None,
-                f"no value observation for {missing}",
+                f"no usable value observation for {missing}"
+                + "".join(
+                    f"; {sources[a].value_issue}"
+                    for a in missing
+                    if sources[a].value_issue
+                ),
             )
         else:
             systematic += total
