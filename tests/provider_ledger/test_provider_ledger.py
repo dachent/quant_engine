@@ -1223,6 +1223,9 @@ def _quantbase_anchor(
         "account_id": account,
         "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
         "capital_type": capital_type,
+        # The fund orders fill on the allocation date, before the NAV that
+        # recognizes them.
+        "economic_fill_timestamp": f"{event_date}T20:30:00+00:00",
         "event_date": event_date,
         "evidence_layer": "ACCOUNT_LIVE",
         "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
@@ -1288,6 +1291,45 @@ def test_broker_returns_book_quantbase_allocation_at_start_of_recognizing_period
     assert {row["flow_timing"] for row in rows} == {
         "EXACT_TIMESTAMP_BEGINNING_OF_SUBPERIOD"
     }
+
+
+def test_broker_returns_reject_quantbase_allocation_without_economic_fill() -> None:
+    """An exact-timestamp leg needs its fill: no inferred timing for Volatis."""
+
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-03", "165", "qb-3"), "provider_id": "quantbase"},
+    ]
+    opening = _quantbase_anchor(
+        "qb",
+        amount="100",
+        event_date="2026-01-01",
+        recognition_date="2026-01-01",
+        record_id="qb-opening",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+    )
+    allocation = _quantbase_anchor(
+        "qb",
+        amount="50",
+        event_date="2026-01-02",
+        recognition_date="2026-01-03",
+        record_id="qb-allocation",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+    )
+    del allocation["economic_fill_timestamp"]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="lacks its economic fill timestamp"
+    ):
+        ledger._broker_strategy_returns(
+            nav, [], {"quantbase"}, capital_anchors=[opening, allocation]
+        )
+    allocation["economic_fill_timestamp"] = "2026-01-04T20:30:00+00:00"
+    with pytest.raises(ledger.ProviderLedgerError, match="economic date follows"):
+        ledger._broker_strategy_returns(
+            nav, [], {"quantbase"}, capital_anchors=[opening, allocation]
+        )
 
 
 def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
@@ -5504,7 +5546,30 @@ def test_portfolio_fx_candidate_requires_exact_owner_selected_binding(
         "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
     }
 
-    generation_id, rates, artifacts = ledger._portfolio_fx_rates(ref, date(2025, 12, 5))
+    def contract(
+        generation_id: str, manifest_sha256: str, observed_end: str = "2025-12-05"
+    ) -> dict[str, object]:
+        return {
+            "source_segments": [
+                {
+                    "source_id": "portfolio-fx-rates",
+                    "current_generation": {
+                        "generation_id": generation_id,
+                        "sha256": manifest_sha256,
+                        "as_of": "2025-12-05",
+                    },
+                    "interval": {
+                        "observed_start": "2025-12-05",
+                        "observed_end": observed_end,
+                    },
+                }
+            ]
+        }
+
+    admitted = contract(ref["generation_id"], ref["manifest_sha256"])
+    generation_id, rates, artifacts = ledger._portfolio_fx_rates(
+        ref, date(2025, 12, 5), admitted
+    )
 
     assert generation_id == manifest.generation_id
     assert rates == {
@@ -5516,9 +5581,28 @@ def test_portfolio_fx_candidate_requires_exact_owner_selected_binding(
         "portfolio/fx-rates/generation.json",
     }
 
+    # A hash-valid candidate is not authority until the contract admits it:
+    # the spec's owner-selection label alone admitted fd6096d8 through 09-17.
+    with pytest.raises(ledger.ProviderLedgerError, match="contract-admitted"):
+        ledger._portfolio_fx_rates(
+            ref, date(2025, 12, 5), contract("e" * 64, ref["manifest_sha256"])
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="contract-admitted"):
+        ledger._portfolio_fx_rates(
+            ref, date(2025, 12, 5), contract(ref["generation_id"], "0" * 64)
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="its contract interval"):
+        ledger._portfolio_fx_rates(
+            ref,
+            date(2025, 12, 5),
+            contract(ref["generation_id"], ref["manifest_sha256"], "2025-12-04"),
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="segment is absent"):
+        ledger._portfolio_fx_rates(ref, date(2025, 12, 5), {"source_segments": []})
+
     ref["selection"] = "UNSELECTED"
     with pytest.raises(ledger.ProviderLedgerError, match="owner selection is absent"):
-        ledger._portfolio_fx_rates(ref, date(2025, 12, 5))
+        ledger._portfolio_fx_rates(ref, date(2025, 12, 5), admitted)
 
 
 def test_matrixport_daily_holdings_use_selected_daily_fx_without_parity(
@@ -5624,6 +5708,60 @@ def test_matrixport_cutoff_excludes_future_holdings_before_fx_valuation(
     assert findings[0]["original_source_date"] == "2026-09-18"
     assert findings[0]["source_artifact_id"] == "csv/daily_holdings.csv"
     assert findings[0]["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+
+
+def test_matrixport_usd_nav_ends_at_the_admitted_fx_boundary(
+    tmp_path: Path,
+) -> None:
+    """Native Matrixport rows after the contract FX end carry no USD value.
+
+    Before the binding the selected FX had to cover every capture day, so a
+    contract-admitted generation ending 2026-09-03 failed on 2026-09-04 and a
+    later candidate silently extended USD values to the cutoff.
+    """
+
+    run_id = "20260918T184248.013Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-09-03,100,100,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-09-03",
+        component_usd_values=("100",),
+        additional_components=(("2026-09-04", "101"), ("2026-09-18", "999")),
+    )
+    findings: list[dict[str, Any]] = []
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        {
+            "catalog_schema_version": 2,
+            "observed_boundary_date": "2026-09-18",
+            "source_run_id": run_id,
+        },
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+        fx_rates=("9" * 64, {("USDT", date(2026, 9, 3)): Decimal("1")}, ()),
+        financial_cutoff=date(2026, 9, 17),
+        cutoff_findings=findings,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-09-03"]
+    assert [
+        (row["original_source_date"], row["status"], row.get("fx_boundary"))
+        for row in sorted(findings, key=lambda item: item["original_source_date"])
+    ] == [
+        ("2026-09-04", "OUTSIDE_ADMITTED_FX_BOUNDARY", "2026-09-03"),
+        ("2026-09-18", "OUTSIDE_FINANCIAL_CUTOFF", None),
+    ]
 
 
 def test_quantbase_dashboard_nav_declares_strategy_nav_basis(
@@ -6475,15 +6613,18 @@ def _quantbase_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], Path, Path
     activity_path = artifact_root / "csv/account_activity.csv"
     activity_path.write_text(
         "activity_type,amount,fund,is_rebalance,time,type,amount_cents,"
-        "created_at,destination_account_id,id,origin_account_id,status\n"
+        "created_at,destination_account_id,id,origin_account_id,status,"
+        "transaction,filled_at\n"
         "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,10000000,"
-        ",,buy-1,,C\n"
+        ",,buy-1,,C,,\n"
+        "order,,107,,2026-08-12T20:30:00Z,,,,,order-1,,,buy-1,"
+        "2026-08-12T20:30:00.5Z\n"
         "filled_txn,50000,14,False,2026-08-12T20:00:00Z,BUY,5000000,"
-        ",,buy-2,,C\n"
+        ",,buy-2,,C,,\n"
         "filled_txn,100000,107,True,2026-08-13T19:00:00Z,BUY,10000000,"
-        ",,buy-3,,C\n"
+        ",,buy-3,,C,,\n"
         "transfer,2000,,,,DEPOSIT,200000,2026-08-12T20:01:00Z,"
-        "alpaca-account,deposit-1,bank-account,C\n",
+        "alpaca-account,deposit-1,bank-account,C,,\n",
         encoding="utf-8-sig",
     )
     catalog = {
@@ -7245,7 +7386,9 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
     with activity_path.open("a", encoding="utf-8") as handle:
         handle.write(
             "filled_txn,77777,107,False,2026-08-14T20:00:00Z,BUY,7777700,"
-            ",,buy-unreconciled,,C\n"
+            ",,buy-unreconciled,,C,,\n"
+            "order,,107,,2026-08-14T20:30:00Z,,,,,order-2,,,buy-unreconciled,"
+            "2026-08-14T20:30:00Z\n"
         )
     manifest = _make_two_artifact_manifest(
         {
@@ -7283,9 +7426,10 @@ def test_quantbase_non_fee_fund_sell_fails_closed_without_withdrawal_admission(
     """A fund redemption cannot silently become a zero strategy flow."""
     root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees\n"
-        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False\n"
-        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False\n",
+        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees,"
+        "id,transaction,filled_at\n"
+        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False,buy-1,,\n"
+        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False,sell-1,,\n",
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7331,15 +7475,21 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     price_path.write_text(
         "time,value,cost_basis\n"
         "10/13/2024,0,0\n"
+        "10/14/2024,0,0\n"
         "10/15/2024,985.44,1000\n"
-        "11/08/2024,1061.44,1076\n",
+        "11/13/2024,985.44,1000\n"
+        "11/14/2024,1061.44,1076\n",
         encoding="utf-8-sig",
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY\n",
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
+        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
+        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
+        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
+        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7374,7 +7524,13 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     assert [row["event_date"] for row in anchors] == ["2024-10-13", "2024-11-08"]
     assert [row["nav_recognition_date"] for row in anchors] == [
         "2024-10-15",
-        "2024-11-08",
+        "2024-11-14",
+    ]
+    # The money-weighted cash date is the last fill of the allocation's own
+    # fund orders; an order on another fund is not its fill.
+    assert [row["economic_fill_timestamp"] for row in anchors] == [
+        "2024-10-14T19:46:07.648556+00:00",
+        "2024-11-13T14:51:35.165283+00:00",
     ]
     assert anchors[0]["amount"] == {
         "currency": "USD",
@@ -7393,6 +7549,68 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     assert {row["capital_type"] for row in anchors}.isdisjoint(
         {"EXTERNAL_PROVIDER_TRANSFER", "EXTERNAL_CAPITAL"}
     )
+
+
+@pytest.mark.parametrize(
+    ("orders", "message"),
+    [
+        ("", "lacks its order fill timestamp"),
+        (
+            # The allocation filled on 11-12, so 11-13 is its recognizing NAV;
+            # a cost-basis match on 11-14 is not that allocation's capital.
+            "order,,107,,2024-11-12T14:51:34Z,,o-3,172127,2024-11-12T14:51:35Z\n",
+            "not the first NAV after its fill",
+        ),
+    ],
+)
+def test_quantbase_allocation_without_its_recognizing_fill_fails_closed(
+    tmp_path: Path, orders: str, message: str
+) -> None:
+    run_id = "quantbase-source"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts" / "csv"
+    artifact_root.mkdir(parents=True)
+    price_path = artifact_root / "dashboard_Volatis_Strategy_pricehistory.csv"
+    price_path.write_text(
+        "time,value,cost_basis\n"
+        "10/14/2024,0,0\n"
+        "10/15/2024,985.44,1000\n"
+        "11/13/2024,985.44,1000\n"
+        "11/14/2024,1061.44,1076\n",
+        encoding="utf-8-sig",
+    )
+    activity_path = artifact_root / "account_activity.csv"
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57Z,BUY,161908,,\n"
+        "order,,107,,2024-10-14T19:46:07Z,,o-1,161908,2024-10-14T19:46:07Z\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38Z,BUY,172127,,\n" + orders,
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._quantbase_capital_anchors(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 1, "legacy_lineage": {"run_id": run_id}},
+            tmp_path,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            {
+                "account-58e75e8d952fa1b8": [
+                    {
+                        "effective_start": "2024-10-15",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "volatis-strategy",
+                    }
+                ]
+            },
+        )
 
 
 def test_quantbase_source_coverage_keeps_last_nav_not_last_capital_recognition() -> (
@@ -7868,6 +8086,41 @@ def test_matrixport_capital_anchor_fails_closed_without_a_selected_rate(
     """No owner-selected close for the recognition day means no anchor at all."""
 
     manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    fx = ("f" * 64, {("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658")}, ())
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio FX lacks USDT/USD on 2025-12-06",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+            fx_rates=fx,
+        )
+
+
+def test_matrixport_subscription_past_the_admitted_fx_end_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A later subscription is never silently dropped for want of admitted FX."""
+
+    manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    holdings_path = tmp_path / "output/matrixport-source/csv/daily_holdings.csv"
+    with holdings_path.open("a", encoding="utf-8") as handle:
+        handle.write("2025-12-05,H1,1,USDT,1,api_reported_usd_value,1,1,1\n")
+    manifest = _make_two_artifact_manifest(
+        {
+            artifact.artifact_id: tmp_path
+            / "output/matrixport-source"
+            / artifact.artifact_id
+            for artifact in manifest.artifacts
+        }
+    )
     fx = ("f" * 64, {("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658")}, ())
 
     with pytest.raises(

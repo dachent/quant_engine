@@ -842,6 +842,25 @@ def _matrixport_daily_component_total(
     return total
 
 
+def _admitted_fx_end(
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> date:
+    """Return the last date the contract-admitted FX generation converts.
+
+    ``_portfolio_fx_rates`` proves complete daily coverage through the
+    contract interval end, so the last rate date is that boundary.
+    """
+
+    rates = fx_rates[1]
+    if not rates:
+        raise ProviderLedgerError("portfolio FX has no admitted rate")
+    return max(day for _currency, day in rates)
+
+
 def _daily_fx_evidence(
     currency: str,
     day: date,
@@ -880,8 +899,14 @@ def _excluded_source_row(
     cutoff: date,
     *,
     original_source_dates: Mapping[str, str] | None = None,
+    status: str = "OUTSIDE_FINANCIAL_CUTOFF",
 ) -> None:
-    """Retain the identity of a native row excluded before derivation."""
+    """Retain the identity of a native row excluded before derivation.
+
+    ``OUTSIDE_ADMITTED_FX_BOUNDARY`` records a native row inside the financial
+    cutoff that has no contract-admitted USD conversion; its boundary is the
+    admitted FX interval end.
+    """
     if findings is None:
         return
     row_hash = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
@@ -893,8 +918,14 @@ def _excluded_source_row(
         or row.get("time")
         or row_hash
     )
+    if status not in {"OUTSIDE_FINANCIAL_CUTOFF", "OUTSIDE_ADMITTED_FX_BOUNDARY"}:
+        raise ProviderLedgerError("excluded source row status is unknown")
     finding: dict[str, Any] = {
-        "financial_cutoff": cutoff.isoformat(),
+        (
+            "financial_cutoff"
+            if status == "OUTSIDE_FINANCIAL_CUTOFF"
+            else "fx_boundary"
+        ): cutoff.isoformat(),
         "fact_type": fact_type,
         "original_record_id": source_id,
         "original_source_date": observed.isoformat(),
@@ -903,7 +934,7 @@ def _excluded_source_row(
         "source_artifact_id": artifact_id,
         "source_record_id": source_id,
         "source_row_sha256": row_hash,
-        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+        "status": status,
     }
     if original_source_dates is not None:
         finding["original_source_dates"] = dict(original_source_dates)
@@ -937,6 +968,8 @@ def _matrixport_daily_fx_totals(
     totals: dict[date, Decimal] = defaultdict(Decimal)
     evidence: dict[date, dict[str, dict[str, Any]]] = defaultdict(dict)
     incomplete_days: set[date] = set()
+    fx_end = _admitted_fx_end(fx_rates)
+    unconverted: list[tuple[date, str]] = []
     with localcontext() as context:
         context.prec = 80
         for row in rows:
@@ -950,6 +983,21 @@ def _matrixport_daily_fx_totals(
                     row,
                     day,
                     financial_cutoff,
+                )
+                continue
+            if day > fx_end:
+                # The contract admits USD conversion only through its FX
+                # interval end: no USD value exists for a later native row.
+                unconverted.append((day, str(row.get("currency") or "")))
+                _excluded_source_row(
+                    cutoff_findings,
+                    "matrixport",
+                    "nav_observations",
+                    artifact_id,
+                    row,
+                    day,
+                    fx_end,
+                    status="OUTSIDE_ADMITTED_FX_BOUNDARY",
                 )
                 continue
             share = _observed_decimal(
@@ -978,6 +1026,11 @@ def _matrixport_daily_fx_totals(
         totals.pop(day, None)
         evidence.pop(day, None)
     if not totals:
+        if unconverted:
+            day, currency = min(unconverted)
+            raise ProviderLedgerError(
+                f"portfolio FX lacks {currency}/USD on {day.isoformat()}"
+            )
         raise ProviderLedgerError(
             "MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE: no active daily holdings exist"
         )
@@ -1132,6 +1185,18 @@ def _matrixport_flows(
                     financial_cutoff,
                 )
                 continue
+            if timestamp.date() > _admitted_fx_end(fx_rates):
+                _excluded_source_row(
+                    cutoff_findings,
+                    "matrixport",
+                    "flows",
+                    artifact_id,
+                    row,
+                    timestamp.date(),
+                    _admitted_fx_end(fx_rates),
+                    status="OUTSIDE_ADMITTED_FX_BOUNDARY",
+                )
+                continue
             currency = _text(row.get("currency"), "matrixport wallet currency")
             signed = amount * sign
             projected.append(
@@ -1195,10 +1260,10 @@ def _matrixport_nav_observations(
             catalog.get("observed_boundary_date"),
             "matrixport observed_boundary_date",
         )
-        expected_snapshot = (
-            min(snapshot_date, financial_cutoff)
-            if financial_cutoff is not None
-            else snapshot_date
+        expected_snapshot = min(
+            snapshot_date,
+            financial_cutoff if financial_cutoff is not None else snapshot_date,
+            _admitted_fx_end(fx_rates),
         )
         if max(daily_totals) != expected_snapshot:
             raise ProviderLedgerError(
@@ -1514,6 +1579,14 @@ def _matrixport_capital_anchors(
                 financial_cutoff,
             )
             continue
+        if fx_rates is not None and recognition_day > _admitted_fx_end(fx_rates):
+            # A subscription the admitted FX cannot value is not a silently
+            # skipped anchor: the account's opening has no USD value.
+            raise ProviderLedgerError(
+                "portfolio FX lacks "
+                f"{_text(row.get('subscription_currency'), 'currency')}/USD on "
+                f"{recognition_day.isoformat()}"
+            )
         qualified = (
             recognition_day in source_backed_dates
             if fx_daily_totals is None
@@ -1732,6 +1805,11 @@ def _quantbase_capital_anchors(
     cost-basis increase supplies its later NAV-recognition date, but must not
     overwrite the source activity date or turn the allocation into an
     account-external deposit.
+
+    The allocation's economic moment is the last fill of the fund orders it
+    created (order ``transaction`` = allocation ``id``).  That exact timestamp
+    is the money-weighted cash date, and the recognizing NAV must be the first
+    dashboard value after it; an allocation without its fills fails closed.
     """
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
@@ -1758,9 +1836,37 @@ def _quantbase_capital_anchors(
     activity_rows = _verified_csv_rows(
         _exact_file(run_root, activity_rel, "quantbase account activity"),
         activity_artifact.sha256,
-        {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
+        {
+            "activity_type",
+            "amount",
+            "filled_at",
+            "fund",
+            "id",
+            "is_rebalance",
+            "time",
+            "transaction",
+            "type",
+        },
         "quantbase account activity",
     )
+    order_fills: dict[str, list[datetime]] = defaultdict(list)
+    for row in activity_rows:
+        filled_at = str(row.get("filled_at") or "").strip()
+        transaction = str(row.get("transaction") or "").strip()
+        if (
+            row.get("activity_type") != "order"
+            or row.get("fund") != _QUANTBASE_FUND_ID
+            or not filled_at
+            or not transaction
+        ):
+            continue
+        order_fills[transaction].append(
+            datetime.fromisoformat(
+                _utc_timestamp(filled_at, "quantbase order filled_at").replace(
+                    "Z", "+00:00"
+                )
+            )
+        )
 
     for row in activity_rows:
         if (
@@ -1779,7 +1885,7 @@ def _quantbase_capital_anchors(
                 "quantbase non-fee fund sell requires admitted withdrawal"
             )
 
-    contributions: list[tuple[datetime, Decimal]] = []
+    contributions: list[tuple[datetime, Decimal, datetime]] = []
     for row in activity_rows:
         if (
             row["activity_type"] != "filled_txn"
@@ -1807,7 +1913,12 @@ def _quantbase_capital_anchors(
                 financial_cutoff,
             )
             continue
-        contributions.append((observed, amount))
+        fills = order_fills.get(str(row.get("id") or "").strip())
+        if not fills:
+            raise ProviderLedgerError(
+                "quantbase capital allocation lacks its order fill timestamp"
+            )
+        contributions.append((observed, amount, max(fills)))
     contributions.sort(key=lambda item: item[0])
 
     history: list[tuple[date, Decimal, Decimal | None]] = []
@@ -1836,10 +1947,10 @@ def _quantbase_capital_anchors(
         )
     history.sort(key=lambda item: item[0])
 
-    pending: list[tuple[datetime, Decimal]] = []
+    pending: list[tuple[datetime, Decimal, datetime]] = []
     contribution_index = 0
     previous_cost_basis = Decimal(0)
-    booked_anchors: list[tuple[datetime, Decimal, date, Decimal]] = []
+    booked_anchors: list[tuple[datetime, Decimal, date, Decimal, datetime]] = []
     tolerance = Decimal("0.02")
     for day, cost_basis, nav_value in history:
         while (
@@ -1852,7 +1963,7 @@ def _quantbase_capital_anchors(
         if delta > tolerance and pending:
             running = Decimal(0)
             matched_count = 0
-            for index, (_timestamp, amount) in enumerate(pending):
+            for index, (_timestamp, amount, _fill) in enumerate(pending):
                 running += amount
                 if abs(running - delta) <= tolerance:
                     matched_count = index + 1
@@ -1865,19 +1976,27 @@ def _quantbase_capital_anchors(
                         "quantbase capital recognition lacks a positive NAV"
                     )
                 booked_anchors.extend(
-                    (timestamp, amount, day, nav_value)
-                    for timestamp, amount in pending[:matched_count]
+                    (timestamp, amount, day, nav_value, fill)
+                    for timestamp, amount, fill in pending[:matched_count]
                 )
                 pending = pending[matched_count:]
         previous_cost_basis = cost_basis
     if contribution_index != len(contributions) or pending:
         raise ProviderLedgerError("quantbase capital additions do not reconcile")
 
+    history_days = [day for day, _cost_basis, _value in history]
     anchors: list[dict[str, Any]] = []
-    for index, (timestamp, amount, recognition_day, nav_value) in enumerate(
+    for index, (timestamp, amount, recognition_day, nav_value, fill) in enumerate(
         sorted(booked_anchors, key=lambda item: item[0])
     ):
         event_day = timestamp.date()
+        if (
+            min((day for day in history_days if day > fill.date()), default=None)
+            != recognition_day
+        ):
+            raise ProviderLedgerError(
+                "quantbase capital recognition is not the first NAV after its fill"
+            )
         # Keep the activity timestamp as the economic capital date, but map
         # against the first dashboard NAV that recognizes the allocation.
         strategy_id, mapping_status = _mapped_strategy_for_account(
@@ -1895,6 +2014,7 @@ def _quantbase_capital_anchors(
                 if index == 0
                 else "STRATEGY_CAPITAL_ALLOCATION"
             ),
+            "economic_fill_timestamp": fill.isoformat(),
             "event_date": event_day.isoformat(),
             "evidence_layer": "ACCOUNT_LIVE",
             "generation_id": generation_id,
@@ -2944,15 +3064,36 @@ def _provider(
     return identity, manifest, catalog, artifacts, root
 
 
+def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any]:
+    segments = [
+        row
+        for row in _objects(
+            financial_contract.get("source_segments"), "financial MVP source_segments"
+        )
+        if row.get("source_id") == "portfolio-fx-rates"
+    ]
+    if len(segments) != 1:
+        raise ProviderLedgerError("portfolio FX contract segment is absent")
+    return segments[0]
+
+
 def _portfolio_fx_rates(
     value: object,
     baseline_as_of: date,
+    financial_contract: Mapping[str, Any],
 ) -> tuple[
     str,
     dict[tuple[str, date], Decimal],
     tuple[SourceArtifact, SourceArtifact],
 ]:
-    """Load an explicitly selected, hash-bound daily FX candidate."""
+    """Load the contract-admitted, hash-bound daily FX generation.
+
+    The spec's owner-selection label is not authority on its own: the
+    generation and manifest hash must be the financial contract's
+    ``portfolio-fx-rates.current_generation`` and its rates must cover exactly
+    the contract interval.  A later candidate stays unadmitted until the
+    contract selects it, so no USD value is derived past the admitted end.
+    """
 
     ref = _object(value, "portfolio_fx_rates")
     expected = {
@@ -2968,6 +3109,18 @@ def _portfolio_fx_rates(
         raise ProviderLedgerError("portfolio FX owner selection is absent")
     root = Path(_text(ref["root"], "portfolio_fx_rates.root")).resolve()
     generation_id = _run_id(ref["generation_id"], "portfolio_fx_rates.generation_id")
+    segment = _contract_fx_segment(financial_contract)
+    admitted = _object(
+        segment.get("current_generation"), "portfolio FX contract current_generation"
+    )
+    if (
+        admitted.get("generation_id") != generation_id
+        or admitted.get("sha256") != ref["manifest_sha256"]
+    ):
+        raise ProviderLedgerError(
+            "portfolio FX generation is not the contract-admitted generation"
+        )
+    admitted_interval = _object(segment.get("interval"), "portfolio FX interval")
     generation_root = root / "generations" / generation_id
     manifest, manifest_hash, manifest_size = _manifest(
         _exact_file(
@@ -3069,6 +3222,14 @@ def _portfolio_fx_rates(
     start = _day(coverage.get("observed_start"), "portfolio FX observed_start")
     end = _day(coverage.get("observed_end"), "portfolio FX observed_end")
     expected_dates = (end - start).days + 1
+    if start != _day(
+        admitted_interval.get("observed_start"), "portfolio FX admitted start"
+    ) or end != _day(
+        admitted_interval.get("observed_end"), "portfolio FX admitted end"
+    ):
+        raise ProviderLedgerError(
+            "portfolio FX coverage differs from its contract interval"
+        )
     if (
         start != manifest.coverage.observed_start
         or end != manifest.coverage.observed_end
@@ -5967,16 +6128,27 @@ def _broker_strategy_returns(
             quantbase_openings[(account_id, strategy_id)] = recognition_day
         else:
             quantbase_allocation_accounts.add((account_id, strategy_id))
-            # The fund allocation carries an exact activity timestamp, so it
-            # is capital at risk from the start of its recognizing sub-period.
+            raw_fill = row.get("economic_fill_timestamp")
+            if raw_fill in {None, ""}:
+                raise ProviderLedgerError(
+                    "quantbase capital allocation lacks its economic fill timestamp"
+                )
+            fill_day = datetime.fromisoformat(
+                _utc_timestamp(
+                    raw_fill, "quantbase capital anchor economic_fill_timestamp"
+                ).replace("Z", "+00:00")
+            ).date()
+            # The fund allocation fills at an exact time, so it is capital at
+            # risk from the start of its recognizing sub-period.
             legs_by_account[("quantbase", account_id)].append(
                 _return_leg(
                     amount=amount_value,
                     internal=True,
-                    event_day=event_day,
+                    event_day=min(event_day, fill_day),
                     recognition_day=recognition_day,
                     timing=EXACT_TIMESTAMP,
                     record_id=record_id,
+                    economic_day=fill_day,
                 )
             )
             flow_timing_by_provider["quantbase"].add(_EXACT_TIMESTAMP_FLOW_TIMING)
@@ -8819,7 +8991,11 @@ def build_catalog(
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
     run_observation = authority.get("run_observation")
     fx_rates = (
-        _portfolio_fx_rates(spec["portfolio_fx_rates"], as_of)
+        _portfolio_fx_rates(
+            spec["portfolio_fx_rates"],
+            as_of,
+            _object(authority.get("contract"), "financial MVP contract"),
+        )
         if "portfolio_fx_rates" in spec
         else None
     )

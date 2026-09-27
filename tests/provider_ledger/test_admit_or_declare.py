@@ -577,9 +577,12 @@ def _staged_observation(
                     }
                 )
             )
+            fill_day = (cutoff - timedelta(days=1)).isoformat()
             activity = (
-                "activity_type,amount,fund,is_rebalance,time,type,amount_cents,created_at,destination_account_id,id,origin_account_id,status\n"
-                + f"filled_txn,100,107,False,{cutoff.isoformat()}T00:00:00Z,BUY,10000,,,synthetic-buy,,C\n"
+                "activity_type,amount,fund,is_rebalance,time,type,amount_cents,created_at,destination_account_id,id,origin_account_id,status,transaction,filled_at\n"
+                + f"filled_txn,100,107,False,{cutoff.isoformat()}T00:00:00Z,BUY,10000,,,synthetic-buy,,C,,\n"
+                # The fund order fills before the NAV that recognizes it.
+                + f"order,,107,,{fill_day}T23:00:00Z,,,,,synthetic-order,,,synthetic-buy,{fill_day}T23:00:00Z\n"
             )
             activity_relative = "csv/account_activity.csv"
             bind(
