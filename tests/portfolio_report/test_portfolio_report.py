@@ -1002,6 +1002,7 @@ def test_performance_preserves_pool_disposition_and_account_live_return_path() -
         ],
         "strategy_returns": [
             {
+                "component_account_ids": ["account-live"],
                 "date": "2026-01-01",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -1009,6 +1010,7 @@ def test_performance_preserves_pool_disposition_and_account_live_return_path() -
                 "strategy_id": "strategy-live",
             },
             {
+                "component_account_ids": ["account-live"],
                 "date": "2026-01-02",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -1022,7 +1024,10 @@ def test_performance_preserves_pool_disposition_and_account_live_return_path() -
     live = next(row for row in rows if row["assignment_id"] == "assignment-live")
     reserve = next(row for row in rows if row["assignment_id"] == "assignment-reserve")
 
-    assert live["twr_status"] == "UNAVAILABLE_INSUFFICIENT_NAV"
+    # No manifest epoch payload: no numeric TWR (the P1 loop is retired), but
+    # the account's own live return path is still published.
+    assert live["twr"] is None
+    assert live["twr_status"] == "UNAVAILABLE"
     assert live["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
     assert live["return_path_observations"] == 2
     assert live["return_path_cumulative_return"] == "0.0302"
@@ -1163,12 +1168,25 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
                 if row["strategy_id"] == "volatis-strategy"
                 else "FLOW_COMPLETENESS_NOT_PROVEN"
             ),
+            "performance_payload": (
+                {
+                    "flow_count": 0,
+                    "flow_timing": None,
+                    "nav_observations": 2,
+                    "observed_end": "2026-08-13",
+                    "observed_start": "2026-08-12",
+                    "twr": "0.0302",
+                    "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+                }
+                if row["strategy_id"] == "volatis-strategy"
+                else None
+            ),
         }
         for row in included
     }
     for detail in epoch_details.values():
         if detail["epoch_admission_status"] == "BLOCKED":
-            detail["mwr_payload"] = {
+            detail["performance_payload"] = {
                 "mwr_status": "BLOCKED_ADMISSION",
                 "mwr_xirr": None,
                 "mwr_reason": "SYNTHETIC_BLOCKED",
@@ -1214,6 +1232,13 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         ],
         "strategy_returns": [
             {
+                "component_account_ids": [
+                    next(
+                        row["account_id"]
+                        for row in included
+                        if row["strategy_id"] == "volatis-strategy"
+                    )
+                ],
                 "date": day,
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -1281,7 +1306,7 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         "return_path_assignment_id",
     )
     assert all(row[field] is None for row in blocked for field in suppressed_fields)
-    assert funded[0]["twr"] == "0.1"
+    assert funded[0]["twr"] == "0.0302"
     assert funded[0]["observed_end"] == "2026-08-13"
     assert funded[0]["nav_observations"] == 2
     assert funded[0]["return_path_observations"] == 2
@@ -2720,13 +2745,10 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
     mapped = next(
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-a"
     )
-    with reporter.localcontext() as context:
-        context.prec = 34
-        expected = ((Decimal("115") - Decimal("10")) / Decimal("100")) * (
-            Decimal("121") / Decimal("115")
-        ) - Decimal("1")
-    assert mapped["twr"] == reporter.decimal_text(expected)
-    assert mapped["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+    # No manifest epoch payload in this build: no numeric TWR is published
+    # (the report's P1 loop is retired); the MWR stays governed-unavailable.
+    assert mapped["twr"] is None
+    assert mapped["twr_status"] == "UNAVAILABLE"
     assert mapped["mwr_xirr"] is None
     assert mapped["mwr_status"] == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
     assert mapped["mwr_reason"] == "FLOW_COVERAGE_NOT_GOVERNED"
@@ -2742,7 +2764,7 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-b"
     )
     assert missing["twr"] is None
-    assert missing["twr_status"] == "UNAVAILABLE_INSUFFICIENT_NAV"
+    assert missing["twr_status"] == "UNAVAILABLE"
     unmapped = next(
         item
         for item in report["twr_mwr"]
@@ -5517,6 +5539,7 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
     )
     catalog["strategy_returns"] = [
         {
+            "component_account_ids": ["account-a"],
             "date": "2026-01-01",
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "synthetic",
@@ -5524,6 +5547,7 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
             "strategy_id": "strategy-1",
         },
         {
+            "component_account_ids": ["account-a"],
             "date": "2026-01-02",
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "synthetic",
@@ -5531,6 +5555,7 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
             "strategy_id": "strategy-1",
         },
         {
+            "component_account_ids": ["account-b"],
             "date": "2026-01-01",
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "synthetic",
@@ -5538,6 +5563,7 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
             "strategy_id": "strategy-2",
         },
         {
+            "component_account_ids": ["account-b"],
             "date": "2026-01-02",
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "synthetic",
@@ -5622,8 +5648,12 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
     assert retired["twr_status"] == "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT"
     assert "return_path_status" not in retired
     assert current["strategy_id"] == "strategy-2"
-    assert current["twr"] == "0.1"
+    # TWR is the epoch manifest's own engine result; without a manifest epoch
+    # payload no numeric TWR is published (the report's P1 loop is retired).
+    assert current["twr"] is None
+    assert current["twr_status"] == "UNAVAILABLE"
     assert current["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    assert current["return_path_cumulative_return"] == "0.1"
     assert (
         reporter._account_strategy_performance(without_retired_returns, controls)
         == performance
