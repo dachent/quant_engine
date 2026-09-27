@@ -984,6 +984,7 @@ def _preparation_function_fixture(
                 "ledger_admission",
                 "ledger_hwm_inputs",
                 "ledger_models",
+                "ledger_returns",
                 "provider_ledger",
                 "layered_history_repository_dependencies",
             )

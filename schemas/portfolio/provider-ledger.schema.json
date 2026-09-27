@@ -37,6 +37,7 @@
           "account_id": {"type": "string", "minLength": 1},
           "amount": {"$ref": "#/$defs/money"},
           "capital_type": {"enum": ["OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"]},
+          "economic_fill_timestamp": {"type": "string", "format": "date-time"},
           "event_date": {"type": "string", "format": "date"},
           "evidence_layer": {"const": "ACCOUNT_LIVE"},
           "generation_id": {"type": "string", "minLength": 1},

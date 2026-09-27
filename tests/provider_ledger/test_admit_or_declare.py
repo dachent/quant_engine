@@ -577,9 +577,12 @@ def _staged_observation(
                     }
                 )
             )
+            fill_day = (cutoff - timedelta(days=1)).isoformat()
             activity = (
-                "activity_type,amount,fund,is_rebalance,time,type,amount_cents,created_at,destination_account_id,id,origin_account_id,status\n"
-                + f"filled_txn,100,107,False,{cutoff.isoformat()}T00:00:00Z,BUY,10000,,,synthetic-buy,,C\n"
+                "activity_type,amount,fund,is_rebalance,time,type,amount_cents,created_at,destination_account_id,id,origin_account_id,status,transaction,filled_at\n"
+                + f"filled_txn,100,107,False,{cutoff.isoformat()}T00:00:00Z,BUY,10000,,,synthetic-buy,,C,,\n"
+                # The fund order fills before the NAV that recognizes it.
+                + f"order,,107,,{fill_day}T23:00:00Z,,,,,synthetic-order,,,synthetic-buy,{fill_day}T23:00:00Z\n"
             )
             activity_relative = "csv/account_activity.csv"
             bind(
@@ -899,12 +902,14 @@ def _source_bound_stage(
                     "account_id": ledger._CSV_FACT_ACCOUNT[provider_id],
                     "strategy_id": strategy_id,
                     "mapping_status": "MAPPED",
-                    "effective_start": "2025-12-06",
+                    # Each mapped epoch carries its current-census funded
+                    # interval: the census is the performance perimeter (R2).
+                    "effective_start": effective_start,
                     "source_classification": "financial_mvp_funded_membership_reconciled",
                 }
-                for provider_id, strategy_id in (
-                    ("matrixport", "robuxio-crypto"),
-                    ("quantbase", "volatis-strategy"),
+                for provider_id, strategy_id, effective_start in (
+                    ("matrixport", "robuxio-crypto", "2025-12-06"),
+                    ("quantbase", "volatis-strategy", "2024-10-15"),
                 )
             ],
         },
@@ -1348,6 +1353,9 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     )
     monkeypatch.setattr(ledger, "_validate_nav_observation_moves", lambda *_args: None)
     monkeypatch.setattr(
+        ledger, "_census_performance_membership", lambda *_args: ({}, [])
+    )
+    monkeypatch.setattr(
         ledger, "_broker_strategy_returns", lambda *_args, **_kwargs: []
     )
     monkeypatch.setattr(ledger, "_merge_account_returns", lambda *_args, **_kwargs: [])
@@ -1404,6 +1412,149 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
                 str(row["provider_id"]): row for row in receipt["provider_generations"]
             },
         )
+
+
+def test_account_nav_claimed_by_two_providers_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two authoritative providers claiming one account's NAV are ambiguous.
+
+    The account-ownership gate fires on the combined admitted NAV facts, before
+    any census membership or return recomputation consumes them.
+    """
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture(
+        unreferenced_dataset=True, native_source_inventory=True
+    )
+    authority["contract"]["strategies"] = [
+        {
+            "product_requirement": "REQUIRED",
+            "strategy_id": "synthetic-required",
+        }
+    ]
+    refs, selections = _staged_observation(
+        tmp_path / "sources", identities, manifests, catalogs
+    )
+    observation = {
+        "captured_at_utc": "2026-08-14T12:00:00Z",
+        "financial_cutoff": DAY.isoformat(),
+        "policy_contract_sha256": authority["contract_raw_sha256"],
+        "providers": selections,
+        "schema_version": 1,
+    }
+    observation_bytes = canonical_json_bytes(observation)
+    observation_path = tmp_path / "run-observation.json"
+    observation_path.write_bytes(observation_bytes)
+    authority["run_observation"] = observation
+    authority["run_observation_path"] = str(tmp_path / "run-observation.json")
+    authority["run_observation_size_bytes"] = len(observation_bytes)
+    spec = {
+        "as_of_date": DAY.isoformat(),
+        "financial_mvp": {},
+        "output_root": str(tmp_path / "staged"),
+        "provenance": {},
+        "providers": refs,
+        "run_observation": {
+            "path": str(observation_path),
+            "sha256": hashlib.sha256(observation_bytes).hexdigest(),
+            "size_bytes": len(observation_bytes),
+        },
+        "schema_version": 2,
+        "strategy_inputs": {},
+        "strategy_provider_map": {"synthetic-required": "ibkr"},
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    provenance_artifact = SourceArtifact(
+        artifact_id="synthetic/provenance.json",
+        sha256="a" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-provenance",
+        schema_version="1",
+    )
+    strategy_artifact = SourceArtifact(
+        artifact_id="synthetic/strategy.csv",
+        sha256="b" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-strategy",
+        schema_version="1",
+    )
+    evidence_artifact = SourceArtifact(
+        artifact_id="synthetic/strategy-evidence.json",
+        sha256="c" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-strategy-evidence",
+        schema_version="1",
+    )
+    monkeypatch.setattr(ledger, "_financial_mvp_authority", lambda _spec: authority)
+    monkeypatch.setattr(
+        ledger,
+        "_provenance",
+        lambda _spec: ({"assignments": [], "strategies": []}, provenance_artifact),
+    )
+    monkeypatch.setattr(
+        ledger,
+        "_assignment_index",
+        lambda *_args: (
+            {"synthetic-ibkr"},
+            {"synthetic-required"},
+            {
+                "synthetic-ibkr": [
+                    {
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "synthetic-required",
+                    }
+                ]
+            },
+        ),
+    )
+
+    def shared_account_facts(
+        provider_id: str, *_args: object, **_kwargs: object
+    ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        facts = copy.deepcopy(provider_facts[provider_id])
+        if provider_id in {"schwab", "ibkr"}:
+            for row in facts["nav_observations"]:
+                row["account_id"] = "private-account-shared"
+        return facts, []
+
+    monkeypatch.setattr(ledger, "_project_account_facts", shared_account_facts)
+    monkeypatch.setattr(
+        ledger,
+        "_complete_schwab_security_transfer_values",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ledger,
+        "_validate_current_census_provider_generations",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        ledger,
+        "_strategy_inputs",
+        lambda *_args, **_kwargs: ([], [], (strategy_artifact, evidence_artifact)),
+    )
+    monkeypatch.setattr(
+        ledger, "_declared_nav_gap_dates_by_provider", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        ledger, "_provider_native_account_return_strategy_ids", lambda *_args: set()
+    )
+    monkeypatch.setattr(
+        ledger, "_validate_provider_native_strategy_evidence", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        ledger, "_validate_nav_observation_value_bases", lambda *_args: None
+    )
+    monkeypatch.setattr(ledger, "_validate_nav_observation_moves", lambda *_args: None)
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="account NAV is claimed by two providers"
+    ):
+        ledger.stage_candidate(spec_path)
 
 
 def test_observed_receipt_keeps_each_provider_original_qualification(
