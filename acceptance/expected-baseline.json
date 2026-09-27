@@ -102,11 +102,11 @@
      "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -274,11 +274,11 @@
    "unit": "USD",
    "authority_pointer": [
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
@@ -334,11 +334,11 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
@@ -354,11 +354,11 @@
      "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -514,11 +514,11 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
@@ -538,7 +538,8 @@
     "value": "52055.38",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "capital.strategy.cutoff",
@@ -594,11 +595,11 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -698,11 +699,11 @@
      "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -870,11 +871,11 @@
    "unit": "date",
    "authority_pointer": [
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
@@ -998,11 +999,11 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -1222,19 +1223,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -1254,7 +1255,8 @@
     "value": "0",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "flows.account.count",
@@ -1370,11 +1372,11 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -1594,19 +1596,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -1626,7 +1628,8 @@
     "value": "0.00",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "flows.account.net",
@@ -1742,11 +1745,11 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -1966,19 +1969,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -1998,7 +2001,8 @@
     "value": "0.0583663999",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "mwr.account",
@@ -2174,19 +2178,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -2206,7 +2210,8 @@
     "value": "0.0583663999",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "mwr.strategy",
@@ -2262,15 +2267,15 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -2366,11 +2371,11 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
@@ -2558,19 +2563,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -2590,7 +2595,8 @@
     "value": "0.0430170764",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "twr.account",
@@ -2766,19 +2772,19 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/nav_daily.csv",
      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_bills.csv",
      "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_currency_dispositions.csv",
      "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "path": "dataMatrixport/source-runs/matrixport-current-rederived/output/20260918T184248.013Z/csv/wallet_deposits.csv",
      "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
@@ -2798,7 +2804,8 @@
     "value": "0.0430170764",
     "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
-   "critical": true
+   "critical": true,
+   "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
   },
   {
    "metric_id": "twr.strategy",
@@ -2854,15 +2861,15 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/account_activity.csv",
      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/accounts.csv",
      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "path": "dataQuantbase/source-runs/20260919-quantbase-current-native-stage/legacy-20260918-f4b8927f7081/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],

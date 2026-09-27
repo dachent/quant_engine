@@ -72,6 +72,20 @@ def test_no_null_authority_pointer_sha256() -> None:
     assert not offenders, offenders
 
 
+def test_no_machine_local_absolute_authority_pointer_paths() -> None:
+    """Fix round 1 (Kimi K3 + Codex review of cp/acc-baseline-v2): authority
+    pointers must be data-root-relative, never machine-local absolute paths
+    (e.g. C:\\Dev\\scratch\\... scratch lineage captures)."""
+    doc = _load()
+    offenders = [
+        (row["metric_id"], row["entity"], pointer["path"])
+        for row in doc["metrics"]
+        for pointer in row.get("authority_pointer", [])
+        if Path(pointer["path"]).is_absolute() or ":\\" in pointer["path"]
+    ]
+    assert not offenders, offenders
+
+
 def test_tolerance_classes_match_spec() -> None:
     """USD +/-0.01, ratio +/-1e-8, everything else exact (no tolerance)."""
     doc = _load()
