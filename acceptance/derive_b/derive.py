@@ -554,9 +554,7 @@ def composite_series(
                 first_observed, Decimal("0")
             )
         if last_observed < last_date:
-            flows[last_observed] -= values[last_observed] + account_flows.get(
-                last_observed, Decimal("0")
-            )
+            flows[last_observed] -= values[last_observed]
     return observations, dict(flows)
 
 
@@ -569,7 +567,7 @@ def quantbase_raw_observations(
         observed_on = row.get("time")
         value = row.get("value")
         if not observed_on or value in (None, ""):
-            continue
+            raise ValueError("Quantbase pricehistory row lacks a time or value")
         parsed_on = datetime.strptime(observed_on, "%m/%d/%Y").date()
         if parsed_on <= CUTOFF:
             observations.append((parsed_on, Decimal(value)))
@@ -609,13 +607,13 @@ def quantbase_sleeve_flows(
             continue
         amount = row.get("amount")
         if amount in (None, ""):
-            continue
+            raise ValueError("Quantbase sleeve fill lacks an amount")
         fill_timestamps = filled_at_by_transaction.get(str(row.get("id")), [])
         timestamp = max(fill_timestamps, default=None)
         if timestamp is None:
             event_timestamp = row.get("time") or row.get("filled_at")
             if not event_timestamp:
-                continue
+                raise ValueError("Quantbase sleeve fill lacks a fill timestamp")
             timestamp = datetime.fromisoformat(event_timestamp.replace("Z", "+00:00"))
         target_index = next(
             (
@@ -707,8 +705,13 @@ def matrixport_raw_observations(
                 Decimal("0"),
             )
             rate = (fx_rates or {}).get(observed_on)
-            if units == 0 or rate is None:
+            if units == 0:
                 continue
+            if rate is None:
+                raise ValueError(
+                    "no admitted USDT/USD close for unit-holding observation "
+                    + observed_on.isoformat()
+                )
             value = units * Decimal(nav) * rate
             if value != 0:
                 observations.append((observed_on, value))
@@ -749,7 +752,10 @@ def matrixport_raw_flows(
         if row["currency"] == "USDT":
             rate = (fx_rates or {}).get(target)
             if rate is None:
-                continue
+                raise ValueError(
+                    "no admitted USDT/USD close for deposit target "
+                    + target.isoformat()
+                )
             value *= rate
         flows[target] += value
         count += 1
@@ -768,6 +774,42 @@ def usdt_usd_fx_rates(path: Path) -> dict[date, Decimal]:
     }
 
 
+ACCOUNT_METRIC_IDS = (
+    "capital.account.cutoff",
+    "date.source_last_observation",
+    "flows.account.net",
+    "flows.account.count",
+    "twr.account",
+    "mwr.account",
+)
+FLOW_DEPENDENT_METRIC_IDS = (
+    "flows.account.net",
+    "flows.account.count",
+    "twr.account",
+    "mwr.account",
+)
+R6_PROVIDERS = {"QUANTBASE", "MATRIXPORT"}
+
+
+def r6_ledger_tail_note(
+    provider: str,
+    ledger_points: list[tuple[date, Decimal]],
+    raw_points: list[tuple[date, Decimal]],
+) -> str:
+    """Disclose ledger valuations after the last raw observation for R6 providers."""
+    if provider not in R6_PROVIDERS or not raw_points:
+        return ""
+    raw_last = raw_points[-1][0]
+    tail = [point for point in ledger_points if point[0] > raw_last]
+    if not tail:
+        return ""
+    return (
+        f"R6: {len(tail)} ledger USD valuation(s) from {tail[0][0].isoformat()} "
+        f"to {tail[-1][0].isoformat()} follow the last raw observation "
+        f"{raw_last.isoformat()} and are cross-checks only, not expected values."
+    )
+
+
 def raw_provider_data(
     qe_root: Path,
     crosswalk_rows: list[dict[str, object]],
@@ -776,8 +818,14 @@ def raw_provider_data(
     dict[str, list[tuple[date, Decimal]]],
     dict[str, FlowData],
     list[Path],
+    dict[str, dict[str, object]],
 ]:
-    """Load the R6 raw-capture overrides when their selected files are readable."""
+    """Load the R6 raw-capture overrides, failing closed per account.
+
+    A missing, unreadable, unparsable, or empty selected raw capture records a
+    failure for the affected account's metrics; the caller must emit
+    not_derivable and must not substitute ledger values.
+    """
     providers = {
         str(row["account_id"]): str(row.get("provider", "")).upper()
         for row in crosswalk_rows
@@ -785,91 +833,167 @@ def raw_provider_data(
     observations: dict[str, list[tuple[date, Decimal]]] = {}
     flows: dict[str, FlowData] = {}
     used: list[Path] = []
+    failures: dict[str, dict[str, object]] = {}
     membership_starts = membership_starts or {}
     quantbase_accounts = [
         account_id
         for account_id, provider in providers.items()
         if provider == "QUANTBASE"
     ]
-    if (
-        len(quantbase_accounts) == 1
-        and (qe_root / QUANTBASE_PRICE_HISTORY_PATH).is_file()
-    ):
-        with (qe_root / QUANTBASE_PRICE_HISTORY_PATH).open(
-            encoding="utf-8", newline=""
-        ) as handle:
-            values = quantbase_raw_observations(
-                csv.DictReader(handle), quantbase_accounts[0]
+    if quantbase_accounts:
+        price_history_path = qe_root / QUANTBASE_PRICE_HISTORY_PATH
+        activity_path = qe_root / QUANTBASE_ACTIVITY_PATH
+        if len(quantbase_accounts) != 1:
+            reason = (
+                "R6 Quantbase raw capture supports exactly one account; "
+                f"the crosswalk lists {len(quantbase_accounts)}"
             )
-        if values:
-            observations[quantbase_accounts[0]] = values
-            used.append(QUANTBASE_PRICE_HISTORY_PATH)
-            if (qe_root / QUANTBASE_ACTIVITY_PATH).is_file():
-                with (qe_root / QUANTBASE_ACTIVITY_PATH).open(
-                    encoding="utf-8", newline=""
+            for account_id in quantbase_accounts:
+                failures[account_id] = {
+                    "metrics": ACCOUNT_METRIC_IDS,
+                    "reason": reason,
+                }
+        elif not price_history_path.is_file():
+            failures[quantbase_accounts[0]] = {
+                "metrics": ACCOUNT_METRIC_IDS,
+                "reason": "R6 raw capture is missing: "
+                + QUANTBASE_PRICE_HISTORY_PATH.as_posix(),
+            }
+        else:
+            account_id = quantbase_accounts[0]
+            try:
+                with price_history_path.open(
+                    encoding="utf-8-sig", newline=""
                 ) as handle:
-                    flows[quantbase_accounts[0]] = quantbase_sleeve_flows(
-                        csv.DictReader(handle),
-                        values,
-                        membership_starts.get(quantbase_accounts[0]),
+                    values = quantbase_raw_observations(
+                        csv.DictReader(handle), account_id
                     )
-                used.append(QUANTBASE_ACTIVITY_PATH)
+            except (OSError, ValueError) as error:
+                failures[account_id] = {
+                    "metrics": ACCOUNT_METRIC_IDS,
+                    "reason": "R6 raw capture "
+                    + QUANTBASE_PRICE_HISTORY_PATH.as_posix()
+                    + f" is unreadable or unparsable: {error}",
+                }
+            else:
+                if not values:
+                    failures[account_id] = {
+                        "metrics": ACCOUNT_METRIC_IDS,
+                        "reason": "R6 raw capture "
+                        + QUANTBASE_PRICE_HISTORY_PATH.as_posix()
+                        + " yields no observations",
+                    }
+                else:
+                    observations[account_id] = values
+                    used.append(QUANTBASE_PRICE_HISTORY_PATH)
+                    if not activity_path.is_file():
+                        failures[account_id] = {
+                            "metrics": FLOW_DEPENDENT_METRIC_IDS,
+                            "reason": "R6 raw activity capture is missing: "
+                            + QUANTBASE_ACTIVITY_PATH.as_posix(),
+                        }
+                    else:
+                        try:
+                            with activity_path.open(
+                                encoding="utf-8-sig", newline=""
+                            ) as handle:
+                                flows[account_id] = quantbase_sleeve_flows(
+                                    csv.DictReader(handle),
+                                    values,
+                                    membership_starts.get(account_id),
+                                )
+                        except (OSError, ValueError) as error:
+                            failures[account_id] = {
+                                "metrics": FLOW_DEPENDENT_METRIC_IDS,
+                                "reason": "R6 raw activity capture "
+                                + QUANTBASE_ACTIVITY_PATH.as_posix()
+                                + f" is unreadable or unparsable: {error}",
+                            }
+                        else:
+                            used.append(QUANTBASE_ACTIVITY_PATH)
     matrixport_accounts = [
         account_id
         for account_id, provider in providers.items()
         if provider == "MATRIXPORT"
     ]
-    if (
-        len(matrixport_accounts) == 1
-        and (qe_root / MATRIXPORT_NAV_PATH).is_file()
-        and (qe_root / MATRIXPORT_DEPOSITS_PATH).is_file()
-        and (qe_root / MATRIXPORT_BILLS_PATH).is_file()
-        and (qe_root / FX_PATH).is_file()
-    ):
-        with (
-            (qe_root / MATRIXPORT_NAV_PATH).open(
-                encoding="utf-8-sig", newline=""
-            ) as nav_handle,
-            (qe_root / MATRIXPORT_DEPOSITS_PATH).open(
-                encoding="utf-8-sig", newline=""
-            ) as deposit_handle,
-            (qe_root / MATRIXPORT_BILLS_PATH).open(
-                encoding="utf-8-sig", newline=""
-            ) as bill_handle,
-        ):
-            deposit_rows = list(csv.DictReader(deposit_handle))
-            bill_rows = list(csv.DictReader(bill_handle))
-            fx_rates = usdt_usd_fx_rates(qe_root / FX_PATH)
-            values = matrixport_raw_observations(
-                csv.DictReader(nav_handle),
-                deposit_rows,
-                bill_rows,
-                matrixport_accounts[0],
-                fx_rates,
+    if matrixport_accounts:
+        matrixport_paths = (
+            MATRIXPORT_NAV_PATH,
+            MATRIXPORT_DEPOSITS_PATH,
+            MATRIXPORT_BILLS_PATH,
+            FX_PATH,
+        )
+        missing_paths = [
+            path for path in matrixport_paths if not (qe_root / path).is_file()
+        ]
+        if len(matrixport_accounts) != 1:
+            reason = (
+                "R6 Matrixport raw capture supports exactly one account; "
+                f"the crosswalk lists {len(matrixport_accounts)}"
             )
-        if values:
-            observations[matrixport_accounts[0]] = values
-            cash_flows, count = matrixport_raw_flows(
-                deposit_rows,
-                values,
-                fx_rates,
-                membership_starts.get(matrixport_accounts[0]),
-            )
-            flows[matrixport_accounts[0]] = FlowData(
-                cash_flows=cash_flows,
-                twr_end_flows=cash_flows,
-                twr_beginning_flows={},
-                count=count,
-            )
-            used.extend(
-                [
-                    MATRIXPORT_NAV_PATH,
-                    MATRIXPORT_DEPOSITS_PATH,
-                    MATRIXPORT_BILLS_PATH,
-                    FX_PATH,
-                ]
-            )
-    return observations, flows, used
+            for account_id in matrixport_accounts:
+                failures[account_id] = {
+                    "metrics": ACCOUNT_METRIC_IDS,
+                    "reason": reason,
+                }
+        elif missing_paths:
+            failures[matrixport_accounts[0]] = {
+                "metrics": ACCOUNT_METRIC_IDS,
+                "reason": "R6 raw capture is missing: "
+                + ", ".join(path.as_posix() for path in missing_paths),
+            }
+        else:
+            account_id = matrixport_accounts[0]
+            try:
+                with (
+                    (qe_root / MATRIXPORT_NAV_PATH).open(
+                        encoding="utf-8-sig", newline=""
+                    ) as nav_handle,
+                    (qe_root / MATRIXPORT_DEPOSITS_PATH).open(
+                        encoding="utf-8-sig", newline=""
+                    ) as deposit_handle,
+                    (qe_root / MATRIXPORT_BILLS_PATH).open(
+                        encoding="utf-8-sig", newline=""
+                    ) as bill_handle,
+                ):
+                    deposit_rows = list(csv.DictReader(deposit_handle))
+                    bill_rows = list(csv.DictReader(bill_handle))
+                    fx_rates = usdt_usd_fx_rates(qe_root / FX_PATH)
+                    values = matrixport_raw_observations(
+                        csv.DictReader(nav_handle),
+                        deposit_rows,
+                        bill_rows,
+                        account_id,
+                        fx_rates,
+                    )
+                    if not values:
+                        raise ValueError(
+                            "R6 raw capture "
+                            + MATRIXPORT_NAV_PATH.as_posix()
+                            + " yields no observations"
+                        )
+                    cash_flows, count = matrixport_raw_flows(
+                        deposit_rows,
+                        values,
+                        fx_rates,
+                        membership_starts.get(account_id),
+                    )
+            except (OSError, ValueError, KeyError) as error:
+                failures[account_id] = {
+                    "metrics": ACCOUNT_METRIC_IDS,
+                    "reason": f"R6 raw Matrixport capture is unreadable or "
+                    f"unparsable: {error}",
+                }
+            else:
+                observations[account_id] = values
+                flows[account_id] = FlowData(
+                    cash_flows=cash_flows,
+                    twr_end_flows=cash_flows,
+                    twr_beginning_flows={},
+                    count=count,
+                )
+                used.extend(matrixport_paths)
+    return observations, flows, used, failures
 
 
 def metric(
@@ -966,11 +1090,16 @@ def derive(qe_root: Path) -> dict[str, object]:
         str(row["account_id"]): str(row.get("provider", "")).upper()
         for row in crosswalk["rows"]
     }
-    observations, observation_conflicts = latest_observations(ledger)
-    raw_observations, raw_flow_data, raw_paths = raw_provider_data(
+    ledger_observations, observation_conflicts = latest_observations(ledger)
+    raw_observations, raw_flow_data, raw_paths, raw_failures = raw_provider_data(
         qe_root, crosswalk["rows"], membership_starts
     )
-    observations.update(raw_observations)
+    observations = {**ledger_observations, **raw_observations}
+    for account_id, failure in raw_failures.items():
+        if "capital.account.cutoff" in failure["metrics"]:
+            # R6 fails closed: ledger observations are cross-checks only and
+            # must never substitute for an unusable raw capture.
+            observations.pop(account_id, None)
     paths.extend(raw_paths)
     inputs = [
         {
@@ -1023,11 +1152,29 @@ def derive(qe_root: Path) -> dict[str, object]:
             )
 
     for account_id in sorted(account_strategies):
-        account_notes = (
-            MATRIXPORT_FX_PROVENANCE
-            if providers.get(account_id) == "MATRIXPORT"
-            else ""
+        provider = providers.get(account_id, "")
+        note_parts = []
+        if provider == "MATRIXPORT":
+            note_parts.append(MATRIXPORT_FX_PROVENANCE)
+        tail_note = r6_ledger_tail_note(
+            provider,
+            ledger_observations.get(account_id, []),
+            raw_observations.get(account_id, []),
         )
+        if tail_note:
+            note_parts.append(tail_note)
+        account_notes = " ".join(note_parts)
+        failure = raw_failures.get(account_id)
+        if failure is not None and "capital.account.cutoff" in failure["metrics"]:
+            for metric_id in failure["metrics"]:
+                add_not_derivable(
+                    output,
+                    metric_id,
+                    account_id,
+                    str(failure["reason"]),
+                    "ITD" if metric_id.startswith(("flows", "twr", "mwr")) else None,
+                )
+            continue
         if account_id in observation_conflicts:
             for metric_id in (
                 "capital.account.cutoff",
@@ -1090,6 +1237,13 @@ def derive(qe_root: Path) -> dict[str, object]:
                 notes=account_notes,
             )
         )
+        if failure is not None and "flows.account.net" in failure["metrics"]:
+            account_flow_data[account_id] = None
+            for metric_id in failure["metrics"]:
+                add_not_derivable(
+                    output, metric_id, account_id, str(failure["reason"]), "ITD"
+                )
+            continue
         if account_id in raw_flow_data:
             flow_data = raw_flow_data[account_id]
             flow_problem = None
@@ -1192,11 +1346,18 @@ def derive(qe_root: Path) -> dict[str, object]:
     # Retained/excluded accounts are outside performance membership, but their
     # source-cutoff capital and observation date remain required output facts.
     for account_id in sorted(excluded_accounts):
-        account_notes = (
-            MATRIXPORT_FX_PROVENANCE
-            if providers.get(account_id) == "MATRIXPORT"
-            else ""
+        provider = providers.get(account_id, "")
+        note_parts = []
+        if provider == "MATRIXPORT":
+            note_parts.append(MATRIXPORT_FX_PROVENANCE)
+        tail_note = r6_ledger_tail_note(
+            provider,
+            ledger_observations.get(account_id, []),
+            raw_observations.get(account_id, []),
         )
+        if tail_note:
+            note_parts.append(tail_note)
+        account_notes = " ".join(note_parts)
         if account_id in observation_conflicts:
             reason = "conflicting available USD valuations on one observation date"
             for metric_id in (

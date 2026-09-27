@@ -8,6 +8,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 
 MODULE_PATH = Path(__file__).parents[2] / "acceptance" / "derive_b" / "derive.py"
 
@@ -925,7 +927,7 @@ def test_raw_provider_matrixport_uses_subscription_bill_units_and_usdt_fx(
         encoding="utf-8",
     )
 
-    observations, flows, used = derivation.raw_provider_data(
+    observations, flows, used, failures = derivation.raw_provider_data(
         tmp_path,
         [
             {
@@ -936,6 +938,7 @@ def test_raw_provider_matrixport_uses_subscription_bill_units_and_usdt_fx(
         ],
     )
 
+    assert failures == {}
     assert observations == {"account-m": [(date(2026, 1, 2), Decimal("8.910"))]}
     assert flows["account-m"].cash_flows == {}
     assert flows["account-m"].twr_end_flows == {}
@@ -1189,3 +1192,248 @@ def test_derive_matrixport_stops_at_raw_last_date_despite_later_ledger_row(
     assert derivation.MATRIXPORT_NAV_PATH.as_posix() in {
         item["path"] for item in output["inputs"]
     }
+
+
+def test_composite_member_exit_does_not_double_count_same_date_flow():
+    """An exiting member's embedded EOD flow must net to F - V, not -V."""
+    derivation = load_derivation_module()
+
+    observations, flows = derivation.composite_series(
+        {
+            "account-a": [
+                (date(2026, 1, 1), Decimal("100")),
+                (date(2026, 1, 2), Decimal("110")),
+                (date(2026, 1, 3), Decimal("121")),
+                (date(2026, 1, 4), Decimal("133.10")),
+            ],
+            "account-b": [
+                (date(2026, 1, 2), Decimal("50")),
+                (date(2026, 1, 3), Decimal("55")),
+            ],
+        },
+        {"account-a": {}, "account-b": {date(2026, 1, 3): Decimal("10")}},
+    )
+
+    assert observations == [
+        (date(2026, 1, 1), Decimal("100")),
+        (date(2026, 1, 2), Decimal("160")),
+        (date(2026, 1, 3), Decimal("121")),
+        (date(2026, 1, 4), Decimal("133.10")),
+    ]
+    assert flows == {date(2026, 1, 2): Decimal("50"), date(2026, 1, 3): Decimal("-45")}
+    assert derivation.time_weighted_return(observations, flows) == Decimal("0.255375")
+
+
+def test_derive_fails_closed_without_ledger_fallback_when_raw_capture_is_missing(
+    tmp_path: Path,
+):
+    """A missing R6 raw capture must never emit ledger values as expected values."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [nav("account-m", "2026-09-17", "100")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                **included_row("account-m", "strategy-m"),
+                "provider": "MATRIXPORT",
+            }
+        ],
+    )
+    derivation.MATRIXPORT_NAV_PATH = Path("missing/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("missing/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("missing/bills.csv")
+    derivation.FX_PATH = Path("missing/fx.json")
+
+    output = derivation.derive(tmp_path)
+
+    assert not [row for row in output["metrics"] if row["entity"] == "account-m"]
+    failures = {
+        row["metric_id"]: row["reason"]
+        for row in output["not_derivable"]
+        if row["entity"] == "account-m"
+    }
+    assert set(failures) == {
+        "capital.account.cutoff",
+        "date.source_last_observation",
+        "flows.account.net",
+        "flows.account.count",
+        "twr.account",
+        "mwr.account",
+    }
+    assert all("raw capture is missing" in reason for reason in failures.values())
+
+
+def test_quantbase_raw_observations_fail_closed_on_malformed_rows():
+    """A renamed or empty time/value column must fail closed, not skip rows."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(ValueError, match="time or value"):
+        derivation.quantbase_raw_observations(
+            [{"time": "09/02/2026", "value": ""}],
+            "account-quantbase",
+        )
+
+
+def test_quantbase_pricehistory_with_bom_is_parsed_via_utf8_sig(tmp_path: Path):
+    """A BOM-prefixed Quantbase capture must parse instead of yielding no rows."""
+    derivation = load_derivation_module()
+    derivation.QUANTBASE_PRICE_HISTORY_PATH = Path("quantbase/pricehistory.csv")
+    derivation.QUANTBASE_ACTIVITY_PATH = Path("quantbase/activity.csv")
+    (tmp_path / derivation.QUANTBASE_PRICE_HISTORY_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.QUANTBASE_PRICE_HISTORY_PATH).write_text(
+        "time,value\n09/01/2026,99.25\n09/02/2026,100.50\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.QUANTBASE_ACTIVITY_PATH).write_text(
+        "activity_type,id,fund,type,amount,time,created_to_cover_fees,is_rebalance\n",
+        encoding="utf-8-sig",
+    )
+
+    observations, flows, used, failures = derivation.raw_provider_data(
+        tmp_path,
+        [
+            {
+                "account_id": "account-q",
+                "provider": "QUANTBASE",
+                "effective_start": "2026-09-01",
+            }
+        ],
+    )
+
+    assert failures == {}
+    assert observations == {
+        "account-q": [
+            (date(2026, 9, 1), Decimal("99.25")),
+            (date(2026, 9, 2), Decimal("100.50")),
+        ]
+    }
+    assert flows["account-q"].count == 0
+    assert derivation.QUANTBASE_PRICE_HISTORY_PATH in used
+    assert derivation.QUANTBASE_ACTIVITY_PATH in used
+
+
+def test_matrixport_raw_observations_fail_closed_without_admitted_fx_rate():
+    """A unit-holding NAV row without an admitted FX close must fail closed."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(ValueError, match="USDT/USD"):
+        derivation.matrixport_raw_observations(
+            [{"day_timestamp_utc": "2026-01-02T00:00:00+00:00", "nav": "1.1"}],
+            [],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "amount": "9",
+                    "timestamp_utc": "2026-01-01T20:00:00+00:00",
+                }
+            ],
+            "account-m",
+            {},
+        )
+
+
+def test_quantbase_sleeve_flows_fail_closed_on_fill_without_amount():
+    """A candidate fill with an empty amount signals a parse break, not zero flows."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(ValueError, match="amount"):
+        derivation.quantbase_sleeve_flows(
+            [
+                {
+                    "activity_type": "filled_txn",
+                    "id": "transaction-a",
+                    "fund": "107",
+                    "type": "BUY",
+                    "amount": "",
+                    "time": "2026-01-01T20:32:52Z",
+                    "created_to_cover_fees": "False",
+                    "is_rebalance": "False",
+                }
+            ],
+            [
+                (date(2026, 1, 2), Decimal("100")),
+                (date(2026, 1, 3), Decimal("150")),
+            ],
+        )
+
+
+def test_derive_discloses_ledger_tail_after_last_raw_observation(tmp_path: Path):
+    """R6: ledger valuations after the last raw observation must be disclosed in notes."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [
+                nav("account-m", "2026-01-02", "8.91"),
+                nav("account-m", "2026-09-16", "100"),
+                nav("account-m", "2026-09-17", "101"),
+            ],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                **included_row("account-m", "strategy-m"),
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-01-02",
+            }
+        ],
+    )
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
+        "day_timestamp_utc,nav\n"
+        "2026-01-02T00:00:00+00:00,1.1\n"
+        "2026-01-03T00:00:00+00:00,1.21\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-01-01T16:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-01-01T20:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.FX_PATH).write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-01-02T00:00:00",
+                        "Close": 0.99,
+                    },
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-01-03T00:00:00",
+                        "Close": 0.98,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = derivation.derive(tmp_path)
+    account_rows = [row for row in output["metrics"] if row["entity"] == "account-m"]
+
+    assert account_rows
+    assert all("R6" in row["notes"] for row in account_rows)
+    assert all("2 ledger USD valuation(s)" in row["notes"] for row in account_rows)
+    assert all(
+        "2026-09-16" in row["notes"] and "2026-09-17" in row["notes"]
+        for row in account_rows
+    )
+    assert all("cross-checks only" in row["notes"] for row in account_rows)
