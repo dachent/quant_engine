@@ -405,7 +405,9 @@ def composite(members: Iterable[MemberReturn]) -> tuple[CompositeReturn, ...]:
     With capital ``V_begin + F_bod`` per member this equals linking the summed
     member values and flows when member sub-periods share their dates.  A lone
     member's return is passed through unchanged so no second rounding touches
-    it.  Dates without capital at risk are omitted.
+    it.  Dates without capital at risk are omitted.  Members are summed in
+    input order; Decimal addition rounds, so a caller reproducing published
+    digits keeps its member order.
     """
 
     by_day: dict[date, list[MemberReturn]] = defaultdict(list)
