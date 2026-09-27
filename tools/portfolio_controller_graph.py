@@ -130,9 +130,18 @@ _PATH_STAGES = {
     # is the minimal change needed, not a broader edit to this file.
     "tools/check_retained_authority_pins.py": [],
     "tools/check_release_validation_findings.py": [],
+    # WS1b T1.5 (corrective program): another `check_*.py` guard, same reason as
+    # its neighbors above -- it gates `evidence/releases/<date>/` closure
+    # completeness (N1), reading only that record's own declared pins; no
+    # producer imports it and it writes no delivery artifact.
+    "tools/check_release_closure.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/merge_readiness.py": [],
+    # Acceptance runner entrypoint (corrective program WS5). Its checks live in
+    # top-level `acceptance/validate/`; it reads published outputs and imports no
+    # producer, so a change to it affects no execution stage.
+    "tools/validate_generation.py": [],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
