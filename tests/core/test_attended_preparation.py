@@ -538,41 +538,40 @@ def test_attended_basic_preflight_probes_configured_runtime_before_source_qc(
     assert calls == [Path(sys.executable).resolve()]
 
 
-def test_history_dependency_mismatch_requires_rebuild_but_source_failure_does_not(
+def test_history_semantic_validation_failure_requires_rebuild_regardless_of_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only a trusted-code mismatch may replace a retained derived generation."""
+    """Any TargetSeriesError from the verifier means the basis is stale.
+
+    The verifier only raises TargetSeriesError for semantic validation of a
+    well-formed retained generation: a trusted-code change, a return-content
+    mismatch against the provider ledger, or a source-admission proof bound to
+    a previous ledger generation. Matching message variants chases the tail;
+    every such failure is a rebuild.
+    """
 
     import portfolio_target_series as history
 
-    calls: list[str] = []
-
-    def changed(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(str(kwargs["require_mode"]))
-        raise history.TargetSeriesError(
-            "layered history repository dependency differs: schemas/portfolio/financial-mvp-source-contract.schema.json"
-        )
-
-    monkeypatch.setattr(history, "verify_layered_history_generation", changed)
-    assert (
-        preparation._retained_history_requires_rebuild(
-            tmp_path / "history", tmp_path / "contract.json", {}
-        )
-        is True
-    )
-    assert calls == ["LIVE_ONLY"]
-
-    def corrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise history.TargetSeriesError("layered history artifact sha256 differs")
-
-    monkeypatch.setattr(history, "verify_layered_history_generation", corrupted)
-    with pytest.raises(
-        preparation.AttendedPreparationError,
-        match="retained layered history is invalid",
+    for message in (
+        "layered history repository dependency differs: "
+        "schemas/portfolio/financial-mvp-source-contract.schema.json",
+        "current source admission proof differs",
     ):
-        preparation._retained_history_requires_rebuild(
-            tmp_path / "history", tmp_path / "contract.json", {}
+        calls: list[str] = []
+
+        def changed(*_args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(str(kwargs["require_mode"]))
+            raise history.TargetSeriesError(message)
+
+        monkeypatch.setattr(history, "verify_layered_history_generation", changed)
+        assert (
+            preparation._retained_history_requires_rebuild(
+                tmp_path / "history", tmp_path / "contract.json", {}
+            )
+            is True
         )
+        assert calls == ["LIVE_ONLY"]
+        monkeypatch.undo()
 
 
 def test_history_ledger_basis_change_requires_rebuild_but_corrupt_input_does_not(
@@ -583,8 +582,12 @@ def test_history_ledger_basis_change_requires_rebuild_but_corrupt_input_does_not
     The layered history is one cycle behind by design: when the admitted
     ACCOUNT_LIVE returns change under a semantics change, verification of the
     retained generation fails with the content-diff class against the provider
-    ledger, and the generation must be rebuilt from the corrected basis.
+    ledger, and the generation must be rebuilt from the corrected basis. A
+    corrupt or unreadable input instead surfaces as an OSError or JSON error,
+    which is invalid source evidence and fails closed.
     """
+
+    import json
 
     import portfolio_target_series as history
 
@@ -612,19 +615,22 @@ def test_history_ledger_basis_change_requires_rebuild_but_corrupt_input_does_not
     )
     assert calls == ["LIVE_ONLY"]
 
-    def unparseable(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise history.TargetSeriesError(
-            "layered history generation manifest is invalid"
-        )
+    def corrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise OSError("retained history artifact is unreadable")
 
-    monkeypatch.setattr(history, "verify_layered_history_generation", unparseable)
-    with pytest.raises(
-        preparation.AttendedPreparationError,
-        match="retained layered history is invalid",
-    ):
-        preparation._retained_history_requires_rebuild(
-            tmp_path / "history", tmp_path / "contract.json", authorities
-        )
+    def unparseable(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise json.JSONDecodeError("Expecting value", "<manifest>", 0)
+
+    for broken in (corrupted, unparseable):
+        monkeypatch.setattr(history, "verify_layered_history_generation", broken)
+        with pytest.raises(
+            preparation.AttendedPreparationError,
+            match="retained layered history is invalid",
+        ):
+            preparation._retained_history_requires_rebuild(
+                tmp_path / "history", tmp_path / "contract.json", authorities
+            )
+        monkeypatch.undo()
 
 
 def test_rebuild_layered_history_uses_selected_builder_kwargs_and_current_commit(
