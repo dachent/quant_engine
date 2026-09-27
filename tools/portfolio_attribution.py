@@ -28,6 +28,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import ReturnsError, splice_spans
 
 
 SCHEMA_VERSION: Final = 2
@@ -221,6 +222,42 @@ def _rows(path: Path) -> dict[str, dict[date, Decimal]]:
     return result
 
 
+def _account_live_series(
+    baseline: Mapping[str, Any],
+) -> dict[str, dict[date, Decimal]]:
+    """The baseline's own admitted ACCOUNT_LIVE daily return per strategy.
+
+    This is the account side of a comparison (B3): the baseline already
+    carries the provider-ledger's admitted, authoritative strategy return
+    series (``_baseline()`` loads the whole catalog), so attribution reads it
+    directly instead of a separately retained CSV that can fall behind.
+    """
+
+    rows = baseline.get("strategy_returns")
+    result: dict[str, dict[date, Decimal]] = {}
+    if rows is None:
+        return result
+    if not isinstance(rows, list):
+        raise AttributionValidationError("baseline strategy_returns must be an array")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "strategy_returns.strategy_id")
+        day = date.fromisoformat(_text(row.get("date"), "strategy_returns.date"))
+        value = _decimal(row.get("return"), "strategy_returns.return")
+        if value <= -1:
+            raise AttributionValidationError(
+                "strategy_returns.return must be greater than -1"
+            )
+        series = result.setdefault(strategy_id, {})
+        if day in series and series[day] != value:
+            raise AttributionValidationError(
+                "baseline strategy_returns has conflicting dates"
+            )
+        series[day] = value
+    return result
+
+
 def _cumulative(values: Sequence[Decimal]) -> Decimal:
     wealth = Decimal(1)
     with localcontext() as context:
@@ -238,9 +275,8 @@ def _comparison_metrics(
     common = sorted(set(account) & set(reference))
     if len(common) < 2:
         raise AttributionValidationError("comparison lacks two exact common dates")
-    account_dec = [account[day] for day in common]
     reference_dec = [reference[day] for day in common]
-    account_values = [float(value) for value in account_dec]
+    account_values = [float(account[day]) for day in common]
     reference_values = [float(value) for value in reference_dec]
     active = [left - right for left, right in zip(account_values, reference_values)]
     tracking_error = statistics.stdev(active) * math.sqrt(periods_per_year)
@@ -286,7 +322,12 @@ def _comparison_metrics(
         relative_wealth *= (1 + account_return) / (1 + reference_return)
         peak = max(peak, relative_wealth)
         relative_drawdown = min(relative_drawdown, relative_wealth / peak - 1)
-    account_cumulative = _cumulative(account_dec)
+    try:
+        account_cumulative = splice_spans(sorted(account.items())).cumulative_return
+    except ReturnsError as exc:
+        raise AttributionValidationError(
+            f"account live series is invalid: {exc}"
+        ) from exc
     reference_cumulative = _cumulative(reference_dec)
     return {
         "account_cumulative_return": _decimal_text(account_cumulative),
@@ -308,7 +349,9 @@ def _comparison_metrics(
 
 def _accepted_comparison(
     comparison: Mapping[str, Any],
-    series: Mapping[str, Mapping[date, Decimal]],
+    strategy_id: str,
+    account_live_series: Mapping[str, Mapping[date, Decimal]],
+    reference_series: Mapping[str, Mapping[date, Decimal]],
 ) -> dict[str, Any]:
     accepted = dict(comparison)
     status = accepted.get("status")
@@ -316,13 +359,17 @@ def _accepted_comparison(
     legacy_delta = None
     legacy_disposition = "NOT_APPLICABLE"
     if status in AVAILABLE_STATUSES:
-        account_id = _text(
-            accepted.get("account_series_id"), "comparison.account_series_id"
-        )
+        # account_series_id is retained provenance (which account/provider feeds
+        # this strategy's admitted series); the account values themselves come
+        # from the baseline's own ACCOUNT_LIVE series keyed by strategy_id, not
+        # from a lookup by this id (B3: the account side must read the live
+        # series, never a separately retained return-source row).
+        _text(accepted.get("account_series_id"), "comparison.account_series_id")
         reference_id = _text(
             accepted.get("reference_series_id"), "comparison.reference_series_id"
         )
-        if account_id not in series or reference_id not in series:
+        account_full_series = account_live_series.get(strategy_id)
+        if not account_full_series or reference_id not in reference_series:
             raise AttributionValidationError("comparison series is missing")
         start = (
             None
@@ -342,19 +389,19 @@ def _accepted_comparison(
             start is not None and end is not None and end < start
         ):
             raise AttributionValidationError("comparison interval is invalid")
-        account_series = {
+        account_window = {
             day: value
-            for day, value in series[account_id].items()
+            for day, value in account_full_series.items()
             if (start is None or day >= start) and (end is None or day <= end)
         }
-        reference_series = {
+        reference_window = {
             day: value
-            for day, value in series[reference_id].items()
+            for day, value in reference_series[reference_id].items()
             if (start is None or day >= start) and (end is None or day <= end)
         }
         metrics = _comparison_metrics(
-            account_series,
-            reference_series,
+            account_window,
+            reference_window,
             int(accepted.get("periods_per_year", 0)),
         )
         expected_gap = accepted.get("expected_legacy_cumulative_gap")
@@ -437,6 +484,7 @@ def build_catalog(
             "source manifest as-of date is invalid"
         ) from exc
     series = _rows(source_path)
+    account_live_series = _account_live_series(baseline)
     benchmark_rows = spec.get("benchmark_assignments")
     benchmark_comparison_rows = spec.get("benchmark_comparisons")
     comparison_rows = spec.get("comparisons")
@@ -531,10 +579,14 @@ def build_catalog(
                 "unavailable benchmark assignment cannot produce metrics"
             )
         accepted_benchmark_comparisons.append(
-            _accepted_comparison(benchmark_comparison, series)
+            _accepted_comparison(
+                benchmark_comparison, strategy_id, account_live_series, series
+            )
         )
         accepted_comparisons.append(
-            _accepted_comparison(comparison_by_id[strategy_id], series)
+            _accepted_comparison(
+                comparison_by_id[strategy_id], strategy_id, account_live_series, series
+            )
         )
         allocation = allocations[strategy_id]
         current_value = _decimal(
