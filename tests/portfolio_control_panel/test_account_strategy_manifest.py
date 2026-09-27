@@ -252,7 +252,7 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
-        membership_census_path=inputs["census"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
         )
     )
@@ -272,7 +272,7 @@ def test_public_producer_rejects_valid_looking_synthetic_receipts_without_select
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
-        membership_census_path=inputs["census"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -414,7 +414,7 @@ def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
-        membership_census_path=inputs["census"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -472,7 +472,7 @@ def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewr
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
-        membership_census_path=inputs["census"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": receipt_path
@@ -6688,9 +6688,7 @@ def test_cli_table_renders_unavailable_performance_on_ok_rows(
         ("nav-3", "2026-01-03", "3.81"),
     ):
         observation = next(
-            item
-            for item in ledger["nav_observations"]
-            if item["record_id"] == record
+            item for item in ledger["nav_observations"] if item["record_id"] == record
         )
         observation["as_of_date"] = day
         observation["nav"]["value"] = value

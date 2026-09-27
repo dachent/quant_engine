@@ -949,9 +949,7 @@ def _fixture(
     (roles / "account-strategy-flow-classification-policy.json").write_bytes(
         selected.flow_classification_policy.contents
     )
-    (roles / "membership-census.json").write_bytes(
-        selected.membership_census.contents
-    )
+    (roles / "membership-census.json").write_bytes(selected.membership_census.contents)
     account_bundle = builder.stage_account_manifest_generation(
         selected, tmp_path / "account-manifest"
     )

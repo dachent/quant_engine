@@ -9304,7 +9304,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )["all_passed"]
         is True
     )
@@ -9433,7 +9433,7 @@ def test_financial_mode_requires_separately_selected_flow_coverage(
             manifest_classified_flows_path=authority["flows"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9487,7 +9487,7 @@ def test_financial_mode_does_not_reuse_generic_report_baseline(
             manifest_classified_flows_path=authority["flows"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9541,7 +9541,7 @@ def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9574,7 +9574,7 @@ def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9608,7 +9608,7 @@ def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=copied_policy,
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9641,7 +9641,7 @@ def test_financial_mode_rejects_report_unbound_manifest_baseline(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9755,7 +9755,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9823,7 +9823,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
-        manifest_membership_census_path=authority["census"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -10866,9 +10866,7 @@ def _produce_manifest(
                         "assignments": [
                             {
                                 "strategy_id": funded_assignment["strategy_id"],
-                                "effective_start": funded_assignment[
-                                    "effective_start"
-                                ],
+                                "effective_start": funded_assignment["effective_start"],
                                 "effective_end": funded_assignment["effective_end"],
                                 "status": "FUNDED_MEMBERSHIP",
                             }

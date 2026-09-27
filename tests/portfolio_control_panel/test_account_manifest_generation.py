@@ -26288,9 +26288,7 @@ def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
         if item["timing"] == "EXACT_TIMESTAMP"
     )
     assert leg["economic_date"] == "2026-01-31"
-    assert any(
-        cashflow["date"] == "2026-01-31" for cashflow in row["mwr_cashflows"]
-    )
+    assert any(cashflow["date"] == "2026-01-31" for cashflow in row["mwr_cashflows"])
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )

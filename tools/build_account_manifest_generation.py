@@ -4195,7 +4195,9 @@ def stage_account_manifest_generation(
         membership_census=(
             None
             if selected_inputs.membership_census is None
-            else _require_snapshot(selected_inputs.membership_census, "membership_census")
+            else _require_snapshot(
+                selected_inputs.membership_census, "membership_census"
+            )
         ),
         current_epoch_crosswalk=selected_inputs.current_epoch_crosswalk,
     )

@@ -13226,9 +13226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
-                manifest_membership_census_path=(
-                    args.manifest_membership_census_json
-                ),
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 report_candidate=args.report_candidate,
                 strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
@@ -13278,9 +13276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
-                manifest_membership_census_path=(
-                    args.manifest_membership_census_json
-                ),
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 report_candidate=args.report_candidate,
                 strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
@@ -13329,9 +13325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
-                manifest_membership_census_path=(
-                    args.manifest_membership_census_json
-                ),
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 account_manifest_generation_root=(
                     args.account_manifest_generation_root
                 ),
