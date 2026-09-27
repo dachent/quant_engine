@@ -1551,6 +1551,144 @@ def test_coverage_evidence_flows_status_flips_once_capital_anchor_flows_are_admi
     assert flows_status([admitted_flow]) == "OBSERVED_NOT_COMPLETENESS_PROOF"
 
 
+def test_provider_ledger_v2_capital_anchor_native_currency_is_not_ready() -> None:
+    """B7/M9 fail-closed rule: a native-currency allocation (Matrixport's
+    subscription currency, e.g. USDT) must never be treated as USD.  It is
+    excluded from flows and recorded as an explicit NOT_READY finding, not
+    silently admitted at par and not silently dropped."""
+
+    account_id = "account-matrixport"
+    native = _capital_anchor(
+        account_id=account_id,
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    native["amount"]["currency"] = "USDT"
+    catalog = {
+        "admissions": [
+            _capital_anchor_admission(account_id=account_id, provider_id="matrixport")
+        ],
+        "capital_anchors": [native],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": account_id}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    flows, quality_findings = result[1], result[5]
+    assert flows == []
+    finding = next(
+        item
+        for item in quality_findings
+        if item["record_id"] == "matrixport-capital-anchor:1"
+    )
+    assert finding["status"] == "NOT_READY_AWAITING_CONTRACT_FX"
+    assert finding["currency"] == "USDT"
+    assert finding["provider_id"] == "matrixport"
+    assert finding["fact_type"] == "capital_anchors"
+
+
+def test_provider_ledger_v2_capital_anchor_flow_requires_usd_currency() -> None:
+    """Defense in depth: the projection helper itself refuses a non-USD
+    anchor, so no other caller can silently mint a mislabeled USD flow."""
+
+    anchor = _capital_anchor(
+        account_id="account-matrixport",
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    anchor["amount"]["currency"] = "USDT"
+
+    with pytest.raises(baseline.BaselineValidationError, match="requires a USD amount"):
+        baseline._capital_anchor_flow(anchor)
+
+
+def test_provider_ledger_v2_matrixport_capital_anchor_becomes_a_flow_once_usd_admitted() -> (
+    None
+):
+    """The Matrixport half of D2 is blocked on T4 (lane cp/c1-t4-ledger):
+    ``_matrixport_capital_anchors`` computes a contract-admitted USD
+    ``opening_nav`` only for the OPENING anchor; a later
+    ``STRATEGY_CAPITAL_ALLOCATION`` leg carries only its native subscription
+    currency today, so the pinned catalog (run baseline-950733c, ledger
+    3b1445ee) has zero Matrixport STRATEGY_CAPITAL_ALLOCATION anchors and
+    this code path is currently exercised by Quantbase alone.
+
+    This test simulates T4's landed state -- a USD-denominated allocation
+    anchor -- to prove T5's projection is already correct and provider-
+    agnostic for it.  It will flip from exercising this synthetic anchor to
+    exercising T4's real output the day T4 merges a USD conversion, with no
+    further change to portfolio_baseline.py required.
+    """
+
+    account_id = "account-matrixport"
+    anchor = _capital_anchor(
+        account_id=account_id,
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    catalog = {
+        "admissions": [
+            _capital_anchor_admission(account_id=account_id, provider_id="matrixport")
+        ],
+        "capital_anchors": [anchor],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": account_id}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    flows = result[1]
+    assert [row["record_id"] for row in flows] == [
+        "capital-allocation-flow:matrixport-capital-anchor:1"
+    ]
+    assert flows[0]["flow_type"] == "EXTERNAL_CONTRIBUTION"
+    assert flows[0]["provider"] == "MATRIXPORT"
+
+
 @pytest.mark.parametrize(
     ("observed_at", "expects_position"),
     (
