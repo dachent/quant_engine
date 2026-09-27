@@ -140,3 +140,78 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
         assert isinstance(row["entity"], str) and row["entity"]
         assert "expected" not in row
         assert "reason_a" in row and "reason_b" in row
+
+
+# --- v2 row set (successor of PR #485's v1; inputs acceptance/v2/*) ---
+
+V2_COMMITS = {
+    "a": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea",
+    "b": "dac6e410046045ed6e5b37899eae039679d137ac",
+}
+V2_AGREE_COUNT = 91
+V2_NOT_DERIVABLE_COUNT = 14
+
+
+def _find(
+    doc: dict[str, Any], metric_id: str, entity: str, window: Any = None
+) -> dict[str, Any]:
+    matches = [
+        row
+        for row in doc["metrics"]
+        if row["metric_id"] == metric_id
+        and row["entity"] == entity
+        and row.get("window") == window
+    ]
+    assert len(matches) == 1, (metric_id, entity, window, len(matches))
+    return matches[0]
+
+
+def test_v2_row_set_and_derivation_identities() -> None:
+    doc = _load()
+    assert len(doc["metrics"]) == V2_AGREE_COUNT
+    assert len(doc["not_derivable"]) == V2_NOT_DERIVABLE_COUNT
+    assert doc["derivations"]["a"]["code_commit"] == V2_COMMITS["a"]
+    assert doc["derivations"]["b"]["code_commit"] == V2_COMMITS["b"]
+    for row in doc["metrics"]:
+        assert row["derivation_a"]["code_commit"] == V2_COMMITS["a"]
+        assert row["derivation_b"]["code_commit"] == V2_COMMITS["b"]
+
+
+def test_v2_quantbase_rederived_on_finalized_capture() -> None:
+    """Volatis (Quantbase) re-derived on the finalized 52b3758a capture:
+    59,092.28 USD as of 2026-09-17, TWR 0.6765085987, MWR 0.1956573642."""
+    doc = _load()
+    for metric_id, entity in (
+        ("capital.account.cutoff", "account-58e75e8d952fa1b8"),
+        ("capital.strategy.cutoff", "volatis-strategy"),
+    ):
+        row = _find(doc, metric_id, entity)
+        assert row["as_of"] == "2026-09-17", row
+        assert Decimal(row["expected"]) == Decimal("59092.28"), row
+    assert Decimal(
+        _find(doc, "twr.strategy", "volatis-strategy", "ITD")["expected"]
+    ) == Decimal("0.676508598689")
+    assert Decimal(
+        _find(doc, "mwr.strategy", "volatis-strategy", "ITD")["expected"]
+    ) == Decimal("0.195657364162")
+    assert Decimal(
+        _find(doc, "capital.portfolio.systematic.cutoff", "portfolio")["expected"]
+    ) == Decimal("425056.98")
+
+
+def test_v2_matrixport_rows_unchanged_with_raw_observation_date() -> None:
+    """Matrixport rows keep their USD-converted values with true as_of
+    2026-09-03; date.source_last_observation is the last raw observation
+    date (2026-09-17) of the finalized f6e87f8c capture."""
+    doc = _load()
+    row = _find(doc, "capital.strategy.cutoff", "robuxio-crypto")
+    assert row["as_of"] == "2026-09-03", row
+    assert Decimal(row["expected"]) == Decimal("52055.38"), row
+    assert Decimal(
+        _find(doc, "twr.strategy", "robuxio-crypto", "ITD")["expected"]
+    ) == Decimal("0.043017076433")
+    assert Decimal(
+        _find(doc, "mwr.strategy", "robuxio-crypto", "ITD")["expected"]
+    ) == Decimal("0.058366399911")
+    observed = _find(doc, "date.source_last_observation", "account-d2e5821e608e25f1")
+    assert observed["expected"] == "2026-09-17", observed

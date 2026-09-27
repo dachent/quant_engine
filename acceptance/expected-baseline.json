@@ -5,16 +5,16 @@
  "derivations": {
   "a": {
    "model": "claude-opus-5-5",
-   "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a",
-   "path": "acceptance/derive_a.json (scratch)"
+   "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea",
+   "path": "acceptance/v2/derive_a.json (scratch)"
   },
   "b": {
    "model": "independent-standalone-python",
-   "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070",
-   "path": "acceptance/derive_b.json (scratch)"
+   "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac",
+   "path": "acceptance/v2/derive_b.json (scratch)"
   }
  },
- "generated_utc": "2026-09-27T00:29:18Z",
+ "generated_utc": "2026-09-27T05:41:32Z",
  "metrics": [
   {
    "metric_id": "capital.account.cutoff",
@@ -32,11 +32,11 @@
    ],
    "derivation_a": {
     "value": "0.19",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.19",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -56,11 +56,11 @@
    ],
    "derivation_a": {
     "value": "57200.88",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "57200.88",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -80,11 +80,11 @@
    ],
    "derivation_a": {
     "value": "48309.42",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "48309.42",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -92,8 +92,8 @@
    "metric_id": "capital.account.cutoff",
    "entity": "account-58e75e8d952fa1b8",
    "window": null,
-   "as_of": "2026-09-02",
-   "expected": "61433.30",
+   "as_of": "2026-09-17",
+   "expected": "59092.28",
    "tolerance": "0.01",
    "unit": "USD",
    "authority_pointer": [
@@ -102,21 +102,21 @@
      "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "61433.30",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "59092.28",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "61433.30",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "59092.28",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -136,11 +136,11 @@
    ],
    "derivation_a": {
     "value": "51233.90",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "51233.90",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -160,11 +160,11 @@
    ],
    "derivation_a": {
     "value": "3.81",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "3.81",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -184,11 +184,11 @@
    ],
    "derivation_a": {
     "value": "10628.97",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "10628.97",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -208,11 +208,11 @@
    ],
    "derivation_a": {
     "value": "14520.86",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "14520.86",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -232,11 +232,11 @@
    ],
    "derivation_a": {
     "value": "74492.29",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "74492.29",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -256,11 +256,11 @@
    ],
    "derivation_a": {
     "value": "12054.51",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "12054.51",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -274,12 +274,12 @@
    "unit": "USD",
    "authority_pointer": [
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
      "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
@@ -288,11 +288,11 @@
    ],
    "derivation_a": {
     "value": "52055.38",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "52055.38",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -312,11 +312,11 @@
    ],
    "derivation_a": {
     "value": "45464.69",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "45464.69",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -325,7 +325,7 @@
    "entity": "portfolio",
    "window": null,
    "as_of": "2026-09-17",
-   "expected": "427398.00",
+   "expected": "425056.98",
    "tolerance": "0.01",
    "unit": "USD",
    "authority_pointer": [
@@ -334,12 +334,12 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
      "path": "dataPortfolio/provider-ledger/generations/3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/provider-ledger.json",
@@ -354,21 +354,21 @@
      "sha256": "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "427398.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "425056.98",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "427398.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "425056.98",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -396,11 +396,11 @@
    ],
    "derivation_a": {
     "value": "51233.90",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "51233.90",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -428,11 +428,11 @@
    ],
    "derivation_a": {
     "value": "57200.88",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "57200.88",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -460,11 +460,11 @@
    ],
    "derivation_a": {
     "value": "45464.69",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "45464.69",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -492,11 +492,11 @@
    ],
    "derivation_a": {
     "value": "58938.39",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "58938.39",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -514,12 +514,12 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -532,11 +532,11 @@
    ],
    "derivation_a": {
     "value": "52055.38",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "52055.38",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -564,11 +564,11 @@
    ],
    "derivation_a": {
     "value": "101071.47",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "101071.47",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -576,8 +576,8 @@
    "metric_id": "capital.strategy.cutoff",
    "entity": "volatis-strategy",
    "window": null,
-   "as_of": "2026-09-02",
-   "expected": "61433.30",
+   "as_of": "2026-09-17",
+   "expected": "59092.28",
    "tolerance": "0.01",
    "unit": "USD",
    "authority_pointer": [
@@ -594,21 +594,21 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "61433.30",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "59092.28",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "61433.30",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "59092.28",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -628,11 +628,11 @@
    ],
    "derivation_a": {
     "value": "2026-07-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-07-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -652,11 +652,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -676,11 +676,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -688,8 +688,8 @@
    "metric_id": "date.source_last_observation",
    "entity": "account-58e75e8d952fa1b8",
    "window": null,
-   "as_of": "2026-09-02",
-   "expected": "2026-09-02",
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
    "tolerance": null,
    "unit": "date",
    "authority_pointer": [
@@ -698,21 +698,21 @@
      "sha256": "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "2026-09-02",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "2026-09-17",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "2026-09-02",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "2026-09-17",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -732,11 +732,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -756,11 +756,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -780,11 +780,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -804,11 +804,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -828,11 +828,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -852,11 +852,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -864,18 +864,18 @@
    "metric_id": "date.source_last_observation",
    "entity": "account-d2e5821e608e25f1",
    "window": null,
-   "as_of": "2026-09-03",
-   "expected": "2026-09-03",
+   "as_of": "2026-09-17",
+   "expected": "2026-09-17",
    "tolerance": null,
    "unit": "date",
    "authority_pointer": [
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
      "path": "dataPortfolio/source-runs/portfolio-fx-yahoo-candidate-20260906T234500Z/raw/yfinance-history.json",
@@ -883,12 +883,12 @@
     }
    ],
    "derivation_a": {
-    "value": "2026-09-03",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "2026-09-17",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "2026-09-03",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "2026-09-17",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -908,11 +908,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -940,11 +940,11 @@
    ],
    "derivation_a": {
     "value": "5",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "5",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -972,11 +972,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -984,7 +984,7 @@
    "metric_id": "flows.account.count",
    "entity": "account-58e75e8d952fa1b8",
    "window": "ITD",
-   "as_of": "2026-09-02",
+   "as_of": "2026-09-17",
    "expected": "11",
    "tolerance": null,
    "unit": "count",
@@ -998,21 +998,21 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
     "value": "11",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "11",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1040,11 +1040,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1072,11 +1072,11 @@
    ],
    "derivation_a": {
     "value": "4",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "4",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1104,11 +1104,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1136,11 +1136,11 @@
    ],
    "derivation_a": {
     "value": "1",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "1",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1168,11 +1168,11 @@
    ],
    "derivation_a": {
     "value": "4",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "4",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1200,11 +1200,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1222,20 +1222,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1248,11 +1248,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1280,11 +1280,11 @@
    ],
    "derivation_a": {
     "value": "14",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "14",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1312,11 +1312,11 @@
    ],
    "derivation_a": {
     "value": "20748.40",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "20748.40",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1344,11 +1344,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1356,7 +1356,7 @@
    "metric_id": "flows.account.net",
    "entity": "account-58e75e8d952fa1b8",
    "window": "ITD",
-   "as_of": "2026-09-02",
+   "as_of": "2026-09-17",
    "expected": "47120.06",
    "tolerance": "0.01",
    "unit": "USD",
@@ -1370,21 +1370,21 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
     "value": "47120.06",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "47120.06",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1412,11 +1412,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1444,11 +1444,11 @@
    ],
    "derivation_a": {
     "value": "-72220.15",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "-72220.15",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1476,11 +1476,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1508,11 +1508,11 @@
    ],
    "derivation_a": {
     "value": "7500.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "7500.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1540,11 +1540,11 @@
    ],
    "derivation_a": {
     "value": "22050.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "22050.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1572,11 +1572,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1594,20 +1594,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1620,11 +1620,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1652,11 +1652,11 @@
    ],
    "derivation_a": {
     "value": "34035.50",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "34035.50",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1684,11 +1684,11 @@
    ],
    "derivation_a": {
     "value": "0.043211694123",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0432116941",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1716,11 +1716,11 @@
    ],
    "derivation_a": {
     "value": "0.206784222500",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.2067842225",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1728,8 +1728,8 @@
    "metric_id": "mwr.account",
    "entity": "account-58e75e8d952fa1b8",
    "window": "ITD",
-   "as_of": "2026-09-02",
-   "expected": "0.245729129016",
+   "as_of": "2026-09-17",
+   "expected": "0.195657364162",
    "tolerance": "0.00000001",
    "unit": "ratio",
    "authority_pointer": [
@@ -1742,21 +1742,21 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "0.245729129016",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "0.195657364162",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "0.2457291290",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "0.1956573642",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1784,11 +1784,11 @@
    ],
    "derivation_a": {
     "value": "0.035090482505",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0350904825",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1816,11 +1816,11 @@
    ],
    "derivation_a": {
     "value": "0.050835289126",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0508352891",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1848,11 +1848,11 @@
    ],
    "derivation_a": {
     "value": "0.206349620449",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.2063496204",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1880,11 +1880,11 @@
    ],
    "derivation_a": {
     "value": "0.002020725087",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0020207251",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1912,11 +1912,11 @@
    ],
    "derivation_a": {
     "value": "0.016369796725",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0163697967",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1944,11 +1944,11 @@
    ],
    "derivation_a": {
     "value": "0.037575884790",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0375758848",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -1966,20 +1966,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -1992,11 +1992,11 @@
    ],
    "derivation_a": {
     "value": "0.058366399911",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0583663999",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2024,11 +2024,11 @@
    ],
    "derivation_a": {
     "value": "0.405739236967",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.4057392370",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2056,11 +2056,11 @@
    ],
    "derivation_a": {
     "value": "0.035090482505",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0350904825",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2088,11 +2088,11 @@
    ],
    "derivation_a": {
     "value": "0.043211694123",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0432116941",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2120,11 +2120,11 @@
    ],
    "derivation_a": {
     "value": "0.405739236967",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.4057392370",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2152,11 +2152,11 @@
    ],
    "derivation_a": {
     "value": "0.206705826527",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.2067058265",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2174,20 +2174,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -2200,11 +2200,11 @@
    ],
    "derivation_a": {
     "value": "0.058366399911",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0583663999",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2232,11 +2232,11 @@
    ],
    "derivation_a": {
     "value": "0.022676762040",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0226767620",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2244,8 +2244,8 @@
    "metric_id": "mwr.strategy",
    "entity": "volatis-strategy",
    "window": "ITD",
-   "as_of": "2026-09-02",
-   "expected": "0.245729129016",
+   "as_of": "2026-09-17",
+   "expected": "0.195657364162",
    "tolerance": "0.00000001",
    "unit": "ratio",
    "authority_pointer": [
@@ -2262,25 +2262,25 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "0.245729129016",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "0.195657364162",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "0.2457291290",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "0.1956573642",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2308,11 +2308,11 @@
    ],
    "derivation_a": {
     "value": "0.024531782896",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0245317829",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2340,11 +2340,11 @@
    ],
    "derivation_a": {
     "value": "0.140913076778",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.1409130768",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2352,8 +2352,8 @@
    "metric_id": "twr.account",
    "entity": "account-58e75e8d952fa1b8",
    "window": "ITD",
-   "as_of": "2026-09-02",
-   "expected": "0.742925737437",
+   "as_of": "2026-09-17",
+   "expected": "0.676508598689",
    "tolerance": "0.00000001",
    "unit": "ratio",
    "authority_pointer": [
@@ -2366,21 +2366,21 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "0.742925737437",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "0.676508598689",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "0.7429257374",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "0.6765085987",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2408,11 +2408,11 @@
    ],
    "derivation_a": {
     "value": "0.024678000000",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0246780000",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2440,11 +2440,11 @@
    ],
    "derivation_a": {
     "value": "0.140624882627",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.1406248826",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2472,11 +2472,11 @@
    ],
    "derivation_a": {
     "value": "0.008541704507",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0085417045",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2504,11 +2504,11 @@
    ],
    "derivation_a": {
     "value": "0.025740189555",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0257401896",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2536,11 +2536,11 @@
    ],
    "derivation_a": {
     "value": "0.030469983510",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0304699835",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2558,20 +2558,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -2584,11 +2584,11 @@
    ],
    "derivation_a": {
     "value": "0.043017076433",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0430170764",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2616,11 +2616,11 @@
    ],
    "derivation_a": {
     "value": "0.330273816246",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.3302738162",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2648,11 +2648,11 @@
    ],
    "derivation_a": {
     "value": "0.024678000000",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0246780000",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2680,11 +2680,11 @@
    ],
    "derivation_a": {
     "value": "0.024531782896",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0245317829",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2712,11 +2712,11 @@
    ],
    "derivation_a": {
     "value": "0.330273816246",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.3302738162",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2744,11 +2744,11 @@
    ],
    "derivation_a": {
     "value": "0.140861092980",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.1408610930",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2766,20 +2766,20 @@
      "sha256": "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/nav_daily.csv",
-     "sha256": "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\nav_daily.csv",
+     "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_bills.csv",
-     "sha256": "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_bills.csv",
+     "sha256": "318101d8f78d2d03623f5af921639b1fe4f812fb1903515e7d448743f61e4a81"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_currency_dispositions.csv",
-     "sha256": "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_currency_dispositions.csv",
+     "sha256": "d6fcbf02d54ea71439097a7f956df04a6aa46998a8813b1becb10f7619aed64f"
     },
     {
-     "path": "dataMatrixport/output/20260903T051029.331Z/csv/wallet_deposits.csv",
-     "sha256": "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\matrixport-f6e87f8c\\wallet_deposits.csv",
+     "sha256": "2e94928f542b0ef2b4a330cfd241e0b8a9de781c58eff44935265cdad250ac00"
     },
     {
      "path": "dataPortfolio/reporting/generations/d14355537c5e6eeaeb8716c4fe58f4bea2c2b11e3b19a14824359389727509ae/input/account-strategy-current-epoch-crosswalk.json",
@@ -2792,11 +2792,11 @@
    ],
    "derivation_a": {
     "value": "0.043017076433",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0430170764",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2824,11 +2824,11 @@
    ],
    "derivation_a": {
     "value": "0.028441498710",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "0.0284414987",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2836,8 +2836,8 @@
    "metric_id": "twr.strategy",
    "entity": "volatis-strategy",
    "window": "ITD",
-   "as_of": "2026-09-02",
-   "expected": "0.742925737437",
+   "as_of": "2026-09-17",
+   "expected": "0.676508598689",
    "tolerance": "0.00000001",
    "unit": "ratio",
    "authority_pointer": [
@@ -2854,25 +2854,25 @@
      "sha256": "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/account_activity.csv",
-     "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\account_activity.csv",
+     "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/accounts.csv",
-     "sha256": "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\accounts.csv",
+     "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
     },
     {
-     "path": "dataQuantbase/source-runs/refresh-20260902/csv_full/dashboard_Volatis_Strategy_pricehistory.csv",
-     "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
+     "path": "C:\\Dev\\scratch\\quant_engine\\lineage\\v2\\quantbase-52b3758a\\dashboard_Volatis_Strategy_pricehistory.csv",
+     "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
     }
    ],
    "derivation_a": {
-    "value": "0.742925737437",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "value": "0.676508598689",
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
-    "value": "0.7429257374",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "value": "0.6765085987",
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2896,11 +2896,11 @@
    ],
    "derivation_a": {
     "value": "7",
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": "7",
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   },
@@ -2940,7 +2940,7 @@
      "tt-portfolio",
      "volatis-strategy"
     ],
-    "code_commit": "432a6b2b82c69ff06006b8903412cc03b1cc019a"
+    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
    },
    "derivation_b": {
     "value": [
@@ -2952,7 +2952,7 @@
      "tt-portfolio",
      "volatis-strategy"
     ],
-    "code_commit": "657257834fa3f2b0f79e6fd01d793ba779639070"
+    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
    },
    "critical": true
   }
