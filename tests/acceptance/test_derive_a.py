@@ -1011,6 +1011,52 @@ def test_usdt_to_usdc_conversion_is_not_a_subscription(tmp_path: Path) -> None:
         )
 
 
+def test_unrelated_debit_and_credit_within_ten_minutes_stay_a_subscription(
+    tmp_path: Path,
+) -> None:
+    # A USDT subscription of 55 and an unrelated USDC wallet credit of 20 one minute
+    # later do not agree in amount, so they are not a conversion.
+    _synthetic_root(tmp_path)
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("55", "USDT", "2", "2026-01-05T12:00:00", "2855")
+        + _bill("20", "USDC", "1", "2026-01-05T12:01:00", "2001"),
+    )
+    metrics = _index(_run(tmp_path))
+    assert metrics[("flows.account.count", "acct-mp")]["value"] == "1"
+    assert metrics[("flows.account.net", "acct-mp")]["value"] == "55.00"
+    assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "115.50"
+
+
+@pytest.mark.parametrize(
+    "counterparts",
+    [
+        # Two amount-matching USDC credits: which one converts is ambiguous.
+        _bill("20", "USDC", "1", "2026-01-05T12:01:00", "2557")
+        + _bill("20", "USDC", "1", "2026-01-05T12:02:00", "2557"),
+        # A non-stablecoin credit cannot be amount-checked.
+        _bill("0.0003", "BTC", "1", "2026-01-05T12:01:00", "2557"),
+    ],
+)
+def test_ambiguous_conversion_pairing_fails_closed(
+    tmp_path: Path, counterparts: str
+) -> None:
+    _synthetic_root(tmp_path)
+    _write(
+        tmp_path,
+        derive.MP_BILLS,
+        MP_BILLS_HEADER
+        + BASE_BILLS
+        + _bill("20", "USDT", "2", "2026-01-05T12:00:00", "2008")
+        + counterparts,
+    )
+    reasons = _reasons(_run(tmp_path))
+    assert "ambiguous conversion pairing" in reasons[("twr.account", "acct-mp")]
+
+
 def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:
     _synthetic_root(tmp_path)
     pins = {LAYOUT[path]: digest for path, digest in derive.PINNED_SHA256.items()}

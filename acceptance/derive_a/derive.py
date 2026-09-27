@@ -111,6 +111,9 @@ CONTRACTS = (PERFORMANCE_POLICY, MVP_CONTRACT, FLOW_POLICY)
 DECLARED_CUTOFF = dt.date(2026, 9, 17)
 FUNDED = "FUNDED_MEMBERSHIP"
 MATRIXPORT_PRODUCT_CURRENCY = "USDT"
+STABLECOINS = frozenset({"USDT", "USDC"})
+CONVERSION_WINDOW_MS = 600_000
+CONVERSION_TOLERANCE = Decimal("0.01")
 WINDOW = "ITD"
 CENT = Decimal("0.01")
 RATIO_QUANTUM = Decimal("1e-12")
@@ -218,13 +221,17 @@ CONVENTION_NOTES = (
     "Ledger values and ledger account deposits are cross-checks only.",
     "R6 Matrixport (admission under test): the entity is the strategy holding "
     "(the ledger value basis excludes the wallet). Values = units x raw "
-    "nav_daily.csv nav (fee-net) x USDT->USD. Raw wallet_bills.csv classes: a USDT "
-    "debit is a strategy subscription - a holding inflow of amount x USDT->USD, EOD "
-    "at its confirm date (first nav_daily day_timestamp_ms after the bill), adding "
-    "amount / confirm NAV units; bills in other currencies and a USDT credit within "
-    "10 minutes after another-currency debit (conversion) stay in the wallet; any "
-    "other USDT credit (e.g. redemption) is unsupported and fails closed in a "
-    "window. Raw wallet_deposits.csv deposits are wallet-level. "
+    "nav_daily.csv nav (fee-net) x USDT->USD. Raw wallet_bills.csv classes: a "
+    "conversion is a USDT<->USDC debit and the other stablecoin's credit within 10 "
+    "minutes after it whose amounts agree within 1 %, when that credit is the only "
+    "such candidate (bills share no transaction id); several matching or "
+    "non-stablecoin counterparts are ambiguous and fail closed; both conversion "
+    "legs stay in the wallet. An unpaired USDT debit is a strategy subscription - a "
+    "holding inflow of amount x USDT->USD, EOD at its confirm date (first nav_daily "
+    "day_timestamp_ms after the bill), adding amount / confirm NAV units; other "
+    "currencies' bills are wallet-level; an unpaired USDT credit (e.g. redemption) "
+    "is unsupported and fails closed in a window. Raw wallet_deposits.csv deposits "
+    "are wallet-level. "
     "wallet_currency_dispositions.csv proves which currencies' history was "
     "readable.",
     "X1 FX: USDT->USD = Yahoo USDT-USD daily Close on the original UTC NAV or "
@@ -770,49 +777,77 @@ def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
 
 def _classify_bills(
     wallet: MatrixportWallet,
-) -> tuple[list[Bill], list[tuple[Bill, str]], list[Bill]]:
+) -> tuple[list[Bill], list[tuple[Bill, str]], list[tuple[Bill, str]]]:
     """Split raw wallet bills for the strategy-holding entity.
 
-    - a conversion pairs a debit in one currency with a credit in another within
-      10 minutes after it (one-to-one, either direction: USDC->USDT or
-      USDT->USDC); both legs stay in the wallet;
-    - an unpaired product-currency (USDT) debit is a strategy subscription:
-      capital into the holding;
-    - an unpaired bill in any other currency is wallet-level (deposit/withdrawal
-      outside the holding);
+    Raw bills carry no shared transaction id across legs (each ``sn`` is unique),
+    so a conversion is proved economically:
+
+    - a debit and a credit in the other stablecoin (USDT <-> USDC) within 10
+      minutes after it, whose amounts agree within 1 % (the conversion rate),
+      are one conversion if that credit is the debit's only such candidate; both
+      legs stay in the wallet;
+    - two or more matching candidates, or any product-currency counterpart that
+      cannot be amount-checked (a non-stablecoin), is ambiguous and fails closed;
+    - a stablecoin bill in the window whose amount does not agree is unrelated;
+    - an unpaired product-currency (USDT) debit is a strategy subscription;
+    - an unpaired bill in any other currency is wallet-level;
     - an unpaired USDT credit (e.g. a redemption) is unsupported and fails closed
       when it falls inside a window.
     """
 
-    paired: dict[int, str] = {}
     bills = list(wallet.bills)
+    paired: dict[int, str] = {}
+    ambiguous: dict[int, str] = {}
     for index, debit in enumerate(bills):
-        if debit.direction != "2" or index in paired:
+        if debit.direction != "2" or index in paired or debit.amount <= 0:
             continue
-        for other, credit in enumerate(bills):
-            if (
-                other not in paired
-                and other != index
-                and credit.direction == "1"
-                and credit.currency != debit.currency
-                and MATRIXPORT_PRODUCT_CURRENCY in {credit.currency, debit.currency}
-                and 0 <= credit.moment_ms - debit.moment_ms <= 600_000
-            ):
-                paired[index] = "conversion debit"
-                paired[other] = "conversion credit"
-                break
+        window = [
+            (other, credit)
+            for other, credit in enumerate(bills)
+            if other != index
+            and other not in paired
+            and credit.direction == "1"
+            and credit.currency != debit.currency
+            and MATRIXPORT_PRODUCT_CURRENCY in {credit.currency, debit.currency}
+            and 0 <= credit.moment_ms - debit.moment_ms <= CONVERSION_WINDOW_MS
+        ]
+        checkable = [
+            (other, credit)
+            for other, credit in window
+            if {credit.currency, debit.currency} <= STABLECOINS
+        ]
+        matching = [
+            (other, credit)
+            for other, credit in checkable
+            if abs(credit.amount / debit.amount - 1) <= CONVERSION_TOLERANCE
+        ]
+        unverifiable = [pair for pair in window if pair not in checkable]
+        if len(matching) == 1 and not unverifiable:
+            paired[index] = "conversion debit"
+            paired[matching[0][0]] = "conversion credit"
+        elif matching or unverifiable:
+            reason = (
+                f"ambiguous conversion pairing ({len(matching)} amount-matching and "
+                f"{len(unverifiable)} unverifiable counterpart(s) within 10 minutes)"
+            )
+            ambiguous[index] = reason
+            for other, _ in matching + unverifiable:
+                ambiguous.setdefault(other, reason)
     subscriptions: list[Bill] = []
     wallet_level: list[tuple[Bill, str]] = []
-    unsupported: list[Bill] = []
+    unsupported: list[tuple[Bill, str]] = []
     for index, bill in enumerate(bills):
         if index in paired:
             wallet_level.append((bill, paired[index]))
+        elif index in ambiguous and bill.currency == MATRIXPORT_PRODUCT_CURRENCY:
+            unsupported.append((bill, ambiguous[index]))
         elif bill.currency != MATRIXPORT_PRODUCT_CURRENCY:
             wallet_level.append((bill, "non-product currency"))
         elif bill.direction == "2":
             subscriptions.append(bill)
         else:
-            unsupported.append(bill)
+            unsupported.append((bill, "unpaired product-currency credit"))
     return subscriptions, wallet_level, unsupported
 
 
@@ -869,12 +904,13 @@ def _matrixport_source(
                 dated_by="nav_confirm_date",
             )
         )
-    for bill in unsupported:
+    for bill, why in unsupported:
         source.raw_events.append(
             (
                 bill.day,
-                f"unsupported wallet bill tx_type {bill.tx_type} credit {bill.amount} "
-                f"{bill.currency}",
+                f"unsupported wallet bill tx_type {bill.tx_type} "
+                f"{'debit' if bill.direction == '2' else 'credit'} {bill.amount} "
+                f"{bill.currency}: {why}",
             )
         )
     # Holding value per raw NAV date: units subscribed by then x NAV x USDT-USD.
