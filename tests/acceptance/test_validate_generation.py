@@ -212,12 +212,13 @@ def base_report() -> dict[str, Any]:
         }
     ]
     returns = []
-    for strategy in ("alpha", "beta"):
+    for strategy, opening in (("alpha", "1000"), ("beta", "4800")):
         returns.append(
             {
                 "strategy_id": strategy,
                 "date": PATH_START,
                 "return": "0.1",
+                "beginning_capital": opening,
                 "evidence_layer": "ACCOUNT_LIVE",
             }
         )
@@ -226,6 +227,7 @@ def base_report() -> dict[str, Any]:
                 "strategy_id": strategy,
                 "date": CUTOFF,
                 "return": "0",
+                "beginning_capital": str(Decimal(opening) * Decimal("1.1")),
                 "evidence_layer": "ACCOUNT_LIVE",
             }
         )
@@ -1834,7 +1836,7 @@ def test_view_past_authoritative_as_of_blocks_and_recompute_agrees(
             "metric_id": "twr.strategy",
             "entity": "alpha",
             "window": "ITD",
-            "window_start": PATH_START,
+            "window_start": START,
             "as_of": EARLY,
             "expected": "0.1",
         },
@@ -1872,7 +1874,7 @@ def test_view_past_authoritative_as_of_and_recompute_regresses(tmp_path: Path) -
             "metric_id": "twr.strategy",
             "entity": "alpha",
             "window": "ITD",
-            "window_start": PATH_START,
+            "window_start": START,
             "as_of": EARLY,
             "expected": "0.2",
         },
@@ -1905,6 +1907,106 @@ def test_view_past_as_of_without_a_series_is_still_decided(tmp_path: Path) -> No
     assert _expected_findings(tmp_path, [row]) == [
         ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)
     ]
+
+
+# Round 4: recompute strictly over (window start, as_of] (spec R1): an epoch that
+# ends before the window is excluded, an epoch straddling the start is cut there
+# (opening = value at the boundary), pre-window flows never enter, and the recompute
+# declines rather than compare an epoch-anchored value.
+MID = "2026-01-01"
+
+
+def _expected_only(findings: list[checks.Finding]) -> list[tuple[str, str]]:
+    return [
+        (f.check_id, f.klass) for f in findings if f.check_id.startswith("expected.")
+    ]
+
+
+def _window_row(
+    metric: str, entity: str, expected: str, **extra: str
+) -> dict[str, Any]:
+    return {
+        "metric_id": metric,
+        "entity": entity,
+        "window": "H",
+        "expected": expected,
+        **extra,
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "fired"),
+    [
+        # straddling epoch cut at the window start: own value over (MID, CUTOFF] is 0
+        (_window_row("twr.account", "A1", "0", window_start=MID), []),
+        (
+            _window_row("twr.account", "A1", "0.1", window_start=MID),
+            [("expected.twr.account", checks.BLOCKER_REGRESSION)],
+        ),
+        # MWR opening = capital at the window start (1100), not the epoch opening
+        (_window_row("mwr.account", "A1", "0", window_start=MID), []),
+        (
+            _window_row("mwr.account", "A1", ALPHA_XIRR, window_start=MID),
+            [("expected.mwr.account", checks.BLOCKER_REGRESSION)],
+        ),
+        # a flow dated before the window start never enters
+        (_window_row("flows.account.count", "B2", "0", window_start="2025-12-05"), []),
+        (
+            _window_row("flows.account.count", "B2", "1", window_start="2025-12-05"),
+            [("expected.flows.account.count", checks.BLOCKER_REGRESSION)],
+        ),
+        # multi-account strategy straddling the start cannot be cut exactly: decline
+        (
+            _window_row("mwr.strategy", "beta", "0.0989", window_start=MID),
+            [("expected.mwr.strategy", checks.NOT_READY)],
+        ),
+    ],
+)
+def test_recompute_is_bounded_by_the_expected_window(
+    tmp_path: Path, row: dict[str, Any], fired: list[tuple[str, str]]
+) -> None:
+    assert _expected_only(run(build(tmp_path), [row])) == fired
+
+
+def _earlier_epoch(report: dict[str, Any]) -> None:
+    earlier = copy.deepcopy(report["twr_mwr"][0])
+    earlier.update(
+        {
+            "effective_start": "2025-06-01",
+            "effective_end": "2025-09-09",
+            "observed_start": "2025-06-01",
+            "observed_end": "2025-09-09",
+            "twr": "0.5",
+            "mwr_opening_date": "2025-06-01",
+            "mwr_terminal_date": "2025-09-09",
+            "mwr_cashflows": [
+                {"amount": "-500", "date": "2025-06-01", "source_record_ids": []},
+                {"amount": "750", "date": "2025-09-09", "source_record_ids": []},
+            ],
+        }
+    )
+    report["twr_mwr"].insert(0, earlier)
+
+
+@pytest.mark.parametrize(
+    ("expected", "fired"),
+    [
+        ("0.1", [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)]),
+        (
+            "0.65",
+            [
+                ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY),
+                ("expected.twr.account", checks.BLOCKER_REGRESSION),
+            ],
+        ),
+    ],
+)
+def test_epoch_before_the_window_is_excluded(
+    tmp_path: Path, expected: str, fired: list[tuple[str, str]]
+) -> None:
+    row = _window_row("twr.account", "A1", expected, window_start=START, as_of=EARLY)
+    findings = run(build(tmp_path, Spec(report=[_earlier_epoch])), [row])
+    assert sorted(_expected_only(findings)) == sorted(fired)
 
 
 def test_check_error_fails_closed(tmp_path: Path) -> None:

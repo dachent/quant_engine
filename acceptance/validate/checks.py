@@ -4272,47 +4272,66 @@ def _terminal(
     return None
 
 
-def recompute_metric(
-    ctx: Context, metric_id: str, entity: str, window: tuple[date | None, date | None]
-) -> list[Observed]:
-    """The generation's own value for ``metric_id`` over the expected window."""
+def _flow_day(item: Mapping[str, Any]) -> date | None:
+    """Spec R4: a flow is dated by the NAV that recognises it, else its event date."""
 
-    start, end = window
+    return to_date(item.get("nav_recognition_date")) or to_date(item.get("event_date"))
+
+
+def recompute_metric(
+    ctx: Context,
+    metric_id: str,
+    entity: str,
+    window: tuple[date | None, date | None],
+    explicit_start: date | None = None,
+) -> list[Observed]:
+    """The generation's own value for ``metric_id`` strictly over the expected window.
+
+    Spec R1: the window is ``(B, E]`` where ``B`` is the valuation boundary — the
+    expected row's explicit start, else the entity's ITD start (its first epoch's
+    opening date) — and ``E`` the row's as_of. The opening value is the value at ``B``;
+    only returns and flows dated after ``B`` and on or before ``E`` enter. Epochs that
+    end on or before ``B`` are excluded; an epoch straddling ``B`` or ``E`` is cut at the
+    boundary from the daily series when the account alone carries its strategy, and
+    the recompute declines (returns ``[]``) when it cannot be cut exactly.
+    """
+
+    end = window[1]
     if end is None:
         return []
+    strategy_level = metric_id in ("twr.strategy", "mwr.strategy")
+    epochs = sorted(
+        (
+            (position, row)
+            for position, row in twr_rows(ctx)
+            if str(row.get("strategy_id" if strategy_level else "account_id")) == entity
+        ),
+        key=lambda item: str(item[1].get("effective_start")),
+    )
+    epoch_starts = [
+        day
+        for _, row in epochs
+        if (day := to_date(row.get("observed_start"))) is not None
+    ]
+    boundary = explicit_start or (min(epoch_starts) if epoch_starts else None)
     if metric_id == "twr.strategy":
-        value, count = compound_window(ctx, entity, start, end)
+        after = boundary if boundary is not None else date.min
+        value, count = compound_window(ctx, entity, after + timedelta(days=1), end)
         if not count:
             return []
         return [
             Observed(
-                f"recomputed:compound(report.strategy_returns[{entity}]) to {end}",
+                f"recomputed:compound(report.strategy_returns[{entity}]) over "
+                f"({after}, {end}]",
                 value,
-                start,
+                boundary,
                 end,
                 None,
                 REPORT,
                 "$.strategy_returns",
             )
         ]
-    epochs = sorted(
-        (
-            (position, row)
-            for position, row in twr_rows(ctx)
-            if (
-                str(row.get("strategy_id")) == entity
-                if metric_id == "mwr.strategy"
-                else str(row.get("account_id")) == entity
-            )
-        ),
-        key=lambda item: str(item[1].get("effective_start")),
-    )
-    if not epochs:
-        return []
-    first_start = to_date(epochs[0][1].get("observed_start"))
-    if start is None:
-        start = first_start
-    if start is None or first_start is None:
+    if not epochs or boundary is None:
         return []
     if metric_id == "twr.account":
         chain = Decimal(1)
@@ -4320,24 +4339,31 @@ def recompute_metric(
         for position, row in epochs:
             epoch_start = to_date(row.get("observed_start"))
             epoch_end = to_date(row.get("observed_end"))
-            if epoch_start is None or epoch_end is None or epoch_start > end:
+            if epoch_start is None or epoch_end is None:
+                return []
+            if epoch_end <= boundary or epoch_start >= end:
                 continue
-            if epoch_end <= end:
+            if epoch_start >= boundary and epoch_end <= end:
                 value = to_decimal(row.get("twr"))
                 if value is None:
                     return []
                 parts.append(f"twr_mwr[{position}].twr")
             elif _single_account(ctx, row):
+                cut_from = max(boundary, epoch_start)
+                cut_to = min(end, epoch_end)
                 compounded, count = compound_window(
                     ctx,
                     str(row.get("strategy_id")),
-                    epoch_start + timedelta(days=1),
-                    end,
+                    cut_from + timedelta(days=1),
+                    cut_to,
                 )
                 if not count or compounded is None:
                     return []
                 value = compounded
-                parts.append(f"compound(strategy_returns[{row.get('strategy_id')}])")
+                parts.append(
+                    f"compound(strategy_returns[{row.get('strategy_id')}] over "
+                    f"({cut_from}, {cut_to}])"
+                )
             else:
                 return []
             chain *= Decimal(1) + value
@@ -4347,7 +4373,7 @@ def recompute_metric(
             Observed(
                 "recomputed:" + " x ".join(parts),
                 chain - Decimal(1),
-                start,
+                boundary,
                 end,
                 None,
                 REPORT,
@@ -4360,10 +4386,8 @@ def recompute_metric(
             if key[0] != entity:
                 continue
             for item in row.get("capital_flow_trace") or []:
-                day = (
-                    to_date(item.get("event_date")) if isinstance(item, dict) else None
-                )
-                if day is not None and start <= day <= end:
+                day = _flow_day(item) if isinstance(item, dict) else None
+                if day is not None and boundary < day <= end:
                     events.append(item)
         if metric_id == "flows.account.count":
             value_out: Any = len(events)
@@ -4376,45 +4400,56 @@ def recompute_metric(
             value_out = total
         return [
             Observed(
-                f"recomputed:account_manifest.capital_flow_trace[{entity}] in window",
+                f"recomputed:account_manifest.capital_flow_trace[{entity}] over "
+                f"({boundary}, {end}]",
                 value_out,
-                start,
+                boundary,
                 end,
                 None,
                 PANEL,
                 "$.account_manifest.rows[*].capital_flow_trace",
             )
         ]
-    if metric_id == "mwr.account":
-        flows = _cash_flows(epochs[0][1])[:1]
-        for _, row in epochs:
-            flows += [f for f in _cash_flows(row)[1:-1] if start <= f[0] <= end]
-        terminal = _terminal(ctx, epochs[-1][1], end)
-        if not flows or terminal is None:
+    if metric_id not in ("mwr.account", "mwr.strategy"):
+        return []
+    flows: list[tuple[date, Decimal]] = []
+    opened = False
+    for _, row in epochs:
+        epoch_flows = _cash_flows(row)
+        epoch_start = to_date(row.get("observed_start"))
+        terminal_day = to_date(row.get("mwr_terminal_date"))
+        if not epoch_flows or epoch_start is None or terminal_day is None:
             return []
-        rate = _xirr(flows + [terminal])
-    elif metric_id == "mwr.strategy":
-        flows = []
-        for _, row in epochs:
-            epoch_flows = _cash_flows(row)
-            if not epoch_flows or epoch_flows[0][0] > end:
-                continue
-            flows.append(epoch_flows[0])
-            flows += [f for f in epoch_flows[1:-1] if f[0] <= end]
+        if terminal_day <= boundary or epoch_start >= end:
+            continue
+        if epoch_start >= boundary:
+            if metric_id == "mwr.strategy" or not opened:
+                flows.append(epoch_flows[0])
+        elif _single_account(ctx, row):
+            nav = _nav_at(ctx, str(row.get("strategy_id")), boundary)
+            if nav is None:
+                return []
+            flows.append((boundary, -nav))
+        else:
+            return []
+        opened = True
+        flows += [f for f in epoch_flows[1:-1] if boundary < f[0] <= end]
+        if terminal_day <= end:
+            if metric_id == "mwr.strategy" or row is epochs[-1][1]:
+                flows.append(epoch_flows[-1])
+        else:
             terminal = _terminal(ctx, row, end)
             if terminal is None:
                 return []
             flows.append(terminal)
-        rate = _xirr(flows) if flows else None
-    else:
-        return []
+    rate = _xirr(flows) if flows else None
     if rate is None:
         return []
     return [
         Observed(
-            f"recomputed:xirr(twr_mwr.mwr_cashflows[{entity}]) to {end}",
+            f"recomputed:xirr(twr_mwr.mwr_cashflows[{entity}]) over ({boundary}, {end}]",
             rate,
-            start,
+            boundary,
             end,
             None,
             REPORT,
@@ -4460,7 +4495,9 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         observed = resolve_metric(ctx, metric_id, entity)
         wanted = _row_window(row, ctx.cutoff)
         if not observed:
-            recomputed = recompute_metric(ctx, metric_id, entity, wanted)
+            recomputed = recompute_metric(
+                ctx, metric_id, entity, wanted, _row_window(row, ctx.cutoff)[0]
+            )
             if not recomputed:
                 yield _finding(
                     f"expected.{metric_id}",
@@ -4518,7 +4555,9 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
                     tuple(defects) + ("C5",),
                     "the output claims currency past its last authoritative observation",
                 )
-            recomputed = recompute_metric(ctx, metric_id, entity, wanted)
+            recomputed = recompute_metric(
+                ctx, metric_id, entity, wanted, _row_window(row, ctx.cutoff)[0]
+            )
             if not beyond and not recomputed:
                 yield _finding(
                     f"expected.{metric_id}",
