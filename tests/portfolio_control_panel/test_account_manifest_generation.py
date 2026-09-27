@@ -28225,3 +28225,171 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
         "discrepancy_count": 0,
         "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
     }
+
+
+# --- C1 T2: independent verifier recomputes the R1-R4 epoch engine ----------
+
+
+def _t2_verifier_facts(
+    verifier_module: Any,
+    *,
+    pre_start: tuple[date, Decimal | None] | None,
+    flows: tuple[Any, ...] = (),
+) -> Any:
+    return verifier_module._IndependentEpochFacts(
+        "acct-t2",
+        date(2025, 11, 11),
+        date(2025, 11, 14),
+        tuple(
+            verifier_module._IndependentNavFact(day, "USD", value)
+            for day, value in (
+                (date(2025, 11, 12), Decimal("100")),
+                (date(2025, 11, 13), Decimal("187.64")),
+                (date(2025, 11, 14), Decimal("190")),
+            )
+        ),
+        flows,
+        None,
+        True,
+        pre_start,
+    )
+
+
+def test_t2_verifier_opens_at_the_pre_start_observation_like_the_producer(
+    verifier_module: Any,
+) -> None:
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2025-11-12": Decimal("100"),
+        "2025-11-13": Decimal("187.64"),
+        "2025-11-14": Decimal("190"),
+    }
+    for pre_start in (None, (date(2025, 11, 10), Decimal("95"))):
+        row = verifier_module._derive_first_available_nav_epoch(
+            _t2_verifier_facts(verifier_module, pre_start=pre_start)
+        )
+        producer = producer_module.analyze_epoch(
+            navs,
+            {},
+            {},
+            {},
+            {},
+            None,
+            "2025-11-11",
+            None,
+            pre_start_observation=(
+                None if pre_start is None else (pre_start[0].isoformat(), pre_start[1])
+            ),
+        )
+        assert producer is not None
+        for field in (
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "performance_opening_date",
+            "performance_opening_value",
+            "performance_opening_basis",
+            "opening_capital",
+        ):
+            assert row[field] == producer[field], field
+    assert row["performance_opening_basis"] == "LAST_OBSERVATION_BEFORE_START"
+    assert row["observation_trace"]["links"][0]["start_date"] == "2025-11-10"
+    unavailable = verifier_module._derive_first_available_nav_epoch(
+        _t2_verifier_facts(verifier_module, pre_start=(date(2025, 11, 10), None))
+    )
+    assert unavailable["performance_reason"] == "OPENING_OBSERVATION_UNAVAILABLE"
+
+
+def test_t2_verifier_links_exact_fills_at_beginning_of_day_like_the_producer(
+    verifier_module: Any,
+) -> None:
+    from tools import account_strategy_manifest as producer_module
+
+    fill = verifier_module._IndependentFlowFact(
+        date(2025, 11, 11),
+        "INTERNAL_IN",
+        "USD",
+        Decimal("100"),
+        date(2025, 11, 13),
+        "fill-1",
+        "EXACT_TIMESTAMP",
+        date(2025, 11, 12),
+    )
+    row = verifier_module._derive_first_available_nav_epoch(
+        _t2_verifier_facts(verifier_module, pre_start=None, flows=(fill,))
+    )
+    producer = producer_module.analyze_epoch(
+        {
+            "2025-11-12": Decimal("100"),
+            "2025-11-13": Decimal("187.64"),
+            "2025-11-14": Decimal("190"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2025-11-11",
+        None,
+        capital_allocation_legs={
+            ("2025-11-11", "2025-11-13", "fill-1", "2025-11-12"): Decimal("100")
+        },
+    )
+    assert producer is not None
+    assert row["observation_trace"]["links"][0]["factor"] == Decimal("0.9382")
+    assert row["observation_trace"] == producer["observation_trace"]
+    assert row["performance_flow_legs"] == producer["performance_flow_legs"]
+    assert row["performance_flags"] == producer["performance_flags"] == []
+
+
+def test_t2_fact_projections_carry_each_funded_epoch_pre_start_observation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """R1 needs the S-1 valuation in the calculation ledger (builder and verifier).
+
+    Pre-change both projections kept only in-window NAVs, so every funded
+    epoch silently opened at the end of day S.
+    """
+
+    navs = [
+        {
+            "record_id": f"{account}-{day}",
+            "account_id": account,
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        }
+        for account, day in (
+            ("acct-t2", "2026-01-01"),
+            ("acct-t2", "2026-01-04"),
+            ("acct-t2", "2026-01-05"),
+            ("acct-t2", "2026-01-06"),
+            ("acct-other", "2026-01-04"),
+        )
+    ]
+    assignment = {
+        "account_id": "acct-t2",
+        "strategy_id": "strategy-t2",
+        "effective_start": "2026-01-05",
+        "effective_end": None,
+    }
+    receipt = {"requested_start": "2026-01-05", "requested_end": "2026-01-06"}
+    builder_navs = perimeter_module._mixed_admitted_fact_projection(
+        funded_assignments=[assignment],
+        routes=[{"assignment": assignment, "receipt": receipt}],
+        navs=navs,
+        flows=[],
+        events=[],
+        capital_anchors=[],
+    )[0]
+    verifier_navs = verifier_module._mixed_admitted_fact_projection(
+        funded_assignments=[assignment],
+        routes=[{"selected_assignment": assignment, "receipt": receipt}],
+        navs=navs,
+        flows=[],
+        events=[],
+        capital_anchors=[],
+    )[0]
+    expected = ["acct-t2-2026-01-04", "acct-t2-2026-01-05", "acct-t2-2026-01-06"]
+    assert [nav["record_id"] for nav in builder_navs] == expected
+    assert [nav["record_id"] for nav in verifier_navs] == expected

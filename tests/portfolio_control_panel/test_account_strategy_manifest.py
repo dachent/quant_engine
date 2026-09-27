@@ -6327,3 +6327,250 @@ def test_schema_and_semantics_reject_negative_drawdown_values(
 
     with pytest.raises(manifest_module.ManifestError, match="formal schema|drawdown"):
         manifest_module.validate_manifest_schema(manifest)
+
+
+# --- C1 T2: manifest epoch engine on the single return engine (R1-R4) -------
+
+
+def _t2_epoch(
+    manifest_module: Any,
+    *,
+    pre_start: tuple[str, Decimal | None] | None = None,
+    external_in: dict[object, Decimal] | None = None,
+    internal_in: dict[object, Decimal] | None = None,
+    allocations: dict[object, Decimal] | None = None,
+    navs: dict[str, Decimal] | None = None,
+    start: str = "2026-01-05",
+) -> dict[str, Any]:
+    stats = manifest_module.analyze_epoch(
+        navs
+        or {
+            "2026-01-05": Decimal("102"),
+            "2026-01-06": Decimal("103"),
+            "2026-01-07": Decimal("104"),
+        },
+        external_in or {},
+        {},
+        internal_in or {},
+        {},
+        None,
+        start,
+        None,
+        capital_allocation_legs=allocations,
+        pre_start_observation=pre_start,
+    )
+    assert stats is not None and "unavailable_status" not in stats
+    return stats
+
+
+def test_t2_r1_performance_opens_at_the_last_observation_before_start(
+    manifest_module: Any,
+) -> None:
+    """R1 (B2/B8 1b44, c63d, cff1, qsi): day S earns from the S-1 valuation.
+
+    Pre-change the epoch opened at the end of day S and dropped day S's
+    return (and its S-1 opening from the MWR).  The capital basis keeps its
+    meaning: the first available NAV stays the contributed opening capital.
+    """
+
+    without = _t2_epoch(manifest_module)
+    with_pre_start = _t2_epoch(
+        manifest_module, pre_start=("2026-01-04", Decimal("100"))
+    )
+
+    assert without["performance_opening_basis"] == (
+        "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+    )
+    assert without["performance_opening_date"] == "2026-01-05"
+    with manifest_module.localcontext(manifest_module._DECIMAL_CONTEXT):
+        assert without["observation_linked_return"] == (
+            Decimal("104") / Decimal("102") - 1
+        )
+    assert with_pre_start["performance_opening_basis"] == (
+        "LAST_OBSERVATION_BEFORE_START"
+    )
+    assert with_pre_start["performance_opening_date"] == "2026-01-04"
+    assert with_pre_start["performance_opening_value"] == Decimal("100")
+    assert with_pre_start["observation_linked_return"] == Decimal("0.04")
+    assert len(with_pre_start["observation_trace"]["links"]) == 3
+    assert with_pre_start["observation_trace"]["links"][0]["start_date"] == (
+        "2026-01-04"
+    )
+    for field in ("opening_capital", "invested", "gain", "opening_capital_date"):
+        assert with_pre_start[field] == without[field]
+    assert with_pre_start["opening_capital"] == Decimal("102")
+
+
+def test_t2_r1_nonpositive_pre_start_falls_back_and_unavailable_fails_closed(
+    manifest_module: Any,
+) -> None:
+    zero = _t2_epoch(manifest_module, pre_start=("2026-01-04", Decimal("0")))
+    assert zero["performance_opening_date"] == "2026-01-05"
+    missing = _t2_epoch(manifest_module, pre_start=("2026-01-04", None))
+    assert missing["performance_status"] == "UNAVAILABLE"
+    assert missing["performance_reason"] == "OPENING_OBSERVATION_UNAVAILABLE"
+    assert missing["performance_opening_date"] is None
+    assert missing["flow_count"] is None
+    assert missing["opening_capital"] == Decimal("102")
+    with pytest.raises(manifest_module.ManifestError, match="not before the epoch"):
+        _t2_epoch(manifest_module, pre_start=("2026-01-05", Decimal("100")))
+
+
+def test_t2_exact_timestamp_fund_allocation_enters_at_beginning_of_day(
+    manifest_module: Any,
+) -> None:
+    """A1 mechanism 2: a timestamped fill earns the whole sub-period it joins.
+
+    The same 100 booked end-of-day (the pre-change treatment) turns the
+    ordinary -6.18 % day into -12.36 %.
+    """
+
+    navs = {
+        "2025-11-12": Decimal("100"),
+        "2025-11-13": Decimal("187.64"),
+        "2025-11-14": Decimal("187.64"),
+    }
+    exact = _t2_epoch(
+        manifest_module,
+        navs=navs,
+        start="2025-11-11",
+        allocations={
+            ("2025-11-11", "2025-11-13", "fill-1", "2025-11-12"): Decimal("100")
+        },
+    )
+    date_only = _t2_epoch(
+        manifest_module,
+        navs=navs,
+        start="2025-11-11",
+        internal_in={("2025-11-11", "2025-11-13", "flow-1"): Decimal("100")},
+    )
+
+    exact_link = exact["observation_trace"]["links"][0]
+    assert exact_link["beginning_flow"] == Decimal("100")
+    assert exact_link["ending_flow"] == Decimal("0")
+    assert exact_link["factor"] == Decimal("0.9382")
+    assert exact["performance_flags"] == []
+    assert exact["performance_flow_legs"] == [
+        {
+            "class": "INTERNAL_IN",
+            "event_date": "2025-11-11",
+            "nav_recognition_date": "2025-11-13",
+            "economic_date": "2025-11-12",
+            "timing": "EXACT_TIMESTAMP",
+            "amount": Decimal("100"),
+        }
+    ]
+    date_only_link = date_only["observation_trace"]["links"][0]
+    assert date_only_link["factor"] == Decimal("0.8764")
+    assert date_only["performance_flags"] == ["INFERRED_TIMING"]
+    assert exact["internal_in"] == date_only["internal_in"] == Decimal("100")
+
+
+def test_t2_flow_count_counts_source_records_not_date_buckets(
+    manifest_module: Any,
+) -> None:
+    """B1 (d697 0.28 + 0.08): two records on one leg date are two flows."""
+
+    events = [
+        {
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-06",
+            "nav_recognition_date": "2026-01-06",
+            "amount": Decimal(amount),
+            "disposition": "EXTERNAL",
+            "source_record_id": source,
+        }
+        for amount, source in (("0.28", "flow-a"), ("0.08", "flow-b"))
+    ]
+    buckets = manifest_module.flow_buckets_from_classes(events)
+    per_record = _t2_epoch(
+        manifest_module, external_in=buckets["external_in"]["synthetic-account"]
+    )
+    merged = _t2_epoch(
+        manifest_module,
+        external_in={("2026-01-06", "2026-01-06"): Decimal("0.36")},
+    )
+
+    assert per_record["flow_count"] == 2
+    assert len(per_record["capital_flow_trace"]) == 2
+    assert per_record["deposits"] == merged["deposits"] == Decimal("0.36")
+    assert merged["flow_count"] == 1
+    assert (
+        per_record["observation_linked_return"] == merged["observation_linked_return"]
+    )
+
+
+def _t2_census(*assignments: tuple[str, str, str, str | None, str]) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "assignments": [
+                        {
+                            "strategy_id": strategy,
+                            "status": status,
+                            "effective_start": start,
+                            "effective_end": end,
+                        }
+                    ],
+                }
+                for provider, strategy, start, end, status in assignments
+            ]
+        }
+    }
+
+
+def test_t2_r2_funded_admission_of_a_census_assignment_only_interval_raises(
+    manifest_module: Any,
+) -> None:
+    """R2 (38b6/98f5 tt): ASSIGNMENT_ONLY is never funded performance."""
+
+    census = manifest_module.load_membership_census(
+        _t2_census(
+            ("SCHWAB", "tt", "2025-11-25", "2026-01-04", "ASSIGNMENT_ONLY"),
+            ("SCHWAB", "tt", "2025-11-25", "2026-01-04", "ASSIGNMENT_ONLY"),
+            ("SCHWAB", "tt", "2025-11-25", None, "FUNDED_MEMBERSHIP"),
+        )
+    )
+    providers = {"a": "SCHWAB", "b": "SCHWAB", "c": "SCHWAB"}
+    funded = {"status": "FUNDED"}
+    blocked = {"status": "BLOCKED"}
+    good = {
+        ("a", "tt", "2025-11-25", "2026-01-04"): blocked,
+        ("b", "tt", "2025-11-25", "2026-01-04"): blocked,
+        ("c", "tt", "2025-11-25", None): funded,
+    }
+    manifest_module._validate_admissions_against_census(good, census, providers)
+    bad = {**good, ("a", "tt", "2025-11-25", "2026-01-04"): funded}
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(bad, census, providers)
+    too_many = {**good, ("d", "tt", "2025-11-25", None): funded}
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(
+            too_many, census, {**providers, "d": "SCHWAB"}
+        )
+    unlisted = {("c", "other", "2025-11-25", None): funded}
+    with pytest.raises(manifest_module.ManifestError, match="absent from"):
+        manifest_module._validate_admissions_against_census(unlisted, census, providers)
+
+
+def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
+    manifest_module: Any,
+) -> None:
+    """The governed census marks the two tt->qsi transitions ASSIGNMENT_ONLY."""
+
+    contract = json.loads(
+        (
+            Path(manifest_module.__file__).resolve().parents[1]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    census = manifest_module.load_membership_census(contract)
+    key = ("SCHWAB", "tt-portfolio", "2025-11-25", "2026-01-04")
+    assert census[key] == ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(
+            {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
+        )
