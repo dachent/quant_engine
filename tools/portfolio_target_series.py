@@ -320,6 +320,16 @@ class TargetSeriesError(ValueError):
     or ledger cycle behind by design, while ``"integrity"`` (the default)
     marks every other failure, including tampered artifacts, non-canonical
     manifests, and unreadable evidence.
+
+    The two imported-core checks ("layered history imported core dependency
+    differs" and "financial MVP validator imported core dependency differs")
+    deliberately stay ``"integrity"``. Unlike the repository-dependency gate,
+    they compare the module the running process actually imported (via
+    ``inspect.getsourcefile``) against the bytes committed at the generation's
+    recorded SHA, and they are only reachable after the working tree already
+    matches that recorded SHA. A mismatch therefore means the import resolved
+    outside the recorded checkout — environment tampering, not a code cycle —
+    and the retained evidence fails closed instead of rebuilding.
     """
 
     def __init__(self, message: str, *, kind: str = "integrity") -> None:
@@ -6197,7 +6207,9 @@ def validate_layered_history_generation(
         _trusted_layered_history_code_identity()
     )
     if tool_sha256 != trusted_tool_sha256:
-        raise TargetSeriesError("layered history code identity is not trusted")
+        raise TargetSeriesError(
+            "layered history code identity is not trusted", kind="staleness"
+        )
 
     contract, strategies, sources, corrections = _history_contract(
         contract_path, repository_sha

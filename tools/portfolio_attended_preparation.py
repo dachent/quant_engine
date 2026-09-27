@@ -616,15 +616,16 @@ def _retained_history_requires_rebuild(
 
     The verifier marks a TargetSeriesError as ``kind="staleness"`` only when a
     well-formed retained generation is one cycle behind by design: the code
-    that defines it moved on (a recorded repository dependency differs), its
-    current source admission proof binds a previous ledger generation, or its
-    account-live returns no longer match the provider ledger after a
-    semantics change. Each such generation is rebuilt from the frozen
-    selected bytes. Every other TargetSeriesError is an integrity failure of
-    the retained evidence itself (tampered artifact bytes, an invalid or
-    non-canonical manifest, a differing inventory, an unreadable generation),
-    and raw OSError/ValueError escapes are unreadable evidence; both fail
-    closed without rebuilding.
+    that defines it moved on (a recorded repository dependency differs, or
+    the history tool itself was edited after the build so its trusted
+    identity no longer matches), its current source admission proof binds a
+    previous ledger generation, or its account-live returns no longer match
+    the provider ledger after a semantics change. Each such generation is
+    rebuilt from the frozen selected bytes. Every other TargetSeriesError is
+    an integrity failure of the retained evidence itself (tampered artifact
+    bytes, an invalid or non-canonical manifest, a differing inventory, an
+    unreadable generation), and raw OSError escapes are unreadable evidence;
+    both fail closed without rebuilding.
     """
 
     import portfolio_target_series as history
@@ -640,7 +641,7 @@ def _retained_history_requires_rebuild(
             raise AttendedPreparationError(
                 "retained layered history is invalid"
             ) from exc
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
             raise AttendedPreparationError(
                 "retained layered history is invalid"
             ) from exc

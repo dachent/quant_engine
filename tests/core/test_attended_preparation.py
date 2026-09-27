@@ -658,6 +658,69 @@ def test_stale_repository_dependency_kind_rebuilds_retained_history(
     )
 
 
+def test_stale_tool_identity_kind_rebuilds_retained_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained generation built under a previous tool identity rebuilds.
+
+    The trusted tool SHA comparison is the only detector for an edit to the
+    layered-history tool itself: ``portfolio_target_series.py`` is not a
+    recorded repository dependency, and this check fires before the
+    dependency gate. An edit to the tool therefore leaves every retained
+    generation one code cycle behind by design, so the verifier marks it
+    ``staleness`` and the rebuild decision rebuilds it instead of failing
+    closed. The verifier's real trusted-identity gate stays live: the
+    retained manifest below records the genuine tool SHA of the current
+    file, and the simulation replaces the trusted identity with a later
+    one, exactly what editing this very tool produces after the build.
+    """
+
+    import portfolio_target_series as history
+
+    def gated_synthetic_parse(
+        path: Path, repository_sha: str | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        history._require_trusted_layered_history_dependencies(repository_sha)
+        return cast(
+            "tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]",
+            history_tests._synthetic_history_contract(path),
+        )
+
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    monkeypatch.setattr(history, "_history_contract", gated_synthetic_parse)
+
+    fixture, generation = _retained_layered_history(tmp_path)
+    assert (
+        history.verify_layered_history_generation(generation, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+
+    monkeypatch.setattr(
+        history,
+        "_trusted_layered_history_code_identity",
+        lambda: ("0" * 40, "f" * 64),
+    )
+
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="layered history code identity is not trusted",
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert raised.value.kind == "staleness"
+    assert (
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+        is True
+    )
+
+
 def test_stale_source_admission_proof_kind_rebuilds_retained_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
