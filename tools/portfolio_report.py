@@ -2073,11 +2073,15 @@ def _account_live_return_series(
     composite substitution.  Both compound through the one return engine
     (``splice_spans``); the epoch HPR gap spans are spliced in that single
     place.  The epoch receipt's hash/count bindings hold for the strategy
-    series, so they are enforced on strategy-level paths only.
+    series, so they are enforced on strategy-level paths only, and an
+    account-owned path splices the receipt's gap spans only when that account
+    is the receipt's sole component -- a multi-account member composes only
+    a subset of the bound strategy series.
     """
 
     grouped: dict[str | tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     providers: dict[str, set[str]] = defaultdict(set)
+    strategy_components: dict[str, set[str]] = defaultdict(set)
     cutoff = (
         None
         if calculation_cutoff_date is None
@@ -2092,6 +2096,12 @@ def _account_live_return_series(
         parsed_day = _date(row.get("date"), "strategy return.date")
         if cutoff is not None and parsed_day > cutoff:
             continue
+        row_components = row.get("component_account_ids")
+        if isinstance(row_components, list):
+            strategy_components[strategy_id].update(
+                _text(item, "strategy return.component_account_ids")
+                for item in row_components
+            )
         if account_owned:
             components = row.get("component_account_ids")
             if not isinstance(components, list) or len(components) != 1:
@@ -2124,6 +2134,14 @@ def _account_live_return_series(
                 f"account-live strategy returns repeat a date for {strategy_id}"
             )
         epoch_receipt = epoch_receipts.get(strategy_id)
+        if account_owned and strategy_components.get(strategy_id, set()) != {
+            series_key[0]
+        }:
+            # The epoch receipt binds the strategy-level series.  A member of
+            # a multi-account strategy composes only a subset of that series,
+            # so the receipt's gap spans must not be spliced into the
+            # member's own path.
+            epoch_receipt = None
         with localcontext() as context:
             # Matrixport's retained source arithmetic is a 28-significant-
             # digit Decimal path.  Replaying its HPR receipt at a wider local

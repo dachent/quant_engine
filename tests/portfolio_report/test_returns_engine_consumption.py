@@ -490,3 +490,357 @@ def test_multi_account_strategy_path_matches_the_engine_composite() -> None:
         engine_compound.cumulative_return
     )
     assert canonical["strategy-shared"]["return_observations"] == len(rows)
+
+
+def test_volatis_like_capital_anchors_are_not_booked_as_returns() -> None:
+    """Paired (fail-before): strategy capital anchors never become returns.
+
+    The P1 loop re-derived the epoch TWR from raw NAV and flow records, so the
+    eleven STRATEGY_CAPITAL_ALLOCATION sleeve anchors -- evidence P1 never read
+    as allocations -- were divided into a flat 100 -> 100 NAV pair and rendered
+    ``(100 + 11 * 536) / 100 - 1 = 58.96``, a ~5,896% epoch.  The manifest
+    payload now carries the engine TWR and the raw records are never read.
+    """
+
+    from quant_engine.portfolio_ledger.returns import splice_spans
+
+    daily = [
+        {"date": "2026-01-02", "return": "0.01"},
+        {"date": "2026-01-05", "return": "0.02"},
+    ]
+    with localcontext() as context:
+        context.prec = 34
+        engine = splice_spans(
+            [
+                (date.fromisoformat(item["date"]), Decimal(item["return"]))
+                for item in daily
+            ]
+        )
+    engine_twr = decimal_text(engine.cumulative_return)
+    epoch_details = {
+        ("account-owned", "strategy-volatis", "2026-01-01", None): {
+            "account_label": "Volatis account",
+            "last_four": "4321",
+            "epoch_admission_status": "FUNDED",
+            "epoch_output_status": "OK",
+            "epoch_blocking_reason": None,
+            "performance_payload": {
+                "flow_count": 0,
+                "flow_timing": None,
+                "nav_observations": 2,
+                "observed_end": "2026-01-05",
+                "observed_start": "2026-01-02",
+                "twr": engine_twr,
+                "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+            },
+        }
+    }
+    catalog = {
+        "assignments": [_owned_assignment("account-owned", "strategy-volatis")],
+        "calendar_coverage": [],
+        "flows": [
+            {
+                "account_id": "account-owned",
+                "amount": {"status": "AVAILABLE", "value": "-536"},
+                "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+                "event_date": "2026-01-05",
+                "flow_type": "EXTERNAL_CONTRIBUTION",
+                "strategy_id": "strategy-volatis",
+            }
+            for _anchor in range(11)
+        ],
+        "nav_observations": [
+            {
+                "account_id": "account-owned",
+                "as_of_date": "2026-01-02",
+                "nav": {"status": "AVAILABLE", "value": "100"},
+            },
+            {
+                "account_id": "account-owned",
+                "as_of_date": "2026-01-05",
+                "nav": {"status": "AVAILABLE", "value": "100"},
+            },
+        ],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [{"account_id": "account-owned"}],
+                    "observed_start": "2026-01-02",
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-volatis",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": ["account-owned"],
+                "date": item["date"],
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": item["return"],
+                "strategy_id": "strategy-volatis",
+            }
+            for item in daily
+        ],
+    }
+
+    rows = reporter._account_strategy_performance(
+        catalog,
+        None,
+        set(epoch_details),
+        epoch_details,
+    )
+
+    row = rows[0]
+    assert row["twr"] == engine_twr
+    # The ~58.9 (5,896%) P1 garbage must not survive in any rendered field.
+    assert Decimal(row["twr"]) < Decimal("1")
+    assert row["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+    assert row["flow_count"] == 0
+    assert row["nav_observations"] == 2
+
+
+def test_multi_account_members_carry_their_own_return_paths() -> None:
+    """Paired (fail-before): each member's row carries the member's own path.
+
+    A multi-account strategy renders one return path per account, and the
+    per-account paths differ; the strategy composite is the beginning-capital
+    weighted ``returns.composite`` over the members, never either member's
+    path.  The pre-T3 code substituted the strategy-level composite for every
+    scoped member.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+        splice_spans,
+    )
+
+    epoch_a = link_epoch(
+        {
+            date(2026, 1, 1): Decimal("100"),
+            date(2026, 1, 2): Decimal("101"),
+            date(2026, 1, 3): Decimal("104.03"),
+        },
+        [],
+        OpeningPoint(date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"),
+    )
+    epoch_b = link_epoch(
+        {
+            date(2026, 1, 2): Decimal("200"),
+            date(2026, 1, 3): Decimal("206"),
+            date(2026, 1, 4): Decimal("210.12"),
+        },
+        [],
+        OpeningPoint(date(2026, 1, 2), Decimal("200"), "LAST_OBSERVATION_BEFORE_START"),
+    )
+    composited = composite(
+        (*member_returns("account-a", epoch_a), *member_returns("account-b", epoch_b))
+    )
+    assert [
+        (item.end_date.isoformat(), decimal_text(item.period_return))
+        for item in composited
+    ] == [
+        ("2026-01-02", "0.01"),
+        ("2026-01-03", "0.03"),
+        ("2026-01-04", "0.02"),
+    ]
+    catalog = {
+        "assignments": [
+            _owned_assignment("account-a", "strategy-shared"),
+            _owned_assignment("account-b", "strategy-shared"),
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [
+                        {"account_id": "account-a"},
+                        {"account_id": "account-b"},
+                    ],
+                    "observed_start": "2026-01-02",
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-shared",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": ["account-a"],
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.01",
+                "strategy_id": "strategy-shared",
+            },
+            {
+                "component_account_ids": ["account-a", "account-b"],
+                "date": "2026-01-03",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.03",
+                "strategy_id": "strategy-shared",
+            },
+            {
+                "component_account_ids": ["account-b"],
+                "date": "2026-01-04",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.02",
+                "strategy_id": "strategy-shared",
+            },
+        ],
+    }
+
+    rows = reporter._account_strategy_performance(catalog)
+    canonical = reporter._account_live_return_series(catalog)
+    rendered = {row["account_id"]: row for row in rows}
+
+    with localcontext() as context:
+        context.prec = 34
+        engine_compound = splice_spans(
+            [
+                (date.fromisoformat(item.end_date.isoformat()), item.period_return)
+                for item in composited
+            ]
+        )
+    # The strategy composite is the composite over the members, compounded
+    # through the one return engine.
+    assert canonical["strategy-shared"]["cumulative_return"] == decimal_text(
+        engine_compound.cumulative_return
+    )
+    # Each member's row carries its own path, not the strategy composite.
+    assert rendered["account-a"]["return_path_status"] == (
+        "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    )
+    assert rendered["account-a"]["return_path_cumulative_return"] == "0.01"
+    assert rendered["account-a"]["return_path_observations"] == 1
+    assert rendered["account-a"]["return_path_observed_start"] == "2026-01-02"
+    assert rendered["account-a"]["return_path_observed_end"] == "2026-01-02"
+    assert rendered["account-b"]["return_path_status"] == (
+        "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    )
+    assert rendered["account-b"]["return_path_cumulative_return"] == "0.02"
+    assert rendered["account-b"]["return_path_observations"] == 1
+    assert rendered["account-b"]["return_path_observed_start"] == "2026-01-04"
+    assert rendered["account-b"]["return_path_observed_end"] == "2026-01-04"
+    assert (
+        rendered["account-a"]["return_path_cumulative_return"]
+        != rendered["account-b"]["return_path_cumulative_return"]
+    )
+
+
+def test_multi_account_strategy_splices_no_epoch_spans_into_member_paths() -> None:
+    """Paired: a strategy receipt's spans never enter a member subset path.
+
+    The epoch HPR receipt binds the strategy-level series.  A member of a
+    multi-account strategy composes only a subset of it, so splicing the
+    strategy gap spans into the member's own path would double count capital
+    the member never held; the member path stays its own plain compound.
+    """
+
+    from quant_engine.portfolio_ledger.returns import splice_spans
+
+    receipt = {
+        "admission_cutoff": "2026-01-05",
+        "daily_cumulative_return": "0.092616",
+        "daily_return_observations": 2,
+        "daily_return_series_schema": "ordered-date-return/1",
+        "daily_return_series_sha256": "b" * 64,
+        "epoch_cumulative_return": "0.201882",
+        "epoch_holding_period_link_observations": 3,
+        "observed_end": "2026-01-05",
+        "observed_start": "2026-01-02",
+        "source_gap_policy_sha256": "0" * 64,
+        "span_return_receipts": [
+            {
+                "end_endpoint_sha256": "1" * 64,
+                "missing_source_date": "2026-01-03",
+                "return": "0.1",
+                "span_days": 2,
+                "span_end_date": "2026-01-04",
+                "span_start_date": "2026-01-02",
+                "start_endpoint_sha256": "2" * 64,
+                "subscription_events_in_span": 0,
+            }
+        ],
+    }
+    catalog = {
+        "assignments": [
+            _owned_assignment("account-a", "strategy-shared"),
+            _owned_assignment("account-b", "strategy-shared"),
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "epoch_hpr_receipts": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "receipt": receipt,
+                "source_generation_id": "3" * 64,
+                "source_id": "matrixport-account-generation",
+                "strategy_id": "strategy-shared",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": ["account-a"],
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": "0.01",
+                "strategy_id": "strategy-shared",
+            },
+            {
+                "component_account_ids": ["account-a"],
+                "date": "2026-01-05",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": "0.02",
+                "strategy_id": "strategy-shared",
+            },
+            {
+                "component_account_ids": ["account-b"],
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": "0.1",
+                "strategy_id": "strategy-shared",
+            },
+            {
+                "component_account_ids": ["account-b"],
+                "date": "2026-01-05",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": "0.2",
+                "strategy_id": "strategy-shared",
+            },
+        ],
+    }
+
+    own = reporter._account_live_return_series(catalog, account_owned=True)
+
+    with localcontext() as context:
+        context.prec = 34
+        own_a = splice_spans(
+            [(date(2026, 1, 2), Decimal("0.01")), (date(2026, 1, 5), Decimal("0.02"))]
+        )
+        own_b = splice_spans(
+            [(date(2026, 1, 2), Decimal("0.1")), (date(2026, 1, 5), Decimal("0.2"))]
+        )
+    assert own[("account-a", "strategy-shared")]["cumulative_return"] == decimal_text(
+        own_a.cumulative_return
+    )
+    assert own[("account-b", "strategy-shared")]["cumulative_return"] == decimal_text(
+        own_b.cumulative_return
+    )
+    for key in (("account-a", "strategy-shared"), ("account-b", "strategy-shared")):
+        assert own[key]["return_observations"] == 2
+        assert own[key]["cumulative_return_label"] == "DAILY_GEOMETRIC_TWR"
+        assert own[key]["path_dependent_metrics_status"] == "AVAILABLE"
