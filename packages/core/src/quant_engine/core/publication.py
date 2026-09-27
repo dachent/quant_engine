@@ -1933,11 +1933,14 @@ def evaluate_release_validation_findings(
     """Return ``(may_publish, blocking_findings, refusal_reason)`` for one generation.
 
     Fails closed on every axis the contract names: missing, unreadable, a
-    non-resident cloud placeholder, malformed, or naming a different generation
-    all refuse. Only a well-formed document for exactly ``expected_generation_id``
-    with zero ``BLOCKER_*`` findings may publish. ``refusal_reason`` is set only
-    for those non-finding refusals; a well-formed document with blockers returns
-    them instead so the caller can report exactly what refused it.
+    non-resident cloud placeholder, malformed, naming a different generation,
+    or declaring no expected baseline (``expected_baseline_sha256: null``, the
+    shape a validator run without ``--expected`` produces) all refuse. Only a
+    well-formed document for exactly ``expected_generation_id``, with a
+    recorded expected-baseline digest and zero ``BLOCKER_*`` findings, may
+    publish. ``refusal_reason`` is set only for those non-finding refusals; a
+    well-formed document with blockers returns them instead so the caller can
+    report exactly what refused it.
     """
     if not path.is_file():
         return False, [], f"no release-validation findings file at {path}"
@@ -1965,6 +1968,17 @@ def evaluate_release_validation_findings(
             (
                 "release-validation findings generation_id differs: expected "
                 f"{expected_generation_id!r}, found {document['generation_id']!r}"
+            ),
+        )
+    if document["expected_baseline_sha256"] is None:
+        return (
+            False,
+            [],
+            (
+                "release-validation findings expected_baseline_sha256 is null "
+                "(the validator ran without --expected, so no fixed-baseline "
+                "regression comparison occurred); a generation cannot be "
+                "authorized for publication without one"
             ),
         )
     findings = cast(list[dict[str, object]], document["findings"])
