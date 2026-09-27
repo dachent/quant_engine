@@ -98,10 +98,28 @@ INPUT_ORDER = (
     QB_VALUES,
     FX_HISTORY,
 )
-# Identities pinned by state/briefs/acceptance-inputs.json.
+# Identities pinned by state/briefs/acceptance-inputs.json (LEDGER, CROSSWALK,
+# FX_HISTORY) plus the remaining seven consumed sources (T2.8, PR #487 bot
+# finding 4113723389): acceptance-inputs.json's v1 record carries a null
+# sha256 for these -- captured before the census filled it in -- so there was
+# no approved digest to copy. Each was independently computed by sha256'ing
+# the exact resident bytes at the path already named in INPUT_ORDER (the same
+# identity read_input() would otherwise have trusted unverified); see
+# state/reports/T2.8-report.md for how each was derived. Without a pin here,
+# read_input() skips verification entirely for that path (only a path
+# present in this mapping is checked), so any of these seven could be
+# replaced in place and the derivation would silently calculate a new,
+# apparently-valid expected result from unapproved bytes.
 PINNED_SHA256 = {
     LEDGER: "ba5232acadbbd192e60f1a1b9635cfab05900ac024b0064bdc782a57079d5f13",
     CROSSWALK: "2d1035cabfecdd4c1b53c8f03c6db97417ee27e43b14e8669e5d8b9452ac905f",
+    MP_NAV: "f067dbcc382e85154fabd7730c1b9573abfb39ef0817ac9013d3f40867df0c16",
+    MP_DEPOSITS: "e5a8926bf0e9dce277d02e0cf9dc934a206e32357b099eaacf4d1680165ca339",
+    MP_BILLS: "c8fd298586aea4c4fcf2d8633da8245d057a5b8a849a344923a411ca9c6437f1",
+    MP_DISPOSITIONS: "acb2ffc16d2b28aa0e9938494d4990141e87c3eeae1c6c3ace31fad3f6ec4a8a",
+    QB_ACCOUNTS: "3fa85ee87de511fe2350e3fea9f1568b3f8506e5e08ef017eacd4d214cdf2385",
+    QB_ACTIVITY: "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
+    QB_VALUES: "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
     FX_HISTORY: "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c",
 }
 PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"

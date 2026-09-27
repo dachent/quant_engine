@@ -1064,6 +1064,19 @@ def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:
         _run(tmp_path, expected_sha256=pins)
 
 
+def test_every_consumed_input_is_pinned() -> None:
+    """T2.8 (PR #487 bot finding 4113723389): ``read_input`` verifies a path
+    only when it is present in the ``expected_sha256`` mapping it is handed
+    (``acceptance/derive_a/sources.py``); a path absent from ``PINNED_SHA256``
+    is read completely unverified. Before this fix only 3 of the 10
+    ``INPUT_ORDER`` sources were pinned (``LEDGER``, ``CROSSWALK``,
+    ``FX_HISTORY``), so any of the other 7 -- all the raw Matrixport/Quantbase
+    captures -- could be replaced in place and derive_a would silently
+    calculate a new, apparently-valid expected result from unapproved bytes.
+    """
+    assert set(derive.PINNED_SHA256) == set(derive.INPUT_ORDER)
+
+
 # --------------------------------------------------------------------- oracle rule
 
 
