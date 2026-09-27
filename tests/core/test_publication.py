@@ -38,7 +38,10 @@ def _finding(**overrides: object) -> dict[str, object]:
 
 
 def _document(
-    generation_id: str, *, findings: tuple[dict[str, object], ...] = ()
+    generation_id: str,
+    *,
+    findings: tuple[dict[str, object], ...] = (),
+    baseline: str | None = "b" * 64,
 ) -> dict[str, object]:
     summary = {
         "BLOCKER_INVARIANT": 0,
@@ -54,7 +57,7 @@ def _document(
         "generation_id": generation_id,
         "generation_dir": f"/generations/{generation_id}",
         "validator_commit": "c" * 40,
-        "expected_baseline_sha256": None,
+        "expected_baseline_sha256": baseline,
         "summary": summary,
         "findings": list(findings),
     }
@@ -89,6 +92,26 @@ def test_clean_document_permits_publish(tmp_path: Path) -> None:
     )
 
     assert (may_publish, blockers, reason) == (True, [], None)
+
+
+def test_null_expected_baseline_refuses_even_with_zero_blockers(
+    tmp_path: Path,
+) -> None:
+    """T2.8 (PR #487 bot finding 4113723374): a validator run without
+    ``--expected`` skips the regression suite as ``NOT_READY``, which is not a
+    ``BLOCKER_*`` class -- so without this gate an otherwise-clean document
+    with a null ``expected_baseline_sha256`` would be publishable despite no
+    financial value ever being compared to a fixed baseline."""
+    path = tmp_path / "findings.json"
+    _write(path, _document("gen-1", baseline=None))
+
+    may_publish, blockers, reason = evaluate_release_validation_findings(
+        path, expected_generation_id="gen-1"
+    )
+
+    assert may_publish is False
+    assert blockers == []
+    assert reason is not None and "expected_baseline_sha256" in reason
 
 
 def test_not_ready_and_warning_alone_do_not_block(tmp_path: Path) -> None:
