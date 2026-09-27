@@ -174,10 +174,16 @@ def test_tt_broker_returns_preserve_account_transitions_and_ignore_other_provide
         "flows": flows,
     }
     cutoff = date(2026, 1, 8)
-    expected = attribution.provider_ledger._broker_strategy_returns(
-        nav[:-1], flows, {"schwab"}
-    )
+    expected = [
+        row
+        for row in attribution.provider_ledger._broker_strategy_returns(
+            nav[:-1], flows, {"schwab"}
+        )
+        if row["strategy_id"] == "tt-portfolio"
+    ]
     assert [(row["date"], Decimal(row["return"])) for row in expected] == [
+        # R1: the re-entered TT epoch opens on the prior positive value (200).
+        ("2026-01-03", Decimal("0.5")),
         ("2026-01-04", Decimal("0.1")),
         ("2026-01-05", Decimal("0")),
         ("2026-01-08", Decimal("0.1")),

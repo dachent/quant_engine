@@ -131,7 +131,11 @@ def test_selected_account_source_projects_history_from_the_same_daily_navs(tmp_p
     for navs in by_account.values():
         navs.sort(key=lambda row: row["as_of_date"])
         for previous, current in zip(navs, navs[1:]):
-            if previous["strategy_id"] != current["strategy_id"]:
+            # R1: a run opens on the positive value just before its first
+            # mapped day, whatever that day was mapped to.
+            if previous["strategy_id"] != current["strategy_id"] and (
+                current["strategy_id"] is None or Decimal(previous["nav"]["value"]) <= 0
+            ):
                 continue
             contributions.setdefault(
                 (current["strategy_id"], current["as_of_date"]), []

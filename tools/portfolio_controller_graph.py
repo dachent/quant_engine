@@ -31,6 +31,9 @@ _TARGET_SERIES = "tools/portfolio_target_series.py"
 _DEPENDENCE = "tools/portfolio_current_dependence.py"
 _DECOMPOSITION_PLAN = "tools/portfolio_current_decomposition_plan.py"
 _PROVIDER_LEDGER = "tools/provider_ledger.py"
+_LEDGER_RETURNS = (
+    "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py"
+)
 _BASELINE = "tools/portfolio_baseline.py"
 _EPOCH_MANIFEST = "tools/stage_current_epoch_manifest.py"
 _ACCOUNT_MANIFEST = "tools/build_account_manifest_generation.py"
@@ -335,6 +338,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "provider-ledger-generation",
         "source_paths": (
             _PROVIDER_LEDGER,
+            _LEDGER_RETURNS,
             "tools/quantbase_generation.py",
             "tools/schwab_generation.py",
             _RELEASE,
