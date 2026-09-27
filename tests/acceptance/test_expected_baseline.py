@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +72,30 @@ def test_no_null_authority_pointer_sha256() -> None:
     assert not offenders, offenders
 
 
+# Fix round 2 (Codex scoped re-review of cp/acc-baseline-v2): the gate is the
+# stricter allowlist form -- a pointer passes only when it is data-root-relative
+# under one of the declared prefixes the file actually uses. Any absolute or
+# rooted path fails, including driveless Windows rooted forms such as
+# "\\Dev\\scratch\\..." for which Path(...).is_absolute() is False and a ":\\"
+# substring test is False too.
+ALLOWED_AUTHORITY_POINTER_ROOTS = (
+    "contracts/",
+    "dataPortfolio/",
+    "dataQuantbase/",
+    "dataMatrixport/",
+    "evidence/",
+    "schemas/",
+)
+
+
+def _is_data_root_relative(path: str) -> bool:
+    # PureWindowsPath(...).anchor is non-empty for both "C:\..." and the
+    # driveless rooted "\Dev..." form; PurePosixPath covers "/...".
+    if PureWindowsPath(path).anchor or PurePosixPath(path).anchor:
+        return False
+    return path.startswith(ALLOWED_AUTHORITY_POINTER_ROOTS)
+
+
 def test_no_machine_local_absolute_authority_pointer_paths() -> None:
     """Fix round 1 (Kimi K3 + Codex review of cp/acc-baseline-v2): authority
     pointers must be data-root-relative, never machine-local absolute paths
@@ -81,9 +105,34 @@ def test_no_machine_local_absolute_authority_pointer_paths() -> None:
         (row["metric_id"], row["entity"], pointer["path"])
         for row in doc["metrics"]
         for pointer in row.get("authority_pointer", [])
-        if Path(pointer["path"]).is_absolute() or ":\\" in pointer["path"]
+        if not _is_data_root_relative(pointer["path"])
     ]
     assert not offenders, offenders
+
+
+def test_authority_pointer_gate_regression_rooted_and_relative() -> None:
+    """Fix round 2 paired regression: a driveless rooted Windows pointer must
+    FAIL the gate (it slipped past the round-1 is_absolute()/":\\" check), the
+    "C:\\" form must still fail, and legit data-root-relative pointers must
+    pass every declared prefix."""
+    assert not _is_data_root_relative(
+        r"\Dev\scratch\quant_engine\lineage\v2\x\accounts.csv"
+    )
+    assert not _is_data_root_relative(
+        r"C:\Dev\scratch\quant_engine\lineage\v2\x\accounts.csv"
+    )
+    assert not _is_data_root_relative("/Dev/scratch/quant_engine/accounts.csv")
+    for good in (
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "dataPortfolio/provider-ledger/generations/<sha>/provider-ledger.json",
+        "dataQuantbase/source-runs/run/artifacts/csv/accounts.csv",
+        "dataMatrixport/source-runs/run/csv/nav_daily.csv",
+        "evidence/capture-run/evidence.json",
+        "schemas/core/account.json",
+    ):
+        assert _is_data_root_relative(good), good
+    # prefix must match at a component boundary, not as a loose substring
+    assert not _is_data_root_relative("contracts-evil/payload.json")
 
 
 def test_tolerance_classes_match_spec() -> None:
