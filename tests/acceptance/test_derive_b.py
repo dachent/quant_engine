@@ -927,7 +927,7 @@ def test_raw_provider_matrixport_uses_subscription_bill_units_and_usdt_fx(
         encoding="utf-8",
     )
 
-    observations, flows, used, failures = derivation.raw_provider_data(
+    observations, flows, used, failures, notes = derivation.raw_provider_data(
         tmp_path,
         [
             {
@@ -939,6 +939,7 @@ def test_raw_provider_matrixport_uses_subscription_bill_units_and_usdt_fx(
     )
 
     assert failures == {}
+    assert notes == {}
     assert observations == {"account-m": [(date(2026, 1, 2), Decimal("8.910"))]}
     assert flows["account-m"].cash_flows == {}
     assert flows["account-m"].twr_end_flows == {}
@@ -1294,7 +1295,7 @@ def test_quantbase_pricehistory_with_bom_is_parsed_via_utf8_sig(tmp_path: Path):
         encoding="utf-8-sig",
     )
 
-    observations, flows, used, failures = derivation.raw_provider_data(
+    observations, flows, used, failures, notes = derivation.raw_provider_data(
         tmp_path,
         [
             {
@@ -1306,6 +1307,7 @@ def test_quantbase_pricehistory_with_bom_is_parsed_via_utf8_sig(tmp_path: Path):
     )
 
     assert failures == {}
+    assert notes == {}
     assert observations == {
         "account-q": [
             (date(2026, 9, 1), Decimal("99.25")),
@@ -1437,3 +1439,263 @@ def test_derive_discloses_ledger_tail_after_last_raw_observation(tmp_path: Path)
         for row in account_rows
     )
     assert all("cross-checks only" in row["notes"] for row in account_rows)
+
+
+def write_manifest_file(tmp_path: Path, entries: list[dict[str, object]]) -> Path:
+    """Write the smallest valid acceptance-inputs manifest for manifest tests."""
+    manifest_path = tmp_path / "acceptance-inputs.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "qe-cp-acceptance-inputs/2",
+                "cutoff": "2026-09-17",
+                "root": "qe:",
+                "inputs": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def pinned_entry(path: Path) -> dict[str, object]:
+    """Declare a fixture file with its real sha256 and byte size pins."""
+    import hashlib
+
+    return {
+        "family": "test",
+        "path": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "bytes": path.stat().st_size,
+    }
+
+
+def unpinned_entry(path: Path) -> dict[str, object]:
+    return {"family": "test", "path": str(path), "sha256": None, "bytes": None}
+
+
+def write_manifest_role_fixtures(tmp_path: Path) -> dict[str, Path]:
+    """Write one tiny fixture per input role, named for manifest selection."""
+    fixtures = {
+        "provider-ledger.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [nav("account-a", "2026-09-17", "100")],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        "account-strategy-current-epoch-crosswalk.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [included_row("account-a", "strategy-a")],
+            }
+        ),
+        "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n",
+        "account_activity.csv": "activity_type,id,fund,type,amount,time\n",
+        "nav_daily.csv": "day_timestamp_utc,nav\n",
+        "wallet_deposits.csv": "state,currency,amount,created_at_utc\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
+        "yfinance-history.json": json.dumps({"rows": []}),
+    }
+    paths: dict[str, Path] = {}
+    for name, contents in fixtures.items():
+        path = tmp_path / name
+        path.write_text(contents, encoding="utf-8")
+        paths[name] = path
+    return paths
+
+
+def test_manifest_loads_and_resolves_every_role(tmp_path: Path):
+    """A valid manifest must select each derivation input by its basename."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    manifest_path = write_manifest_file(
+        tmp_path, [unpinned_entry(path) for path in fixtures.values()]
+    )
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    resolved = derivation.manifest_input_paths(manifest, tmp_path)
+
+    assert resolved == {
+        "ledger": fixtures["provider-ledger.json"],
+        "crosswalk": fixtures["account-strategy-current-epoch-crosswalk.json"],
+        "quantbase_price_history": fixtures[
+            "dashboard_Volatis_Strategy_pricehistory.csv"
+        ],
+        "quantbase_activity": fixtures["account_activity.csv"],
+        "matrixport_nav": fixtures["nav_daily.csv"],
+        "matrixport_deposits": fixtures["wallet_deposits.csv"],
+        "matrixport_bills": fixtures["wallet_bills.csv"],
+        "fx": fixtures["yfinance-history.json"],
+    }
+
+
+def test_manifest_verifies_declared_sha256_and_bytes(tmp_path: Path):
+    """A correct pin set must verify cleanly, including unconsumed entries."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    extra = tmp_path / "accounts.csv"
+    extra.write_text("id,funds\n", encoding="utf-8")
+    entries = [pinned_entry(path) for path in fixtures.values()]
+    entries.append(pinned_entry(extra))
+    manifest_path = write_manifest_file(tmp_path, entries)
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    resolved = derivation.manifest_input_paths(manifest, tmp_path)
+
+    assert len(resolved) == 8
+
+
+def test_manifest_sha256_mismatch_fails_closed(tmp_path: Path):
+    """A tampered declared input must abort the derivation, never derive anyway."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    entries = [unpinned_entry(path) for path in fixtures.values()]
+    tampered = pinned_entry(fixtures["nav_daily.csv"])
+    tampered["bytes"] = None
+    fixtures["nav_daily.csv"].write_text(
+        "day_timestamp_utc,nav\n2026-09-17T00:00:00+00:00,9.99\n", encoding="utf-8"
+    )
+    entries[4] = tampered
+    manifest_path = write_manifest_file(tmp_path, entries)
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    with pytest.raises(derivation.ManifestError, match="sha256 mismatch"):
+        derivation.manifest_input_paths(manifest, tmp_path)
+
+
+def test_manifest_bytes_mismatch_fails_closed(tmp_path: Path):
+    """A byte-size change with a null hash pin is still a declared-input break."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    entries = [unpinned_entry(path) for path in fixtures.values()]
+    entry = pinned_entry(fixtures["wallet_bills.csv"])
+    entry["sha256"] = None
+    fixtures["wallet_bills.csv"].write_text(
+        "currency,direction,amount,timestamp_utc,extra\n", encoding="utf-8"
+    )
+    entries[6] = entry
+    manifest_path = write_manifest_file(tmp_path, entries)
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    with pytest.raises(derivation.ManifestError, match="byte size mismatch"):
+        derivation.manifest_input_paths(manifest, tmp_path)
+
+
+def test_manifest_cutoff_mismatch_fails_closed(tmp_path: Path):
+    """A manifest for another financial cutoff must be rejected outright."""
+    derivation = load_derivation_module()
+    manifest_path = tmp_path / "acceptance-inputs.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "qe-cp-acceptance-inputs/2",
+                "cutoff": "2026-09-18",
+                "inputs": [{"family": "test", "path": "x"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(derivation.ManifestError, match="cutoff"):
+        derivation.load_inputs_manifest(manifest_path)
+
+
+def test_manifest_missing_role_fails_closed(tmp_path: Path):
+    """A manifest that omits a required input must fail closed, not fall back."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    entries = [
+        unpinned_entry(path)
+        for name, path in fixtures.items()
+        if name != "nav_daily.csv"
+    ]
+    manifest_path = write_manifest_file(tmp_path, entries)
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    with pytest.raises(derivation.ManifestError, match="matrixport_nav"):
+        derivation.manifest_input_paths(manifest, tmp_path)
+
+
+def test_derive_with_manifest_uses_selected_paths_and_notes_verification(
+    tmp_path: Path,
+):
+    """Manifest mode must derive from the manifest's paths, not the v1 defaults."""
+    derivation = load_derivation_module()
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    manifest_path = write_manifest_file(
+        tmp_path, [pinned_entry(path) for path in fixtures.values()]
+    )
+
+    manifest = derivation.load_inputs_manifest(manifest_path)
+    output = derivation.derive(tmp_path, manifest)
+
+    capital = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "capital.account.cutoff" and row["entity"] == "account-a"
+    )
+    assert capital["value"] == "100.00"
+    assert any(
+        "sha256/bytes pin was verified" in note for note in output["convention_notes"]
+    )
+    assert {item["path"] for item in output["inputs"]} == {
+        str(fixtures["provider-ledger.json"]).replace("\\", "/"),
+        str(fixtures["account-strategy-current-epoch-crosswalk.json"]).replace(
+            "\\", "/"
+        ),
+    }
+
+
+def test_derive_default_mode_uses_builtin_v1_paths(tmp_path: Path):
+    """Without --inputs the derivation must keep the reproducible v1 selection."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [nav("account-a", "2026-09-17", "100")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [included_row("account-a", "strategy-a")],
+    )
+
+    output = derivation.derive(tmp_path)
+
+    assert all("verified" not in note for note in output["convention_notes"])
+    assert any(
+        row["metric_id"] == "capital.account.cutoff" and row["value"] == "100.00"
+        for row in output["metrics"]
+    )
+
+
+def test_matrixport_raw_observations_skip_fx_unconverted_dates_after_boundary():
+    """R6 v2: post-boundary raw NAV dates are disclosed, not converted or fatal."""
+    derivation = load_derivation_module()
+    fx_unconverted: list[date] = []
+
+    observations = derivation.matrixport_raw_observations(
+        [
+            {"day_timestamp_utc": "2026-09-03T00:00:00+00:00", "nav": "1.1"},
+            {"day_timestamp_utc": "2026-09-04T00:00:00+00:00", "nav": "1.2"},
+            {"day_timestamp_utc": "2026-09-17T00:00:00+00:00", "nav": "1.3"},
+        ],
+        [],
+        [
+            {
+                "currency": "USDT",
+                "direction": "2",
+                "amount": "9",
+                "timestamp_utc": "2026-09-02T20:00:00+00:00",
+            }
+        ],
+        "account-m",
+        {date(2026, 9, 3): Decimal("0.99")},
+        fx_unconverted,
+    )
+
+    assert observations == [(date(2026, 9, 3), Decimal("8.91"))]
+    assert fx_unconverted == [date(2026, 9, 4), date(2026, 9, 17)]

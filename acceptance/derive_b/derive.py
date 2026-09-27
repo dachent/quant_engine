@@ -57,6 +57,117 @@ EXTERNAL_FLOW_TYPES = {
     "EXTERNAL_PROVIDER_TRANSFER",
     "DEPOSIT_OR_WITHDRAWAL",
 }
+INPUT_MANIFEST_SCHEMA_PREFIX = "qe-cp-acceptance-inputs/"
+INPUT_ROLE_BASENAMES = {
+    "ledger": "provider-ledger.json",
+    "crosswalk": "account-strategy-current-epoch-crosswalk.json",
+    "quantbase_price_history": "dashboard_Volatis_Strategy_pricehistory.csv",
+    "quantbase_activity": "account_activity.csv",
+    "matrixport_nav": "nav_daily.csv",
+    "matrixport_deposits": "wallet_deposits.csv",
+    "matrixport_bills": "wallet_bills.csv",
+    "fx": "yfinance-history.json",
+}
+
+
+class ManifestError(ValueError):
+    """An inputs manifest or a declared input fails closed verification."""
+
+
+def default_input_paths() -> dict[str, Path]:
+    """Return the v1 input selection used when no inputs manifest is given."""
+    return {
+        "ledger": LEDGER_PATH,
+        "crosswalk": CROSSWALK_PATH,
+        "quantbase_price_history": QUANTBASE_PRICE_HISTORY_PATH,
+        "quantbase_activity": QUANTBASE_ACTIVITY_PATH,
+        "matrixport_nav": MATRIXPORT_NAV_PATH,
+        "matrixport_deposits": MATRIXPORT_DEPOSITS_PATH,
+        "matrixport_bills": MATRIXPORT_BILLS_PATH,
+        "fx": FX_PATH,
+    }
+
+
+def load_inputs_manifest(path: Path) -> dict[str, object]:
+    """Read an acceptance-inputs manifest, failing closed on any contract break."""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"inputs manifest {path} is unreadable: {error}") from error
+    if not isinstance(manifest, dict):
+        raise ManifestError(f"inputs manifest {path} is not a JSON object")
+    schema = manifest.get("schema")
+    if not isinstance(schema, str) or not schema.startswith(
+        INPUT_MANIFEST_SCHEMA_PREFIX
+    ):
+        raise ManifestError(
+            f"inputs manifest {path} has an unrecognized schema: {schema!r}"
+        )
+    cutoff = manifest.get("cutoff")
+    if cutoff != CUTOFF.isoformat():
+        raise ManifestError(
+            f"inputs manifest cutoff {cutoff!r} differs from the fixed "
+            f"{CUTOFF.isoformat()} cutoff"
+        )
+    entries = manifest.get("inputs")
+    if not isinstance(entries, list) or not entries:
+        raise ManifestError(f"inputs manifest {path} declares no inputs")
+    return manifest
+
+
+def resolve_input_path(qe_root: Path, raw_path: str) -> Path:
+    candidate = Path(raw_path)
+    return candidate if candidate.is_absolute() else qe_root / candidate
+
+
+def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, Path]:
+    """Select declared inputs by basename and verify every pinned hash fail-closed.
+
+    Every manifest entry that declares sha256 or bytes is verified even when this
+    derivation does not consume the file. Relative paths resolve under qe_root.
+    """
+    entries = manifest["inputs"]
+    if not isinstance(entries, list):
+        raise ManifestError("inputs manifest inputs must be a list")
+    paths_by_basename: dict[str, set[str]] = defaultdict(set)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ManifestError("inputs manifest entry is not a JSON object")
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ManifestError("inputs manifest entry lacks a path")
+        paths_by_basename[Path(raw_path).name].add(raw_path)
+    resolved: dict[str, Path] = {}
+    for role, basename in INPUT_ROLE_BASENAMES.items():
+        candidates = paths_by_basename.get(basename, set())
+        if len(candidates) != 1:
+            raise ManifestError(
+                f"inputs manifest must declare exactly one distinct {basename} "
+                f"path for role {role}; found {len(candidates)}"
+            )
+        resolved[role] = Path(next(iter(candidates)))
+    for entry in entries:
+        raw_path = str(entry["path"])
+        expected_sha256 = entry.get("sha256")
+        expected_bytes = entry.get("bytes")
+        if expected_sha256 is None and expected_bytes is None:
+            continue
+        absolute = resolve_input_path(qe_root, raw_path)
+        if not absolute.is_file():
+            raise ManifestError(f"declared input is missing: {raw_path}")
+        if expected_bytes is not None and absolute.stat().st_size != expected_bytes:
+            raise ManifestError(
+                f"declared input byte size mismatch: {raw_path} "
+                f"(expected {expected_bytes}, found {absolute.stat().st_size})"
+            )
+        if expected_sha256 is not None:
+            actual_sha256 = file_sha256(absolute)
+            if actual_sha256 != expected_sha256:
+                raise ManifestError(
+                    f"declared input sha256 mismatch: {raw_path} "
+                    f"(expected {expected_sha256}, found {actual_sha256})"
+                )
+    return resolved
 
 
 class FlowData:
@@ -684,8 +795,14 @@ def matrixport_raw_observations(
     bill_rows: Iterable[dict[str, str]],
     account_id: str,
     fx_rates: dict[date, Decimal] | None = None,
+    fx_unconverted: list[date] | None = None,
 ) -> list[tuple[date, Decimal]]:
-    """Use raw Matrixport subscription units and USD-converted NAV, never ledger values."""
+    """Use raw Matrixport subscription units and USD-converted NAV, never ledger values.
+
+    Unit-holding rows after the admitted FX boundary (R6 v2) are not converted:
+    their dates are recorded in fx_unconverted and no value is emitted. A missing
+    rate at or before the boundary remains a fail-closed error.
+    """
     nav_rows = list(nav_rows)
     subscriptions = matrixport_subscription_units(nav_rows, bill_rows)
     observations: list[tuple[date, Decimal]] = []
@@ -708,6 +825,10 @@ def matrixport_raw_observations(
             if units == 0:
                 continue
             if rate is None:
+                if observed_on > FX_LAST_ADMITTED_DATE:
+                    if fx_unconverted is not None:
+                        fx_unconverted.append(observed_on)
+                    continue
                 raise ValueError(
                     "no admitted USDT/USD close for unit-holding observation "
                     + observed_on.isoformat()
@@ -814,18 +935,28 @@ def raw_provider_data(
     qe_root: Path,
     crosswalk_rows: list[dict[str, object]],
     membership_starts: dict[str, date] | None = None,
+    paths: dict[str, Path] | None = None,
 ) -> tuple[
     dict[str, list[tuple[date, Decimal]]],
     dict[str, FlowData],
     list[Path],
     dict[str, dict[str, object]],
+    dict[str, str],
 ]:
     """Load the R6 raw-capture overrides, failing closed per account.
 
     A missing, unreadable, unparsable, or empty selected raw capture records a
     failure for the affected account's metrics; the caller must emit
-    not_derivable and must not substitute ledger values.
+    not_derivable and must not substitute ledger values. The fifth return value
+    carries per-account disclosure notes (for example FX-unconverted raw dates).
     """
+    paths = paths or default_input_paths()
+    price_history_path = paths["quantbase_price_history"]
+    activity_path = paths["quantbase_activity"]
+    matrixport_nav_path = paths["matrixport_nav"]
+    matrixport_deposits_path = paths["matrixport_deposits"]
+    matrixport_bills_path = paths["matrixport_bills"]
+    fx_path = paths["fx"]
     providers = {
         str(row["account_id"]): str(row.get("provider", "")).upper()
         for row in crosswalk_rows
@@ -834,6 +965,7 @@ def raw_provider_data(
     flows: dict[str, FlowData] = {}
     used: list[Path] = []
     failures: dict[str, dict[str, object]] = {}
+    notes: dict[str, str] = {}
     membership_starts = membership_starts or {}
     quantbase_accounts = [
         account_id
@@ -841,8 +973,6 @@ def raw_provider_data(
         if provider == "QUANTBASE"
     ]
     if quantbase_accounts:
-        price_history_path = qe_root / QUANTBASE_PRICE_HISTORY_PATH
-        activity_path = qe_root / QUANTBASE_ACTIVITY_PATH
         if len(quantbase_accounts) != 1:
             reason = (
                 "R6 Quantbase raw capture supports exactly one account; "
@@ -853,16 +983,15 @@ def raw_provider_data(
                     "metrics": ACCOUNT_METRIC_IDS,
                     "reason": reason,
                 }
-        elif not price_history_path.is_file():
+        elif not (qe_root / price_history_path).is_file():
             failures[quantbase_accounts[0]] = {
                 "metrics": ACCOUNT_METRIC_IDS,
-                "reason": "R6 raw capture is missing: "
-                + QUANTBASE_PRICE_HISTORY_PATH.as_posix(),
+                "reason": "R6 raw capture is missing: " + price_history_path.as_posix(),
             }
         else:
             account_id = quantbase_accounts[0]
             try:
-                with price_history_path.open(
+                with (qe_root / price_history_path).open(
                     encoding="utf-8-sig", newline=""
                 ) as handle:
                     values = quantbase_raw_observations(
@@ -872,7 +1001,7 @@ def raw_provider_data(
                 failures[account_id] = {
                     "metrics": ACCOUNT_METRIC_IDS,
                     "reason": "R6 raw capture "
-                    + QUANTBASE_PRICE_HISTORY_PATH.as_posix()
+                    + price_history_path.as_posix()
                     + f" is unreadable or unparsable: {error}",
                 }
             else:
@@ -880,21 +1009,21 @@ def raw_provider_data(
                     failures[account_id] = {
                         "metrics": ACCOUNT_METRIC_IDS,
                         "reason": "R6 raw capture "
-                        + QUANTBASE_PRICE_HISTORY_PATH.as_posix()
+                        + price_history_path.as_posix()
                         + " yields no observations",
                     }
                 else:
                     observations[account_id] = values
-                    used.append(QUANTBASE_PRICE_HISTORY_PATH)
-                    if not activity_path.is_file():
+                    used.append(price_history_path)
+                    if not (qe_root / activity_path).is_file():
                         failures[account_id] = {
                             "metrics": FLOW_DEPENDENT_METRIC_IDS,
                             "reason": "R6 raw activity capture is missing: "
-                            + QUANTBASE_ACTIVITY_PATH.as_posix(),
+                            + activity_path.as_posix(),
                         }
                     else:
                         try:
-                            with activity_path.open(
+                            with (qe_root / activity_path).open(
                                 encoding="utf-8-sig", newline=""
                             ) as handle:
                                 flows[account_id] = quantbase_sleeve_flows(
@@ -906,11 +1035,11 @@ def raw_provider_data(
                             failures[account_id] = {
                                 "metrics": FLOW_DEPENDENT_METRIC_IDS,
                                 "reason": "R6 raw activity capture "
-                                + QUANTBASE_ACTIVITY_PATH.as_posix()
+                                + activity_path.as_posix()
                                 + f" is unreadable or unparsable: {error}",
                             }
                         else:
-                            used.append(QUANTBASE_ACTIVITY_PATH)
+                            used.append(activity_path)
     matrixport_accounts = [
         account_id
         for account_id, provider in providers.items()
@@ -918,10 +1047,10 @@ def raw_provider_data(
     ]
     if matrixport_accounts:
         matrixport_paths = (
-            MATRIXPORT_NAV_PATH,
-            MATRIXPORT_DEPOSITS_PATH,
-            MATRIXPORT_BILLS_PATH,
-            FX_PATH,
+            matrixport_nav_path,
+            matrixport_deposits_path,
+            matrixport_bills_path,
+            fx_path,
         )
         missing_paths = [
             path for path in matrixport_paths if not (qe_root / path).is_file()
@@ -946,30 +1075,32 @@ def raw_provider_data(
             account_id = matrixport_accounts[0]
             try:
                 with (
-                    (qe_root / MATRIXPORT_NAV_PATH).open(
+                    (qe_root / matrixport_nav_path).open(
                         encoding="utf-8-sig", newline=""
                     ) as nav_handle,
-                    (qe_root / MATRIXPORT_DEPOSITS_PATH).open(
+                    (qe_root / matrixport_deposits_path).open(
                         encoding="utf-8-sig", newline=""
                     ) as deposit_handle,
-                    (qe_root / MATRIXPORT_BILLS_PATH).open(
+                    (qe_root / matrixport_bills_path).open(
                         encoding="utf-8-sig", newline=""
                     ) as bill_handle,
                 ):
                     deposit_rows = list(csv.DictReader(deposit_handle))
                     bill_rows = list(csv.DictReader(bill_handle))
-                    fx_rates = usdt_usd_fx_rates(qe_root / FX_PATH)
+                    fx_rates = usdt_usd_fx_rates(qe_root / fx_path)
+                    fx_unconverted: list[date] = []
                     values = matrixport_raw_observations(
                         csv.DictReader(nav_handle),
                         deposit_rows,
                         bill_rows,
                         account_id,
                         fx_rates,
+                        fx_unconverted,
                     )
                     if not values:
                         raise ValueError(
                             "R6 raw capture "
-                            + MATRIXPORT_NAV_PATH.as_posix()
+                            + matrixport_nav_path.as_posix()
                             + " yields no observations"
                         )
                     cash_flows, count = matrixport_raw_flows(
@@ -992,8 +1123,16 @@ def raw_provider_data(
                     twr_beginning_flows={},
                     count=count,
                 )
+                if fx_unconverted:
+                    notes[account_id] = (
+                        f"R6 v2: {len(fx_unconverted)} raw Matrixport NAV date(s) "
+                        f"from {fx_unconverted[0].isoformat()} to "
+                        f"{fx_unconverted[-1].isoformat()} follow the admitted FX "
+                        f"boundary {FX_LAST_ADMITTED_DATE.isoformat()} and are "
+                        "FX-unconverted; no converted value is emitted for them."
+                    )
                 used.extend(matrixport_paths)
-    return observations, flows, used, failures
+    return observations, flows, used, failures, notes
 
 
 def metric(
@@ -1037,14 +1176,37 @@ def add_not_derivable(
     output["not_derivable"].append(row)
 
 
-def derive(qe_root: Path) -> dict[str, object]:
-    paths = [LEDGER_PATH, CROSSWALK_PATH]
+def derive(
+    qe_root: Path,
+    inputs_manifest: dict[str, object] | None = None,
+) -> dict[str, object]:
+    input_paths = default_input_paths()
+    convention_notes = [
+        "ITD is the only window emitted: contracts/portfolio-performance-policy-v1.json has no window-id field beyond its synthetic cases.",
+        "TWR uses contracts/portfolio-performance-policy-v1.json:twr_cases[case_id=date_only_end_of_day]: (ending value - same-date external flow) / prior value, compounded and not annualized.",
+        "MWR uses contracts/portfolio-performance-policy-v1.json:mwr_cases.day_count=ACTUAL_365 and an annualized XIRR; investor cash flows are the inverse of portfolio external flows.",
+        "R4/R5: flows use nav_recognition_date when present; internal transfers remain account and strategy flows and net only at the portfolio aggregate.",
+        "R1/R2: account and strategy ITD uses only the current funded-membership crosswalk interval; historical predecessor assignments are excluded.",
+        "Strategy TWR uses a union of admitted member valuation dates with no source-date fill and treats entering/exiting member capital as a flow at its admitted boundary.",
+        "Matrixport USDT values and flows use the selected raw USDT/USD Close series; the per-row fx_provenance note records its candidate-generation caveat.",
+        "Reserve discovery inspects provider-ledger.json:capital_anchors only; no reserve/bucket identifier permits a reserve balance to be inferred.",
+    ]
+    if inputs_manifest is not None:
+        input_paths = manifest_input_paths(inputs_manifest, qe_root)
+        convention_notes.append(
+            "Inputs were selected by the supplied qe-cp-acceptance-inputs manifest; "
+            "every declared sha256/bytes pin was verified fail-closed before "
+            "derivation, including declared entries this derivation does not read."
+        )
+    paths = [input_paths["ledger"], input_paths["crosswalk"]]
     absolute_paths = [qe_root / path for path in paths]
     for path in absolute_paths:
         if not path.is_file():
             raise FileNotFoundError(path)
-    ledger = json.loads((qe_root / LEDGER_PATH).read_text(encoding="utf-8"))
-    crosswalk = json.loads((qe_root / CROSSWALK_PATH).read_text(encoding="utf-8"))
+    ledger = json.loads((qe_root / input_paths["ledger"]).read_text(encoding="utf-8"))
+    crosswalk = json.loads(
+        (qe_root / input_paths["crosswalk"]).read_text(encoding="utf-8")
+    )
     cutoff_mismatches = [
         label
         for label, value in (
@@ -1091,9 +1253,13 @@ def derive(qe_root: Path) -> dict[str, object]:
         for row in crosswalk["rows"]
     }
     ledger_observations, observation_conflicts = latest_observations(ledger)
-    raw_observations, raw_flow_data, raw_paths, raw_failures = raw_provider_data(
-        qe_root, crosswalk["rows"], membership_starts
-    )
+    (
+        raw_observations,
+        raw_flow_data,
+        raw_paths,
+        raw_failures,
+        raw_notes,
+    ) = raw_provider_data(qe_root, crosswalk["rows"], membership_starts, input_paths)
     observations = {**ledger_observations, **raw_observations}
     for account_id, failure in raw_failures.items():
         if "capital.account.cutoff" in failure["metrics"]:
@@ -1116,16 +1282,7 @@ def derive(qe_root: Path) -> dict[str, object]:
         "model": "independent-standalone-python",
         "code_commit": code_commit(),
         "inputs": inputs,
-        "convention_notes": [
-            "ITD is the only window emitted: contracts/portfolio-performance-policy-v1.json has no window-id field beyond its synthetic cases.",
-            "TWR uses contracts/portfolio-performance-policy-v1.json:twr_cases[case_id=date_only_end_of_day]: (ending value - same-date external flow) / prior value, compounded and not annualized.",
-            "MWR uses contracts/portfolio-performance-policy-v1.json:mwr_cases.day_count=ACTUAL_365 and an annualized XIRR; investor cash flows are the inverse of portfolio external flows.",
-            "R4/R5: flows use nav_recognition_date when present; internal transfers remain account and strategy flows and net only at the portfolio aggregate.",
-            "R1/R2: account and strategy ITD uses only the current funded-membership crosswalk interval; historical predecessor assignments are excluded.",
-            "Strategy TWR uses a union of admitted member valuation dates with no source-date fill and treats entering/exiting member capital as a flow at its admitted boundary.",
-            "Matrixport USDT values and flows use the selected raw USDT/USD Close series; the per-row fx_provenance note records its candidate-generation caveat.",
-            "Reserve discovery inspects provider-ledger.json:capital_anchors only; no reserve/bucket identifier permits a reserve balance to be inferred.",
-        ],
+        "convention_notes": convention_notes,
         "metrics": [],
         "not_derivable": [],
     }
@@ -1163,6 +1320,9 @@ def derive(qe_root: Path) -> dict[str, object]:
         )
         if tail_note:
             note_parts.append(tail_note)
+        raw_note = raw_notes.get(account_id)
+        if raw_note:
+            note_parts.append(raw_note)
         account_notes = " ".join(note_parts)
         failure = raw_failures.get(account_id)
         if failure is not None and "capital.account.cutoff" in failure["metrics"]:
@@ -1357,6 +1517,9 @@ def derive(qe_root: Path) -> dict[str, object]:
         )
         if tail_note:
             note_parts.append(tail_note)
+        raw_note = raw_notes.get(account_id)
+        if raw_note:
+            note_parts.append(raw_note)
         account_notes = " ".join(note_parts)
         if account_id in observation_conflicts:
             reason = "conflicting available USD valuations on one observation date"
@@ -1686,8 +1849,26 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qe-root", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--inputs",
+        type=Path,
+        default=None,
+        help=(
+            "acceptance-inputs manifest JSON selecting and pinning the inputs; "
+            "when omitted, the built-in v1 input selection is used"
+        ),
+    )
     args = parser.parse_args()
-    result = derive(args.qe_root)
+    manifest = None
+    if args.inputs is not None:
+        try:
+            manifest = load_inputs_manifest(args.inputs)
+        except ManifestError as error:
+            parser.exit(1, f"error: {error}\n")
+    try:
+        result = derive(args.qe_root, manifest)
+    except ManifestError as error:
+        parser.exit(1, f"error: {error}\n")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n",
