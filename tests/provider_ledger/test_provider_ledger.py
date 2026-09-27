@@ -1223,6 +1223,9 @@ def _quantbase_anchor(
         "account_id": account,
         "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
         "capital_type": capital_type,
+        # The fund orders fill on the allocation date, before the NAV that
+        # recognizes them.
+        "economic_fill_timestamp": f"{event_date}T20:30:00+00:00",
         "event_date": event_date,
         "evidence_layer": "ACCOUNT_LIVE",
         "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
@@ -1234,8 +1237,16 @@ def _quantbase_anchor(
     }
 
 
-def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() -> None:
-    """A later Volatis allocation is not performance or an external flow."""
+def test_broker_returns_book_quantbase_allocation_at_start_of_recognizing_period() -> (
+    None
+):
+    """A later Volatis allocation is capital at risk, not performance.
+
+    The fund allocation carries an exact timestamp, so it joins the beginning
+    capital of the sub-period that ends at its NAV recognition date.  Booking
+    it at the end of that day, (165 - 50) / 110 - 1 = 0.0454..., overstates the
+    return on the allocated capital (the 2025-11-13 Volatis pattern).
+    """
 
     nav = [
         {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
@@ -1273,10 +1284,52 @@ def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() ->
     assert anchors[1]["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
     assert [(row["date"], row["return"]) for row in rows] == [
         ("2026-01-02", "0.1"),
-        # (165 - 50) / 110 - 1: the raw 50% NAV jump is a capital allocation.
-        ("2026-01-03", "0.045454545454545454545454545"),
+        # 165 / (110 + 50) - 1: the raw 50% NAV jump is a capital allocation.
+        ("2026-01-03", "0.03125"),
     ]
-    assert {row["flow_timing"] for row in rows} == {"PROVIDER_NAV_RECOGNITION_DATE"}
+    assert rows[-1]["beginning_capital"] == "160"
+    assert {row["flow_timing"] for row in rows} == {
+        "EXACT_TIMESTAMP_BEGINNING_OF_SUBPERIOD"
+    }
+
+
+def test_broker_returns_reject_quantbase_allocation_without_economic_fill() -> None:
+    """An exact-timestamp leg needs its fill: no inferred timing for Volatis."""
+
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-03", "165", "qb-3"), "provider_id": "quantbase"},
+    ]
+    opening = _quantbase_anchor(
+        "qb",
+        amount="100",
+        event_date="2026-01-01",
+        recognition_date="2026-01-01",
+        record_id="qb-opening",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+    )
+    allocation = _quantbase_anchor(
+        "qb",
+        amount="50",
+        event_date="2026-01-02",
+        recognition_date="2026-01-03",
+        record_id="qb-allocation",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+    )
+    del allocation["economic_fill_timestamp"]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="lacks its economic fill timestamp"
+    ):
+        ledger._broker_strategy_returns(
+            nav, [], {"quantbase"}, capital_anchors=[opening, allocation]
+        )
+    allocation["economic_fill_timestamp"] = "2026-01-04T20:30:00+00:00"
+    with pytest.raises(ledger.ProviderLedgerError, match="economic date follows"):
+        ledger._broker_strategy_returns(
+            nav, [], {"quantbase"}, capital_anchors=[opening, allocation]
+        )
 
 
 def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
@@ -1296,6 +1349,33 @@ def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
             [],
             {"quantbase"},
             capital_anchors=[],
+        )
+
+
+def test_broker_returns_reject_quantbase_opening_anchor_that_does_not_open_its_nav() -> (
+    None
+):
+    """The opening anchor's recognition day must carry a positive mapped NAV."""
+
+    nav = [
+        {**_nav("qb", "2026-01-01", "0", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+    ]
+    opening = _quantbase_anchor(
+        "qb",
+        amount="100",
+        event_date="2026-01-01",
+        recognition_date="2026-01-01",
+        record_id="qb-opening",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="quantbase opening capital anchor does not open its NAV",
+    ):
+        ledger._broker_strategy_returns(
+            nav, [], {"quantbase"}, capital_anchors=[opening]
         )
 
 
@@ -1337,7 +1417,7 @@ def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_an
         capital_anchors=[opening, allocation, foreign],
     )
 
-    assert rows[-1]["return"] == "0.045454545454545454545454545"
+    assert rows[-1]["return"] == "0.03125"
     with pytest.raises(
         ledger.ProviderLedgerError, match="duplicate quantbase capital anchor"
     ):
@@ -1437,7 +1517,8 @@ def test_matrixport_catalog_returns_ignore_ambient_decimal_context() -> None:
         context.rounding = ROUND_DOWN
         altered = ledger._broker_strategy_returns(nav, [], {"matrixport"})
 
-    expected = "0.200000000000000000000000000"
+    # (4 + 8) / (3 + 7) - 1, linked on the summed member values.
+    expected = "0.2"
     assert baseline[0]["return"] == expected
     assert altered[0]["return"] == expected
 
@@ -1639,7 +1720,540 @@ def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
         ledger._broker_strategy_returns(nav, flows, {"schwab"})
 
 
-def test_account_rollforward_appends_only_dates_newer_than_accepted_history() -> None:
+def _account_nav(
+    account: str,
+    day: str,
+    value: str,
+    strategy: str | None = "strategy-a",
+    *,
+    provider: str = "schwab",
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "as_of_date": day,
+        "mapping_status": "MAPPED" if strategy else "UNMAPPED",
+        "nav": value,
+        "provider_id": provider,
+        "record_id": f"{account}:{day}",
+        "strategy_id": strategy,
+    }
+
+
+def _account_flow(
+    account: str, day: str, amount: str, *, provider: str = "schwab"
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "amount": amount,
+        "event_date": day,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": day,
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+        "provider_id": provider,
+        "record_id": f"{account}:flow:{day}",
+    }
+
+
+def test_broker_returns_open_day_s_from_the_prior_positive_observation() -> None:
+    """R1: capital funded from day S earns day S's return on the S-1 value.
+
+    The previous kernel needed both adjacent NAVs mapped to the strategy, so
+    the funded day's return (the p123-ai 2026-01-22 and tt 2025-11-25 pattern)
+    never entered the path.
+    """
+
+    nav = [
+        _account_nav("a", "2026-01-21", "100", None),
+        _account_nav("a", "2026-01-22", "101"),
+        _account_nav("a", "2026-01-23", "102.01"),
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+    assert [(row["date"], row["return"], row["beginning_capital"]) for row in rows] == [
+        ("2026-01-22", "0.01", "100"),
+        ("2026-01-23", "0.01", "101"),
+    ]
+    assert rows[0]["source_record_ids"] == ["a:2026-01-22"]
+
+
+def test_broker_returns_open_at_first_funded_value_after_an_empty_prior_day() -> None:
+    """R1: an empty S-1 opens the epoch at the end of day S, flows embedded."""
+
+    nav = [
+        _account_nav("a", "2025-11-18", "250", None),
+        _account_nav("a", "2025-11-19", "0", None),
+        _account_nav("a", "2025-11-20", "4700"),
+        _account_nav("a", "2025-11-21", "4747"),
+    ]
+    funding = [_account_flow("a", "2025-11-20", "4700")]
+
+    rows = ledger._broker_strategy_returns(nav, funding, {"schwab"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [("2025-11-21", "0.01")]
+
+
+def test_broker_returns_reject_duplicated_account_nav_observation_date() -> None:
+    """Two accepted NAV observations for one account/date are ambiguous."""
+
+    nav = [
+        _account_nav("a", "2026-01-21", "100"),
+        _account_nav("a", "2026-01-22", "101"),
+        {**_account_nav("a", "2026-01-22", "202"), "record_id": "a:2026-01-22-again"},
+    ]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="account NAV observation date is duplicated"
+    ):
+        ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+
+def _membership(
+    *rows: tuple[str, str, str, str | None, str],
+) -> dict[tuple[str, str], tuple[tuple[date, date | None, str], ...]]:
+    result: dict[tuple[str, str], list[tuple[date, date | None, str]]] = defaultdict(
+        list
+    )
+    for account, strategy, start, end, status in rows:
+        result[(account, strategy)].append(
+            (
+                date.fromisoformat(start),
+                None if end is None else date.fromisoformat(end),
+                status,
+            )
+        )
+    return {key: tuple(value) for key, value in result.items()}
+
+
+def test_broker_returns_admit_only_census_funded_membership() -> None:
+    """R2: an assignment-only epoch keeps its mapping but never a return.
+
+    The 38b6/98f5 pattern: accounts assigned to TT before their QSI funding.
+    Without the census the predecessor epoch is weighted into the TT path.
+    """
+
+    nav = [
+        _account_nav("tt", "2025-11-24", "100", None),
+        _account_nav("tt", "2025-11-25", "101", "tt-portfolio"),
+        _account_nav("tt", "2025-11-26", "102.01", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-24", "400", None),
+        _account_nav("qsi", "2025-11-25", "400", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-26", "300", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-27", "330", "qsi"),
+    ]
+    membership = _membership(
+        ("tt", "tt-portfolio", "2025-11-25", None, "FUNDED_MEMBERSHIP"),
+        ("qsi", "tt-portfolio", "2025-11-25", "2025-11-26", "ASSIGNMENT_ONLY"),
+        ("qsi", "qsi", "2025-11-27", None, "FUNDED_MEMBERSHIP"),
+    )
+
+    unscoped = ledger._broker_strategy_returns(nav, [], {"schwab"})
+    funded = ledger._broker_strategy_returns(
+        nav, [], {"schwab"}, performance_membership=membership
+    )
+
+    assert {row["date"]: row["component_account_ids"] for row in unscoped} == {
+        "2025-11-25": ["qsi", "tt"],
+        "2025-11-26": ["qsi", "tt"],
+        "2025-11-27": ["qsi"],
+    }
+    assert [
+        (row["strategy_id"], row["date"], row["return"], row["component_account_ids"])
+        for row in funded
+    ] == [
+        # QSI opens on the predecessor-epoch value of 2025-11-26 (R1).
+        ("qsi", "2025-11-27", "0.1", ["qsi"]),
+        ("tt-portfolio", "2025-11-25", "0.01", ["tt"]),
+        ("tt-portfolio", "2025-11-26", "0.01", ["tt"]),
+    ]
+    with pytest.raises(ledger.ProviderLedgerError, match="one census membership"):
+        ledger._broker_strategy_returns(
+            nav,
+            [],
+            {"schwab"},
+            performance_membership=_membership(
+                ("tt", "tt-portfolio", "2025-11-25", None, "FUNDED_MEMBERSHIP")
+            ),
+        )
+
+
+def test_broker_returns_split_same_strategy_membership_transition() -> None:
+    """R2: a status transition that keeps the strategy splits the NAV run.
+
+    The FUNDED -> ASSIGNMENT_ONLY -> FUNDED transition leaves no single census
+    interval covering the whole contiguous same-strategy run; only the
+    assignment-only epoch is excluded, and the re-entering funded epoch opens
+    per R1 on the last positive observation before its first funded day.
+    """
+
+    nav = [
+        _account_nav("a", "2026-01-01", "100", "strategy-a"),
+        _account_nav("a", "2026-01-02", "101", "strategy-a"),
+        _account_nav("a", "2026-01-03", "102.01", "strategy-a"),
+        _account_nav("a", "2026-01-04", "0", "strategy-a"),
+        _account_nav("a", "2026-01-05", "50", "strategy-a"),
+        _account_nav("a", "2026-01-06", "50.5", "strategy-a"),
+    ]
+    membership = _membership(
+        ("a", "strategy-a", "2026-01-01", "2026-01-02", "FUNDED_MEMBERSHIP"),
+        ("a", "strategy-a", "2026-01-03", "2026-01-04", "ASSIGNMENT_ONLY"),
+        ("a", "strategy-a", "2026-01-05", None, "FUNDED_MEMBERSHIP"),
+    )
+
+    rows = ledger._broker_strategy_returns(
+        nav, [], {"schwab"}, performance_membership=membership
+    )
+
+    assert [
+        (row["date"], row["return"], row["component_account_ids"]) for row in rows
+    ] == [
+        ("2026-01-02", "0.01", ["a"]),
+        # 2026-01-03/04 are the assignment-only epoch: excluded, not a raise.
+        ("2026-01-06", "0.01", ["a"]),
+    ]
+
+
+def _census_contract(*sleeves: tuple[str, list[dict[str, object]]]) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {"provider_id": provider, "assignments": assignments}
+                for provider, assignments in sleeves
+            ]
+        }
+    }
+
+
+def test_census_membership_binds_exact_epoch_signature() -> None:
+    assignments = {
+        "account-a": [
+            {
+                "effective_end": "2026-01-04",
+                "effective_start": "2025-11-25",
+                "mapping_status": "MAPPED",
+                "strategy_id": "tt-portfolio",
+            },
+            {
+                "effective_end": None,
+                "effective_start": "2026-01-05",
+                "mapping_status": "MAPPED",
+                "strategy_id": "qsi",
+            },
+            {
+                "effective_end": "2025-11-25",
+                "effective_start": "2024-05-24",
+                "mapping_status": "UNMAPPED",
+                "strategy_id": None,
+            },
+        ],
+        "account-b": [
+            {
+                "effective_end": None,
+                "effective_start": "2025-11-25",
+                "mapping_status": "MAPPED",
+                "strategy_id": "tt-portfolio",
+            }
+        ],
+    }
+    contract = _census_contract(
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": "2026-01-04",
+                    "effective_start": "2025-11-25",
+                    "status": "ASSIGNMENT_ONLY",
+                    "strategy_id": "tt-portfolio",
+                },
+                {
+                    "effective_end": None,
+                    "effective_start": "2026-01-05",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "qsi",
+                },
+            ],
+        ),
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+    )
+    providers = {"account-a": "schwab", "account-b": "schwab"}
+    strategies = {"qsi", "tt-portfolio"}
+
+    membership, disclosures = ledger._census_performance_membership(
+        assignments, contract, providers, strategies
+    )
+
+    assert membership == {
+        ("account-a", "qsi"): ((date(2026, 1, 5), None, "FUNDED_MEMBERSHIP"),),
+        ("account-a", "tt-portfolio"): (
+            (date(2025, 11, 25), date(2026, 1, 4), "ASSIGNMENT_ONLY"),
+        ),
+        ("account-b", "tt-portfolio"): (
+            (date(2025, 11, 25), None, "FUNDED_MEMBERSHIP"),
+        ),
+    }
+    assert disclosures == [
+        {
+            "account_id": "account-a",
+            "census_status": "ASSIGNMENT_ONLY",
+            "effective_end": "2026-01-04",
+            "effective_start": "2025-11-25",
+            "performance_effect": "EXCLUDED_FROM_STRATEGY_RETURNS",
+            "strategy_id": "tt-portfolio",
+        }
+    ]
+    with pytest.raises(ledger.ProviderLedgerError, match="lacks a current-census"):
+        ledger._census_performance_membership(
+            assignments, contract, {"account-a": "ibkr"}, strategies
+        )
+    conflicting = _census_contract(
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "ASSIGNMENT_ONLY",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+    )
+    with pytest.raises(ledger.ProviderLedgerError, match="ambiguous"):
+        ledger._census_performance_membership(
+            {"account-b": assignments["account-b"]},
+            conflicting,
+            {"account-b": "schwab"},
+            strategies,
+        )
+
+
+def test_broker_returns_count_value_appearing_on_zero_member_capital() -> None:
+    """A member's gain on zero capital is strategy return (the 702c pattern).
+
+    On 2026-07-15 the summed strategy value moves from 100 to 113 with no
+    flow.  A beginning-capital weighted composite gives the zero-capital
+    member no weight and reports 0.1, losing the 3 that appeared.
+    """
+
+    nav = [
+        _account_nav("a", "2026-07-12", "100"),
+        _account_nav("a", "2026-07-13", "100"),
+        _account_nav("a", "2026-07-14", "100"),
+        _account_nav("a", "2026-07-15", "110"),
+        _account_nav("b", "2026-07-12", "10"),
+        _account_nav("b", "2026-07-13", "0"),
+        _account_nav("b", "2026-07-14", "0"),
+        _account_nav("b", "2026-07-15", "3"),
+    ]
+    flows = [_account_flow("b", "2026-07-13", "-10")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
+
+    by_day = {row["date"]: row for row in rows}
+    assert by_day["2026-07-13"]["return"] == "0"
+    assert by_day["2026-07-13"]["component_account_ids"] == ["a", "b"]
+    assert by_day["2026-07-14"]["component_account_ids"] == ["a"]
+    assert by_day["2026-07-15"]["return"] == "0.13"
+    assert by_day["2026-07-15"]["beginning_capital"] == "100"
+    assert by_day["2026-07-15"]["component_account_ids"] == ["a", "b"]
+
+
+def test_broker_returns_link_member_entry_and_exit_as_boundary_transfers() -> None:
+    """Joining or leaving a strategy is a transfer, never strategy return."""
+
+    nav = [
+        _account_nav("a", "2026-01-01", "100"),
+        _account_nav("a", "2026-01-02", "110"),
+        _account_nav("a", "2026-01-03", "121"),
+        _account_nav("a", "2026-01-04", "133.1"),
+        _account_nav("b", "2026-01-02", "50"),
+        _account_nav("b", "2026-01-03", "45"),
+        _account_nav("b", "2026-01-04", "90", "strategy-b"),
+    ]
+
+    rows = [
+        row
+        for row in ledger._broker_strategy_returns(nav, [], {"schwab"})
+        if row["strategy_id"] == "strategy-a"
+    ]
+
+    assert [(row["date"], row["return"], row["beginning_capital"]) for row in rows] == [
+        ("2026-01-02", "0.1", "100"),
+        # (121 + 45) / (110 + 50) - 1
+        ("2026-01-03", "0.0375", "160"),
+        # b left at the start of 01-04: 133.1 / (166 - 45) - 1
+        ("2026-01-04", "0.1", "121"),
+    ]
+    assert [row["component_account_ids"] for row in rows] == [
+        ["a"],
+        ["a", "b"],
+        ["a"],
+    ]
+
+
+def test_strategy_member_accounts_must_share_nav_observation_dates() -> None:
+    """An active member without a value on a shared day has no strategy NAV."""
+
+    nav = [
+        _account_nav("a", "2026-01-21", "100"),
+        _account_nav("a", "2026-01-22", "101"),
+        _account_nav("a", "2026-01-23", "102.01"),
+        _account_nav("b", "2026-01-21", "200"),
+        _account_nav("b", "2026-01-23", "204"),
+    ]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="strategy member accounts do not share NAV observation dates",
+    ):
+        ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+
+def test_broker_returns_book_flow_recognized_between_observations_at_next_nav() -> None:
+    """A flow recognized on a day without NAV belongs to the next observation.
+
+    The previous kernel applied a flow only on an exact NAV date, so a
+    weekend-recognized deposit was silently booked as return (0.5 here).
+    """
+
+    nav = [
+        {**_account_nav("a", "2026-01-02", "100"), "provider_id": "ibkr"},
+        {**_account_nav("a", "2026-01-05", "150"), "provider_id": "ibkr"},
+    ]
+    flows = [_account_flow("a", "2026-01-03", "50", provider="ibkr")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"ibkr"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [("2026-01-05", "0")]
+    assert ledger._unobserved_flow_recognitions(nav, flows, {"ibkr"}) == [
+        "a:flow:2026-01-03"
+    ]
+    assert ledger._unobserved_flow_recognitions(nav, flows, {"schwab"}) == []
+
+
+def test_broker_returns_omit_undefined_zero_capital_period_and_reopen() -> None:
+    """R3: value cannot appear on zero capital; the path re-opens after it."""
+
+    nav = [
+        _account_nav("a", "2026-01-01", "100"),
+        _account_nav("a", "2026-01-02", "0"),
+        _account_nav("a", "2026-01-03", "0"),
+        _account_nav("a", "2026-01-04", "5"),
+        _account_nav("a", "2026-01-05", "6"),
+    ]
+    flows = [_account_flow("a", "2026-01-02", "-100")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-02", "0"),
+        ("2026-01-05", "0.2"),
+    ]
+
+
+def test_strategy_return_overlap_publishes_retained_only_dates() -> None:
+    source = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        }
+        for day in ("2026-01-01", "2026-01-02")
+    ]
+    broker = [_recomputed_row("strategy-a", "2026-01-02", "0.01")]
+
+    (check,) = ledger._strategy_return_overlap_checks(source, broker)
+
+    assert check["retained_only_dates"] == ["2026-01-01"]
+    assert check["divergences"] == []
+    assert check["status"] == "PASS"
+
+
+def test_strategy_return_overlap_publishes_fully_disjoint_retained_dates() -> None:
+    """A recomputed strategy sharing no date with its retained rows still
+    publishes the overlap row: the retained-only dates are the evidence of
+    what the recompute superseded."""
+
+    source = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        }
+        for day in ("2026-01-01", "2026-01-02")
+    ]
+    broker = [
+        _recomputed_row("strategy-a", "2026-02-01", "0.02"),
+        _recomputed_row("strategy-a", "2026-02-02", "0.03"),
+    ]
+
+    (check,) = ledger._strategy_return_overlap_checks(source, broker)
+
+    assert check["compared_date_count"] == 0
+    assert check["divergences"] == []
+    assert check["maximum_absolute_difference"] == "0"
+    assert check["retained_only_dates"] == ["2026-01-01", "2026-01-02"]
+    assert check["status"] == "PASS"
+
+
+def _recomputed_row(
+    strategy_id: str,
+    day: str,
+    value: str,
+    *,
+    provider_id: str = "schwab",
+    capital: str = "100",
+) -> dict[str, object]:
+    """A complete admitted-NAV rollforward row as the recompute emits it."""
+
+    return {
+        "account_reconciliation_sha256": "a" * 64,
+        "beginning_capital": capital,
+        "component_account_count": 1,
+        "component_account_ids": [f"{strategy_id}-account"],
+        "date": day,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "flow_timing": "PROVIDER_NAV_RECOGNITION_DATE",
+        "provider_id": provider_id,
+        "return": value,
+        "return_basis": "NET",
+        "return_type": "TOTAL",
+        "source_record_ids": [f"{strategy_id}-nav-{day}"],
+        "strategy_id": strategy_id,
+    }
+
+
+def test_admitted_recompute_supersedes_retained_account_rows() -> None:
+    """A retained pinned return never overrides the admitted NAV (C1 M5).
+
+    The previous merge kept the retained 0.01 on every date up to the last
+    retained date and appended the recompute only after it.
+    """
+
     source = [
         {
             "date": "2026-01-02",
@@ -1649,107 +2263,70 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
         }
     ]
     broker = [
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.02",
-            "beginning_capital": "100",
-            "strategy_id": "strategy-a",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.03",
-            "strategy_id": "strategy-a",
-        },
+        _recomputed_row("strategy-a", "2026-01-02", "0.02"),
+        _recomputed_row("strategy-a", "2026-01-03", "0.03"),
     ]
 
     rows = ledger._merge_account_returns(source, broker, {"strategy-a": "Strategy A"})
 
-    assert [row["date"] for row in rows] == ["2026-01-02", "2026-01-03"]
-    assert rows[-1]["strategy_name"] == "Strategy A"
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-02", "0.02"),
+        ("2026-01-03", "0.03"),
+    ]
+    assert {row["strategy_name"] for row in rows} == {"Strategy A"}
+    assert {row["cost"] for row in rows} == {None}
 
 
-def test_non_native_overlap_retains_source_return_and_projects_broker_rollforward() -> (
-    None
-):
-    """A retained non-native return still carries broker NAV rollforward proof."""
+def test_merge_account_returns_requires_a_provenance_strategy_name() -> None:
+    """A recomputed strategy the provenance does not name fails closed."""
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="recomputed account return lacks a provenance strategy name",
+    ):
+        ledger._merge_account_returns(
+            [],
+            [_recomputed_row("strategy-x", "2026-01-02", "0.01")],
+            {"strategy-a": "Strategy A"},
+        )
+
+
+def test_retained_account_rows_survive_only_without_an_admitted_recompute() -> None:
+    """History the admitted NAV does not cover stays retained evidence."""
 
     source = [
         {
             "cost": "0.0007",
             "date": "2026-01-02",
             "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "matrixport",
+            "provider_id": "alpaca",
             "return": "0.0123",
-            "return_basis": "NET",
-            "return_type": "TOTAL",
-            "source_id": "owner-account-live-history",
-            "strategy_id": "strategy-owner",
-        }
-    ]
-    broker = [
+            "strategy_id": "strategy-history",
+        },
         {
-            "account_reconciliation_sha256": "a" * 64,
-            "beginning_capital": "12345.67",
-            "component_account_count": 2,
-            "component_account_ids": ["ibkr-b", "schwab-a"],
             "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-            "provider_id": "schwab",
-            "return": "0.7777",
-            "return_basis": "NET",
-            "return_type": "TOTAL",
-            "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-            "strategy_id": "strategy-owner",
-        }
+            "evidence_layer": "BACKTEST",
+            "provider_id": "portfolio123",
+            "return": "0.5",
+            "strategy_id": "strategy-a",
+        },
     ]
+    broker = [_recomputed_row("strategy-a", "2026-01-02", "0.7777")]
 
     rows = ledger._merge_account_returns(
-        source, broker, {"strategy-owner": "Owner Strategy"}
+        source,
+        broker,
+        {"strategy-a": "Strategy A", "strategy-history": "History"},
     )
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert {
-        field: row[field]
-        for field in (
-            "cost",
-            "provider_id",
-            "return",
-            "return_basis",
-            "return_type",
-            "source_id",
-        )
-    } == {
-        "cost": "0.0007",
-        "provider_id": "matrixport",
-        "return": "0.0123",
-        "return_basis": "NET",
-        "return_type": "TOTAL",
-        "source_id": "owner-account-live-history",
-    }
-    assert {
-        field: row[field]
-        for field in (
-            "account_reconciliation_sha256",
-            "beginning_capital",
-            "component_account_count",
-            "component_account_ids",
-            "flow_timing",
-            "source_record_ids",
-        )
-    } == {
-        "account_reconciliation_sha256": "a" * 64,
-        "beginning_capital": "12345.67",
-        "component_account_count": 2,
-        "component_account_ids": ["ibkr-b", "schwab-a"],
-        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-    }
+    assert [
+        (row["strategy_id"], row["evidence_layer"], row["return"]) for row in rows
+    ] == [
+        ("strategy-a", "ACCOUNT_LIVE", "0.7777"),
+        ("strategy-a", "BACKTEST", "0.5"),
+        ("strategy-history", "ACCOUNT_LIVE", "0.0123"),
+    ]
+    assert rows[0]["account_reconciliation_sha256"] == "a" * 64
 
 
 @pytest.mark.parametrize(
@@ -1773,11 +2350,11 @@ def test_non_native_overlap_retains_source_return_and_projects_broker_rollforwar
         ({"source_record_ids": ["schwab-nav-2", " "]}, None),
     ],
 )
-def test_non_native_overlap_does_not_project_an_incomplete_broker_rollforward(
+def test_incomplete_broker_rollforward_cannot_become_account_authority(
     rollforward_override: dict[str, object],
     missing_field: str | None,
 ) -> None:
-    """A malformed broker bundle cannot partially enrich an inherited return."""
+    """A malformed recompute bundle fails closed instead of replacing history."""
 
     source = [
         {
@@ -1789,27 +2366,18 @@ def test_non_native_overlap_does_not_project_an_incomplete_broker_rollforward(
         }
     ]
     broker = {
-        "account_reconciliation_sha256": "a" * 64,
-        "beginning_capital": "12345.67",
+        **_recomputed_row("strategy-owner", "2026-01-02", "0.7777"),
         "component_account_count": 2,
         "component_account_ids": ["ibkr-b", "schwab-a"],
-        "date": "2026-01-02",
-        "evidence_layer": "ACCOUNT_LIVE",
-        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-        "provider_id": "schwab",
-        "return": "0.7777",
-        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-        "strategy_id": "strategy-owner",
     }
     broker.update(rollforward_override)
     if missing_field is not None:
         del broker[missing_field]
 
-    rows = ledger._merge_account_returns(
-        source, [broker], {"strategy-owner": "Owner Strategy"}
-    )
-
-    assert rows == source
+    with pytest.raises(ledger.ProviderLedgerError, match="complete NAV rollforward"):
+        ledger._merge_account_returns(
+            source, [broker], {"strategy-owner": "Owner Strategy"}
+        )
 
 
 def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
@@ -1828,34 +2396,14 @@ def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
         },
     ]
     broker = [
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "quantbase",
-            "return": "-0.06",
-            "strategy_id": "strategy-native",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "quantbase",
-            "return": "0.02",
-            "strategy_id": "strategy-native",
-        },
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.99",
-            "strategy_id": "strategy-owner",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.03",
-            "strategy_id": "strategy-owner",
-        },
+        _recomputed_row(
+            "strategy-native", "2026-01-02", "-0.06", provider_id="quantbase"
+        ),
+        _recomputed_row(
+            "strategy-native", "2026-01-03", "0.02", provider_id="quantbase"
+        ),
+        _recomputed_row("strategy-owner", "2026-01-02", "0.99"),
+        _recomputed_row("strategy-owner", "2026-01-03", "0.03"),
     ]
 
     rows = ledger._merge_account_returns(
@@ -1871,7 +2419,7 @@ def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
     assert [(row["strategy_id"], row["date"], row["return"]) for row in rows] == [
         ("strategy-native", "2026-01-02", "-0.06"),
         ("strategy-native", "2026-01-03", "0.02"),
-        ("strategy-owner", "2026-01-02", "0.01"),
+        ("strategy-owner", "2026-01-02", "0.99"),
         ("strategy-owner", "2026-01-03", "0.03"),
     ]
     assert rows[0]["strategy_name"] == "Native Strategy"
@@ -1973,22 +2521,34 @@ def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> No
 
     checks = ledger._strategy_return_overlap_checks(source, broker)
 
+    # The retained path is superseded; its divergence is published, the way
+    # the retained grizzly and qsi 2026-07-17 values are.
     assert checks == [
         {
             "adjudication": (
-                "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
-                "path retains its correction set; broker NAV path is retained "
-                "as reconciliation evidence and rollforward input only"
+                "ADMITTED_NAV_RECOMPUTE; retained tracker path is comparison "
+                "evidence only"
             ),
             "authority_effect": (
-                "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+                "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
+                "RETAINED_ACCOUNT_PATH_SUPERSEDED"
             ),
             "blocking": False,
             "check_id": "strategy-return-overlap-strategy-a",
             "compared_date_count": 1,
+            "divergences": [
+                {
+                    "absolute_difference": "0.01",
+                    "date": "2026-01-02",
+                    "estimated_dollar_impact": "1.00",
+                    "recomputed_return": "0.02",
+                    "retained_return": "0.01",
+                }
+            ],
             "exception_date_count": 1,
             "maximum_absolute_difference": "0.01",
             "maximum_estimated_dollar_impact": "1.00",
+            "retained_only_dates": [],
             "status": "PASS_WITH_ADJUDICATED_VARIANCE",
             "strategy_id": "strategy-a",
             "tolerance": "0.000001",
@@ -5124,7 +5684,30 @@ def test_portfolio_fx_candidate_requires_exact_owner_selected_binding(
         "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
     }
 
-    generation_id, rates, artifacts = ledger._portfolio_fx_rates(ref, date(2025, 12, 5))
+    def contract(
+        generation_id: str, manifest_sha256: str, observed_end: str = "2025-12-05"
+    ) -> dict[str, object]:
+        return {
+            "source_segments": [
+                {
+                    "source_id": "portfolio-fx-rates",
+                    "current_generation": {
+                        "generation_id": generation_id,
+                        "sha256": manifest_sha256,
+                        "as_of": "2025-12-05",
+                    },
+                    "interval": {
+                        "observed_start": "2025-12-05",
+                        "observed_end": observed_end,
+                    },
+                }
+            ]
+        }
+
+    admitted = contract(ref["generation_id"], ref["manifest_sha256"])
+    generation_id, rates, artifacts = ledger._portfolio_fx_rates(
+        ref, date(2025, 12, 5), admitted
+    )
 
     assert generation_id == manifest.generation_id
     assert rates == {
@@ -5136,9 +5719,37 @@ def test_portfolio_fx_candidate_requires_exact_owner_selected_binding(
         "portfolio/fx-rates/generation.json",
     }
 
+    # A hash-valid candidate is not authority until the contract admits it:
+    # the spec's owner-selection label alone admitted fd6096d8 through 09-17.
+    with pytest.raises(ledger.ProviderLedgerError, match="contract-admitted"):
+        ledger._portfolio_fx_rates(
+            ref, date(2025, 12, 5), contract("e" * 64, ref["manifest_sha256"])
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="contract-admitted"):
+        ledger._portfolio_fx_rates(
+            ref, date(2025, 12, 5), contract(ref["generation_id"], "0" * 64)
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="its contract interval"):
+        ledger._portfolio_fx_rates(
+            ref,
+            date(2025, 12, 5),
+            contract(ref["generation_id"], ref["manifest_sha256"], "2025-12-04"),
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="segment is absent"):
+        ledger._portfolio_fx_rates(ref, date(2025, 12, 5), {"source_segments": []})
+
     ref["selection"] = "UNSELECTED"
     with pytest.raises(ledger.ProviderLedgerError, match="owner selection is absent"):
-        ledger._portfolio_fx_rates(ref, date(2025, 12, 5))
+        ledger._portfolio_fx_rates(ref, date(2025, 12, 5), admitted)
+
+
+def test_admitted_fx_end_requires_an_admitted_rate() -> None:
+    """An FX generation with no admitted rate admits no conversion boundary."""
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="portfolio FX has no admitted rate"
+    ):
+        ledger._admitted_fx_end(("f" * 64, {}, ()))
 
 
 def test_matrixport_daily_holdings_use_selected_daily_fx_without_parity(
@@ -5244,6 +5855,153 @@ def test_matrixport_cutoff_excludes_future_holdings_before_fx_valuation(
     assert findings[0]["original_source_date"] == "2026-09-18"
     assert findings[0]["source_artifact_id"] == "csv/daily_holdings.csv"
     assert findings[0]["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+
+
+def test_matrixport_usd_nav_ends_at_the_admitted_fx_boundary(
+    tmp_path: Path,
+) -> None:
+    """Native Matrixport rows after the contract FX end carry no USD value.
+
+    Before the binding the selected FX had to cover every capture day, so a
+    contract-admitted generation ending 2026-09-03 failed on 2026-09-04 and a
+    later candidate silently extended USD values to the cutoff.
+    """
+
+    run_id = "20260918T184248.013Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-09-03,100,100,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-09-03",
+        component_usd_values=("100",),
+        additional_components=(("2026-09-04", "101"), ("2026-09-18", "999")),
+    )
+    findings: list[dict[str, Any]] = []
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        {
+            "catalog_schema_version": 2,
+            "observed_boundary_date": "2026-09-18",
+            "source_run_id": run_id,
+        },
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+        fx_rates=("9" * 64, {("USDT", date(2026, 9, 3)): Decimal("1")}, ()),
+        financial_cutoff=date(2026, 9, 17),
+        cutoff_findings=findings,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-09-03"]
+    assert [
+        (row["original_source_date"], row["status"], row.get("fx_boundary"))
+        for row in sorted(findings, key=lambda item: item["original_source_date"])
+    ] == [
+        ("2026-09-04", "OUTSIDE_ADMITTED_FX_BOUNDARY", "2026-09-03"),
+        ("2026-09-18", "OUTSIDE_FINANCIAL_CUTOFF", None),
+    ]
+
+
+def _matrixport_fx_boundary_manifest(
+    tmp_path: Path,
+    holdings_text: str,
+) -> tuple[GenerationManifest, Path]:
+    run_id = "20260918T184248.013Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-09-03,100,100,true\n",
+        encoding="utf-8-sig",
+    )
+    holdings_path = output_root / "csv/daily_holdings.csv"
+    holdings_path.write_text(holdings_text, encoding="utf-8-sig")
+    quality_path = output_root / "csv/valuation_quality_issues.csv"
+    quality_path.write_text(
+        "source_index,source_table,reason\n",
+        encoding="utf-8-sig",
+    )
+    return (
+        _make_two_artifact_manifest(
+            {
+                "csv/daily_portfolio_totals.csv": totals_path,
+                "csv/daily_holdings.csv": holdings_path,
+                "csv/valuation_quality_issues.csv": quality_path,
+            }
+        ),
+        output_root,
+    )
+
+
+def test_matrixport_inactive_holdings_past_fx_end_do_not_emit_boundary_findings(
+    tmp_path: Path,
+) -> None:
+    """A zero-share row past the FX end holds nothing to convert.
+
+    Before the reordering the inactive row emitted OUTSIDE_ADMITTED_FX_BOUNDARY
+    like an active one, so a past-boundary exit was indistinguishable from an
+    unconverted active holding.
+    """
+
+    manifest, run_root = _matrixport_fx_boundary_manifest(
+        tmp_path,
+        "utc_date,product_id,share,currency,native_value,valuation_source,"
+        "value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
+        "2026-09-03,P1,1,USDT,100,api_reported_usd_value,1,100,100\n"
+        "2026-09-04,P1,0,USDT,101,api_reported_usd_value,1,101,101\n",
+    )
+    findings: list[dict[str, Any]] = []
+
+    totals = ledger._matrixport_daily_fx_totals(
+        manifest,
+        run_root,
+        ("9" * 64, {("USDT", date(2026, 9, 3)): Decimal("1")}, ()),
+        date(2026, 9, 17),
+        findings,
+    )
+
+    assert sorted(day.isoformat() for day in totals) == ["2026-09-03"]
+    assert findings == []
+
+
+def test_matrixport_no_active_holdings_names_holdings_not_missing_fx(
+    tmp_path: Path,
+) -> None:
+    """With no active holding the error names the holdings, not the FX.
+
+    Before the reordering the inactive past-boundary rows made the empty
+    totals raise the misleading 'portfolio FX lacks <ccy>/USD'.
+    """
+
+    manifest, run_root = _matrixport_fx_boundary_manifest(
+        tmp_path,
+        "utc_date,product_id,share,currency,native_value,valuation_source,"
+        "value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
+        "2026-09-03,P1,0,USDT,100,api_reported_usd_value,1,100,100\n"
+        "2026-09-04,P1,0,USDT,101,api_reported_usd_value,1,101,101\n",
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE",
+    ):
+        ledger._matrixport_daily_fx_totals(
+            manifest,
+            run_root,
+            ("9" * 64, {("USDT", date(2026, 9, 3)): Decimal("1")}, ()),
+            date(2026, 9, 17),
+            [],
+        )
 
 
 def test_quantbase_dashboard_nav_declares_strategy_nav_basis(
@@ -6095,15 +6853,18 @@ def _quantbase_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], Path, Path
     activity_path = artifact_root / "csv/account_activity.csv"
     activity_path.write_text(
         "activity_type,amount,fund,is_rebalance,time,type,amount_cents,"
-        "created_at,destination_account_id,id,origin_account_id,status\n"
+        "created_at,destination_account_id,id,origin_account_id,status,"
+        "transaction,filled_at\n"
         "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,10000000,"
-        ",,buy-1,,C\n"
+        ",,buy-1,,C,,\n"
+        "order,,107,,2026-08-12T20:30:00Z,,,,,order-1,,,buy-1,"
+        "2026-08-12T20:30:00.5Z\n"
         "filled_txn,50000,14,False,2026-08-12T20:00:00Z,BUY,5000000,"
-        ",,buy-2,,C\n"
+        ",,buy-2,,C,,\n"
         "filled_txn,100000,107,True,2026-08-13T19:00:00Z,BUY,10000000,"
-        ",,buy-3,,C\n"
+        ",,buy-3,,C,,\n"
         "transfer,2000,,,,DEPOSIT,200000,2026-08-12T20:01:00Z,"
-        "alpaca-account,deposit-1,bank-account,C\n",
+        "alpaca-account,deposit-1,bank-account,C,,\n",
         encoding="utf-8-sig",
     )
     catalog = {
@@ -6865,7 +7626,9 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
     with activity_path.open("a", encoding="utf-8") as handle:
         handle.write(
             "filled_txn,77777,107,False,2026-08-14T20:00:00Z,BUY,7777700,"
-            ",,buy-unreconciled,,C\n"
+            ",,buy-unreconciled,,C,,\n"
+            "order,,107,,2026-08-14T20:30:00Z,,,,,order-2,,,buy-unreconciled,"
+            "2026-08-14T20:30:00Z\n"
         )
     manifest = _make_two_artifact_manifest(
         {
@@ -6903,9 +7666,10 @@ def test_quantbase_non_fee_fund_sell_fails_closed_without_withdrawal_admission(
     """A fund redemption cannot silently become a zero strategy flow."""
     root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees\n"
-        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False\n"
-        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False\n",
+        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees,"
+        "id,transaction,filled_at\n"
+        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False,buy-1,,\n"
+        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False,sell-1,,\n",
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -6951,15 +7715,21 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     price_path.write_text(
         "time,value,cost_basis\n"
         "10/13/2024,0,0\n"
+        "10/14/2024,0,0\n"
         "10/15/2024,985.44,1000\n"
-        "11/08/2024,1061.44,1076\n",
+        "11/13/2024,985.44,1000\n"
+        "11/14/2024,1061.44,1076\n",
         encoding="utf-8-sig",
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY\n",
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
+        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
+        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
+        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
+        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -6994,7 +7764,13 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     assert [row["event_date"] for row in anchors] == ["2024-10-13", "2024-11-08"]
     assert [row["nav_recognition_date"] for row in anchors] == [
         "2024-10-15",
-        "2024-11-08",
+        "2024-11-14",
+    ]
+    # The money-weighted cash date is the last fill of the allocation's own
+    # fund orders; an order on another fund is not its fill.
+    assert [row["economic_fill_timestamp"] for row in anchors] == [
+        "2024-10-14T19:46:07.648556+00:00",
+        "2024-11-13T14:51:35.165283+00:00",
     ]
     assert anchors[0]["amount"] == {
         "currency": "USD",
@@ -7013,6 +7789,68 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     assert {row["capital_type"] for row in anchors}.isdisjoint(
         {"EXTERNAL_PROVIDER_TRANSFER", "EXTERNAL_CAPITAL"}
     )
+
+
+@pytest.mark.parametrize(
+    ("orders", "message"),
+    [
+        ("", "lacks its order fill timestamp"),
+        (
+            # The allocation filled on 11-12, so 11-13 is its recognizing NAV;
+            # a cost-basis match on 11-14 is not that allocation's capital.
+            "order,,107,,2024-11-12T14:51:34Z,,o-3,172127,2024-11-12T14:51:35Z\n",
+            "not the first NAV after its fill",
+        ),
+    ],
+)
+def test_quantbase_allocation_without_its_recognizing_fill_fails_closed(
+    tmp_path: Path, orders: str, message: str
+) -> None:
+    run_id = "quantbase-source"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts" / "csv"
+    artifact_root.mkdir(parents=True)
+    price_path = artifact_root / "dashboard_Volatis_Strategy_pricehistory.csv"
+    price_path.write_text(
+        "time,value,cost_basis\n"
+        "10/14/2024,0,0\n"
+        "10/15/2024,985.44,1000\n"
+        "11/13/2024,985.44,1000\n"
+        "11/14/2024,1061.44,1076\n",
+        encoding="utf-8-sig",
+    )
+    activity_path = artifact_root / "account_activity.csv"
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57Z,BUY,161908,,\n"
+        "order,,107,,2024-10-14T19:46:07Z,,o-1,161908,2024-10-14T19:46:07Z\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38Z,BUY,172127,,\n" + orders,
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._quantbase_capital_anchors(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 1, "legacy_lineage": {"run_id": run_id}},
+            tmp_path,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            {
+                "account-58e75e8d952fa1b8": [
+                    {
+                        "effective_start": "2024-10-15",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "volatis-strategy",
+                    }
+                ]
+            },
+        )
 
 
 def test_quantbase_source_coverage_keeps_last_nav_not_last_capital_recognition() -> (
@@ -7178,6 +8016,46 @@ def test_matrixport_wallet_deposits_project_as_native_account_flows_with_fx(
         "source_artifact_id": "rates.csv",
         "timing": "UTC_DAILY_CLOSE",
     }
+
+
+def test_matrixport_wallet_flow_past_the_admitted_fx_end_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A wallet flow the admitted FX cannot value is never silently dropped.
+
+    The flow path fails closed like the anchor path: an unvalued movement
+    after the admitted FX end is a build error, not an excluded row, whatever
+    its currency.
+    """
+
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    wallet_path = csv_root / "wallet_deposits.csv"
+    wallet_path.write_text(
+        "amount,created_at_utc,currency,state,transaction_id\n"
+        "100,2026-09-05T15:42:18+00:00,USDC,confirmed,wallet-late\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest({"csv/wallet_deposits.csv": wallet_path})
+    fx = ("f" * 64, {("USDC", date(2026, 9, 3)): Decimal("0.999")}, ())
+    findings: list[dict[str, Any]] = []
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio FX lacks USDC/USD on 2026-09-05",
+    ):
+        ledger._matrixport_flows(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 2, "source_run_id": run_id},
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            fx,
+            financial_cutoff=date(2026, 9, 17),
+            cutoff_findings=findings,
+        )
+    assert findings == []
 
 
 def test_matrixport_wallet_history_admits_source_bound_zero_flow_coverage(
@@ -7488,6 +8366,41 @@ def test_matrixport_capital_anchor_fails_closed_without_a_selected_rate(
     """No owner-selected close for the recognition day means no anchor at all."""
 
     manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    fx = ("f" * 64, {("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658")}, ())
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio FX lacks USDT/USD on 2025-12-06",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+            fx_rates=fx,
+        )
+
+
+def test_matrixport_subscription_past_the_admitted_fx_end_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A later subscription is never silently dropped for want of admitted FX."""
+
+    manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    holdings_path = tmp_path / "output/matrixport-source/csv/daily_holdings.csv"
+    with holdings_path.open("a", encoding="utf-8") as handle:
+        handle.write("2025-12-05,H1,1,USDT,1,api_reported_usd_value,1,1,1\n")
+    manifest = _make_two_artifact_manifest(
+        {
+            artifact.artifact_id: tmp_path
+            / "output/matrixport-source"
+            / artifact.artifact_id
+            for artifact in manifest.artifacts
+        }
+    )
     fx = ("f" * 64, {("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658")}, ())
 
     with pytest.raises(
