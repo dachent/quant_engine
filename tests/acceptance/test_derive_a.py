@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import hashlib
 import json
 import sys
 from decimal import Decimal
@@ -849,6 +850,15 @@ def test_fx_rates_after_the_admitted_boundary_are_ignored(tmp_path: Path) -> Non
         "admitted boundary 2026-01-08, 3 raw rate(s) after it ignored"
         in (capital["notes"])
     )
+    # R6 v2: the raw NAV observed on 01-09 is reported as FX-unconverted, and the
+    # source date is the last raw observation, not the last USD valuation.
+    assert (
+        "R6 v2 FX-UNCONVERTED: 1 raw NAV date(s) 2026-01-09..2026-01-09"
+        in (capital["notes"])
+    )
+    observed = metrics[("date.source_last_observation", "acct-mp")]
+    assert (observed["value"], observed["as_of"]) == ("2026-01-09", "2026-01-09")
+    assert "last USD-converted valuation 2026-01-08 (FX boundary)" in observed["notes"]
 
 
 def test_fx_history_close_is_read_exactly(tmp_path: Path) -> None:
@@ -1062,6 +1072,136 @@ def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:
     pins = {LAYOUT[path]: digest for path, digest in derive.PINNED_SHA256.items()}
     with pytest.raises(sources.InputError):
         _run(tmp_path, expected_sha256=pins)
+
+
+# ------------------------------------------------------------- inputs manifest
+
+
+def _manifest_tree(root: Path, absolute_fx: bool = True) -> dict[str, Any]:
+    """Copy the synthetic inputs under their real basenames and list them."""
+
+    _synthetic_root(root)
+    entries = [
+        {
+            "family": "declared_cutoff_date",
+            "path": "m/account-strategy-manifest.json",
+            "sha256": "0" * 64,
+            "bytes": 1,
+        }
+    ]
+    for canonical in derive.INPUT_ORDER:
+        basename = canonical.replace("\\", "/").split("/")[-1]
+        data = root.joinpath(*LAYOUT[canonical].split("/")).read_bytes()
+        target = root / "m" / basename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        path = (
+            str(target)
+            if absolute_fx and canonical == derive.FX_HISTORY
+            else f"m/{basename}"
+        )
+        entries.append(
+            {
+                "family": "synthetic",
+                "path": path,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+            }
+        )
+    # The ledger listed twice with the sha only once, as the real manifests do.
+    entries.append({"family": "flow_totals", "path": "m/provider-ledger.json"})
+    return {"schema": "qe-cp-acceptance-inputs/2", "cutoff": CUTOFF, "inputs": entries}
+
+
+def _run_manifest(root: Path, manifest: dict[str, Any]) -> Any:
+    loaded = derive.load_inputs_manifest(
+        json.dumps(manifest).encode("utf-8"), "synthetic-inputs.json"
+    )
+    return derive.derive(
+        root,
+        _synthetic_repo(root),
+        cutoff=day(CUTOFF),
+        model="test",
+        code_commit="test",
+        declared_cutoff=day(CUTOFF),
+        manifest=loaded,
+    )
+
+
+def test_inputs_manifest_resolves_every_role(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    baseline = _index(_run(tmp_path))
+    document = _run_manifest(tmp_path, manifest)
+    # Same bytes under manifest paths: identical expected values.
+    assert {k: v["value"] for k, v in _index(document).items()} == {
+        k: v["value"] for k, v in baseline.items()
+    }
+    paths = [item["path"] for item in document["inputs"]]
+    assert paths[0] == "m/provider-ledger.json"
+    assert paths[-1] == str(tmp_path / "m" / "yfinance-history.json")
+    assert document["inputs_manifest"]["path"] == "synthetic-inputs.json"
+    assert document["inputs_manifest"]["not_read"] == [
+        "m/account-strategy-manifest.json"
+    ]
+
+
+def test_inputs_manifest_sha256_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    for entry in manifest["inputs"]:
+        if entry["path"] == "m/nav_daily.csv":
+            entry["sha256"] = "f" * 64
+    with pytest.raises(sources.InputError, match="differs from pinned"):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_bytes_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    for entry in manifest["inputs"]:
+        if entry["path"] == "m/accounts.csv":
+            entry["bytes"] += 1
+    with pytest.raises(sources.InputError, match="manifest lists"):
+        _run_manifest(tmp_path, manifest)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("unpinned", "does not pin one sha256"),
+        ("unknown", "names an unknown input"),
+        ("duplicate", "names 2 path"),
+        ("missing", "names 0 path"),
+    ],
+)
+def test_inputs_manifest_structure_fails_closed(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    manifest = _manifest_tree(tmp_path)
+    entries = manifest["inputs"]
+    if mutation == "unpinned":
+        for entry in entries:
+            if entry["path"] == "m/wallet_bills.csv":
+                entry["sha256"] = None
+    elif mutation == "unknown":
+        entries.append({"path": "m/holdings.csv", "sha256": "0" * 64})
+    elif mutation == "duplicate":
+        entries.append({"path": "other/accounts.csv", "sha256": "0" * 64})
+    else:
+        manifest["inputs"] = [
+            e for e in entries if e["path"] != "m/wallet_deposits.csv"
+        ]
+    with pytest.raises(sources.InputError, match=message):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_cutoff_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    manifest["cutoff"] = "2026-01-09"
+    document = _run_manifest(tmp_path, manifest)
+    assert document["metrics"] == []
+    assert all(
+        "inputs manifest cutoff 2026-01-09" in row["reason"]
+        for row in document["not_derivable"]
+    )
 
 
 def test_every_consumed_input_is_pinned() -> None:
