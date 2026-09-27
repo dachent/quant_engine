@@ -612,7 +612,13 @@ def _retained_history_requires_rebuild(
     contract_path: Path,
     authorities: _HistoryAuthorities,
 ) -> bool:
-    """Distinguish stale code-bound derived history from invalid source evidence."""
+    """Distinguish stale code- or ledger-bound derived history from invalid evidence.
+
+    A retained generation is stale, and rebuilt, when the code that defines it
+    changed or when its return content no longer matches the provider ledger
+    after a semantics change (the layered history is one cycle behind by
+    design). Any other verification failure is invalid source evidence.
+    """
 
     import portfolio_target_series as history
 
@@ -622,7 +628,11 @@ def _retained_history_requires_rebuild(
                 history_root, contract_path, require_mode=mode, **authorities
             )
         except history.TargetSeriesError as exc:
-            if str(exc).startswith("layered history repository dependency differs:"):
+            message = str(exc)
+            if (
+                message.startswith("layered history repository dependency differs:")
+                or "differs from provider ledger" in message
+            ):
                 return True
             raise AttendedPreparationError(
                 "retained layered history is invalid"

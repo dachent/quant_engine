@@ -575,6 +575,58 @@ def test_history_dependency_mismatch_requires_rebuild_but_source_failure_does_no
         )
 
 
+def test_history_ledger_basis_change_requires_rebuild_but_corrupt_input_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained history built from the prior ledger basis is stale, not invalid.
+
+    The layered history is one cycle behind by design: when the admitted
+    ACCOUNT_LIVE returns change under a semantics change, verification of the
+    retained generation fails with the content-diff class against the provider
+    ledger, and the generation must be rebuilt from the corrected basis.
+    """
+
+    import portfolio_target_series as history
+
+    authorities: preparation._HistoryAuthorities = {
+        "financial_input_contract_path": tmp_path / "contract.json",
+        "portfolio123_version_evidence_path": tmp_path / "versions.json",
+        "provider_admission_receipt_path": tmp_path / "admission.json",
+        "provider_ledger_catalog_path": tmp_path / "ledger-catalog.json",
+        "provider_ledger_manifest_path": tmp_path / "ledger-manifest.json",
+    }
+    calls: list[str] = []
+
+    def rebased(*_args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(str(kwargs["require_mode"]))
+        raise history.TargetSeriesError(
+            "Quantbase account-live return differs from provider ledger"
+        )
+
+    monkeypatch.setattr(history, "verify_layered_history_generation", rebased)
+    assert (
+        preparation._retained_history_requires_rebuild(
+            tmp_path / "history", tmp_path / "contract.json", authorities
+        )
+        is True
+    )
+    assert calls == ["LIVE_ONLY"]
+
+    def unparseable(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise history.TargetSeriesError(
+            "layered history generation manifest is invalid"
+        )
+
+    monkeypatch.setattr(history, "verify_layered_history_generation", unparseable)
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            tmp_path / "history", tmp_path / "contract.json", authorities
+        )
+
+
 def test_rebuild_layered_history_uses_selected_builder_kwargs_and_current_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
