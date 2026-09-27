@@ -1439,6 +1439,10 @@ def test_derive_discloses_ledger_tail_after_last_raw_observation(tmp_path: Path)
         for row in account_rows
     )
     assert all("cross-checks only" in row["notes"] for row in account_rows)
+    assert all(
+        "follow the last FX-converted raw observation" in row["notes"]
+        for row in account_rows
+    )
 
 
 def write_manifest_file(tmp_path: Path, entries: list[dict[str, object]]) -> Path:
@@ -1935,3 +1939,136 @@ def test_fx_unconverted_note_reports_sorted_dates_for_unsorted_nav_rows(
     assert failures == {}
     assert observations == {"account-m": [(date(2026, 9, 3), Decimal("8.91"))]}
     assert "from 2026-09-04 to 2026-09-17" in notes["account-m"]
+
+
+def test_matrixport_raw_flows_disclose_deposits_past_last_converted_date():
+    """A deposit with no raw NAV point after it must be disclosed, never silently dropped."""
+    derivation = load_derivation_module()
+    deposits_skipped: list[tuple[date, Decimal]] = []
+
+    flows, count = derivation.matrixport_raw_flows(
+        [
+            {
+                "state": "confirmed",
+                "currency": "USDC",
+                "amount": "500",
+                "created_at_utc": "2026-09-05T10:00:00+00:00",
+            },
+            {
+                "state": "confirmed",
+                "currency": "USDC",
+                "amount": "250",
+                "created_at_utc": "2026-09-20T10:00:00+00:00",
+            },
+        ],
+        [(date(2026, 9, 3), Decimal("8.91"))],
+        deposits_skipped=deposits_skipped,
+    )
+
+    assert (flows, count) == ({}, 0)
+    assert deposits_skipped == [(date(2026, 9, 5), Decimal("500"))]
+
+
+def test_derive_discloses_deposits_skipped_past_fx_boundary_without_changing_flows(
+    tmp_path: Path,
+):
+    """R6 v2: a confirmed deposit past the last FX-converted raw observation must
+    appear in the per-account note while flows.account.net/count stay at the
+    admitted-converted values."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [nav("account-m", "2026-09-17", "99999")],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                **included_row("account-m", "strategy-m"),
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-09-01",
+            }
+        ],
+    )
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
+        "day_timestamp_utc,nav\n"
+        "2026-09-02T00:00:00+00:00,1.0\n"
+        "2026-09-03T00:00:00+00:00,1.1\n"
+        "2026-09-17T00:00:00+00:00,1.2\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,1000,2026-09-02T16:00:00+00:00\n"
+        "confirmed,USDC,500,2026-09-05T10:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\nUSDT,2,9,2026-09-01T20:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.FX_PATH).write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-09-02T00:00:00",
+                        "Close": 0.99,
+                    },
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-09-03T00:00:00",
+                        "Close": 0.99,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = derivation.derive(tmp_path)
+    account_rows = {
+        row["metric_id"]: row
+        for row in output["metrics"]
+        if row["entity"] == "account-m"
+    }
+
+    assert account_rows["capital.account.cutoff"]["value"] == "9.80"
+    assert account_rows["flows.account.net"]["value"] == "1000.00"
+    assert account_rows["flows.account.count"]["value"] == "1"
+    for metric_id in (
+        "capital.account.cutoff",
+        "flows.account.net",
+        "flows.account.count",
+    ):
+        note = account_rows[metric_id]["notes"]
+        assert "deposits_skipped" in note
+        assert "2026-09-05" in note and "500.00" in note
+        assert "remain the admitted-converted values" in note
+
+
+def test_manifest_future_schema_version_fails_closed(tmp_path: Path):
+    """A prefix match would admit an incompatible future manifest schema version."""
+    derivation = load_derivation_module()
+    manifest_path = tmp_path / "acceptance-inputs.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "qe-cp-acceptance-inputs/3",
+                "cutoff": "2026-09-17",
+                "inputs": [{"family": "test", "path": "x"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(derivation.ManifestError, match="unsupported schema"):
+        derivation.load_inputs_manifest(manifest_path)

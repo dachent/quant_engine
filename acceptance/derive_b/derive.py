@@ -57,7 +57,7 @@ EXTERNAL_FLOW_TYPES = {
     "EXTERNAL_PROVIDER_TRANSFER",
     "DEPOSIT_OR_WITHDRAWAL",
 }
-INPUT_MANIFEST_SCHEMA_PREFIX = "qe-cp-acceptance-inputs/"
+INPUT_MANIFEST_SCHEMA = "qe-cp-acceptance-inputs/2"
 INPUT_ROLE_BASENAMES = {
     "ledger": "provider-ledger.json",
     "crosswalk": "account-strategy-current-epoch-crosswalk.json",
@@ -97,11 +97,10 @@ def load_inputs_manifest(path: Path) -> dict[str, object]:
     if not isinstance(manifest, dict):
         raise ManifestError(f"inputs manifest {path} is not a JSON object")
     schema = manifest.get("schema")
-    if not isinstance(schema, str) or not schema.startswith(
-        INPUT_MANIFEST_SCHEMA_PREFIX
-    ):
+    if schema != INPUT_MANIFEST_SCHEMA:
         raise ManifestError(
-            f"inputs manifest {path} has an unrecognized schema: {schema!r}"
+            f"inputs manifest {path} has an unsupported schema: {schema!r}; "
+            f"expected exactly {INPUT_MANIFEST_SCHEMA!r}"
         )
     cutoff = manifest.get("cutoff")
     if cutoff != CUTOFF.isoformat():
@@ -865,8 +864,15 @@ def matrixport_raw_flows(
     observations: list[tuple[date, Decimal]],
     fx_rates: dict[date, Decimal] | None = None,
     opening_date: date | None = None,
+    deposits_skipped: list[tuple[date, Decimal]] | None = None,
 ) -> tuple[dict[date, Decimal], int]:
-    """Place raw confirmed wallet deposits at the first subsequent raw NAV point."""
+    """Place raw confirmed wallet deposits at the first subsequent raw NAV point.
+
+    A confirmed USDT/USDC deposit with no raw NAV point after it (raw
+    observations stop at the admitted FX boundary) is not converted into a
+    flow; it is recorded in deposits_skipped as (date, signed raw amount) for
+    per-account disclosure, and flows values are unchanged.
+    """
     dates = sorted(observed_on for observed_on, _ in observations)
     flows: dict[date, Decimal] = defaultdict(Decimal)
     count = 0
@@ -884,11 +890,11 @@ def matrixport_raw_flows(
         target = next(
             (observed_on for observed_on in dates if observed_on > occurred_on), None
         )
-        if (
-            target is None
-            or target == dates[0]
-            or (opening_date is not None and target <= opening_date)
-        ):
+        if target is None:
+            if deposits_skipped is not None and occurred_on <= CUTOFF:
+                deposits_skipped.append((occurred_on, Decimal(amount)))
+            continue
+        if target == dates[0] or (opening_date is not None and target <= opening_date):
             continue
         value = Decimal(amount)
         if row["currency"] == "USDT":
@@ -938,16 +944,25 @@ def r6_ledger_tail_note(
     ledger_points: list[tuple[date, Decimal]],
     raw_points: list[tuple[date, Decimal]],
 ) -> str:
-    """Disclose ledger valuations after the last raw observation for R6 providers."""
+    """Disclose ledger valuations after the last raw observation for R6 providers.
+
+    For Matrixport the raw value series stops at the last FX-converted
+    observation, so the note names that basis explicitly.
+    """
     if provider not in R6_PROVIDERS or not raw_points:
         return ""
     raw_last = raw_points[-1][0]
     tail = [point for point in ledger_points if point[0] > raw_last]
     if not tail:
         return ""
+    raw_basis = (
+        "FX-converted raw observation"
+        if provider == "MATRIXPORT"
+        else "raw observation"
+    )
     return (
         f"R6: {len(tail)} ledger USD valuation(s) from {tail[0][0].isoformat()} "
-        f"to {tail[-1][0].isoformat()} follow the last raw observation "
+        f"to {tail[-1][0].isoformat()} follow the last {raw_basis} "
         f"{raw_last.isoformat()} and are cross-checks only, not expected values."
     )
 
@@ -1118,6 +1133,7 @@ def raw_provider_data(
                     fx_rates = usdt_usd_fx_rates(qe_root / fx_path)
                     fx_unconverted: list[date] = []
                     raw_nav_dates: list[date] = []
+                    deposits_skipped: list[tuple[date, Decimal]] = []
                     values = matrixport_raw_observations(
                         csv.DictReader(nav_handle),
                         deposit_rows,
@@ -1138,6 +1154,7 @@ def raw_provider_data(
                         values,
                         fx_rates,
                         membership_starts.get(account_id),
+                        deposits_skipped,
                     )
             except (OSError, ValueError, KeyError) as error:
                 failures[account_id] = {
@@ -1155,8 +1172,9 @@ def raw_provider_data(
                     twr_beginning_flows={},
                     count=count,
                 )
+                note_segments = []
                 if fx_unconverted:
-                    notes[account_id] = (
+                    note_segments.append(
                         f"R6 v2: {len(fx_unconverted)} raw Matrixport NAV date(s) "
                         f"from {min(fx_unconverted).isoformat()} to "
                         f"{max(fx_unconverted).isoformat()} follow the admitted FX "
@@ -1166,6 +1184,21 @@ def raw_provider_data(
                         "NAV date while USD capital as_of stays at the last "
                         "FX-converted date."
                     )
+                if deposits_skipped:
+                    skipped = ", ".join(
+                        f"{occurred_on.isoformat()} {money(amount)}"
+                        for occurred_on, amount in sorted(deposits_skipped)
+                    )
+                    note_segments.append(
+                        f"R6 v2: {len(deposits_skipped)} confirmed Matrixport "
+                        "deposit(s) past the last FX-converted raw observation "
+                        "have no admitted conversion target and are excluded "
+                        "from flows; deposits_skipped (raw wallet amounts): "
+                        f"{skipped}; flows.account.net/count remain the "
+                        "admitted-converted values."
+                    )
+                if note_segments:
+                    notes[account_id] = " ".join(note_segments)
                 used.extend(matrixport_paths)
     return observations, flows, used, failures, notes
 
