@@ -9230,6 +9230,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
         manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
+        manifest_membership_census_path=authority["census"],
     )
     data = _candidate_data(built_with)
     row = data["account_manifest"]["rows"][0]
@@ -9282,6 +9283,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
         manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
+        manifest_membership_census_path=authority["census"],
     )
     assert again["panel_id"] == built_with["panel_id"]
 
@@ -9302,6 +9304,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )["all_passed"]
         is True
     )
@@ -9430,6 +9433,7 @@ def test_financial_mode_requires_separately_selected_flow_coverage(
             manifest_classified_flows_path=authority["flows"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9483,6 +9487,7 @@ def test_financial_mode_does_not_reuse_generic_report_baseline(
             manifest_classified_flows_path=authority["flows"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9536,6 +9541,7 @@ def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9568,6 +9574,7 @@ def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9601,6 +9608,7 @@ def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=copied_policy,
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9633,6 +9641,7 @@ def test_financial_mode_rejects_report_unbound_manifest_baseline(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9746,6 +9755,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -9813,6 +9823,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
             manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
+            manifest_membership_census_path=authority["census"],
         )
 
 
@@ -10840,6 +10851,31 @@ def _produce_manifest(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    account_providers = {
+        account["account_id"]: str(account["provider"]).upper()
+        for account in baseline["accounts"]
+    }
+    membership_census_path = target_dir / "membership-census.json"
+    _write_json(
+        membership_census_path,
+        {
+            "current_census": {
+                "account_sleeves": [
+                    {
+                        "provider_id": account_providers[funded_account_id],
+                        "assignments": [
+                            {
+                                "strategy_id": funded_assignment["strategy_id"],
+                                "effective_start": funded_assignment["effective_start"],
+                                "effective_end": funded_assignment["effective_end"],
+                                "status": "FUNDED_MEMBERSHIP",
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
     admission_policy_path = target_dir / "admission-policy.json"
     _write_json(
         admission_policy_path,
@@ -10970,6 +11006,7 @@ def _produce_manifest(
         flow_coverage_path=flow_coverage_path,
         classification_policy_path=classification_policy_path,
         admission_policy_path=admission_policy_path,
+        membership_census_path=membership_census_path,
     )
     manifest_path = target_dir / "produced-manifest.json"
     manifest_path.write_bytes(canonical_json_bytes(manifest))
@@ -10981,6 +11018,7 @@ def _produce_manifest(
         "flow_coverage": flow_coverage_path,
         "classification_policy": classification_policy_path,
         "policy": admission_policy_path,
+        "census": membership_census_path,
     }
 
 
@@ -11000,6 +11038,7 @@ def _financial_manifest_kwargs(
         "manifest_flow_coverage_path": authority["flow_coverage"],
         "manifest_classification_policy_path": authority["classification_policy"],
         "manifest_admission_policy_path": authority["policy"],
+        "manifest_membership_census_path": authority["census"],
     }
 
 
@@ -11479,6 +11518,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
         manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
+        manifest_membership_census_path=authority["census"],
     )
     candidate = Path(built["candidate_dir"])
     built_data = _candidate_data(built)
@@ -11528,6 +11568,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
         "manifest_flow_coverage_path": authority["flow_coverage"],
         "manifest_classification_policy_path": authority["classification_policy"],
         "manifest_admission_policy_path": authority["policy"],
+        "manifest_membership_census_path": authority["census"],
     }
     receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     qa_before = {
@@ -11575,6 +11616,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
         manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
+        manifest_membership_census_path=authority["census"],
         coordinated_release_receipt=receipt,
     )
     assert published["publication_state"] == "PUBLISHED"
@@ -11600,6 +11642,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
         manifest_flow_coverage_path=other_authority["flow_coverage"],
         manifest_classification_policy_path=other_authority["classification_policy"],
         manifest_admission_policy_path=other_authority["policy"],
+        manifest_membership_census_path=other_authority["census"],
     )
     assert rebuilt["panel_id"] != built["panel_id"]
 

@@ -320,16 +320,17 @@
       "properties": {
         "links": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["start_date", "end_date", "base_nav", "ending_nav", "net_flow", "factor", "cumulative_index", "running_hwm_index", "drawdown"],
+            "required": ["start_date", "end_date", "base_nav", "beginning_flow", "ending_nav", "ending_flow", "net_flow", "factor", "cumulative_index", "running_hwm_index", "drawdown"],
             "properties": {
               "start_date": {"$ref": "#/$defs/date"},
               "end_date": {"$ref": "#/$defs/date"},
               "base_nav": {"$ref": "#/$defs/decimal"},
+              "beginning_flow": {"$ref": "#/$defs/decimal"},
               "ending_nav": {"$ref": "#/$defs/decimal"},
+              "ending_flow": {"$ref": "#/$defs/decimal"},
               "net_flow": {"$ref": "#/$defs/decimal"},
               "factor": {"$ref": "#/$defs/decimal"},
               "cumulative_index": {"$ref": "#/$defs/decimal"},
@@ -363,6 +364,22 @@
           "class": {"enum": ["EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"]},
           "event_date": {"$ref": "#/$defs/date"},
           "nav_recognition_date": {"$ref": "#/$defs/date"},
+          "amount": {"$ref": "#/$defs/decimal"}
+        }
+      }
+    },
+    "performance_flow_legs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "event_date", "nav_recognition_date", "economic_date", "timing", "amount"],
+        "properties": {
+          "class": {"enum": ["EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"]},
+          "event_date": {"$ref": "#/$defs/date"},
+          "nav_recognition_date": {"$ref": "#/$defs/date"},
+          "economic_date": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+          "timing": {"enum": ["EXACT_TIMESTAMP", "DATE_ONLY"]},
           "amount": {"$ref": "#/$defs/decimal"}
         }
       }
@@ -469,13 +486,22 @@
         },
         "mwr_label": {"enum": ["STRATEGY_EPOCH_MWR", "ACCOUNT_EPOCH_MWR", null]},
         "mwr_value_basis": {"enum": ["STRATEGY_NAV", "ACCOUNT_TOTAL", "ACCOUNT_VALUE", null]},
-        "mwr_valuation_timing": {"enum": ["ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
+        "mwr_valuation_timing": {"enum": ["NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE", "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
         "mwr_day_count": {"const": "ACTUAL_365"},
         "mwr_unit": {"const": "ANNUALIZED_RETURN"},
         "mwr_source_binding": {"const": "GOVERNED_SOURCE_IDENTITIES"},
-        "observation_linked_return": {"$ref": "#/$defs/decimal"},
-        "observed_hwm_index": {"$ref": "#/$defs/decimal"},
-        "observed_max_drawdown": {"$ref": "#/$defs/nonnegative_decimal"},
+        "observation_linked_return": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "observed_hwm_index": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "observed_max_drawdown": {"anyOf": [{"$ref": "#/$defs/nonnegative_decimal"}, {"type": "null"}]},
+        "opening_capital_date": {"$ref": "#/$defs/date"},
+        "performance_status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "performance_reason": {"type": ["string", "null"], "minLength": 1},
+        "performance_opening_date": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "performance_opening_value": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "performance_opening_basis": {"enum": ["LAST_OBSERVATION_BEFORE_START", "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START", "PREDECESSOR_CLOSING_NAV", null]},
+        "performance_flags": {"type": "array", "uniqueItems": true, "items": {"enum": ["INFERRED_TIMING"]}},
+        "performance_flow_legs": {"$ref": "#/$defs/performance_flow_legs"},
+        "flow_count": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
         "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"]},
         "observation_trace": {"$ref": "#/$defs/observation_trace"},
         "capital_flow_trace": {"type": "array"},
@@ -491,7 +517,9 @@
               "invested", "external_withdrawals", "internal_out", "withdrawn",
               "net_capital", "current_value", "gain", "return_on_net_capital",
               "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return",
-              "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observations"
+              "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observations",
+              "opening_capital_date", "performance_status", "performance_reason", "performance_opening_date",
+              "performance_opening_value", "performance_opening_basis", "performance_flags", "performance_flow_legs", "flow_count"
             ],
             "properties": {
               "admission_status": {"const": "FUNDED"},
@@ -537,7 +565,7 @@
         {
           "if": {"not": {"properties": {"status": {"const": "OK"}}, "required": ["status"]}},
           "then": {
-            "not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}
+            "not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}, {"required": ["opening_capital_date"]}, {"required": ["performance_status"]}, {"required": ["performance_reason"]}, {"required": ["performance_opening_date"]}, {"required": ["performance_opening_value"]}, {"required": ["performance_opening_basis"]}, {"required": ["performance_flags"]}, {"required": ["performance_flow_legs"]}, {"required": ["flow_count"]}]}
           }
         }
       ]

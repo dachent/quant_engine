@@ -240,6 +240,7 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
             "account strategy manifest schema",
         ),
         baseline_generation_id=BASELINE_GENERATION_ID,
+        membership_census=InputSnapshot.capture(inputs["census"], "membership census"),
     )
 
     assert manifest_module.build_manifest_candidate_from_snapshots(snapshots) == (
@@ -251,6 +252,7 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
         )
     )
@@ -270,6 +272,7 @@ def test_public_producer_rejects_valid_looking_synthetic_receipts_without_select
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -299,6 +302,7 @@ def test_selected_receipt_authority_emits_funded_first_epoch_and_preserves_block
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -386,6 +390,7 @@ def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -409,6 +414,7 @@ def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -436,6 +442,7 @@ def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewr
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -465,6 +472,7 @@ def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewr
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+            membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": receipt_path
@@ -489,6 +497,7 @@ def test_end_to_end_producer_emits_only_blocked_rows_without_retained_receipts(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
     )
     assert [row["status"] for row in manifest["rows"]] == [
@@ -541,6 +550,7 @@ def test_snapshot_native_producer_never_reopens_any_captured_input(
             "account strategy manifest schema",
         ),
         baseline_generation_id=BASELINE_GENERATION_ID,
+        membership_census=InputSnapshot.capture(inputs["census"], "membership census"),
     )
     expected = manifest_module.build_manifest_candidate_from_snapshots(snapshots)
     for path in (
@@ -550,6 +560,7 @@ def test_snapshot_native_producer_never_reopens_any_captured_input(
         inputs["flows"],
         inputs["classification_policy"],
         inputs["policy"],
+        inputs["census"],
         inputs["flow_coverage"],
         calculation_code_copy,
         manifest_schema_copy,
@@ -601,6 +612,7 @@ def test_snapshot_and_coverage_reject_non_mapping_or_blank_receipt_keys(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
 
     inputs = _write_valid_inputs(tmp_path / "inputs")
@@ -649,6 +661,7 @@ def test_manifest_candidate_snapshots_reject_duck_typed_snapshot_lookalikes(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
     with pytest.raises(manifest_module.ManifestError, match="retrieval receipts"):
         manifest_module.ManifestCandidateSnapshots(
@@ -663,6 +676,7 @@ def test_manifest_candidate_snapshots_reject_duck_typed_snapshot_lookalikes(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
 
 
@@ -1861,6 +1875,29 @@ def _admission_policy(
     }
 
 
+def _membership_census(
+    *intervals: tuple[str, str, str | None],
+) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": "SYNTHETIC",
+                    "assignments": [
+                        {
+                            "strategy_id": strategy_id,
+                            "effective_start": start,
+                            "effective_end": end,
+                            "status": "FUNDED_MEMBERSHIP",
+                        }
+                    ],
+                }
+                for strategy_id, start, end in intervals
+            ]
+        }
+    }
+
+
 def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     ledger_path = tmp_path / "provider-ledger.json"
@@ -1955,6 +1992,16 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
     # producer fixture buildable by describing two independently blocked epochs,
     # rather than asserting an unprovable capital-continuity handoff.
     _write_json(policy_path, _admission_policy(assignments, continuity=False))
+    census_path = tmp_path / "membership-census.json"
+    _write_json(
+        census_path,
+        _membership_census(
+            ("synthetic-strategy-a", "2026-01-01", "2026-01-03"),
+            ("synthetic-strategy-b", "2026-01-04", None),
+            ("synthetic-strategy-b", "2026-01-05", None),
+            ("mapped-strategy", "2026-01-01", None),
+        ),
+    )
 
     classification_policy_path = tmp_path / "flow-classification-policy.json"
     _write_json(classification_policy_path, _flow_classification_policy("2026-01-06"))
@@ -2045,6 +2092,7 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "ledger_identity": ledger_identity_path,
         "baseline_root": baseline_root,
         "policy": policy_path,
+        "census": census_path,
         "classification_policy": classification_policy_path,
         "flows": flows_path,
         "flow_coverage": coverage_path,
@@ -3067,6 +3115,8 @@ def _producer_argv(inputs: dict[str, Path]) -> list[str]:
         BASELINE_GENERATION_ID,
         "--admission-policy-json",
         str(inputs["policy"]),
+        "--membership-census-json",
+        str(inputs["census"]),
         "--flow-classes-json",
         str(inputs["flows"]),
         "--classification-policy-json",
@@ -3133,6 +3183,7 @@ def _manifest_from_cli(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths=selected_receipts,
     )
@@ -3372,6 +3423,7 @@ def test_reusable_build_candidate_matches_cli_output(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={},
     )
@@ -4068,8 +4120,9 @@ def test_source_bound_strategy_mwr_uses_strategy_nav_and_allocation_not_brokerag
         "opening_capital": "60",
         "current_value": "66",
         "funded_nav_record_ids": ["synthetic-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-01",
+        "performance_opening_value": "60",
+        "performance_flow_legs": [],
     }
     manifest = {"rows": [row]}
     ledger = {
@@ -4125,8 +4178,9 @@ def test_source_bound_strategy_mwr_accepts_in_memory_decimal_manifest_values(
         "opening_capital": manifest_module.Decimal("60"),
         "current_value": manifest_module.Decimal("66"),
         "funded_nav_record_ids": ["synthetic-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-01",
+        "performance_opening_value": manifest_module.Decimal("60"),
+        "performance_flow_legs": [],
     }
     manifest = {"rows": [row]}
     ledger = {
@@ -4155,41 +4209,51 @@ def test_source_bound_strategy_mwr_accepts_in_memory_decimal_manifest_values(
     assert row["mwr_terminal_value"] == manifest_module.Decimal("66")
 
 
-def test_source_bound_strategy_mwr_uses_opening_anchor_at_economic_date(
-    manifest_module: Any,
-) -> None:
-    """A capital event can predate the first NAV that recognizes it."""
-    row = {
+def _mwr_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "account_id": "synthetic-account",
         "strategy_id": "synthetic-strategy",
         "status": "OK",
-        "start": "2025-01-01",
-        "end": "2026-01-01",
+        "effective_start": "2025-01-02",
+        "start": "2025-01-02",
+        "end": "2026-01-02",
         "opening_capital": "100",
         "current_value": "110",
         "funded_nav_record_ids": ["recognized-opening-nav"],
-        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
-        "capital_flow_trace": [],
+        "performance_opening_date": "2025-01-02",
+        "performance_opening_value": "100",
+        "performance_flow_legs": [],
     }
-    manifest = {"rows": [row]}
-    ledger = {
+    row.update(overrides)
+    return row
+
+
+def _mwr_ledger(*dates: str) -> dict[str, Any]:
+    return {
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
-                "as_of_date": "2025-01-02",
-                "record_id": "recognized-opening-nav",
-                "value_basis": "STRATEGY_NAV",
+                "as_of_date": day,
+                "record_id": f"nav-{day}",
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {"currency": "USD"},
-            },
-            {
-                "account_id": "synthetic-account",
-                "as_of_date": "2026-01-01",
-                "record_id": "synthetic-terminal-nav",
-                "value_basis": "STRATEGY_NAV",
-                "nav": {"currency": "USD"},
-            },
+            }
+            for day in dates
         ]
     }
+
+
+def test_source_bound_mwr_opens_at_the_performance_opening_not_the_anchor_event(
+    manifest_module: Any,
+) -> None:
+    """R1/B8: the MWR opening is the valuation at the performance opening.
+
+    The pre-change producer dated the opening cash flow at the anchor event
+    date and valued it at the anchor amount (1b44: -39,508.85 on 01-22 instead
+    of the opening valuation).  The anchor stays provenance of the opening.
+    """
+    row = _mwr_row()
+    manifest = {"rows": [row]}
     anchors = [
         {
             "account_id": "synthetic-account",
@@ -4201,14 +4265,130 @@ def test_source_bound_strategy_mwr_uses_opening_anchor_at_economic_date(
         }
     ]
 
-    manifest_module._mwr_payloads_from_governed_inputs(manifest, ledger, [], anchors)
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], anchors
+    )
 
     assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_opening_date"] == "2025-01-02"
+    assert row["mwr_valuation_timing"] == "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE"
     assert row["mwr_cashflows"][0] == {
-        "date": "2025-01-01",
-        "amount": manifest_module.Decimal("-100"),
-        "source_record_ids": ["synthetic-opening-capital"],
+        "date": "2025-01-02",
+        "amount": Decimal("-100"),
+        "source_record_ids": ["nav-2025-01-02", "synthetic-opening-capital"],
     }
+
+
+def _date_only_leg(event: str, recognition: str, amount: str) -> dict[str, Any]:
+    return {
+        "class": "EXTERNAL_IN",
+        "event_date": event,
+        "nav_recognition_date": recognition,
+        "economic_date": None,
+        "timing": "DATE_ONLY",
+        "amount": amount,
+    }
+
+
+def _classified_event(event: str, recognition: str, amount: str) -> dict[str, Any]:
+    return {
+        "account_id": "synthetic-account",
+        "event_date": event,
+        "nav_recognition_date": recognition,
+        "amount": Decimal(amount),
+        "disposition": "EXTERNAL",
+        "source_record_id": f"flow-{event}",
+    }
+
+
+def test_source_bound_mwr_dates_a_date_only_flow_at_its_nav_recognition(
+    manifest_module: Any,
+) -> None:
+    """R4: a date-only flow is investor cash when the NAV first shows it.
+
+    Pre-change an event recognized one day later was dated at its event and
+    merged into the opening leg; it now stands alone on its recognition date.
+    """
+    row = _mwr_row(
+        performance_flow_legs=[_date_only_leg("2025-01-02", "2025-01-03", "50")]
+    )
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest,
+        _mwr_ledger("2025-01-02", "2026-01-02"),
+        [_classified_event("2025-01-02", "2025-01-03", "50")],
+        [],
+    )
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert [flow["date"] for flow in row["mwr_cashflows"]] == [
+        "2025-01-02",
+        "2025-01-03",
+        "2026-01-02",
+    ]
+    assert row["mwr_cashflows"][1] == {
+        "date": "2025-01-03",
+        "amount": Decimal("-50"),
+        "source_record_ids": ["flow-2025-01-02"],
+    }
+
+
+def _allocation_leg(economic: str | None) -> dict[str, Any]:
+    return {
+        "class": "INTERNAL_IN",
+        "event_date": "2025-03-01",
+        "nav_recognition_date": "2025-03-05",
+        "economic_date": economic,
+        "timing": "EXACT_TIMESTAMP",
+        "amount": "40",
+    }
+
+
+_ALLOCATION_ANCHOR = {
+    "account_id": "synthetic-account",
+    "strategy_id": "synthetic-strategy",
+    "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+    "event_date": "2025-03-01",
+    "nav_recognition_date": "2025-03-05",
+    "amount": Decimal("40"),
+    "source_record_id": "fill-1",
+}
+
+
+def test_source_bound_mwr_dates_an_exact_fill_at_its_economic_date(
+    manifest_module: Any,
+) -> None:
+    row = _mwr_row(performance_flow_legs=[_allocation_leg("2025-03-04")])
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], [_ALLOCATION_ANCHOR]
+    )
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_cashflows"][1] == {
+        "date": "2025-03-04",
+        "amount": Decimal("-40"),
+        "source_record_ids": ["fill-1"],
+    }
+
+
+def test_source_bound_mwr_fails_closed_without_an_exact_fill_date(
+    manifest_module: Any,
+) -> None:
+    """The allocation date is not the fill date: no fill date, no MWR."""
+    row = _mwr_row(performance_flow_legs=[_allocation_leg(None)])
+    manifest = {"rows": [row]}
+
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], [_ALLOCATION_ANCHOR]
+    )
+
+    assert row["mwr_status"] == "BLOCKED_ADMISSION"
+    assert row["mwr_reason"] == "EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE"
+    assert row["mwr_xirr"] is None
+    assert row["mwr_cashflows"] == []
 
 
 @pytest.mark.parametrize(
@@ -4893,6 +5073,7 @@ def test_missing_predecessor_block_is_impossible_after_ok_predecessor(
         "observation_trace",
         "capital_flow_trace",
         "nav_observations",
+        *manifest_module.PERFORMANCE_ROW_FIELDS,
     ):
         successor.pop(field)
 
@@ -5063,6 +5244,7 @@ def test_schema_forbids_metrics_on_undefined_return_block(
         "observation_trace",
         "capital_flow_trace",
         "nav_observations",
+        *manifest_module.PERFORMANCE_ROW_FIELDS,
     ):
         row.pop(field)
 
@@ -6030,9 +6212,17 @@ def test_epoch_fails_closed_when_recognition_cannot_attach_to_observed_interval(
     }
 
 
-def test_provider_opening_anchor_sets_basis_and_first_observation_factor(
+def test_provider_opening_anchor_sets_capital_basis_but_never_a_return_value(
     manifest_module: Any,
 ) -> None:
+    """R1 (A1 mechanism 3): the anchor amount is contributed capital only.
+
+    The pre-change engine pre-linked the 1000 anchor to the first 985.44
+    observation, booking a -1.456 % "return" before membership began.  The
+    performance opening is the first observation; the anchor keeps its
+    meaning as the capital basis dated at its economic event.
+    """
+
     stats = manifest_module.analyze_epoch(
         {
             "2024-10-15": Decimal("985.44"),
@@ -6050,25 +6240,59 @@ def test_provider_opening_anchor_sets_basis_and_first_observation_factor(
             "event_date": "2024-10-13",
             "nav_recognition_date": "2024-10-15",
             "amount": Decimal("1000"),
+            "opening_nav": Decimal("985.44"),
         },
     )
 
     assert stats is not None
     assert stats["opening_basis"] == "PROVIDER_CAPITAL_ANCHOR"
     assert stats["opening_capital"] == Decimal("1000")
+    assert stats["opening_capital_date"] == "2024-10-13"
     assert stats["deposits"] == Decimal("0")
     assert stats["internal_in"] == Decimal("0")
-    assert stats["observation_trace"]["links"][0] == {
-        "start_date": "2024-10-13",
-        "end_date": "2024-10-15",
-        "base_nav": Decimal("1000"),
-        "ending_nav": Decimal("985.44"),
-        "net_flow": Decimal("0"),
-        "factor": Decimal("0.98544"),
-        "cumulative_index": Decimal("98.54400"),
-        "running_hwm_index": Decimal("100"),
-        "drawdown": Decimal("0.01456"),
+    assert stats["performance_opening_date"] == "2024-10-15"
+    assert stats["performance_opening_value"] == Decimal("985.44")
+    assert (
+        stats["performance_opening_basis"]
+        == "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+    )
+    assert stats["observation_trace"]["links"][0]["start_date"] == "2024-10-15"
+    assert stats["observation_trace"]["links"][0]["base_nav"] == Decimal("985.44")
+    assert stats["observation_linked_return"] == Decimal("0")
+    assert len(stats["observation_trace"]["links"]) == 2
+
+
+def test_provider_opening_anchor_nav_must_confirm_the_performance_opening(
+    manifest_module: Any,
+) -> None:
+    anchor = {
+        "event_date": "2024-10-13",
+        "nav_recognition_date": "2024-10-15",
+        "amount": Decimal("1000"),
+        "opening_nav": Decimal("985.45"),
     }
+    stats = manifest_module.analyze_epoch(
+        {
+            "2024-10-15": Decimal("985.44"),
+            "2024-10-16": Decimal("985.44"),
+            "2024-10-17": Decimal("985.44"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2024-10-15",
+        None,
+        opening_anchor=anchor,
+    )
+
+    assert stats is not None
+    assert stats["opening_capital"] == Decimal("1000")
+    assert stats["performance_status"] == "UNAVAILABLE"
+    assert stats["performance_reason"] == "OPENING_ANCHOR_NAV_DIFFERS"
+    assert stats["observation_linked_return"] is None
+    assert stats["observation_trace"] == {"links": []}
 
 
 def test_provider_strategy_allocation_before_epoch_is_not_admitted_by_recognition(
@@ -6155,3 +6379,376 @@ def test_schema_and_semantics_reject_negative_drawdown_values(
 
     with pytest.raises(manifest_module.ManifestError, match="formal schema|drawdown"):
         manifest_module.validate_manifest_schema(manifest)
+
+
+# --- C1 T2: manifest epoch engine on the single return engine (R1-R4) -------
+
+
+def _t2_epoch(
+    manifest_module: Any,
+    *,
+    pre_start: tuple[str, Decimal | None] | None = None,
+    external_in: dict[object, Decimal] | None = None,
+    internal_in: dict[object, Decimal] | None = None,
+    allocations: dict[object, Decimal] | None = None,
+    navs: dict[str, Decimal] | None = None,
+    start: str = "2026-01-05",
+) -> dict[str, Any]:
+    stats = manifest_module.analyze_epoch(
+        navs
+        or {
+            "2026-01-05": Decimal("102"),
+            "2026-01-06": Decimal("103"),
+            "2026-01-07": Decimal("104"),
+        },
+        external_in or {},
+        {},
+        internal_in or {},
+        {},
+        None,
+        start,
+        None,
+        capital_allocation_legs=allocations,
+        pre_start_observation=pre_start,
+    )
+    assert stats is not None and "unavailable_status" not in stats
+    return stats
+
+
+def test_t2_r1_performance_opens_at_the_last_observation_before_start(
+    manifest_module: Any,
+) -> None:
+    """R1 (B2/B8 1b44, c63d, cff1, qsi): day S earns from the S-1 valuation.
+
+    Pre-change the epoch opened at the end of day S and dropped day S's
+    return (and its S-1 opening from the MWR).  The capital basis keeps its
+    meaning: the first available NAV stays the contributed opening capital.
+    """
+
+    without = _t2_epoch(manifest_module)
+    with_pre_start = _t2_epoch(
+        manifest_module, pre_start=("2026-01-04", Decimal("100"))
+    )
+
+    assert without["performance_opening_basis"] == (
+        "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+    )
+    assert without["performance_opening_date"] == "2026-01-05"
+    with manifest_module.localcontext(manifest_module._DECIMAL_CONTEXT):
+        assert without["observation_linked_return"] == (
+            Decimal("104") / Decimal("102") - 1
+        )
+    assert with_pre_start["performance_opening_basis"] == (
+        "LAST_OBSERVATION_BEFORE_START"
+    )
+    assert with_pre_start["performance_opening_date"] == "2026-01-04"
+    assert with_pre_start["performance_opening_value"] == Decimal("100")
+    assert with_pre_start["observation_linked_return"] == Decimal("0.04")
+    assert len(with_pre_start["observation_trace"]["links"]) == 3
+    assert with_pre_start["observation_trace"]["links"][0]["start_date"] == (
+        "2026-01-04"
+    )
+    for field in ("opening_capital", "invested", "gain", "opening_capital_date"):
+        assert with_pre_start[field] == without[field]
+    assert with_pre_start["opening_capital"] == Decimal("102")
+
+
+def test_t2_r1_nonpositive_pre_start_falls_back_and_unavailable_fails_closed(
+    manifest_module: Any,
+) -> None:
+    zero = _t2_epoch(manifest_module, pre_start=("2026-01-04", Decimal("0")))
+    assert zero["performance_opening_date"] == "2026-01-05"
+    missing = _t2_epoch(manifest_module, pre_start=("2026-01-04", None))
+    assert missing["performance_status"] == "UNAVAILABLE"
+    assert missing["performance_reason"] == "OPENING_OBSERVATION_UNAVAILABLE"
+    assert missing["performance_opening_date"] is None
+    assert missing["flow_count"] is None
+    assert missing["opening_capital"] == Decimal("102")
+    with pytest.raises(manifest_module.ManifestError, match="not before the epoch"):
+        _t2_epoch(manifest_module, pre_start=("2026-01-05", Decimal("100")))
+
+
+def test_t2_exact_timestamp_fund_allocation_enters_at_beginning_of_day(
+    manifest_module: Any,
+) -> None:
+    """A1 mechanism 2: a timestamped fill earns the whole sub-period it joins.
+
+    The same 100 booked end-of-day (the pre-change treatment) turns the
+    ordinary -6.18 % day into -12.36 %.
+    """
+
+    navs = {
+        "2025-11-12": Decimal("100"),
+        "2025-11-13": Decimal("187.64"),
+        "2025-11-14": Decimal("187.64"),
+    }
+    exact = _t2_epoch(
+        manifest_module,
+        navs=navs,
+        start="2025-11-11",
+        allocations={
+            ("2025-11-11", "2025-11-13", "fill-1", "2025-11-12"): Decimal("100")
+        },
+    )
+    date_only = _t2_epoch(
+        manifest_module,
+        navs=navs,
+        start="2025-11-11",
+        internal_in={("2025-11-11", "2025-11-13", "flow-1"): Decimal("100")},
+    )
+
+    exact_link = exact["observation_trace"]["links"][0]
+    assert exact_link["beginning_flow"] == Decimal("100")
+    assert exact_link["ending_flow"] == Decimal("0")
+    assert exact_link["factor"] == Decimal("0.9382")
+    assert exact["performance_flags"] == []
+    assert exact["performance_flow_legs"] == [
+        {
+            "class": "INTERNAL_IN",
+            "event_date": "2025-11-11",
+            "nav_recognition_date": "2025-11-13",
+            "economic_date": "2025-11-12",
+            "timing": "EXACT_TIMESTAMP",
+            "amount": Decimal("100"),
+        }
+    ]
+    date_only_link = date_only["observation_trace"]["links"][0]
+    assert date_only_link["factor"] == Decimal("0.8764")
+    assert date_only["performance_flags"] == ["INFERRED_TIMING"]
+    assert exact["internal_in"] == date_only["internal_in"] == Decimal("100")
+
+
+def test_t2_flow_count_counts_source_records_not_date_buckets(
+    manifest_module: Any,
+) -> None:
+    """B1 (d697 0.28 + 0.08): two records on one leg date are two flows."""
+
+    events = [
+        {
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-06",
+            "nav_recognition_date": "2026-01-06",
+            "amount": Decimal(amount),
+            "disposition": "EXTERNAL",
+            "source_record_id": source,
+        }
+        for amount, source in (("0.28", "flow-a"), ("0.08", "flow-b"))
+    ]
+    buckets = manifest_module.flow_buckets_from_classes(events)
+    per_record = _t2_epoch(
+        manifest_module, external_in=buckets["external_in"]["synthetic-account"]
+    )
+    merged = _t2_epoch(
+        manifest_module,
+        external_in={("2026-01-06", "2026-01-06"): Decimal("0.36")},
+    )
+
+    assert per_record["flow_count"] == 2
+    assert len(per_record["capital_flow_trace"]) == 2
+    assert per_record["deposits"] == merged["deposits"] == Decimal("0.36")
+    assert merged["flow_count"] == 1
+    assert (
+        per_record["observation_linked_return"] == merged["observation_linked_return"]
+    )
+
+
+def _t2_census(*assignments: tuple[str, str, str, str | None, str]) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "assignments": [
+                        {
+                            "strategy_id": strategy,
+                            "status": status,
+                            "effective_start": start,
+                            "effective_end": end,
+                        }
+                    ],
+                }
+                for provider, strategy, start, end, status in assignments
+            ]
+        }
+    }
+
+
+def test_t2_r2_funded_admission_of_a_census_assignment_only_interval_raises(
+    manifest_module: Any,
+) -> None:
+    """R2 (38b6/98f5 tt): ASSIGNMENT_ONLY is never funded performance."""
+
+    census = manifest_module.load_membership_census(
+        _t2_census(
+            ("SCHWAB", "tt", "2025-11-25", "2026-01-04", "ASSIGNMENT_ONLY"),
+            ("SCHWAB", "tt", "2025-11-25", "2026-01-04", "ASSIGNMENT_ONLY"),
+            ("SCHWAB", "tt", "2025-11-25", None, "FUNDED_MEMBERSHIP"),
+        )
+    )
+    providers = {"a": "SCHWAB", "b": "SCHWAB", "c": "SCHWAB"}
+    funded = {"status": "FUNDED"}
+    blocked = {"status": "BLOCKED"}
+    good = {
+        ("a", "tt", "2025-11-25", "2026-01-04"): blocked,
+        ("b", "tt", "2025-11-25", "2026-01-04"): blocked,
+        ("c", "tt", "2025-11-25", None): funded,
+    }
+    manifest_module._validate_admissions_against_census(good, census, providers)
+    bad = {**good, ("a", "tt", "2025-11-25", "2026-01-04"): funded}
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(bad, census, providers)
+    too_many = {**good, ("d", "tt", "2025-11-25", None): funded}
+    with pytest.raises(
+        manifest_module.ManifestError, match="funds more epochs than census"
+    ):
+        manifest_module._validate_admissions_against_census(
+            too_many, census, {**providers, "d": "SCHWAB"}
+        )
+    unlisted = {("c", "other", "2025-11-25", None): funded}
+    with pytest.raises(manifest_module.ManifestError, match="absent from"):
+        manifest_module._validate_admissions_against_census(unlisted, census, providers)
+
+
+def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
+    manifest_module: Any,
+) -> None:
+    """The governed census marks the two tt->qsi transitions ASSIGNMENT_ONLY."""
+
+    contract = json.loads(
+        (
+            Path(manifest_module.__file__).resolve().parents[1]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    census = manifest_module.load_membership_census(contract)
+    key = ("SCHWAB", "tt-portfolio", "2025-11-25", "2026-01-04")
+    assert census[key] == ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(
+            {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
+        )
+
+
+def test_c1_membership_transition_excludes_only_the_post_boundary_epoch(
+    manifest_module: Any,
+) -> None:
+    """A FUNDED->ASSIGNMENT_ONLY transition inside one strategy is per-epoch.
+
+    The same strategy's contiguous NAV run is split at the census membership
+    boundary: the epoch inside the census funded interval stays admissible,
+    only a funded epoch of the post-transition interval is rejected, and the
+    whole run cannot be funded across the boundary as one epoch.
+    """
+
+    census = manifest_module.load_membership_census(
+        _t2_census(
+            ("SCHWAB", "tt", "2025-01-01", "2026-06-30", "FUNDED_MEMBERSHIP"),
+            ("SCHWAB", "tt", "2026-07-01", None, "ASSIGNMENT_ONLY"),
+        )
+    )
+    providers = {"a": "SCHWAB"}
+    funded = {"status": "FUNDED"}
+    blocked = {"status": "BLOCKED"}
+    good = {
+        ("a", "tt", "2025-01-01", "2026-06-30"): funded,
+        ("a", "tt", "2026-07-01", None): blocked,
+    }
+    manifest_module._validate_admissions_against_census(good, census, providers)
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(
+            {**good, ("a", "tt", "2026-07-01", None): funded},
+            census,
+            providers,
+        )
+    with pytest.raises(manifest_module.ManifestError, match="absent from"):
+        manifest_module._validate_admissions_against_census(
+            {("a", "tt", "2025-01-01", None): funded}, census, providers
+        )
+
+
+def test_cli_table_renders_unavailable_performance_on_ok_rows(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R3 (702c-like): an OK row with unavailable performance still tables.
+
+    Pre-change the default table formatter parsed observed_hwm_index and
+    observed_max_drawdown unconditionally, so an OK row whose performance is
+    unavailable raised ManifestError instead of rendering.
+    """
+
+    inputs = _write_valid_inputs(tmp_path)
+    authority_path = _write_selected_first_receipt_authority(inputs)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    for record, day, value in (
+        ("nav-1", "2026-01-01", "32.15"),
+        ("nav-2", "2026-01-02", "0"),
+        ("nav-3", "2026-01-03", "3.81"),
+    ):
+        observation = next(
+            item for item in ledger["nav_observations"] if item["record_id"] == record
+        )
+        observation["as_of_date"] = day
+        observation["nav"]["value"] = value
+    ledger["flows"] = [
+        {
+            "record_id": "raw-flow-1",
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-02",
+            "flow_type": "EXTERNAL_WITHDRAWAL",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-32.15"},
+        }
+    ]
+    _write_json(inputs["ledger"], ledger)
+    classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
+    classified["events"] = [
+        {
+            "event_id": "classified-flow-1",
+            "source_record_id": "raw-flow-1",
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-02",
+            "amount": "-32.15",
+            "disposition": "EXTERNAL",
+        }
+    ]
+    _write_json(inputs["flows"], classified)
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][0]["funded_nav_record_ids"] = ["nav-1"]
+    _write_json(inputs["policy"], policy)
+    _refresh_ledger_identity(inputs)
+
+    manifest = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
+        flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
+        },
+        receipt_authority_path=authority_path,
+    )
+    first, second = manifest["rows"]
+    assert first["status"] == "OK"
+    assert first["performance_status"] == "UNAVAILABLE"
+    assert first["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert first["observed_hwm_index"] is None
+    assert first["observed_max_drawdown"] is None
+    assert second["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+
+    displayed = manifest_module.format_table(manifest).splitlines()[-2].split("|")
+    assert sum("unavailable" in cell for cell in displayed) == 2
+
+    argv = _producer_argv(inputs)
+    argv.extend(["--receipt-authority-json", str(authority_path)])
+    argv[argv.index("--format") + 1] = "table"
+    assert manifest_module.main(argv) == 0
+    table = capsys.readouterr().out
+    assert table == manifest_module.format_table(manifest) + "\n"
+    assert sum("unavailable" in cell for cell in table.splitlines()[-2].split("|")) == 2

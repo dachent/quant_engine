@@ -69,11 +69,12 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "receipt_authority",
     "admission_policy",
     "manifest_schema",
+    "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "47e36a3e69e10f57a9b9e1e9cf6b5e440e7d2f51d53c2523e644415e690887d4"
+    "7b6fb1d9c181f40e518780eca00bcdb63b4f9699c1b8777c314b79df60539455"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 26747
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 29130
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -114,10 +115,27 @@ _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
         "observation_trace",
         "capital_flow_trace",
         "nav_observation_trace",
+        "opening_capital_date",
+        "performance_status",
+        "performance_reason",
+        "performance_opening_date",
+        "performance_opening_value",
+        "performance_opening_basis",
+        "performance_flags",
+        "performance_flow_legs",
+        "flow_count",
     }
 )
 _MWR_VALUE_BASES: Final[frozenset[str]] = frozenset(
     {"ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"}
+)
+_CENSUS_MEMBERSHIP_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "ASSIGNMENT_ONLY",
+        "DEPRECATED_HISTORY_ONLY",
+        "EXCLUDED_IMMATERIAL",
+        "FUNDED_MEMBERSHIP",
+    }
 )
 _MWR_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -459,6 +477,7 @@ class IndependentVerifierInputs:
     receipt_authority: InputSnapshot | None = None
     admission_policy: InputSnapshot | None = None
     manifest_schema: InputSnapshot | None = None
+    membership_census: InputSnapshot | None = None
 
     def __post_init__(self) -> None:
         for snapshot in _snapshot_roles(self):
@@ -473,6 +492,7 @@ class IndependentVerifierInputs:
             self.receipt_authority,
             self.admission_policy,
             self.manifest_schema,
+            self.membership_census,
         )
         if any(value is None for value in optional) != all(
             value is None for value in optional
@@ -537,13 +557,14 @@ def _snapshot_roles(selected: IndependentVerifierInputs) -> tuple[InputSnapshot,
 
 def _mixed_snapshot_roles(
     selected: IndependentVerifierInputs,
-) -> tuple[InputSnapshot, InputSnapshot, InputSnapshot]:
+) -> tuple[InputSnapshot, InputSnapshot, InputSnapshot, InputSnapshot]:
     """Return the closed mixed-only snapshots in transport-role order."""
 
     return (
         _require_snapshot(selected.receipt_authority),
         _require_snapshot(selected.admission_policy),
         _require_snapshot(selected.manifest_schema),
+        _require_snapshot(selected.membership_census),
     )
 
 
@@ -1015,6 +1036,13 @@ class _IndependentNavFact:
     value: Decimal
 
 
+_DATE_ONLY: Final[str] = "DATE_ONLY"
+_EXACT_TIMESTAMP: Final[str] = "EXACT_TIMESTAMP"
+_FLOW_SIGNS: Final[Mapping[str, int]] = MappingProxyType(
+    {"EXTERNAL_IN": 1, "EXTERNAL_OUT": -1, "INTERNAL_IN": 1, "INTERNAL_OUT": -1}
+)
+
+
 @dataclass(frozen=True)
 class _IndependentFlowFact:
     event_date: date
@@ -1022,6 +1050,27 @@ class _IndependentFlowFact:
     currency: str
     amount: Decimal
     nav_recognition_date: date | None = None
+    source_record_id: str | None = None
+    timing: str = _DATE_ONLY
+    economic_date: date | None = None
+
+    @property
+    def recognition(self) -> date:
+        return self.nav_recognition_date or self.event_date
+
+    @property
+    def signed_amount(self) -> Decimal:
+        return self.amount * _FLOW_SIGNS[self.classification]
+
+    def order_key(self) -> tuple[str, str, str, str, str, Decimal]:
+        return (
+            self.event_date.isoformat(),
+            self.recognition.isoformat(),
+            self.classification,
+            self.timing,
+            "" if self.economic_date is None else self.economic_date.isoformat(),
+            self.amount,
+        )
 
 
 @dataclass(frozen=True)
@@ -1030,6 +1079,7 @@ class _IndependentCapitalAnchorFact:
     nav_recognition_date: date
     currency: str
     amount: Decimal
+    opening_nav: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -1041,6 +1091,9 @@ class _IndependentEpochFacts:
     flows: tuple[_IndependentFlowFact, ...]
     opening_anchor: _IndependentCapitalAnchorFact | None = None
     dual_date_trace: bool = False
+    # The account's last observation before ``start`` (R1); ``None`` value
+    # means the observation exists but carries no available valuation.
+    pre_start_nav: tuple[date, Decimal | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -1066,6 +1119,11 @@ def _fact_currency(value: object) -> str:
     return currency
 
 
+_OPTIONAL_FLOW_FACT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"source_record_id", "timing", "economic_date"}
+)
+
+
 def _parse_epoch_facts(
     nav_facts: object,
     flow_facts: object,
@@ -1076,8 +1134,13 @@ def _parse_epoch_facts(
     _retained_money: bool = False,
     _dual_date_trace: bool = False,
     opening_anchor: _IndependentCapitalAnchorFact | None = None,
+    pre_start_nav: tuple[date, Decimal | None] | None = None,
 ) -> _IndependentEpochFacts:
-    """Parse immutable facts for one standalone epoch under one money scale."""
+    """Parse immutable facts for one standalone epoch under one money scale.
+
+    A flow fact is one source record.  Facts carrying no record identity and
+    sharing every date, class and timing are one bucketed movement.
+    """
 
     if type(_retained_money) is not bool or type(_dual_date_trace) is not bool:
         _fail()
@@ -1131,7 +1194,9 @@ def _parse_epoch_facts(
         }
         if _dual_date_trace:
             expected_flow_fields.add("nav_recognition_date")
-        if set(raw) != expected_flow_fields:
+        if not expected_flow_fields <= set(raw) or not set(raw) - (
+            expected_flow_fields
+        ) <= (_OPTIONAL_FLOW_FACT_FIELDS):
             _fail()
         raw_account = _fact_text(raw.get("account_id"))
         raw_date = raw["event_date"]
@@ -1141,6 +1206,8 @@ def _parse_epoch_facts(
             if _dual_date_trace
             else event_date
         )
+        if recognition_date < event_date:
+            _fail()
         classification = _fact_text(raw["classification"])
         if classification not in allowed_classes:
             _fail()
@@ -1148,36 +1215,75 @@ def _parse_epoch_facts(
         amount = parse_money(raw["amount"])
         if amount <= 0:
             _fail()
+        source_record_id = raw.get("source_record_id")
+        if source_record_id is not None:
+            source_record_id = _fact_text(source_record_id)
+        timing = raw.get("timing", _DATE_ONLY)
+        if timing not in {_DATE_ONLY, _EXACT_TIMESTAMP}:
+            _fail()
+        economic_raw = raw.get("economic_date")
+        economic_date = (
+            None if economic_raw is None else _parse_canonical_date(economic_raw)
+        )
+        if economic_date is not None and (
+            timing != _EXACT_TIMESTAMP
+            or not event_date <= economic_date <= recognition_date
+        ):
+            _fail()
         if raw_account == target_account and start <= event_date <= end:
             if expected_currency is None or currency != expected_currency:
                 _fail()
             flow_records.append(
                 _IndependentFlowFact(
-                    event_date, classification, currency, amount, recognition_date
+                    event_date,
+                    classification,
+                    currency,
+                    amount,
+                    recognition_date,
+                    source_record_id,
+                    str(timing),
+                    economic_date,
                 )
             )
     with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
-        aggregate: dict[tuple[date, date, str, str], Decimal] = {}
+        aggregate: dict[
+            tuple[date, date, str, str, str | None, str, date | None], Decimal
+        ] = {}
         for flow in flow_records:
-            recognition_date = flow.nav_recognition_date or flow.event_date
             key = (
                 flow.event_date,
-                recognition_date,
+                flow.recognition,
                 flow.classification,
                 flow.currency,
+                flow.source_record_id,
+                flow.timing,
+                flow.economic_date,
             )
             aggregate[key] = aggregate.get(key, Decimal(0)) + flow.amount
-    flow_records = [
-        _IndependentFlowFact(
-            event_date, classification, currency, amount, recognition_date
-        )
-        for (
-            event_date,
-            recognition_date,
-            classification,
-            currency,
-        ), amount in sorted(aggregate.items())
-    ]
+    flows = sorted(
+        (
+            _IndependentFlowFact(
+                event_date,
+                classification,
+                currency,
+                amount,
+                recognition_date,
+                source_record_id,
+                timing,
+                economic_date,
+            )
+            for (
+                event_date,
+                recognition_date,
+                classification,
+                currency,
+                source_record_id,
+                timing,
+                economic_date,
+            ), amount in aggregate.items()
+        ),
+        key=_IndependentFlowFact.order_key,
+    )
     if opening_anchor is not None:
         if (
             type(opening_anchor) is not _IndependentCapitalAnchorFact
@@ -1185,6 +1291,25 @@ def _parse_epoch_facts(
             or opening_anchor.amount <= 0
             or not start <= opening_anchor.nav_recognition_date <= end
             or opening_anchor.nav_recognition_date < opening_anchor.event_date
+            or (
+                opening_anchor.opening_nav is not None
+                and opening_anchor.opening_nav <= 0
+            )
+        ):
+            _fail()
+    if pre_start_nav is not None:
+        if (
+            type(pre_start_nav) is not tuple
+            or len(pre_start_nav) != 2
+            or type(pre_start_nav[0]) is not date
+            or pre_start_nav[0] >= start
+            or (
+                pre_start_nav[1] is not None
+                and (
+                    type(pre_start_nav[1]) is not Decimal
+                    or not pre_start_nav[1].is_finite()
+                )
+            )
         ):
             _fail()
     return _IndependentEpochFacts(
@@ -1192,16 +1317,179 @@ def _parse_epoch_facts(
         start,
         end,
         tuple(navs),
-        tuple(flow_records),
+        tuple(flows),
         opening_anchor,
         _dual_date_trace,
+        pre_start_nav,
     )
 
 
-def _derive_first_available_nav_epoch(
+def _independent_performance(
     facts: _IndependentEpochFacts,
+    days: tuple[_IndependentNavFact, ...],
+    predecessor: _IndependentPredecessorFact | None,
 ) -> dict[str, object]:
-    """Derive one standalone FIRST_AVAILABLE_NAV epoch without producer calls."""
+    """Recompute R1-R4 epoch performance without the producer's return engine.
+
+    The opening is the predecessor closing NAV, else the last observation
+    before the funded start when positive, else the first positive one.  Each
+    flow belongs to the sub-period ending at the first observation on or after
+    its NAV recognition: exact-timestamp fills join its beginning capital,
+    date-only flows leave its ending value.  A zero-capital sub-period is
+    neutral only when nothing was earned; otherwise performance is undefined.
+    """
+
+    first = days[0]
+    anchor = facts.opening_anchor
+
+    def unavailable(
+        reason: str, opening: tuple[date, Decimal] | None, basis: str | None
+    ) -> dict[str, object]:
+        linked = (
+            []
+            if opening is None
+            else [flow for flow in facts.flows if flow.recognition > opening[0]]
+        )
+        return {
+            "observation_linked_return": None,
+            "observed_hwm_index": None,
+            "observed_max_drawdown": None,
+            "observation_trace": {"links": []},
+            "performance_status": "UNAVAILABLE",
+            "performance_reason": reason,
+            "performance_opening_date": (
+                None if opening is None else opening[0].isoformat()
+            ),
+            "performance_opening_value": None if opening is None else opening[1],
+            "performance_opening_basis": basis,
+            "performance_flags": [],
+            "performance_flow_legs": [_independent_leg_row(flow) for flow in linked],
+            "flow_count": None if opening is None else len(linked),
+        }
+
+    if predecessor is not None:
+        opening = (predecessor.closing_nav_date, predecessor.closing_nav_value)
+        basis = "PREDECESSOR_CLOSING_NAV"
+        if (
+            facts.pre_start_nav is not None
+            and facts.pre_start_nav[0] > predecessor.closing_nav_date
+        ):
+            return unavailable(
+                "PREDECESSOR_CLOSING_NAV_IS_NOT_LAST_OBSERVATION", None, None
+            )
+        observations = [opening, *((nav.as_of_date, nav.value) for nav in days)]
+    else:
+        pre = facts.pre_start_nav
+        if pre is not None and pre[1] is None:
+            return unavailable("OPENING_OBSERVATION_UNAVAILABLE", None, None)
+        if pre is not None and pre[1] is not None and pre[1] > 0:
+            opening = (pre[0], pre[1])
+            basis = "LAST_OBSERVATION_BEFORE_START"
+            if facts.navs[0].as_of_date != first.as_of_date:
+                return unavailable(
+                    "NONPOSITIVE_OBSERVATION_AFTER_PERFORMANCE_OPENING", opening, basis
+                )
+            observations = [opening, *((nav.as_of_date, nav.value) for nav in days)]
+        else:
+            opening = (first.as_of_date, first.value)
+            basis = "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+            observations = [(nav.as_of_date, nav.value) for nav in days]
+    if anchor is not None:
+        if anchor.nav_recognition_date > opening[0]:
+            return unavailable(
+                "OPENING_ANCHOR_AFTER_PERFORMANCE_OPENING", opening, basis
+            )
+        if (
+            anchor.opening_nav is not None
+            and anchor.nav_recognition_date == opening[0]
+            and anchor.opening_nav != opening[1]
+        ):
+            return unavailable("OPENING_ANCHOR_NAV_DIFFERS", opening, basis)
+    linked = [flow for flow in facts.flows if flow.recognition > opening[0]]
+    if any(flow.recognition > observations[-1][0] for flow in linked):
+        return unavailable("FLOW_AFTER_CLOSING_OBSERVATION", opening, basis)
+    index = Decimal(1)
+    hwm = Decimal(1)
+    max_drawdown = Decimal(0)
+    hundred = Decimal(100)
+    links: list[dict[str, object]] = []
+    for (prior_day, prior_value), (day, value) in zip(observations, observations[1:]):
+        period = [flow for flow in linked if prior_day < flow.recognition <= day]
+        beginning = [flow for flow in period if flow.timing == _EXACT_TIMESTAMP]
+        beginning_flow = sum((flow.signed_amount for flow in beginning), Decimal(0))
+        ending_flow = sum(
+            (flow.signed_amount for flow in period if flow.timing == _DATE_ONLY),
+            Decimal(0),
+        )
+        base = prior_value + beginning_flow if beginning else prior_value
+        numerator = value - ending_flow
+        if base < 0:
+            return unavailable("NEGATIVE_CAPITAL_BASE", opening, basis)
+        if base == 0:
+            if numerator != 0:
+                return unavailable("ZERO_CAPITAL_RETURN_UNDEFINED", opening, basis)
+            factor = Decimal(1)
+        else:
+            factor = numerator / base
+            if factor <= 0:
+                return unavailable("NONPOSITIVE_LINK_FACTOR", opening, basis)
+            index *= factor
+        hwm = max(hwm, index)
+        drawdown = Decimal(1) - index / hwm
+        max_drawdown = max(max_drawdown, drawdown)
+        links.append(
+            {
+                "start_date": prior_day.isoformat(),
+                "end_date": day.isoformat(),
+                "base_nav": prior_value,
+                "beginning_flow": beginning_flow,
+                "ending_nav": value,
+                "ending_flow": ending_flow,
+                "net_flow": beginning_flow + ending_flow,
+                "factor": factor,
+                "cumulative_index": index * hundred,
+                "running_hwm_index": hwm * hundred,
+                "drawdown": drawdown,
+            }
+        )
+    return {
+        "observation_linked_return": index - Decimal(1),
+        "observed_hwm_index": hwm * hundred,
+        "observed_max_drawdown": max_drawdown,
+        "observation_trace": {"links": links},
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": opening[0].isoformat(),
+        "performance_opening_value": opening[1],
+        "performance_opening_basis": basis,
+        "performance_flags": (
+            ["INFERRED_TIMING"]
+            if any(flow.timing == _DATE_ONLY for flow in linked)
+            else []
+        ),
+        "performance_flow_legs": [_independent_leg_row(flow) for flow in linked],
+        "flow_count": len(linked),
+    }
+
+
+def _independent_leg_row(flow: _IndependentFlowFact) -> dict[str, object]:
+    return {
+        "class": flow.classification,
+        "event_date": flow.event_date.isoformat(),
+        "nav_recognition_date": flow.recognition.isoformat(),
+        "economic_date": (
+            None if flow.economic_date is None else flow.economic_date.isoformat()
+        ),
+        "timing": flow.timing,
+        "amount": flow.amount,
+    }
+
+
+def _derive_independent_epoch(
+    facts: _IndependentEpochFacts,
+    predecessor: _IndependentPredecessorFact | None = None,
+) -> dict[str, object]:
+    """Derive one funded epoch (capital basis and performance) independently."""
 
     if type(facts) is not _IndependentEpochFacts:
         _fail()
@@ -1215,48 +1503,32 @@ def _derive_first_available_nav_epoch(
         funded_navs = facts.navs[first_funded_index:]
         first = funded_navs[0]
         opening_anchor = facts.opening_anchor
-        flows = facts.flows
-        # FIRST_AVAILABLE_NAV already contains cash recognized on or before
-        # the opening observation, and so does a provider capital anchor: the
-        # anchor states the capital the epoch opens holding on that same day.
-        # Those facts remain authority evidence but do not enter the
-        # independently recomputed epoch.
-        flows = tuple(
+        capital_flows = tuple(
             flow
             for flow in facts.flows
-            if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
+            if predecessor is not None or flow.recognition > first.as_of_date
         )
 
         def signed_flow(start_exclusive: date, end_inclusive: date) -> Decimal:
             return sum(
                 (
-                    flow.amount
-                    * (
-                        Decimal(1)
-                        if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
-                        else Decimal(-1)
-                    )
-                    for flow in flows
-                    if start_exclusive
-                    < (flow.nav_recognition_date or flow.event_date)
-                    <= end_inclusive
+                    flow.signed_amount
+                    for flow in capital_flows
+                    if start_exclusive < flow.recognition <= end_inclusive
                 ),
                 Decimal(0),
             )
 
-        days: list[_IndependentNavFact] = []
         nav_index = 0
+        prior_positive = first
         while nav_index < len(funded_navs):
             nav = funded_navs[nav_index]
             if nav.value < 0:
                 _fail()
             if nav.value > 0:
-                days.append(nav)
+                prior_positive = nav
                 nav_index += 1
                 continue
-            if not days:
-                _fail()
-            prior_positive = days[-1]
             first_zero = nav
             zero_end = nav_index
             while (
@@ -1271,28 +1543,35 @@ def _derive_first_available_nav_epoch(
                 != 0
                 or any(
                     first_zero.as_of_date
-                    < (flow.nav_recognition_date or flow.event_date)
+                    < flow.recognition
                     <= funded_navs[zero_end].as_of_date
-                    for flow in flows
+                    for flow in capital_flows
                 )
             ):
                 _fail()
             nav_index = zero_end + 1
-
+        days = funded_navs
         if len(days) < 3:
             _fail()
         closing = days[-1]
         if any(flow.event_date > closing.as_of_date for flow in facts.flows):
             _fail()
+        if any(flow.recognition > closing.as_of_date for flow in capital_flows):
+            _fail()
         if opening_anchor is not None and (
-            opening_anchor.nav_recognition_date != first.as_of_date
+            predecessor is not None
+            or opening_anchor.nav_recognition_date != first.as_of_date
             or opening_anchor.event_date > first.as_of_date
         ):
             _fail()
 
         by_class: dict[str, Decimal] = {
             flow_class: sum(
-                (flow.amount for flow in flows if flow.classification == flow_class),
+                (
+                    flow.amount
+                    for flow in capital_flows
+                    if flow.classification == flow_class
+                ),
                 Decimal(0),
             )
             for flow_class in (
@@ -1302,7 +1581,18 @@ def _derive_first_available_nav_epoch(
                 "INTERNAL_OUT",
             )
         }
-        opening = first.value if opening_anchor is None else opening_anchor.amount
+        if predecessor is not None:
+            opening = predecessor.closing_nav_value
+            opening_date = predecessor.closing_nav_date
+            opening_basis = "PREDECESSOR_CLOSING_NAV"
+        elif opening_anchor is not None:
+            opening = opening_anchor.amount
+            opening_date = opening_anchor.event_date
+            opening_basis = "PROVIDER_CAPITAL_ANCHOR"
+        else:
+            opening = first.value
+            opening_date = first.as_of_date
+            opening_basis = "FIRST_AVAILABLE_NAV"
         deposits = by_class["EXTERNAL_IN"]
         invested = opening + deposits + by_class["INTERNAL_IN"]
         withdrawn = by_class["EXTERNAL_OUT"] + by_class["INTERNAL_OUT"]
@@ -1315,9 +1605,7 @@ def _derive_first_available_nav_epoch(
                 {
                     "class": flow.classification,
                     "event_date": flow.event_date.isoformat(),
-                    "nav_recognition_date": (
-                        flow.nav_recognition_date or flow.event_date
-                    ).isoformat(),
+                    "nav_recognition_date": flow.recognition.isoformat(),
                     "amount": flow.amount,
                 }
                 if facts.dual_date_trace
@@ -1327,115 +1615,14 @@ def _derive_first_available_nav_epoch(
                     "amount": flow.amount,
                 }
             )
-            for flow in flows
+            for flow in capital_flows
         ]
-        flow_by_date: dict[date, Decimal] = {}
-        for flow in flows:
-            signed = (
-                flow.amount
-                if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
-                else -flow.amount
-            )
-            recognition_date = flow.nav_recognition_date or flow.event_date
-            flow_by_date[recognition_date] = (
-                flow_by_date.get(recognition_date, Decimal(0)) + signed
-            )
-
-        def interval_flow(start_date: date, end_date: date) -> Decimal:
-            return sum(
-                (
-                    amount
-                    for event_date, amount in flow_by_date.items()
-                    if start_date < event_date <= end_date
-                ),
-                Decimal(0),
-            )
-
-        cumulative_index = Decimal(100)
-        running_hwm = Decimal(100)
-        max_drawdown = Decimal(0)
-        links: list[dict[str, object]] = []
-        prior = first
-        if opening_anchor is not None and opening_anchor.event_date < first.as_of_date:
-            initial_flow = interval_flow(opening_anchor.event_date, first.as_of_date)
-            factor = Decimal(1) + (first.value - opening - initial_flow) / opening
-            if factor <= 0:
-                _fail()
-            cumulative_index *= factor
-            running_hwm = max(running_hwm, cumulative_index)
-            drawdown = Decimal(1) - cumulative_index / running_hwm
-            max_drawdown = max(max_drawdown, drawdown)
-            links.append(
-                {
-                    "start_date": opening_anchor.event_date.isoformat(),
-                    "end_date": first.as_of_date.isoformat(),
-                    "base_nav": opening,
-                    "ending_nav": first.value,
-                    "net_flow": initial_flow,
-                    "factor": factor,
-                    "cumulative_index": cumulative_index,
-                    "running_hwm_index": running_hwm,
-                    "drawdown": drawdown,
-                }
-            )
-        for current_nav in days[1:]:
-            net_flow = interval_flow(prior.as_of_date, current_nav.as_of_date)
-            factor = (
-                Decimal(1) + (current_nav.value - prior.value - net_flow) / prior.value
-            )
-            if factor <= 0:
-                _fail()
-            cumulative_index *= factor
-            running_hwm = max(running_hwm, cumulative_index)
-            drawdown = Decimal(1) - cumulative_index / running_hwm
-            max_drawdown = max(max_drawdown, drawdown)
-            links.append(
-                {
-                    "start_date": prior.as_of_date.isoformat(),
-                    "end_date": current_nav.as_of_date.isoformat(),
-                    "base_nav": prior.value,
-                    "ending_nav": current_nav.value,
-                    "net_flow": net_flow,
-                    "factor": factor,
-                    "cumulative_index": cumulative_index,
-                    "running_hwm_index": running_hwm,
-                    "drawdown": drawdown,
-                }
-            )
-            prior = current_nav
-
-        for flow in flows:
-            recognition_date = flow.nav_recognition_date or flow.event_date
-            if not any(
-                _parse_canonical_date(link["start_date"])
-                < recognition_date
-                <= _parse_canonical_date(link["end_date"])
-                for link in links
-            ):
-                _fail()
-
         cashflows: list[tuple[date, Decimal]] = [
-            (
-                first.as_of_date
-                if opening_anchor is None
-                else opening_anchor.event_date,
-                -opening,
-            ),
-            *(
-                (
-                    flow.event_date,
-                    -flow.amount
-                    if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
-                    else flow.amount,
-                )
-                for flow in flows
-            ),
+            (opening_date, -opening),
+            *((flow.event_date, -flow.signed_amount) for flow in capital_flows),
             (closing.as_of_date, current),
         ]
         xirr_rate = _xirr(cashflows)
-        opening_date = (
-            first.as_of_date if opening_anchor is None else opening_anchor.event_date
-        )
         span_days = (closing.as_of_date - opening_date).days
         return_on_net_capital = gain / net_capital if net_capital > 0 else None
         annualized = None
@@ -1444,10 +1631,12 @@ def _derive_first_available_nav_epoch(
                 return_on_net_capital,
                 span_days,
             )
+        performance = _independent_performance(facts, days, predecessor)
         return {
             "start": first.as_of_date.isoformat(),
             "end": closing.as_of_date.isoformat(),
             "opening_capital": opening,
+            "opening_capital_date": opening_date.isoformat(),
             "deposits": deposits,
             "internal_in": by_class["INTERNAL_IN"],
             "invested": invested,
@@ -1460,18 +1649,19 @@ def _derive_first_available_nav_epoch(
             "return_on_net_capital": return_on_net_capital,
             "annualized_return_on_net_capital": annualized,
             "xirr_diagnostic": xirr_rate,
-            "observation_linked_return": cumulative_index / Decimal(100) - Decimal(1),
-            "observed_hwm_index": running_hwm,
-            "observed_max_drawdown": max_drawdown,
             "nav_observations": len(days),
-            "opening_basis": (
-                "FIRST_AVAILABLE_NAV"
-                if opening_anchor is None
-                else "PROVIDER_CAPITAL_ANCHOR"
-            ),
-            "observation_trace": {"links": links},
+            "opening_basis": opening_basis,
             "capital_flow_trace": flow_trace,
+            **performance,
         }
+
+
+def _derive_first_available_nav_epoch(
+    facts: _IndependentEpochFacts,
+) -> dict[str, object]:
+    """Derive one standalone epoch without producer calls."""
+
+    return _derive_independent_epoch(facts)
 
 
 def _parse_predecessor_fact(raw: object) -> _IndependentPredecessorFact:
@@ -1544,67 +1734,32 @@ def _derive_predecessor_closing_nav_epoch(
     ):
         _fail()
     _validate_predecessor_adjacency(predecessor, facts)
-
-    opening_nav = _IndependentNavFact(
-        predecessor.closing_nav_date,
-        predecessor.closing_nav_currency,
-        predecessor.closing_nav_value,
-    )
-    combined = _IndependentEpochFacts(
-        facts.account_id,
-        predecessor.closing_nav_date,
-        facts.end,
-        (opening_nav, *facts.navs),
-        facts.flows,
-        None,
-        facts.dual_date_trace,
-    )
-    row = _derive_first_available_nav_epoch(combined)
-    row["start"] = facts.navs[0].as_of_date.isoformat()
-    row["nav_observations"] = len(facts.navs)
-    row["opening_basis"] = "PREDECESSOR_CLOSING_NAV"
-    return row
+    return _derive_independent_epoch(facts, predecessor)
 
 
 def _recognition_legs_attach_to_observed_intervals(
     facts: _IndependentEpochFacts,
     predecessor: _IndependentPredecessorFact | None = None,
 ) -> bool:
-    """Test recognition linkage without deriving or trusting producer numerics."""
+    """Test recognition linkage without deriving or trusting producer numerics.
+
+    Every capital flow must be recognized by an observation of the epoch.  An
+    opening that is not a predecessor closing NAV -- a first available NAV or
+    a provider capital anchor -- already contains the cash recognized on or
+    before it, so those legs carry no linkage obligation.
+    """
 
     funded = tuple(nav for nav in facts.navs if nav.value > 0)
     if not funded:
         return False
-    intervals: list[tuple[date, date]] = []
     first = funded[0]
-    if predecessor is not None:
-        intervals.append((predecessor.closing_nav_date, first.as_of_date))
-    elif facts.opening_anchor is not None:
-        intervals.append((facts.opening_anchor.event_date, first.as_of_date))
-    intervals.extend(
-        (prior.as_of_date, current.as_of_date)
-        for prior, current in zip(funded, funded[1:])
+    last = facts.navs[-1]
+    flows = (
+        facts.flows
+        if predecessor is not None
+        else tuple(flow for flow in facts.flows if flow.recognition > first.as_of_date)
     )
-    flows = facts.flows
-    if predecessor is None:
-        # An opening that is not a predecessor's closing NAV -- a first
-        # available NAV or a provider capital anchor -- already contains the
-        # cash recognized on or before it, so those legs carry no linkage
-        # obligation.
-        flows = tuple(
-            flow
-            for flow in flows
-            if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
-        )
-    return all(
-        any(
-            interval_start
-            < (flow.nav_recognition_date or flow.event_date)
-            <= interval_end
-            for interval_start, interval_end in intervals
-        )
-        for flow in flows
-    )
+    return all(flow.recognition <= last.as_of_date for flow in flows)
 
 
 @dataclass(frozen=True)
@@ -1672,6 +1827,7 @@ _NUMERIC_PROJECTION_FIELDS: Final[frozenset[str]] = frozenset(
         "start",
         "end",
         "opening_capital",
+        "opening_capital_date",
         "deposits",
         "internal_in",
         "invested",
@@ -1691,6 +1847,14 @@ _NUMERIC_PROJECTION_FIELDS: Final[frozenset[str]] = frozenset(
         "nav_observations",
         "observation_trace",
         "capital_flow_trace",
+        "performance_status",
+        "performance_reason",
+        "performance_opening_date",
+        "performance_opening_value",
+        "performance_opening_basis",
+        "performance_flags",
+        "performance_flow_legs",
+        "flow_count",
     }
 )
 _NUMERIC_MONEY_FIELDS: Final[tuple[str, ...]] = (
@@ -1709,8 +1873,6 @@ _NUMERIC_RATE_FIELDS: Final[tuple[str, ...]] = (
     "return_on_net_capital",
     "annualized_return_on_net_capital",
     "xirr_diagnostic",
-)
-_NUMERIC_OBSERVATION_FIELDS: Final[tuple[str, ...]] = (
     "observation_linked_return",
     "observed_hwm_index",
     "observed_max_drawdown",
@@ -1720,7 +1882,9 @@ _NUMERIC_TRACE_FIELDS: Final[frozenset[str]] = frozenset(
         "start_date",
         "end_date",
         "base_nav",
+        "beginning_flow",
         "ending_nav",
+        "ending_flow",
         "net_flow",
         "factor",
         "cumulative_index",
@@ -1730,7 +1894,9 @@ _NUMERIC_TRACE_FIELDS: Final[frozenset[str]] = frozenset(
 )
 _NUMERIC_TRACE_VALUE_FIELDS: Final[tuple[str, ...]] = (
     "base_nav",
+    "beginning_flow",
     "ending_nav",
+    "ending_flow",
     "net_flow",
     "factor",
     "cumulative_index",
@@ -1738,14 +1904,31 @@ _NUMERIC_TRACE_VALUE_FIELDS: Final[tuple[str, ...]] = (
     "drawdown",
 )
 _NUMERIC_TRACE_MONEY_FIELDS: Final[frozenset[str]] = frozenset(
-    {"base_nav", "ending_nav", "net_flow"}
+    {"base_nav", "beginning_flow", "ending_nav", "ending_flow", "net_flow"}
 )
 _NUMERIC_FLOW_FIELDS: Final[frozenset[str]] = frozenset({"class", "date", "amount"})
 _NUMERIC_FLOW_FIELDS_V9: Final[frozenset[str]] = frozenset(
     {"class", "event_date", "nav_recognition_date", "amount"}
 )
+_NUMERIC_LEG_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "class",
+        "event_date",
+        "nav_recognition_date",
+        "economic_date",
+        "timing",
+        "amount",
+    }
+)
 _NUMERIC_CLASSES: Final[frozenset[str]] = frozenset(
     {"EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"}
+)
+_PERFORMANCE_OPENING_BASES: Final[frozenset[str]] = frozenset(
+    {
+        "LAST_OBSERVATION_BEFORE_START",
+        "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START",
+        "PREDECESSOR_CLOSING_NAV",
+    }
 )
 
 
@@ -1782,37 +1965,24 @@ def _parse_numeric_projection(
     if not isinstance(row, Mapping) or set(row) != _NUMERIC_PROJECTION_FIELDS:
         _fail()
 
-    dates = tuple(_parse_canonical_date(row[field]) for field in ("start", "end"))
-    money = tuple(
-        _projection_decimal(
-            row[field],
-            money=True,
-            expected=expected,
-            _retained_money=_retained_money,
+    def decimal_value(value: object, *, money: bool) -> Decimal:
+        return _projection_decimal(
+            value, money=money, expected=expected, _retained_money=_retained_money
         )
-        for field in _NUMERIC_MONEY_FIELDS
+
+    def optional_date(value: object) -> date | None:
+        return None if value is None else _parse_canonical_date(value)
+
+    dates = tuple(
+        _parse_canonical_date(row[field])
+        for field in ("start", "end", "opening_capital_date")
+    )
+    money = tuple(
+        decimal_value(row[field], money=True) for field in _NUMERIC_MONEY_FIELDS
     )
     rates = tuple(
-        (
-            None
-            if row[field] is None
-            else _projection_decimal(
-                row[field],
-                money=False,
-                expected=expected,
-                _retained_money=_retained_money,
-            )
-        )
+        None if row[field] is None else decimal_value(row[field], money=False)
         for field in _NUMERIC_RATE_FIELDS
-    )
-    observations = tuple(
-        _projection_decimal(
-            row[field],
-            money=False,
-            expected=expected,
-            _retained_money=_retained_money,
-        )
-        for field in _NUMERIC_OBSERVATION_FIELDS
     )
     basis = row["opening_basis"]
     if type(basis) is not str or basis not in {
@@ -1840,11 +2010,8 @@ def _parse_numeric_projection(
                 _parse_canonical_date(link["start_date"]),
                 _parse_canonical_date(link["end_date"]),
                 *(
-                    _projection_decimal(
-                        link[field],
-                        money=field in _NUMERIC_TRACE_MONEY_FIELDS,
-                        expected=expected,
-                        _retained_money=_retained_money,
+                    decimal_value(
+                        link[field], money=field in _NUMERIC_TRACE_MONEY_FIELDS
                     )
                     for field in _NUMERIC_TRACE_VALUE_FIELDS
                 ),
@@ -1880,24 +2047,81 @@ def _parse_numeric_projection(
                     if dual_date_trace
                     else (_parse_canonical_date(flow["date"]),)
                 ),
-                _projection_decimal(
-                    flow["amount"],
-                    money=True,
-                    expected=expected,
-                    _retained_money=_retained_money,
-                ),
+                decimal_value(flow["amount"], money=True),
             )
         )
+
+    status = row["performance_status"]
+    reason = row["performance_reason"]
+    opening_basis = row["performance_opening_basis"]
+    if (
+        status not in {"AVAILABLE", "UNAVAILABLE"}
+        or (reason is not None and (type(reason) is not str or not reason))
+        or (
+            opening_basis is not None
+            and opening_basis not in _PERFORMANCE_OPENING_BASES
+        )
+    ):
+        _fail()
+    opening_value = row["performance_opening_value"]
+    flags = row["performance_flags"]
+    if type(flags) is not list or not all(flag == "INFERRED_TIMING" for flag in flags):
+        _fail()
+    flow_count = row["flow_count"]
+    if flow_count is not None and (type(flow_count) is not int or flow_count < 0):
+        _fail()
+    raw_legs = row["performance_flow_legs"]
+    if type(raw_legs) is not list:
+        _fail()
+    parsed_legs: list[tuple[object, ...]] = []
+    for leg in raw_legs:
+        if not isinstance(leg, Mapping) or set(leg) != _NUMERIC_LEG_FIELDS:
+            _fail()
+        if leg["class"] not in _NUMERIC_CLASSES or leg["timing"] not in {
+            _DATE_ONLY,
+            _EXACT_TIMESTAMP,
+        }:
+            _fail()
+        parsed_legs.append(
+            (
+                leg["class"],
+                _parse_canonical_date(leg["event_date"]),
+                _parse_canonical_date(leg["nav_recognition_date"]),
+                optional_date(leg["economic_date"]),
+                leg["timing"],
+                decimal_value(leg["amount"], money=True),
+            )
+        )
+    # Observation metrics exist exactly when the performance is available.
+    observation_metrics = rates[3:]
+    if (status == "AVAILABLE") != all(
+        value is not None for value in observation_metrics
+    ):
+        _fail()
+    if status == "UNAVAILABLE" and (
+        any(value is not None for value in observation_metrics)
+        or parsed_links
+        or flags
+        or reason is None
+    ):
+        _fail()
 
     return (
         *dates,
         *money,
         *rates,
-        *observations,
         basis,
         nav_observations,
         tuple(parsed_links),
         tuple(parsed_flows),
+        status,
+        reason,
+        optional_date(row["performance_opening_date"]),
+        None if opening_value is None else decimal_value(opening_value, money=True),
+        opening_basis,
+        tuple(flags),
+        tuple(parsed_legs),
+        flow_count,
     )
 
 
@@ -2018,7 +2242,12 @@ def _derive_independent_mwr_projection(
     fact_form: object,
     bridge: Mapping[str, object],
 ) -> dict[str, object]:
-    """Rebuild the source-bound MWR vector without calling the producer."""
+    """Rebuild the source-bound MWR vector without calling the producer.
+
+    Investor cash flows start at the performance opening valuation; a
+    date-only leg is dated at its NAV recognition, an exact-timestamp fill at
+    its economic fill date, and without that date the MWR fails closed (R4).
+    """
 
     numeric = _independent_mixed_numeric_row(fact_form)
     ledger = bridge.get("ledger")
@@ -2032,19 +2261,14 @@ def _derive_independent_mwr_projection(
         _fail()
     account_id = _fact_text(assignment.get("account_id"))
     strategy_id = _fact_text(assignment.get("strategy_id"))
-    trace = numeric.get("observation_trace")
-    if (
-        not isinstance(trace, Mapping)
-        or not isinstance(trace.get("links"), list)
-        or not trace["links"]
-    ):
-        _fail()
-    first_link = trace["links"][0]
-    if not isinstance(first_link, Mapping):
-        _fail()
-    opening_date = _parse_canonical_date(first_link.get("start_date"))
+    raw_opening_date = numeric.get("performance_opening_date")
+    if raw_opening_date is None:
+        return _mwr_blocked_projection(
+            "BLOCKED_ADMISSION", "PERFORMANCE_OPENING_UNAVAILABLE", coverage="BLOCKED"
+        )
+    opening_date = _parse_canonical_date(raw_opening_date)
     terminal_date = _parse_canonical_date(numeric.get("end"))
-    opening_value = numeric.get("opening_capital")
+    opening_value = numeric.get("performance_opening_value")
     terminal_value = numeric.get("current_value")
     if type(opening_value) is not Decimal or type(terminal_value) is not Decimal:
         _fail()
@@ -2071,31 +2295,56 @@ def _derive_independent_mwr_projection(
         )
 
     opening_anchor_ids: set[str] = set()
-    allocation_ids: dict[tuple[str, str, date, date], set[str]] = {}
+    allocation_economics: dict[
+        tuple[str, str, date, date, Decimal], dict[date | None, set[str]]
+    ] = {}
     for anchor in anchors:
         if not isinstance(anchor, Mapping):
             _fail()
-        if (
-            _fact_text(anchor.get("account_id")) != account_id
-            or _fact_text(anchor.get("strategy_id")) != strategy_id
-        ):
-            continue
+        anchor_account = _fact_text(anchor.get("account_id"))
+        anchor_strategy = _fact_text(anchor.get("strategy_id"))
         anchor_type = _fact_text(anchor.get("capital_type"))
         event_date = _parse_canonical_date(anchor.get("event_date"))
         recognition_date = _parse_canonical_date(anchor.get("nav_recognition_date"))
         source_id = _fact_text(anchor.get("source_record_id"))
-        if anchor_type == "OPENING_CAPITAL_ANCHOR" and event_date == opening_date:
-            opening_anchor_ids.add(source_id)
-        elif anchor_type == "STRATEGY_CAPITAL_ALLOCATION":
-            allocation_ids.setdefault(
-                (account_id, strategy_id, event_date, recognition_date), set()
-            ).add(source_id)
-        elif anchor_type != "OPENING_CAPITAL_ANCHOR":
+        if anchor_type == "STRATEGY_CAPITAL_ALLOCATION":
+            money = anchor.get("amount")
+            if not isinstance(money, Mapping):
+                _fail()
+            raw_economic = anchor.get("economic_date")
+            economic_date = (
+                None if raw_economic is None else _parse_canonical_date(raw_economic)
+            )
+            if economic_date is not None and not (
+                event_date <= economic_date <= recognition_date
+            ):
+                _fail()
+            # The raw anchor economic date is part of the allocation identity:
+            # an exact-timestamp fill binds its MWR cash date to this source
+            # value, never to a published flow leg's own economic date.
+            allocation_economics.setdefault(
+                (
+                    anchor_account,
+                    anchor_strategy,
+                    event_date,
+                    recognition_date,
+                    _parse_retained_source_decimal(money.get("value")),
+                ),
+                {},
+            ).setdefault(economic_date, set()).add(source_id)
+        elif anchor_type == "OPENING_CAPITAL_ANCHOR":
+            if (
+                anchor_account == account_id
+                and anchor_strategy == strategy_id
+                and recognition_date == opening_date
+            ):
+                opening_anchor_ids.add(source_id)
+        else:
             _fail()
 
     opening_navs = nav_sources.get((account_id, opening_date), [])
     terminal_navs = nav_sources.get((account_id, terminal_date), [])
-    if (not opening_navs and not opening_anchor_ids) or not terminal_navs:
+    if not opening_navs or not terminal_navs:
         return _mwr_blocked_projection(
             "BLOCKED_ADMISSION", "NAV_SOURCE_IDENTITY_UNAVAILABLE", coverage="COMPLETE"
         )
@@ -2111,7 +2360,7 @@ def _derive_independent_mwr_projection(
     basis = next(iter(bases))
     currency = next(iter(currencies))
 
-    event_ids: dict[tuple[str, str, date, date], set[str]] = {}
+    event_ids: dict[tuple[str, str, date, date, Decimal], set[str]] = {}
     for event in events:
         if not isinstance(event, Mapping):
             _fail()
@@ -2122,66 +2371,96 @@ def _derive_independent_mwr_projection(
         disposition = event.get("disposition")
         if disposition not in {"EXTERNAL", "INTERNAL"}:
             _fail()
-        event_date = _parse_canonical_date(event.get("event_date"))
-        recognition_date = _parse_canonical_date(event.get("nav_recognition_date"))
-        flow_class = f"{disposition}_{'IN' if amount > 0 else 'OUT'}"
         event_ids.setdefault(
-            (event_account, flow_class, event_date, recognition_date), set()
+            (
+                event_account,
+                f"{disposition}_{'IN' if amount > 0 else 'OUT'}",
+                _parse_canonical_date(event.get("event_date")),
+                _parse_canonical_date(event.get("nav_recognition_date")),
+                abs(amount),
+            ),
+            set(),
         ).add(_fact_text(event.get("source_record_id")))
 
-    grouped: dict[date, tuple[Decimal, set[str]]] = {}
-
-    def add_leg(when: date, amount: Decimal, source_ids: set[str]) -> bool:
-        if not source_ids:
-            return False
-        prior_amount, prior_ids = grouped.get(when, (Decimal(0), set()))
-        with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
-            grouped[when] = (prior_amount + amount, prior_ids | source_ids)
-        return True
-
-    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
-        opening_leg = -opening_value
-    complete = add_leg(
-        opening_date,
-        opening_leg,
-        {item[0] for item in opening_navs} | opening_anchor_ids,
-    )
-    flow_trace = numeric.get("capital_flow_trace")
-    if not isinstance(flow_trace, list):
+    legs = numeric.get("performance_flow_legs")
+    if not isinstance(legs, list):
         _fail()
-    for flow in flow_trace:
-        if not isinstance(flow, Mapping):
+    complete = True
+    dated: list[tuple[date, Decimal, set[str]]] = []
+    missing_fill_date = False
+    for leg in legs:
+        if not isinstance(leg, Mapping):
             _fail()
-        flow_class = _fact_text(flow.get("class"))
-        event_date = _parse_canonical_date(flow.get("event_date"))
-        recognition_date = _parse_canonical_date(flow.get("nav_recognition_date"))
-        flow_amount = flow.get("amount")
-        if type(flow_amount) is not Decimal:
+        flow_class = _fact_text(leg.get("class"))
+        event_date = _parse_canonical_date(leg.get("event_date"))
+        recognition_date = _parse_canonical_date(leg.get("nav_recognition_date"))
+        amount = leg.get("amount")
+        if type(amount) is not Decimal:
             _fail()
-        source_ids = set(
-            event_ids.get((account_id, flow_class, event_date, recognition_date), set())
-        )
-        if flow_class == "INTERNAL_IN":
-            source_ids.update(
-                allocation_ids.get(
-                    (account_id, strategy_id, event_date, recognition_date), set()
-                )
+        economic = leg.get("economic_date")
+        if leg.get("timing") == _EXACT_TIMESTAMP and flow_class == "INTERNAL_IN":
+            economics = allocation_economics.get(
+                (account_id, strategy_id, event_date, recognition_date, amount)
             )
+            if economics is None:
+                source_ids: set[str] = set()
+            elif economic is None:
+                source_ids = economics.get(None, set())
+            else:
+                leg_economic = _parse_canonical_date(economic)
+                # The published leg's economic date must bind to the raw
+                # anchor's economic date; the MWR cash date is that matched
+                # source value, and a differing published date fails closed.
+                source_ids = economics.get(leg_economic, set())
+                if not source_ids:
+                    _fail()
+        else:
+            source_ids = event_ids.get(
+                (account_id, flow_class, event_date, recognition_date, amount), set()
+            )
+        complete = complete and bool(source_ids)
+        if leg.get("timing") == _EXACT_TIMESTAMP:
+            if economic is None:
+                missing_fill_date = True
+                continue
+            cash_date = _parse_canonical_date(economic)
+        else:
+            cash_date = recognition_date
         with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
             investor_amount = (
-                -flow_amount
-                if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"}
-                else flow_amount
+                -amount if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else amount
             )
-        complete = add_leg(event_date, investor_amount, source_ids) and complete
-    complete = (
-        add_leg(terminal_date, terminal_value, {item[0] for item in terminal_navs})
-        and complete
-    )
+        dated.append((cash_date, investor_amount, set(source_ids)))
     if not complete:
         return _mwr_blocked_projection(
             "BLOCKED_ADMISSION", "FLOW_SOURCE_IDENTITY_UNAVAILABLE", coverage="COMPLETE"
         )
+    if missing_fill_date:
+        return _mwr_blocked_projection(
+            "BLOCKED_ADMISSION",
+            "EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE",
+            coverage="BLOCKED",
+        )
+    if any(cash_date < opening_date for cash_date, _, _ in dated):
+        _fail()
+
+    grouped: dict[date, tuple[Decimal, set[str]]] = {}
+
+    def add(when: date, amount: Decimal, source_ids: set[str]) -> None:
+        prior_amount, prior_ids = grouped.get(when, (Decimal(0), set()))
+        with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+            grouped[when] = (prior_amount + amount, prior_ids | source_ids)
+
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        opening_leg = -opening_value
+    add(
+        opening_date,
+        opening_leg,
+        {item[0] for item in opening_navs} | opening_anchor_ids,
+    )
+    for cash_date, investor_amount, source_ids in dated:
+        add(cash_date, investor_amount, source_ids)
+    add(terminal_date, terminal_value, {item[0] for item in terminal_navs})
     cashflows = [
         (when, amount) for when, (amount, _) in sorted(grouped.items()) if amount
     ]
@@ -2209,7 +2488,7 @@ def _derive_independent_mwr_projection(
             "STRATEGY_EPOCH_MWR" if basis == "STRATEGY_NAV" else "ACCOUNT_EPOCH_MWR"
         ),
         "mwr_value_basis": basis,
-        "mwr_valuation_timing": "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE",
+        "mwr_valuation_timing": "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE",
         "mwr_day_count": "ACTUAL_365",
         "mwr_unit": "ANNUALIZED_RETURN",
         "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
@@ -2374,6 +2653,9 @@ def _selected_identity(
         )
         result["manifest_schema"] = _snapshot_identity(
             _require_snapshot(selected.manifest_schema)
+        )
+        result["membership_census"] = _snapshot_identity(
+            _require_snapshot(selected.membership_census)
         )
     if selected.current_epoch_crosswalk is not None:
         result["current_epoch_crosswalk"] = _snapshot_identity(
@@ -4915,7 +5197,30 @@ def _mixed_admitted_fact_projection(
         )
     ):
         _fail()
-    projected_navs = [nav for nav in navs if in_funded_epoch(nav, "as_of_date")]
+    # R1: each funded epoch opens at its account's last observation before the
+    # funded start, so that one observation (of any status) is projected too.
+    opening_record_ids: set[object] = set()
+    for route in funded_routes:
+        route_account = route["selected_assignment"]["account_id"]
+        route_start = _date_value(route["selected_assignment"]["effective_start"])
+        prior = [
+            nav
+            for nav in navs
+            if nav.get("account_id") == route_account
+            and _date_value(nav.get("as_of_date")) < route_start
+        ]
+        if prior:
+            opening_record_ids.add(
+                max(prior, key=lambda nav: _date_value(nav.get("as_of_date"))).get(
+                    "record_id"
+                )
+            )
+    projected_navs = [
+        nav
+        for nav in navs
+        if in_funded_epoch(nav, "as_of_date")
+        or nav.get("record_id") in opening_record_ids
+    ]
 
     def anchor_membership_date(anchor: Mapping[str, object]) -> object:
         if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
@@ -5238,6 +5543,46 @@ def _selected_mixed_admission_bytes(
     return canonical_json_bytes(policy), policy
 
 
+def _independent_membership_census(
+    payload: Mapping[str, object],
+) -> dict[tuple[str, str, str, str | None], list[str]]:
+    """Index the governed current census without the producer's loader.
+
+    The census names redacted sleeve aliases, not account ids, so an interval
+    is identified by ``(provider, strategy, effective_start, effective_end)``
+    and carries the multiset of its sleeves' membership statuses.  That is
+    enough to bound how many account epochs of one interval can be funded
+    (R2) without the private account crosswalk.
+    """
+
+    census = payload.get("current_census")
+    sleeves = census.get("account_sleeves") if isinstance(census, Mapping) else None
+    if not isinstance(sleeves, list):
+        _fail()
+    statuses: dict[tuple[str, str, str, str | None], list[str]] = {}
+    for sleeve in sleeves:
+        if not isinstance(sleeve, Mapping) or not isinstance(
+            sleeve.get("assignments"), list
+        ):
+            _fail()
+        provider = _fact_text(sleeve.get("provider_id")).upper()
+        for assignment in sleeve["assignments"]:
+            if not isinstance(assignment, Mapping):
+                _fail()
+            status = _fact_text(assignment.get("status"))
+            if status not in _CENSUS_MEMBERSHIP_STATUSES:
+                _fail()
+            end = assignment.get("effective_end")
+            interval = (
+                provider,
+                _fact_text(assignment.get("strategy_id")),
+                _parse_canonical_date(assignment.get("effective_start")).isoformat(),
+                None if end is None else _parse_canonical_date(end).isoformat(),
+            )
+            statuses.setdefault(interval, []).append(status)
+    return statuses
+
+
 def _verify_mixed_admission(
     selected: IndependentVerifierInputs,
     normalized: Mapping[str, bytes],
@@ -5390,6 +5735,38 @@ def _verify_mixed_admission(
         full_by_account.setdefault(account_id, []).append(raw_assignment)
     for chain in full_by_account.values():
         chain.sort(key=lambda row: str(row["effective_start"]))
+    # R2: only census FUNDED_MEMBERSHIP intervals may be admitted as funded.
+    # Each census interval bounds how many account epochs of the same
+    # provider, strategy and interval may be funded; every other funded
+    # admission fails closed.  A FUNDED-to-ASSIGNMENT_ONLY membership
+    # transition inside one strategy is judged per epoch: an epoch inside
+    # the census funded interval stays admissible and only a funded epoch
+    # of the post-transition interval is rejected.
+    census_payload = _strict_object(
+        _require_snapshot(selected.membership_census).contents
+    )
+    census = _independent_membership_census(census_payload)
+    census_providers = _baseline_account_providers(baseline.get("accounts"))
+    funded_counts: dict[tuple[str, str, str, str | None], int] = {}
+    for key, policy_row in admission_by_key.items():
+        if policy_row.get("status") != "FUNDED":
+            continue
+        provider = census_providers.get(str(key[0]))
+        if not isinstance(provider, str) or not provider:
+            _fail()
+        interval = (
+            provider.upper(),
+            _fact_text(key[1]),
+            _parse_canonical_date(key[2]).isoformat(),
+            None if key[3] is None else _parse_canonical_date(key[3]).isoformat(),
+        )
+        funded_counts[interval] = funded_counts.get(interval, 0) + 1
+    for interval, count in funded_counts.items():
+        interval_statuses = census.get(interval)
+        if interval_statuses is None:
+            _fail()
+        if count > sum(status == "FUNDED_MEMBERSHIP" for status in interval_statuses):
+            _fail()
     predecessor_by_key: dict[tuple[object, ...], dict[str, object]] = {}
     for key, policy_row in admission_by_key.items():
         if policy_row["continuity_to_successor"] is not True:
@@ -5490,16 +5867,32 @@ def _mixed_numeric_facts(
         or type(currency) is not str
     ):
         _fail()
+    effective_start = _date_value(assignment["effective_start"])
     nav_facts: list[dict[str, object]] = []
     navs = ledger.get("nav_observations")
     if not isinstance(navs, list):
         _fail()
+    pre_start_nav: tuple[date, Decimal | None] | None = None
     for nav in navs:
         if not isinstance(nav, dict):
             _fail()
         if nav.get("account_id") != assignment["account_id"]:
             continue
         amount = nav.get("nav")
+        nav_date = _date_value(nav.get("as_of_date"))
+        if nav_date < effective_start and (
+            pre_start_nav is None or nav_date > pre_start_nav[0]
+        ):
+            # R1: the last observation before the funded start, whatever its
+            # status, is the only candidate opening before the epoch.
+            pre_start_nav = (
+                nav_date,
+                (
+                    _parse_retained_source_decimal(amount.get("value"))
+                    if isinstance(amount, dict) and amount.get("status") == "AVAILABLE"
+                    else None
+                ),
+            )
         if not isinstance(amount, dict) or amount.get("status") != "AVAILABLE":
             continue
         nav_facts.append(
@@ -5529,6 +5922,7 @@ def _mixed_numeric_facts(
                 "classification": f"{disposition}_{'IN' if amount > 0 else 'OUT'}",
                 "currency": currency,
                 "amount": _format_decimal(abs(amount)),
+                "source_record_id": event.get("source_record_id"),
             }
         )
     epoch_anchors = [
@@ -5564,6 +5958,7 @@ def _mixed_numeric_facts(
                 if isinstance(raw_opening.get("amount"), dict)
                 else None
             ),
+            _parse_retained_source_decimal(opening_nav.get("value")),
         )
     allocation_facts: list[_IndependentFlowFact] = []
     for allocation in epoch_anchors:
@@ -5582,6 +5977,15 @@ def _mixed_numeric_facts(
         allocation_recognition = _date_value(allocation.get("nav_recognition_date"))
         if allocation_recognition < allocation_event:
             _fail()
+        raw_economic = allocation.get("economic_date")
+        allocation_economic = (
+            None if raw_economic is None else _date_value(raw_economic)
+        )
+        if allocation_economic is not None and not (
+            allocation_event <= allocation_economic <= allocation_recognition
+        ):
+            _fail()
+        # A provider fund allocation is an exact-timestamp fill.
         allocation_facts.append(
             _IndependentFlowFact(
                 allocation_event,
@@ -5589,6 +5993,9 @@ def _mixed_numeric_facts(
                 currency,
                 _parse_retained_source_decimal(amount.get("value")),
                 allocation_recognition,
+                _fact_text(allocation.get("source_record_id")),
+                _EXACT_TIMESTAMP,
+                allocation_economic,
             )
         )
     cutoff = _current_epoch_calculation_cutoff(selected)
@@ -5603,32 +6010,18 @@ def _mixed_numeric_facts(
         nav_facts,
         flow_facts,
         account_id=str(assignment["account_id"]),
-        start=_date_value(assignment["effective_start"]),
+        start=effective_start,
         end=assignment_end,
         _retained_money=True,
         _dual_date_trace=True,
         opening_anchor=opening_anchor,
+        pre_start_nav=pre_start_nav,
     )
     for allocation in allocation_facts:
         if not facts.start <= allocation.event_date <= facts.end:
             _fail()
-    aggregate: dict[tuple[date, date, str, str], Decimal] = {}
-    for flow in (*facts.flows, *allocation_facts):
-        key = (
-            flow.event_date,
-            flow.nav_recognition_date or flow.event_date,
-            flow.classification,
-            flow.currency,
-        )
-        aggregate[key] = aggregate.get(key, Decimal(0)) + flow.amount
     combined_flows = tuple(
-        _IndependentFlowFact(event, flow_class, flow_currency, amount, recognition)
-        for (
-            event,
-            recognition,
-            flow_class,
-            flow_currency,
-        ), amount in sorted(aggregate.items())
+        sorted((*facts.flows, *allocation_facts), key=_IndependentFlowFact.order_key)
     )
     return _IndependentEpochFacts(
         facts.account_id,
@@ -5638,6 +6031,7 @@ def _mixed_numeric_facts(
         combined_flows,
         facts.opening_anchor,
         facts.dual_date_trace,
+        facts.pre_start_nav,
     )
 
 

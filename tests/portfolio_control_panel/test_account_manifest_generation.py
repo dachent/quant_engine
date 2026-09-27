@@ -458,6 +458,7 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
             "receipt_authority": selected_base.receipt_authority,
             "admission_policy": selected_base.admission_policy,
             "manifest_schema": selected_base.manifest_schema,
+            "membership_census": selected_base.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "interleaved current epoch crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -872,6 +873,7 @@ def _with_later_baseline_date(module: Any, selected: object) -> object:
                 "receipt_authority": selected.receipt_authority,
                 "admission_policy": selected.admission_policy,
                 "manifest_schema": selected.manifest_schema,
+                "membership_census": selected.membership_census,
             }
         )
     return module.AccountManifestSelectedInputs(**values)
@@ -1850,6 +1852,8 @@ def test_v7_excludes_v8_subjects_and_old_admission_loader_rejects_generated_v1(
             ),
             [],
             {},
+            membership_census={},
+            providers={},
         )
 
 
@@ -4571,6 +4575,8 @@ def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
                     "end_date": "2026-01-05",
                     "base_nav": Decimal("100"),
                     "ending_nav": Decimal("180"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("50"),
                     "net_flow": Decimal("50"),
                     "factor": Decimal("1.3"),
                     "cumulative_index": Decimal("130"),
@@ -4582,6 +4588,8 @@ def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
                     "end_date": "2026-01-09",
                     "base_nav": Decimal("180"),
                     "ending_nav": Decimal("117"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("0"),
                     "net_flow": Decimal("0"),
                     "factor": Decimal("0.65"),
                     "cumulative_index": Decimal("84.5"),
@@ -4593,6 +4601,8 @@ def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
                     "end_date": "2026-01-12",
                     "base_nav": Decimal("117"),
                     "ending_nav": Decimal("150"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("0"),
                     "net_flow": Decimal("0"),
                     "factor": Decimal("1.282051282051282051282051282051282051282"),
                     "cumulative_index": Decimal(
@@ -4606,6 +4616,8 @@ def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
                     "end_date": "2027-01-02",
                     "base_nav": Decimal("150"),
                     "ending_nav": Decimal("150"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("0"),
                     "net_flow": Decimal("0"),
                     "factor": Decimal("1"),
                     "cumulative_index": Decimal(
@@ -4616,6 +4628,40 @@ def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
                 },
             ]
         },
+        "opening_capital_date": "2026-01-02",
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": "2026-01-02",
+        "performance_opening_value": Decimal("100"),
+        "performance_opening_basis": "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START",
+        "performance_flags": ["INFERRED_TIMING"],
+        "performance_flow_legs": [
+            {
+                "class": "EXTERNAL_IN",
+                "event_date": "2026-01-03",
+                "nav_recognition_date": "2026-01-03",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": Decimal("10"),
+            },
+            {
+                "class": "EXTERNAL_OUT",
+                "event_date": "2026-01-03",
+                "nav_recognition_date": "2026-01-03",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": Decimal("10"),
+            },
+            {
+                "class": "INTERNAL_IN",
+                "event_date": "2026-01-05",
+                "nav_recognition_date": "2026-01-05",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": Decimal("50"),
+            },
+        ],
+        "flow_count": 3,
         "capital_flow_trace": [
             {"class": "EXTERNAL_IN", "date": "2026-01-03", "amount": Decimal("10")},
             {"class": "EXTERNAL_OUT", "date": "2026-01-03", "amount": Decimal("10")},
@@ -5114,7 +5160,24 @@ def test_c4c2_epoch_arithmetic_rejects_funding_boundaries(
     elif mutation == "post_funded_nonpositive":
         navs[2]["value"] = "0.00"
     else:
+        # A non-positive link factor makes the epoch performance undefined;
+        # its capital accounting stays derivable (pre-change: whole row failed).
         navs[1]["value"] = "50.00"
+        navs, flows = _c4c2_numeric_projection(navs, flows)
+        facts = verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+        row = verifier_module._derive_first_available_nav_epoch(facts)
+        assert row["performance_status"] == "UNAVAILABLE"
+        assert row["performance_reason"] == "NONPOSITIVE_LINK_FACTOR"
+        assert row["observation_linked_return"] is None
+        assert row["observation_trace"] == {"links": []}
+        assert row["invested"] == Decimal("160")
+        return
     with pytest.raises(verifier_module.IndependentVerificationError):
         navs, flows = _c4c2_numeric_projection(navs, flows)
         facts = verifier_module._parse_epoch_facts(
@@ -6499,6 +6562,8 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
                     "end_date": "2026-02-06",
                     "base_nav": Decimal("120"),
                     "ending_nav": Decimal("198.8"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("78.8"),
                     "net_flow": Decimal("78.8"),
                     "factor": Decimal("1"),
                     "cumulative_index": Decimal("100"),
@@ -6510,6 +6575,8 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
                     "end_date": "2026-02-07",
                     "base_nav": Decimal("198.8"),
                     "ending_nav": Decimal("178.92"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("0"),
                     "net_flow": Decimal("0"),
                     "factor": Decimal("0.9"),
                     "cumulative_index": Decimal("90"),
@@ -6521,6 +6588,8 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
                     "end_date": "2026-02-08",
                     "base_nav": Decimal("178.92"),
                     "ending_nav": Decimal("204.02"),
+                    "beginning_flow": Decimal("0"),
+                    "ending_flow": Decimal("0"),
                     "net_flow": Decimal("0"),
                     "factor": Decimal("1.14028616141292197630225799239883746926"),
                     "cumulative_index": Decimal(
@@ -6533,6 +6602,24 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
                 },
             ]
         },
+        "opening_capital_date": "2026-02-05",
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": "2026-02-05",
+        "performance_opening_value": Decimal("120"),
+        "performance_opening_basis": "PREDECESSOR_CLOSING_NAV",
+        "performance_flags": ["INFERRED_TIMING"],
+        "performance_flow_legs": [
+            {
+                "class": "EXTERNAL_IN",
+                "event_date": "2026-02-06",
+                "nav_recognition_date": "2026-02-06",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": Decimal("78.8"),
+            },
+        ],
+        "flow_count": 1,
         "capital_flow_trace": [
             {
                 "class": "EXTERNAL_IN",
@@ -7610,6 +7697,8 @@ def _c4c4a_first_candidate() -> dict[str, object]:
                     "end_date": "2026-01-05",
                     "base_nav": "100",
                     "ending_nav": "180",
+                    "beginning_flow": "0",
+                    "ending_flow": "50",
                     "net_flow": "50",
                     "factor": "1.3",
                     "cumulative_index": "130",
@@ -7621,6 +7710,8 @@ def _c4c4a_first_candidate() -> dict[str, object]:
                     "end_date": "2026-01-09",
                     "base_nav": "180",
                     "ending_nav": "117",
+                    "beginning_flow": "0",
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": "0.65",
                     "cumulative_index": "84.5",
@@ -7632,6 +7723,8 @@ def _c4c4a_first_candidate() -> dict[str, object]:
                     "end_date": "2026-01-12",
                     "base_nav": "117",
                     "ending_nav": "150",
+                    "beginning_flow": "0",
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": "1.282051282051282051282051282051282051282",
                     "cumulative_index": "108.3333333333333333333333333333333333333",
@@ -7643,6 +7736,8 @@ def _c4c4a_first_candidate() -> dict[str, object]:
                     "end_date": "2027-01-02",
                     "base_nav": "150",
                     "ending_nav": "150",
+                    "beginning_flow": "0",
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": "1",
                     "cumulative_index": "108.3333333333333333333333333333333333333",
@@ -7651,6 +7746,40 @@ def _c4c4a_first_candidate() -> dict[str, object]:
                 },
             ]
         },
+        "opening_capital_date": "2026-01-02",
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": "2026-01-02",
+        "performance_opening_value": "100",
+        "performance_opening_basis": "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START",
+        "performance_flags": ["INFERRED_TIMING"],
+        "performance_flow_legs": [
+            {
+                "class": "EXTERNAL_IN",
+                "event_date": "2026-01-03",
+                "nav_recognition_date": "2026-01-03",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": "10",
+            },
+            {
+                "class": "EXTERNAL_OUT",
+                "event_date": "2026-01-03",
+                "nav_recognition_date": "2026-01-03",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": "10",
+            },
+            {
+                "class": "INTERNAL_IN",
+                "event_date": "2026-01-05",
+                "nav_recognition_date": "2026-01-05",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": "50",
+            },
+        ],
+        "flow_count": 3,
         "capital_flow_trace": [
             {"class": "EXTERNAL_IN", "date": "2026-01-03", "amount": "10"},
             {"class": "EXTERNAL_OUT", "date": "2026-01-03", "amount": "10"},
@@ -7736,6 +7865,8 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
                     "end_date": "2026-02-06",
                     "base_nav": "120",
                     "ending_nav": "198.8",
+                    "beginning_flow": "0",
+                    "ending_flow": "78.8",
                     "net_flow": "78.8",
                     "factor": "1",
                     "cumulative_index": "100",
@@ -7747,6 +7878,8 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
                     "end_date": "2026-02-07",
                     "base_nav": "198.8",
                     "ending_nav": "178.92",
+                    "beginning_flow": "0",
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": "0.9",
                     "cumulative_index": "90",
@@ -7758,6 +7891,8 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
                     "end_date": "2026-02-08",
                     "base_nav": "178.92",
                     "ending_nav": "204.02",
+                    "beginning_flow": "0",
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": "1.14028616141292197630225799239883746926",
                     "cumulative_index": "102.6257545271629778672032193158953722334",
@@ -7766,6 +7901,24 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
                 },
             ]
         },
+        "opening_capital_date": "2026-02-05",
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": "2026-02-05",
+        "performance_opening_value": "120",
+        "performance_opening_basis": "PREDECESSOR_CLOSING_NAV",
+        "performance_flags": ["INFERRED_TIMING"],
+        "performance_flow_legs": [
+            {
+                "class": "EXTERNAL_IN",
+                "event_date": "2026-02-06",
+                "nav_recognition_date": "2026-02-06",
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": "78.8",
+            },
+        ],
+        "flow_count": 1,
         "capital_flow_trace": [
             {"class": "EXTERNAL_IN", "date": "2026-02-06", "amount": "78.8"}
         ],
@@ -7829,13 +7982,24 @@ def test_c4c4a_projections_are_closed_and_comparator_private(
         "nav_observations",
         "observation_trace",
         "capital_flow_trace",
+        "opening_capital_date",
+        "performance_status",
+        "performance_reason",
+        "performance_opening_date",
+        "performance_opening_value",
+        "performance_opening_basis",
+        "performance_flags",
+        "performance_flow_legs",
+        "flow_count",
     }
     assert set(_c4c4a_first_candidate()) == expected
     assert set(_c4c4a_first_candidate()["observation_trace"]["links"][0]) == {
         "start_date",
         "end_date",
         "base_nav",
+        "beginning_flow",
         "ending_nav",
+        "ending_flow",
         "net_flow",
         "factor",
         "cumulative_index",
@@ -13842,6 +14006,8 @@ _C4C4B2B2C_RAW_ORACLE: dict[str, dict[str, object]] = {
                 (("withdrawn",), Decimal("10.01")),
                 (("capital_flow_trace", 0, "amount"), Decimal("10.01")),
                 (("capital_flow_trace", 1, "amount"), Decimal("10.01")),
+                (("performance_flow_legs", 0, "amount"), Decimal("10.01")),
+                (("performance_flow_legs", 1, "amount"), Decimal("10.01")),
             }
         ),
     },
@@ -13860,6 +14026,10 @@ _C4C4B2B2C_RAW_ORACLE: dict[str, dict[str, object]] = {
             {
                 (("capital_flow_trace", 0, "date"), "2026-01-04"),
                 (("capital_flow_trace", 1, "date"), "2026-01-04"),
+                (("performance_flow_legs", 0, "event_date"), "2026-01-04"),
+                (("performance_flow_legs", 0, "nav_recognition_date"), "2026-01-04"),
+                (("performance_flow_legs", 1, "event_date"), "2026-01-04"),
+                (("performance_flow_legs", 1, "nav_recognition_date"), "2026-01-04"),
             }
         ),
     },
@@ -13898,6 +14068,19 @@ _C4C4B2B2C_RAW_ORACLE: dict[str, dict[str, object]] = {
                         ("date", "2026-01-05"),
                     ),
                 ),
+                (("performance_flow_legs", 2, "amount"), Decimal("50.01")),
+                (
+                    ("performance_flow_legs", 3),
+                    (
+                        ("amount", Decimal("0.01")),
+                        ("class", "INTERNAL_OUT"),
+                        ("economic_date", None),
+                        ("event_date", "2026-01-05"),
+                        ("nav_recognition_date", "2026-01-05"),
+                        ("timing", "DATE_ONLY"),
+                    ),
+                ),
+                (("flow_count",), 4),
             }
         ),
     },
@@ -14112,8 +14295,10 @@ def _c4c4b2b2c_expected_row(
     for when, flow_class, amount in flows:
         signed = amount if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else -amount
         flow_by_date[when] = flow_by_date.get(when, Decimal("0")) + signed
-    cumulative = Decimal("100")
-    running_hwm = Decimal("100")
+    # Date-only flows leave the ending value of their sub-period (R1-R4):
+    # factor = (ending - flow) / base on a unit index published x100.
+    cumulative = Decimal("1")
+    running_hwm = Decimal("1")
     maximum_drawdown = Decimal("0")
     links: list[dict[str, object]] = []
     for (link_start, base_nav), (link_end, ending_nav) in zip(navs, navs[1:]):
@@ -14125,10 +14310,7 @@ def _c4c4b2b2c_expected_row(
             ),
             Decimal("0"),
         )
-        factor = exact_context.add(
-            Decimal("1"),
-            exact_context.divide(ending_nav - base_nav - net_flow, base_nav),
-        )
+        factor = exact_context.divide(ending_nav - net_flow, base_nav)
         cumulative = exact_context.multiply(cumulative, factor)
         running_hwm = max(running_hwm, cumulative)
         drawdown = exact_context.subtract(
@@ -14140,11 +14322,15 @@ def _c4c4b2b2c_expected_row(
                 "start_date": link_start.isoformat(),
                 "end_date": link_end.isoformat(),
                 "base_nav": base_nav,
+                "beginning_flow": Decimal("0"),
                 "ending_nav": ending_nav,
+                "ending_flow": net_flow,
                 "net_flow": net_flow,
                 "factor": factor,
-                "cumulative_index": cumulative,
-                "running_hwm_index": running_hwm,
+                "cumulative_index": exact_context.multiply(cumulative, Decimal("100")),
+                "running_hwm_index": exact_context.multiply(
+                    running_hwm, Decimal("100")
+                ),
                 "drawdown": drawdown,
             }
         )
@@ -14165,18 +14351,35 @@ def _c4c4b2b2c_expected_row(
         "return_on_net_capital": gain / net_capital,
         "annualized_return_on_net_capital": Decimal("0"),
         "xirr_diagnostic": Decimal("0"),
-        "observation_linked_return": exact_context.subtract(
-            exact_context.divide(cumulative, Decimal("100")), Decimal("1")
-        ),
-        "observed_hwm_index": running_hwm,
+        "observation_linked_return": exact_context.subtract(cumulative, Decimal("1")),
+        "observed_hwm_index": exact_context.multiply(running_hwm, Decimal("100")),
         "observed_max_drawdown": maximum_drawdown,
         "opening_basis": "FIRST_AVAILABLE_NAV",
+        "opening_capital_date": start.isoformat(),
         "nav_observations": len(navs),
         "observation_trace": {"links": links},
         "capital_flow_trace": [
             {"class": flow_class, "date": when.isoformat(), "amount": amount}
             for when, flow_class, amount in flows
         ],
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_opening_date": start.isoformat(),
+        "performance_opening_value": opening,
+        "performance_opening_basis": "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START",
+        "performance_flags": ["INFERRED_TIMING"] if flows else [],
+        "performance_flow_legs": [
+            {
+                "class": flow_class,
+                "event_date": when.isoformat(),
+                "nav_recognition_date": when.isoformat(),
+                "economic_date": None,
+                "timing": "DATE_ONLY",
+                "amount": amount,
+            }
+            for when, flow_class, amount in flows
+        ],
+        "flow_count": len(flows),
     }
 
 
@@ -21319,6 +21522,56 @@ def test_blocked_builder_rejects_a_complete_mixed_selection(
         )
 
 
+def _mixed_membership_census_snapshot() -> InputSnapshot:
+    """One governed FUNDED membership sleeve per mapped synthetic interval.
+
+    The two-receipt fixture also funds the SYNTHETIC2 lane account-02 epoch,
+    so that interval carries its own sleeve.
+    """
+
+    intervals = [
+        ("SYNTHETIC", f"synthetic-strategy-{number:02d}", "2025-01-01", None)
+        for number in range(1, 12)
+    ]
+    intervals.extend(
+        (
+            "SYNTHETIC",
+            f"synthetic-strategy-{number:02d}",
+            "2025-01-01",
+            "2025-12-31",
+        )
+        for number in range(12, 16)
+    )
+    intervals.append(("SYNTHETIC2", "synthetic-strategy-02", "2025-01-01", None))
+    intervals.extend(
+        (
+            ("SYNTHETIC", "synthetic-strategy-01a", "2025-01-01", "2026-01-28"),
+            ("SYNTHETIC", "synthetic-strategy-01b", "2026-01-29", None),
+        )
+    )
+    census = {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "assignments": [
+                        {
+                            "strategy_id": strategy_id,
+                            "effective_start": start,
+                            "effective_end": end,
+                            "status": "FUNDED_MEMBERSHIP",
+                        }
+                    ],
+                }
+                for provider, strategy_id, start, end in intervals
+            ]
+        }
+    }
+    return InputSnapshot.from_bytes(
+        "mixed membership census", canonical_json_bytes(census)
+    )
+
+
 def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
@@ -21526,6 +21779,7 @@ def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
             "manifest_schema": InputSnapshot.from_bytes(
                 "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
             ),
+            "membership_census": _mixed_membership_census_snapshot(),
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -21597,6 +21851,7 @@ def _mixed_crosswalk_selected_inputs(perimeter_module: Any) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "synthetic current epoch crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -21698,8 +21953,12 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
         row_key = (row["account_id"], row["strategy_id"], row["effective_start"])
         if row["account_id"] != "synthetic-account-01":
             assert row == baseline_rows[row_key]
-    assert ok_row["observation_trace"]["links"][0]["base_nav"] == "499"
-    assert ok_row["observation_trace"]["links"][0]["ending_nav"] == "50"
+    # R1/M3: the 499 USDT anchor amount stays the contributed capital basis
+    # only.  Pre-change it was linked as a USD value into the first return
+    # (499 -> 50); performance now opens at the first observation.
+    assert ok_row["performance_opening_value"] == "50"
+    assert ok_row["observation_trace"]["links"][0]["base_nav"] == "50"
+    assert ok_row["observation_trace"]["links"][0]["start_date"] == ok_row["start"]
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
@@ -21760,10 +22019,17 @@ def test_first_available_nav_absorbs_preopening_flow_and_counts_later_recognitio
     )
 
 
-def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
+def test_zero_nav_liquidation_run_is_linked_under_r3_not_bridged(
     verifier_module: Any,
 ) -> None:
-    """A reconciled zero liquidation gap is not a return base or a lost flow."""
+    """R3 (N4): earnings on zero capital make the epoch TWR undefined.
+
+    Pre-change a reconciled zero run was skipped and 01-01 was linked straight
+    to 01-04, so the 3.81 dividend on zero capital became a +11.85 % return
+    (factor 1.1185...).  The zeros are now linked: the liquidation sub-period
+    is flat, zero-to-zero is neutral, and re-opening without an inflow leaves
+    performance unavailable while the capital accounting stays intact.
+    """
 
     from tools import account_strategy_manifest as producer_module
 
@@ -21782,19 +22048,13 @@ def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
     assert "unavailable_status" not in producer_row
     assert producer_row["start"] == "2026-01-01"
     assert producer_row["end"] == "2026-01-05"
-    assert producer_row["nav_observations"] == 3
+    assert producer_row["nav_observations"] == 5
     assert producer_row["withdrawn"] == Decimal("32.15")
-    assert producer_row["observation_trace"]["links"][0] == {
-        "start_date": "2026-01-01",
-        "end_date": "2026-01-04",
-        "base_nav": Decimal("32.15"),
-        "ending_nav": Decimal("3.81"),
-        "net_flow": Decimal("-32.15"),
-        "factor": Decimal("1.118506998444790046656298600311041990669"),
-        "cumulative_index": Decimal("111.8506998444790046656298600311041990669"),
-        "running_hwm_index": Decimal("111.8506998444790046656298600311041990669"),
-        "drawdown": Decimal("0"),
-    }
+    assert producer_row["performance_status"] == "UNAVAILABLE"
+    assert producer_row["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert producer_row["observation_linked_return"] is None
+    assert producer_row["observation_trace"] == {"links": []}
+    assert producer_row["flow_count"] == 1
 
     facts = verifier_module._IndependentEpochFacts(
         "liquidation-account",
@@ -21819,12 +22079,32 @@ def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
         True,
     )
     verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
-    assert verifier_row["nav_observations"] == 3
+    assert verifier_row["nav_observations"] == 5
     assert verifier_row["withdrawn"] == Decimal("32.15")
-    assert verifier_row["observation_trace"]["links"][0]["end_date"] == "2026-01-04"
-    assert verifier_row["observation_trace"]["links"][0]["net_flow"] == Decimal(
-        "-32.15"
+    assert verifier_row["performance_status"] == "UNAVAILABLE"
+    assert verifier_row["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+
+    # Re-opening with a same-day inflow is defined: zero-to-zero links are
+    # neutral and the recapitalised sub-period links from the inflow.
+    reopened = producer_module.analyze_epoch(
+        {**navs, "2026-01-04": Decimal("40"), "2026-01-05": Decimal("41")},
+        {("2026-01-04", "2026-01-04"): Decimal("40")},
+        withdrawal,
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
     )
+    assert reopened is not None and reopened["performance_status"] == "AVAILABLE"
+    links = reopened["observation_trace"]["links"]
+    assert [link["factor"] for link in links] == [
+        Decimal("1"),
+        Decimal("1"),
+        Decimal("1"),
+        Decimal("1.025"),
+    ]
+    assert reopened["observation_linked_return"] == Decimal("0.025")
 
     invalid_cases = (
         ({("2026-01-02", "2026-01-02"): Decimal("32.14")}, navs),
@@ -21884,6 +22164,7 @@ def test_current_cutoff_excludes_future_economic_flow_despite_earlier_recognitio
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "earlier current cutoff", canonical_json_bytes(crosswalk)
             ),
@@ -21945,6 +22226,7 @@ def test_post_cutoff_allocation_is_source_lineage_not_calculation_input(
                 "later source admission", canonical_json_bytes(admission)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -22173,16 +22455,19 @@ def test_independent_verifier_rejects_coordinated_recognition_date_rewrite(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(item for item in output["rows"] if item["status"] == "OK")
     row["capital_flow_trace"][0]["nav_recognition_date"] = "2026-02-01"
-    row["observation_trace"]["links"][1].update(
+    row["performance_flow_legs"][0]["nav_recognition_date"] = "2026-02-01"
+    row["observation_trace"]["links"][0].update(
         {
+            "ending_flow": "0",
             "net_flow": "0",
             "factor": "1.2",
             "cumulative_index": "120",
             "running_hwm_index": "120",
         }
     )
-    row["observation_trace"]["links"][2].update(
+    row["observation_trace"]["links"][1].update(
         {
+            "ending_flow": "10",
             "net_flow": "10",
             "factor": "1",
             "cumulative_index": "120",
@@ -22209,6 +22494,7 @@ def test_gate1_synthetic_crosswalk_stages_and_reads_back(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "epoch_producer_source": InputSnapshot.from_bytes(
                 "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
             ),
@@ -22240,6 +22526,7 @@ def test_gate1_mixed_stage_rejects_missing_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "epoch_producer_source": InputSnapshot.from_bytes(
                 "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
             ),
@@ -22269,6 +22556,7 @@ def test_gate1_mixed_verifier_rejects_missing_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(verifier_module.IndependentVerificationError):
@@ -22284,6 +22572,7 @@ def _with_gate1_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "mutated Gate 1 crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -22881,6 +23170,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
             "manifest_schema": InputSnapshot.from_bytes(
                 "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
             ),
+            "membership_census": selected.membership_census,
         }
     )
     values["current_epoch_crosswalk"] = _rebound_current_epoch_crosswalk(
@@ -23077,6 +23367,7 @@ def _mixed_reselect_receipts(
                 )
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -23442,6 +23733,7 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
                 "continuity admission", canonical_json_bytes(admission)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**provisional)
@@ -23793,6 +24085,7 @@ def test_mixed_receipt_identifiers_reject_dynamic_path_collisions(
                 "receipt_authority": selected.receipt_authority,
                 "admission_policy": selected.admission_policy,
                 "manifest_schema": selected.manifest_schema,
+                "membership_census": selected.membership_census,
             }
         )
         with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
@@ -23922,6 +24215,7 @@ def test_mixed_receipt_cardinality_is_closed_at_fifteen(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     verifier_selected = verifier_module.IndependentVerifierInputs(**values)
@@ -24183,6 +24477,7 @@ def test_mixed_composer_retains_the_producer_validated_earlier_authority_date(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     rebuilt = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -24288,6 +24583,7 @@ def test_mixed_composer_rejects_receipt_provider_generation_mismatch(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24330,6 +24626,7 @@ def test_mixed_composer_rejects_a_lowercase_baseline_provider_alias(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24370,6 +24667,7 @@ def test_mixed_composer_rejects_a_self_consistent_receipt_authority_evidence_mut
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24405,6 +24703,7 @@ def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24423,6 +24722,7 @@ def _mixed_verifier_inputs(verifier_module: Any, selected: object) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return verifier_module.IndependentVerifierInputs(**values)
@@ -24452,6 +24752,7 @@ def _mixed_selected_with_ledger(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     if policy is not None:
@@ -25330,26 +25631,22 @@ def test_mixed_independent_verifier_recomputes_one_literal_numeric_row(
         "current_value": "70",
         "gain": "10",
     }
-    # Hand-literal links: the exact opening anchor first links at 1, then the
-    # contribution-adjusted link is 1, and finally 70 / 60 = 7/6.
+    # Hand-literal links: the opening anchor is capital evidence only, so
+    # performance opens at the first NAV (R1; pre-change an anchor-to-NAV
+    # link came first); the contribution-adjusted link is 1, then 70 / 60.
+    assert candidate["performance_opening_date"] == "2026-01-30"
+    assert candidate["performance_opening_value"] == "50"
+    assert candidate["opening_capital_date"] == "2024-12-31"
+    assert candidate["flow_count"] == 1
     assert candidate["observation_trace"] == {
         "links": [
-            {
-                "start_date": "2024-12-31",
-                "end_date": "2026-01-30",
-                "base_nav": "50",
-                "ending_nav": "50",
-                "net_flow": "0",
-                "factor": "1",
-                "cumulative_index": "100",
-                "running_hwm_index": "100",
-                "drawdown": "0",
-            },
             {
                 "start_date": "2026-01-30",
                 "end_date": "2026-01-31",
                 "base_nav": "50",
+                "beginning_flow": "0",
                 "ending_nav": "60",
+                "ending_flow": "10",
                 "net_flow": "10",
                 "factor": "1",
                 "cumulative_index": "100",
@@ -25360,7 +25657,9 @@ def test_mixed_independent_verifier_recomputes_one_literal_numeric_row(
                 "start_date": "2026-01-31",
                 "end_date": "2026-02-01",
                 "base_nav": "60",
+                "beginning_flow": "0",
                 "ending_nav": "70",
+                "ending_flow": "0",
                 "net_flow": "0",
                 "factor": "1.166666666666666666666666666666666666667",
                 "cumulative_index": "116.6666666666666666666666666666666666667",
@@ -25491,6 +25790,7 @@ def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
         "receipt_authority_base64",
         "admission_policy_base64",
         "manifest_schema_base64",
+        "membership_census_base64",
     }
     assert [item["path"] for item in parsed["subjects"]] == [
         "authority/account-assignment-perimeter.json",
@@ -25650,6 +25950,7 @@ def _rebound_mixed_verifier_inputs(
     receipt_authority: InputSnapshot | None = None,
     admission_policy: InputSnapshot | None = None,
     manifest_schema: InputSnapshot | None = None,
+    membership_census: InputSnapshot | None = None,
 ) -> object:
     values = _selected_input_kwargs(selected)
     values.update(
@@ -25671,6 +25972,11 @@ def _rebound_mixed_verifier_inputs(
             ),
             "manifest_schema": (
                 selected.manifest_schema if manifest_schema is None else manifest_schema
+            ),
+            "membership_census": (
+                selected.membership_census
+                if membership_census is None
+                else membership_census
             ),
         }
     )
@@ -25854,6 +26160,147 @@ def test_mixed_independent_verifier_rejects_rebound_manifest_schema(
         verifier.verify(verifier_inputs, mutated)
 
 
+def _mutated_assignment_only_census(selected: object) -> InputSnapshot:
+    """Flip only the funded account-01 census membership to ASSIGNMENT_ONLY."""
+
+    census_snapshot = getattr(selected, "membership_census", None)
+    assert isinstance(census_snapshot, InputSnapshot)
+    census = census_snapshot.json_object()
+    for sleeve in census["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            if (
+                sleeve["provider_id"] == "SYNTHETIC"
+                and assignment["strategy_id"] == "synthetic-strategy-01"
+            ):
+                assignment["status"] = "ASSIGNMENT_ONLY"
+    return InputSnapshot.from_bytes(
+        "mutated membership census", canonical_json_bytes(census)
+    )
+
+
+def test_mixed_generation_requires_a_membership_census_selected_input(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """R2 fails closed: no mixed candidate builds or verifies without a census."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    values["membership_census"] = None
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="membership_census",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def test_mixed_builder_rejects_when_only_the_census_membership_changes(
+    perimeter_module: Any,
+) -> None:
+    """C1 (a): a census ASSIGNMENT_ONLY mutation alone must fail the build."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    perimeter_module.build_account_manifest_payloads(selected)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    values["membership_census"] = _mutated_assignment_only_census(selected)
+    mutated = perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(RuntimeError, match="ASSIGNMENT_ONLY"):
+        perimeter_module.build_account_manifest_payloads(mutated)
+
+
+def test_mixed_independent_verifier_rejects_when_only_the_census_membership_changes(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """C1 (b): the same census mutation must fail independent verification."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module,
+        selected,
+        membership_census=_mutated_assignment_only_census(selected),
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, payloads)
+
+
+def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """C2: the MWR cash date is bound to the raw anchor economic date.
+
+    Only the candidate's published flow-leg economic date is mutated here;
+    the source ledger keeps its raw anchor economic date, so the MWR cash
+    date derived from that source value no longer agrees and verification
+    fails closed.
+    """
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    opening = ledger["capital_anchors"][0]
+    ledger["capital_anchors"].append(
+        {
+            "record_id": "mixed-exact-fill-allocation",
+            "account_id": opening["account_id"],
+            "provider_id": opening["provider_id"],
+            "generation_id": opening["generation_id"],
+            "strategy_id": opening["strategy_id"],
+            "mapping_status": "MAPPED",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-02-01",
+            "economic_date": "2026-01-31",
+            "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+            "source_artifact_id": "raw/synthetic.json",
+            "nav_source_artifact_id": "raw/synthetic.json",
+            "source_record_id": "synthetic-exact-fill-allocation",
+            "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    leg = next(
+        item
+        for item in row["performance_flow_legs"]
+        if item["timing"] == "EXACT_TIMESTAMP"
+    )
+    assert leg["economic_date"] == "2026-01-31"
+    assert any(cashflow["date"] == "2026-01-31" for cashflow in row["mwr_cashflows"])
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+    leg["economic_date"] = "2026-02-01"
+    payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+
+
 def test_verifier_manifest_schema_pin_matches_repository_bytes(
     verifier_module: Any,
 ) -> None:
@@ -25969,6 +26416,7 @@ def test_mixed_independent_verifier_accepts_older_anchored_provider_generation(
             "receipt_authority": authority_snapshot,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     older_selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26245,6 +26693,7 @@ def test_mixed_route_preserves_later_admission_authority_date_and_provenance(
             "receipt_authority": authority_snapshot,
             "admission_policy": admission_snapshot,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26349,6 +26798,7 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     verifier_selected = verifier_module.IndependentVerifierInputs(**values)
@@ -26421,6 +26871,7 @@ def test_mixed_independent_verifier_accepts_multiple_valid_funded_nav_ids(
             "admission_policy": admission,
             "receipt_authority": base.receipt_authority,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26482,6 +26933,7 @@ def test_mixed_independent_verifier_ignores_null_start_reserve_assignment(
             "receipt_authority": base.receipt_authority,
             "admission_policy": base.admission_policy,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26533,6 +26985,7 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
             "receipt_authority": base.receipt_authority,
             "admission_policy": base.admission_policy,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26585,29 +27038,25 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
         },
     )
     verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
+    # R1 / A1 mechanism 3: the 1000 anchor amount is the contributed basis,
+    # never a return value.  Pre-change both engines linked 1000 -> 985.44
+    # (a -1.456 % pre-membership "return"); performance opens at 985.44.
     expected = {
         "opening_capital": Decimal("1000"),
-        "first_base_nav": Decimal("1000"),
-        "first_ending_nav": Decimal("985.44"),
+        "first_base_nav": Decimal("985.44"),
+        "first_ending_nav": Decimal("990"),
     }
-    assert producer_row["opening_capital"] == expected["opening_capital"]
-    assert (
-        producer_row["observation_trace"]["links"][0]["base_nav"]
-        == expected["first_base_nav"]
-    )
-    assert (
-        producer_row["observation_trace"]["links"][0]["ending_nav"]
-        == expected["first_ending_nav"]
-    )
-    assert verifier_row["opening_capital"] == expected["opening_capital"]
-    assert (
-        verifier_row["observation_trace"]["links"][0]["base_nav"]
-        == expected["first_base_nav"]
-    )
-    assert (
-        verifier_row["observation_trace"]["links"][0]["ending_nav"]
-        == expected["first_ending_nav"]
-    )
+    for row in (producer_row, verifier_row):
+        assert row["opening_capital"] == expected["opening_capital"]
+        assert row["performance_opening_value"] == expected["first_base_nav"]
+        assert (
+            row["observation_trace"]["links"][0]["base_nav"]
+            == expected["first_base_nav"]
+        )
+        assert (
+            row["observation_trace"]["links"][0]["ending_nav"]
+            == expected["first_ending_nav"]
+        )
 
     # Exercise the complete retained mixed producer -> independent verifier path.
     payloads = perimeter_module.build_account_manifest_payloads(selected)
@@ -26616,16 +27065,19 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
         row for row in output["rows"] if row["account_id"] == assignment["account_id"]
     )
     assert output_row["opening_capital"] == "1000"
+    assert output_row["opening_capital_date"] == "2024-12-31"
     assert output_row["observation_trace"]["links"][0] == {
-        "start_date": "2024-12-31",
-        "end_date": "2026-01-30",
-        "base_nav": "1000",
-        "ending_nav": "985.44",
-        "net_flow": "0",
-        "factor": "0.98544",
-        "cumulative_index": "98.544",
+        "start_date": "2026-01-30",
+        "end_date": "2026-01-31",
+        "base_nav": "985.44",
+        "beginning_flow": "0",
+        "ending_nav": "990",
+        "ending_flow": "10",
+        "net_flow": "10",
+        "factor": "0.9944796233154732911186880987173242409482",
+        "cumulative_index": "99.44796233154732911186880987173242409482",
         "running_hwm_index": "100",
-        "drawdown": "0.01456",
+        "drawdown": "0.0055203766845267088813119012826757590518",
     }
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
@@ -26773,6 +27225,7 @@ def _generation_composer_selected_inputs(perimeter_module: Any) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27135,6 +27588,27 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
             admission["effective_end"] = None
         elif admission["strategy_id"] == "echotrade-growth-pivots":
             admission["effective_end"] = "2025-11-24"
+    account_providers = {
+        account["account_id"]: str(account["provider"]).upper()
+        for account in selected_baseline["accounts"]
+    }
+    census = {"current_census": {"account_sleeves": []}}
+    for admission in admission_policy["admissions"]:
+        if admission["status"] != "FUNDED":
+            continue
+        census["current_census"]["account_sleeves"].append(
+            {
+                "provider_id": account_providers[admission["account_id"]],
+                "assignments": [
+                    {
+                        "strategy_id": admission["strategy_id"],
+                        "effective_start": admission["effective_start"],
+                        "effective_end": admission["effective_end"],
+                        "status": "FUNDED_MEMBERSHIP",
+                    }
+                ],
+            }
+        )
     ledger = selected.provider_ledger.json_object()
     ledger["reconciliation_checks"] = []
     for nav in ledger["nav_observations"]:
@@ -27222,6 +27696,9 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
                 "mixed report-policy admission", canonical_json_bytes(admission_policy)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": InputSnapshot.from_bytes(
+                "remapped membership census", canonical_json_bytes(census)
+            ),
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27601,6 +28078,7 @@ def test_schema9_generation_coverage_boundary_is_version_neutral(
             "receipt_authority": selected_base.receipt_authority,
             "admission_policy": selected_base.admission_policy,
             "manifest_schema": selected_base.manifest_schema,
+            "membership_census": selected_base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27685,6 +28163,7 @@ def test_generation_composer_rejects_executing_source_mismatch_before_writes(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     mismatched = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27764,6 +28243,7 @@ def test_generation_composer_rejects_receipt_authority_rebinding_before_staging(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     rebound = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -28001,3 +28481,171 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
         "discrepancy_count": 0,
         "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
     }
+
+
+# --- C1 T2: independent verifier recomputes the R1-R4 epoch engine ----------
+
+
+def _t2_verifier_facts(
+    verifier_module: Any,
+    *,
+    pre_start: tuple[date, Decimal | None] | None,
+    flows: tuple[Any, ...] = (),
+) -> Any:
+    return verifier_module._IndependentEpochFacts(
+        "acct-t2",
+        date(2025, 11, 11),
+        date(2025, 11, 14),
+        tuple(
+            verifier_module._IndependentNavFact(day, "USD", value)
+            for day, value in (
+                (date(2025, 11, 12), Decimal("100")),
+                (date(2025, 11, 13), Decimal("187.64")),
+                (date(2025, 11, 14), Decimal("190")),
+            )
+        ),
+        flows,
+        None,
+        True,
+        pre_start,
+    )
+
+
+def test_t2_verifier_opens_at_the_pre_start_observation_like_the_producer(
+    verifier_module: Any,
+) -> None:
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2025-11-12": Decimal("100"),
+        "2025-11-13": Decimal("187.64"),
+        "2025-11-14": Decimal("190"),
+    }
+    for pre_start in (None, (date(2025, 11, 10), Decimal("95"))):
+        row = verifier_module._derive_first_available_nav_epoch(
+            _t2_verifier_facts(verifier_module, pre_start=pre_start)
+        )
+        producer = producer_module.analyze_epoch(
+            navs,
+            {},
+            {},
+            {},
+            {},
+            None,
+            "2025-11-11",
+            None,
+            pre_start_observation=(
+                None if pre_start is None else (pre_start[0].isoformat(), pre_start[1])
+            ),
+        )
+        assert producer is not None
+        for field in (
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "performance_opening_date",
+            "performance_opening_value",
+            "performance_opening_basis",
+            "opening_capital",
+        ):
+            assert row[field] == producer[field], field
+    assert row["performance_opening_basis"] == "LAST_OBSERVATION_BEFORE_START"
+    assert row["observation_trace"]["links"][0]["start_date"] == "2025-11-10"
+    unavailable = verifier_module._derive_first_available_nav_epoch(
+        _t2_verifier_facts(verifier_module, pre_start=(date(2025, 11, 10), None))
+    )
+    assert unavailable["performance_reason"] == "OPENING_OBSERVATION_UNAVAILABLE"
+
+
+def test_t2_verifier_links_exact_fills_at_beginning_of_day_like_the_producer(
+    verifier_module: Any,
+) -> None:
+    from tools import account_strategy_manifest as producer_module
+
+    fill = verifier_module._IndependentFlowFact(
+        date(2025, 11, 11),
+        "INTERNAL_IN",
+        "USD",
+        Decimal("100"),
+        date(2025, 11, 13),
+        "fill-1",
+        "EXACT_TIMESTAMP",
+        date(2025, 11, 12),
+    )
+    row = verifier_module._derive_first_available_nav_epoch(
+        _t2_verifier_facts(verifier_module, pre_start=None, flows=(fill,))
+    )
+    producer = producer_module.analyze_epoch(
+        {
+            "2025-11-12": Decimal("100"),
+            "2025-11-13": Decimal("187.64"),
+            "2025-11-14": Decimal("190"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2025-11-11",
+        None,
+        capital_allocation_legs={
+            ("2025-11-11", "2025-11-13", "fill-1", "2025-11-12"): Decimal("100")
+        },
+    )
+    assert producer is not None
+    assert row["observation_trace"]["links"][0]["factor"] == Decimal("0.9382")
+    assert row["observation_trace"] == producer["observation_trace"]
+    assert row["performance_flow_legs"] == producer["performance_flow_legs"]
+    assert row["performance_flags"] == producer["performance_flags"] == []
+
+
+def test_t2_fact_projections_carry_each_funded_epoch_pre_start_observation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """R1 needs the S-1 valuation in the calculation ledger (builder and verifier).
+
+    Pre-change both projections kept only in-window NAVs, so every funded
+    epoch silently opened at the end of day S.
+    """
+
+    navs = [
+        {
+            "record_id": f"{account}-{day}",
+            "account_id": account,
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        }
+        for account, day in (
+            ("acct-t2", "2026-01-01"),
+            ("acct-t2", "2026-01-04"),
+            ("acct-t2", "2026-01-05"),
+            ("acct-t2", "2026-01-06"),
+            ("acct-other", "2026-01-04"),
+        )
+    ]
+    assignment = {
+        "account_id": "acct-t2",
+        "strategy_id": "strategy-t2",
+        "effective_start": "2026-01-05",
+        "effective_end": None,
+    }
+    receipt = {"requested_start": "2026-01-05", "requested_end": "2026-01-06"}
+    builder_navs = perimeter_module._mixed_admitted_fact_projection(
+        funded_assignments=[assignment],
+        routes=[{"assignment": assignment, "receipt": receipt}],
+        navs=navs,
+        flows=[],
+        events=[],
+        capital_anchors=[],
+    )[0]
+    verifier_navs = verifier_module._mixed_admitted_fact_projection(
+        funded_assignments=[assignment],
+        routes=[{"selected_assignment": assignment, "receipt": receipt}],
+        navs=navs,
+        flows=[],
+        events=[],
+        capital_anchors=[],
+    )[0]
+    expected = ["acct-t2-2026-01-04", "acct-t2-2026-01-05", "acct-t2-2026-01-06"]
+    assert [nav["record_id"] for nav in builder_navs] == expected
+    assert [nav["record_id"] for nav in verifier_navs] == expected

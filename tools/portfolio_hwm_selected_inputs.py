@@ -74,6 +74,11 @@ _FORBIDDEN_QUALITY_MARKERS: Final = (
 Row = dict[str, Any]
 EpochKey = tuple[str, str, str, str | None]
 IntervalKey = tuple[str, str, str]
+_GOVERNED_MEMBERSHIP_CENSUS: Final[Path] = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
 
 
 @dataclass(frozen=True)
@@ -373,11 +378,25 @@ def _verify_account_manifest_replay(
     account_manifest_flow_classification_policy_path: Path,
     provider_ledger_generation_path: Path,
     baseline_generation_path: Path,
+    membership_census_path: Path | None = None,
 ) -> tuple[str, str, GenerationManifest]:
     payloads = bundle.payloads
     selected = strict_json_object(
         payloads["authority/selected-input-identities.json"],
         label="selected account-manifest source identities",
+    )
+    # The governed membership census is a repository source contract.  Without
+    # an explicit census path the repository contract is bound against the
+    # identity this generation selected, failing closed on any mismatch.
+    census_path = (
+        _GOVERNED_MEMBERSHIP_CENSUS
+        if membership_census_path is None
+        else membership_census_path
+    )
+    membership_census = _identity_snapshot(
+        census_path,
+        _mapping(selected.get("membership_census"), "membership census identity"),
+        "membership census",
     )
     report_bytes = payloads["verification/independent-verification.json"]
     strict_json_object(report_bytes, label="independent account-manifest report")
@@ -480,6 +499,7 @@ def _verify_account_manifest_replay(
         ),
         admission_policy=admission_policy,
         manifest_schema=manifest_schema,
+        membership_census=membership_census,
     )
     subjects = {
         artifact_id: payload
@@ -704,6 +724,9 @@ def _validated_account_sources(
         raise SelectedHwmInputError("selected epoch has no daily NAV observations")
 
     flows_by_date: dict[str, Decimal] = defaultdict(Decimal)
+    # Provider fund allocations are exact-timestamp fills: the account manifest
+    # links them at the beginning of their sub-period, classified flows at its end.
+    beginning_flows_by_date: dict[str, Decimal] = defaultdict(Decimal)
     flow_evidence_by_date: dict[str, list[Row]] = defaultdict(list)
     for index, raw_anchor in enumerate(
         _rows(calculation.get("capital_anchors"), "capital anchors")
@@ -733,6 +756,7 @@ def _validated_account_sources(
             )
         recognition_text = recognition_day.isoformat()
         flows_by_date[recognition_text] += amount
+        beginning_flows_by_date[recognition_text] += amount
         flow_evidence_by_date[recognition_text].append(anchor)
 
     flow_by_identity: dict[str, tuple[str, str, Decimal]] = {}
@@ -818,10 +842,33 @@ def _validated_account_sources(
             raise SelectedHwmInputError(
                 "trace net flow differs from classified dated source flows"
             )
+        native_beginning_flow = sum(
+            (
+                amount
+                for recognition_day, amount in beginning_flows_by_date.items()
+                if start.isoformat() < recognition_day <= end.isoformat()
+            ),
+            Decimal("0"),
+        )
+        beginning_flow = _decimal(
+            link.get("beginning_flow"), f"trace link {index}.beginning_flow"
+        )
+        ending_flow = _decimal(
+            link.get("ending_flow"), f"trace link {index}.ending_flow"
+        )
+        if (
+            beginning_flow != native_beginning_flow
+            or ending_flow != native_net_flow - native_beginning_flow
+        ):
+            raise SelectedHwmInputError(
+                "trace flow timing differs from classified dated source flows"
+            )
+        # The manifest links every epoch through the portfolio return engine:
+        # factor = (V_end - F_end_of_day) / (V_begin + F_beginning_of_day).
         with localcontext() as context:
             context.prec = 40
             context.rounding = ROUND_HALF_EVEN
-            expected_factor = Decimal("1") + (ending - base - net_flow) / base
+            expected_factor = (ending - ending_flow) / (base + beginning_flow)
         if factor != expected_factor:
             raise SelectedHwmInputError(
                 "trace factor differs from the canonical 40-digit source NAV calculation"
@@ -1064,6 +1111,7 @@ def _selected_hwm_source_rows(
     provider_admission_path: Path,
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
+    membership_census_path: Path | None = None,
 ) -> _SelectedHwmSourceRows:
     generation_path = _filesystem_path(account_manifest_generation_path)
     if generation_path.name != "generation.json":
@@ -1164,6 +1212,7 @@ def _selected_hwm_source_rows(
             ),
             provider_ledger_generation_path=provider_ledger_generation_path,
             baseline_generation_path=baseline_generation_path,
+            membership_census_path=membership_census_path,
         )
     )
     _validate_provider_admission_binding(
@@ -1214,6 +1263,7 @@ def _build_selected_hwm_inputs(
     provider_admission_path: Path,
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
+    membership_census_path: Path | None = None,
 ) -> Row:
     source = _selected_hwm_source_rows(
         account_manifest_generation_path=account_manifest_generation_path,
@@ -1228,6 +1278,7 @@ def _build_selected_hwm_inputs(
         provider_admission_path=provider_admission_path,
         hwm_policy_path=hwm_policy_path,
         hwm_policy_bytes=hwm_policy_bytes,
+        membership_census_path=membership_census_path,
     )
     result = build_governed_hwm_inputs(
         members=source.memberships,
@@ -1460,6 +1511,7 @@ def derive_selected_hwm_calendar_authority(
     provider_admission_path: Path,
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
+    membership_census_path: Path | None = None,
 ) -> Row:
     """Derive the governed HWM calendar for the exact selected source generation."""
 
@@ -1477,6 +1529,7 @@ def derive_selected_hwm_calendar_authority(
             provider_admission_path=provider_admission_path,
             hwm_policy_path=hwm_policy_path,
             hwm_policy_bytes=hwm_policy_bytes,
+            membership_census_path=membership_census_path,
         )
         return _derive_selected_hwm_calendar(source)
     except SelectedHwmInputError:
@@ -1497,6 +1550,7 @@ def build_selected_hwm_inputs(
     provider_admission_path: Path,
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
+    membership_census_path: Path | None = None,
 ) -> Row:
     """Build schema-1 HWM inputs from one exact verified account-manifest generation.
 
@@ -1520,6 +1574,7 @@ def build_selected_hwm_inputs(
             provider_admission_path=provider_admission_path,
             hwm_policy_path=hwm_policy_path,
             hwm_policy_bytes=hwm_policy_bytes,
+            membership_census_path=membership_census_path,
         )
     except SelectedHwmInputError:
         raise
