@@ -14,6 +14,7 @@ import pytest
 
 import portfolio_financial_mvp_contract as financial
 import portfolio_financial_outcomes as outcomes
+import portfolio_hwm_selected_inputs as hwm_inputs
 import portfolio_pipeline_materialize as materializer
 from quant_engine.core.pipeline import (
     ArtifactNode,
@@ -70,6 +71,14 @@ def assemble_product_spec(
         "ACCOUNT_STRATEGY_CLASSIFICATION_POLICY",
         selected["flow_classification_policy"],
     )
+    # The synthetic world binds the same declared governed census everywhere:
+    # the repository census contract cannot bound a synthetic account source
+    # set, so the declared census stands in for it exactly as the synthetic
+    # policy files above stand in for the repository policies.  The replay
+    # still fails closed on any census identity or admission mismatch.
+    monkeypatch.setattr(
+        hwm_inputs, "_GOVERNED_MEMBERSHIP_CENSUS", selected["membership_census"]
+    )
     contract = json.loads(decomposition.contract_path.read_bytes())
     source_matrix = root / "source-matrix.json"
     source_matrix.write_bytes(financial.render_views(contract).source_matrix_json)
@@ -115,6 +124,10 @@ def assemble_product_spec(
         ],
         "provider_ledger_generation_path": selected["provider_generation"],
         "baseline_generation_path": selected["baseline_generation"],
+        # The synthetic world declares its own governed census, exactly as the
+        # selected generation recorded; the repository census contract cannot
+        # bound a synthetic account source set.
+        "membership_census_path": selected["membership_census"],
     }
     assessment = materializer._hwm_input_authority_assessment(
         authority, hwm_bindings=hwm, hwm_source_paths=source_paths
