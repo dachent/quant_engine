@@ -1148,8 +1148,16 @@ def test_capture_stream_observes_a_trickle_before_the_pipe_fills(
     assert observed > 1
 
 
-def _write_release_validation_findings(root: Path, generation_id: str) -> None:
-    """A minimal clean findings.json per state/briefs/findings-contract.md."""
+def _write_release_validation_findings(
+    root: Path, generation_id: str, *, baseline: str | None = "b" * 64
+) -> None:
+    """A minimal clean findings.json per state/briefs/findings-contract.md.
+
+    ``baseline`` defaults to a non-null digest: since T2.8, the publication
+    gate (`evaluate_release_validation_findings`) refuses a null
+    ``expected_baseline_sha256`` -- a real ``--expected`` baseline is part of
+    what makes this document "clean" now.
+    """
     path = root / "validation" / generation_id / "findings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(
@@ -1159,7 +1167,7 @@ def _write_release_validation_findings(root: Path, generation_id: str) -> None:
                 "generation_id": generation_id,
                 "generation_dir": str(root / "generations" / generation_id),
                 "validator_commit": "c" * 40,
-                "expected_baseline_sha256": None,
+                "expected_baseline_sha256": baseline,
                 "summary": {
                     "BLOCKER_INVARIANT": 0,
                     "BLOCKER_AUTHORITY": 0,

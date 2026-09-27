@@ -19,8 +19,10 @@ list of `{check_id, class, entity, observed, expected, pointer, defect_ids}`,
 `class` one of `BLOCKER_INVARIANT|BLOCKER_AUTHORITY|BLOCKER_REGRESSION|
 NOT_READY|WARNING`). Zero `BLOCKER_*` findings, a matching `generation_id`,
 and a `summary` that agrees with `findings` is the pass condition. A missing,
-unreadable, non-resident (cloud-placeholder), malformed, or generation-id-
-mismatched file all refuse -- never treated as a clean pass. #326's
+unreadable, non-resident (cloud-placeholder), malformed, generation-id-
+mismatched, or null-`expected_baseline_sha256` (validator ran without
+`--expected`, so no regression comparison occurred) file all refuse -- never
+treated as a clean pass. #326's
 "applicable open correction blocks release" maps to a `BLOCKER_AUTHORITY`
 finding with a `correction.` `check_id` prefix.
 """
