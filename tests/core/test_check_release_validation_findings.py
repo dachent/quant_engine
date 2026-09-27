@@ -36,7 +36,10 @@ def _finding(**overrides: object) -> dict[str, object]:
 
 
 def _document(
-    generation_id: str, *, findings: tuple[dict[str, object], ...] = ()
+    generation_id: str,
+    *,
+    findings: tuple[dict[str, object], ...] = (),
+    baseline: str | None = "b" * 64,
 ) -> dict[str, object]:
     summary = {
         "BLOCKER_INVARIANT": 0,
@@ -52,7 +55,7 @@ def _document(
         "generation_id": generation_id,
         "generation_dir": f"/generations/{generation_id}",
         "validator_commit": "c" * 40,
-        "expected_baseline_sha256": None,
+        "expected_baseline_sha256": baseline,
         "summary": summary,
         "findings": list(findings),
     }
@@ -84,6 +87,20 @@ def test_cli_clears_with_a_clean_document_at_the_default_path(tmp_path: Path) ->
 
     assert result.returncode == 0
     assert "CLEARED" in result.stdout
+
+
+def test_cli_refuses_when_expected_baseline_is_null(tmp_path: Path) -> None:
+    """T2.8 (PR #487 bot finding 4113723374): no --expected means no
+    regression comparison happened; the CLI (a thin wrapper around the same
+    gate `commit_release` uses) must refuse rather than CLEAR."""
+    path = tmp_path / "validation" / "gen-1" / "findings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(_document("gen-1", baseline=None)), encoding="utf-8")
+
+    result = _run_cli("--generation-id", "gen-1", "--root", str(tmp_path))
+
+    assert result.returncode == 1
+    assert "expected_baseline_sha256" in result.stderr
 
 
 def test_cli_refuses_when_a_blocker_is_present(tmp_path: Path) -> None:

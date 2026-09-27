@@ -1486,6 +1486,7 @@ def _write_release_validation_findings(
     findings: tuple[dict[str, object], ...] = (),
     declared_generation_id: str | None = None,
     path_generation_id: str | None = None,
+    baseline: str | None = "b" * 64,
 ) -> None:
     """A minimal well-formed findings.json per state/briefs/findings-contract.md.
 
@@ -1494,6 +1495,10 @@ def _write_release_validation_findings(
     (default: ``generation_id``) inside the document -- distinct knobs so a test
     can put a findings document at the right path while it names the wrong
     generation, exercising the gate's content check rather than its path lookup.
+
+    ``baseline`` defaults to a non-null digest: since T2.8, the publication
+    gate refuses a null ``expected_baseline_sha256``, so a "clean"/publishable
+    document now needs one.
     """
     declared_generation_id = declared_generation_id or generation_id
     path_generation_id = path_generation_id or generation_id
@@ -1515,7 +1520,7 @@ def _write_release_validation_findings(
                 "generation_id": declared_generation_id,
                 "generation_dir": str(root / "generations" / declared_generation_id),
                 "validator_commit": "c" * 40,
-                "expected_baseline_sha256": None,
+                "expected_baseline_sha256": baseline,
                 "summary": summary,
                 "findings": list(findings),
             }
@@ -1592,6 +1597,36 @@ def test_commit_release_succeeds_with_clean_release_validation_findings(
 
     assert journal.state is ReleaseState.COMMITTED
     assert read_current(root).generation_id == proposed.generation_id
+
+
+def test_commit_release_refuses_with_a_null_expected_baseline(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """T2.8 (PR #487 bot finding 4113723374): a findings document produced
+    without ``--expected`` (``expected_baseline_sha256: null``) has zero
+    ``BLOCKER_*`` findings -- the skipped regression suite is only
+    ``NOT_READY`` -- so it must still refuse at the real publication sink."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-no-baseline")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(root, proposed.generation_id, baseline=None)
+
+    with pytest.raises(ReleaseValidationError, match="expected_baseline_sha256"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    assert read_current(root).generation_id != proposed.generation_id
 
 
 def test_commit_release_refuses_with_a_blocking_release_validation_finding(
