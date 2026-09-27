@@ -420,8 +420,12 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "tools/rebind_current_epoch_crosswalk.py",
             _PREPARATION,
             "schemas/portfolio/account-strategy-manifest.schema.json",
+            "schemas/portfolio/account-manifest-independent-verification.schema.json",
         ),
-        "contracts": ("schemas/portfolio/account-strategy-manifest.schema.json",),
+        "contracts": (
+            "schemas/portfolio/account-strategy-manifest.schema.json",
+            "schemas/portfolio/account-manifest-independent-verification.schema.json",
+        ),
         "producer": (_ACCOUNT_MANIFEST, "stage_account_manifest_generation"),
         "artifacts": (
             "account-strategy-manifest generation",
