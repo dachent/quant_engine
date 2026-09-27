@@ -226,6 +226,7 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
         ],
         "strategy_returns": [
             {
+                "component_account_ids": ["retired-account"],
                 "date": "2026-01-01",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -233,6 +234,7 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
                 "strategy_id": "retired",
             },
             {
+                "component_account_ids": ["retired-account"],
                 "date": "2026-01-02",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -240,6 +242,7 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
                 "strategy_id": "retired",
             },
             {
+                "component_account_ids": ["current-account"],
                 "date": "2026-01-01",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -247,6 +250,7 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
                 "strategy_id": "current",
             },
             {
+                "component_account_ids": ["current-account"],
                 "date": "2026-01-02",
                 "evidence_layer": "ACCOUNT_LIVE",
                 "provider_id": "synthetic",
@@ -292,8 +296,12 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
     assert retired["twr"] is None
     assert retired["twr_status"] == "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT"
     assert "return_path_status" not in retired
-    assert current["twr"] == "0.1"
+    # TWR is the epoch manifest's own engine result; without a manifest epoch
+    # payload no numeric TWR is published (the report's P1 loop is retired).
+    assert current["twr"] is None
+    assert current["twr_status"] == "UNAVAILABLE"
     assert current["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    assert current["return_path_cumulative_return"] == "0.1"
     assert (
         reporter._account_strategy_performance(without_retired_returns, controls)
         == performance

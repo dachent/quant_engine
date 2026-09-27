@@ -528,11 +528,11 @@
         const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
         return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td></tr>`;
       }
-      const acceptedReturn = row.twr ?? row.return_path_cumulative_return;
-      const returnStatus = row.twr != null ? row.twr_status : row.return_path_status || row.twr_status;
-      const observedStart = row.observed_start || row.return_path_observed_start || row.effective_start || "—";
-      const observedEnd = row.observed_end || row.return_path_observed_end || row.effective_end || "—";
-      const evidence = row.twr != null ? `${integer.format(row.nav_observations)} account NAV observations` : row.return_path_status ? `${integer.format(row.return_path_observations)} canonical account-live returns` : `${integer.format(row.nav_observations)} account NAV observations`;
+      const acceptedReturn = row.twr;
+      const returnStatus = row.twr_status;
+      const observedStart = row.observed_start || row.effective_start || "—";
+      const observedEnd = row.observed_end || row.effective_end || "—";
+      const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
       return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch

@@ -3117,9 +3117,49 @@ def _suppress_unmatched_report_performance(
     return suppressed
 
 
+def _validate_twr_payload(row: Mapping[str, Any]) -> None:
+    """Validate the manifest-bound TWR payload a report row carries.
+
+    The report TWR is the epoch manifest's own engine result; the panel
+    never recomputes it, so an available TWR must arrive with the epoch
+    observation facts it was linked over, and an unavailable TWR must
+    carry no numeric value.
+    """
+
+    twr = row.get("twr")
+    twr_status = row.get("twr_status")
+    if str(twr_status).startswith("AVAILABLE"):
+        if not isinstance(twr, str) or not twr:
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+        nav_observations = row.get("nav_observations")
+        if not isinstance(nav_observations, int) or nav_observations < 1:
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+        for field in ("observed_start", "observed_end"):
+            value = row.get(field)
+            if not isinstance(value, str):
+                raise ControlPanelValidationError("available TWR payload is incomplete")
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ControlPanelValidationError(
+                        "available TWR payload is incomplete"
+                    )
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    "available TWR payload is incomplete"
+                ) from exc
+        flow_count = row.get("flow_count")
+        if flow_count is not None and (
+            not isinstance(flow_count, int) or flow_count < 0
+        ):
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+    elif twr is not None:
+        raise ControlPanelValidationError("unavailable TWR must carry no value")
+
+
 def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
-    """Keep the panel a strict projection of governed report MWR facts."""
+    """Keep the panel a strict projection of governed report TWR/MWR facts."""
     for row in rows:
+        _validate_twr_payload(row)
         status = row.get("mwr_status")
         if status == "AVAILABLE":
             required = (
