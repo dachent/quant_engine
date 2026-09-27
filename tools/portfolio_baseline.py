@@ -1589,6 +1589,43 @@ def _admitted_strategy_returns(catalog: Mapping[str, Any]) -> list[dict[str, Any
     return accepted
 
 
+def _capital_anchor_flow(anchor: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one strategy-perimeter capital anchor into a flow fact (D2).
+
+    A ``STRATEGY_CAPITAL_ALLOCATION`` anchor is the only admitted evidence
+    that capital entered a Quantbase or Matrixport strategy's NAV perimeter:
+    the linked-account deposit that funds it is booked separately, stays
+    ``UNMAPPED`` (account-level, outside the strategy perimeter), and is
+    never projected here.  The anchor amount is always positive (the ledger
+    fails closed rather than admit a non-fee sale as an anchor), so it is a
+    genuine external contribution establishing basis in the strategy, not an
+    internal transfer paired against a same-day opposite leg.  The caller
+    excludes ``OPENING_CAPITAL_ANCHOR`` rows: the opening anchor is the
+    performance opening basis (R1), not a funding event, and is read
+    directly from the ledger's own ``capital_anchors`` by the manifest
+    engine (``parse_capital_anchors``), not through this projection.
+    """
+
+    return {
+        "account_id": anchor["account_id"],
+        "amount": anchor["amount"],
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "evidence_layer": anchor.get("evidence_layer"),
+        "event_date": anchor["event_date"],
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "generation_id": anchor.get("generation_id"),
+        "mapping_basis": anchor.get("mapping_basis"),
+        "mapping_status": anchor["mapping_status"],
+        "provider": anchor.get("provider"),
+        "provider_id": anchor.get("provider_id"),
+        "record_id": f"capital-allocation-flow:{anchor['record_id']}",
+        "source_artifact_id": anchor.get("source_artifact_id"),
+        "source_key": anchor.get("source_key"),
+        "source_record_id": anchor.get("source_record_id"),
+        "strategy_id": anchor.get("strategy_id"),
+    }
+
+
 def _provider_ledger_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
@@ -1693,7 +1730,17 @@ def _provider_ledger_facts(
         return accepted
 
     provider_nav = admitted("nav_observations")
-    provider_flows = admitted("flows")
+    # capital_anchors postdates catalog_schema_version 1 (no ledger emits it
+    # there); its absence means no anchors, not a malformed catalog.
+    provider_capital_anchors = (
+        admitted("capital_anchors") if "capital_anchors" in catalog else []
+    )
+    strategy_allocation_flows = [
+        _capital_anchor_flow(item)
+        for item in provider_capital_anchors
+        if item.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+    ]
+    provider_flows = [*admitted("flows"), *strategy_allocation_flows]
     provider_transactions = admitted("transactions")
     provider_positions = admitted("positions")
 
