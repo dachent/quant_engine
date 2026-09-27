@@ -8,6 +8,7 @@ from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -5104,24 +5105,33 @@ def test_attended_execution_observations_preserve_cold_and_resumed_attempt_times
             encoding="utf-8"
         )
     )
+    storage = [attempt.pop("storage") for attempt in receipt["execution_attempts"]]
     assert receipt == {
         "execution_attempts": [
             {
                 "attempt": 1,
                 "ended_at": "2026-09-19T12:00:01+00:00",
+                "pid": os.getpid(),
+                "reason": "stage ledger exited 97",
                 "started_at": "2026-09-19T12:00:00+00:00",
                 "status": "FAILED",
             },
             {
                 "attempt": 2,
                 "ended_at": "2026-09-19T12:01:01+00:00",
+                "pid": os.getpid(),
                 "started_at": "2026-09-19T12:01:00+00:00",
-                "status": "COMPLETED",
+                "status": "PASSED",
             },
         ],
         "preparation_attempts": [],
-        "schema_version": 2,
+        "schema_version": 3,
     }
+    # Bytes are recorded per stage child, including the one that failed.
+    assert [row["role"] for row in storage[0]["stages"]] == ["ledger"]
+    assert [row["role"] for row in storage[1]["stages"]] == ["ledger"]
+    assert storage[1]["stages"][0]["bytes_written"] > 0
+    assert "end" in storage[1] and "end" not in storage[0]
     assert (
         json.loads((output_root / "attended-run.json").read_text())["request_identity"]
         == (preflight["request_identity"])
@@ -5167,12 +5177,14 @@ def test_attended_execution_observations_mark_interrupted_attempt_incomplete(
             encoding="utf-8"
         )
     )["execution_attempts"]
+    # Interrupted is CANCELLED (formerly INCOMPLETE), still without an ending instant.
     assert attempts[0] == {
         "attempt": 1,
+        "pid": os.getpid(),
         "started_at": "2026-09-19T12:00:00+00:00",
-        "status": "INCOMPLETE",
+        "status": "CANCELLED",
     }
-    assert attempts[1]["status"] == "COMPLETED"
+    assert attempts[1]["status"] == "PASSED"
 
 
 @pytest.mark.parametrize(
