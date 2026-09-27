@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +70,69 @@ def test_no_null_authority_pointer_sha256() -> None:
         if not pointer.get("sha256")
     ]
     assert not offenders, offenders
+
+
+# Fix round 2 (Codex scoped re-review of cp/acc-baseline-v2): the gate is the
+# stricter allowlist form -- a pointer passes only when it is data-root-relative
+# under one of the declared prefixes the file actually uses. Any absolute or
+# rooted path fails, including driveless Windows rooted forms such as
+# "\\Dev\\scratch\\..." for which Path(...).is_absolute() is False and a ":\\"
+# substring test is False too.
+ALLOWED_AUTHORITY_POINTER_ROOTS = (
+    "contracts/",
+    "dataPortfolio/",
+    "dataQuantbase/",
+    "dataMatrixport/",
+    "evidence/",
+    "schemas/",
+)
+
+
+def _is_data_root_relative(path: str) -> bool:
+    # PureWindowsPath(...).anchor is non-empty for both "C:\..." and the
+    # driveless rooted "\Dev..." form; PurePosixPath covers "/...".
+    if PureWindowsPath(path).anchor or PurePosixPath(path).anchor:
+        return False
+    return path.startswith(ALLOWED_AUTHORITY_POINTER_ROOTS)
+
+
+def test_no_machine_local_absolute_authority_pointer_paths() -> None:
+    """Fix round 1 (Kimi K3 + Codex review of cp/acc-baseline-v2): authority
+    pointers must be data-root-relative, never machine-local absolute paths
+    (e.g. C:\\Dev\\scratch\\... scratch lineage captures)."""
+    doc = _load()
+    offenders = [
+        (row["metric_id"], row["entity"], pointer["path"])
+        for row in doc["metrics"]
+        for pointer in row.get("authority_pointer", [])
+        if not _is_data_root_relative(pointer["path"])
+    ]
+    assert not offenders, offenders
+
+
+def test_authority_pointer_gate_regression_rooted_and_relative() -> None:
+    """Fix round 2 paired regression: a driveless rooted Windows pointer must
+    FAIL the gate (it slipped past the round-1 is_absolute()/":\\" check), the
+    "C:\\" form must still fail, and legit data-root-relative pointers must
+    pass every declared prefix."""
+    assert not _is_data_root_relative(
+        r"\Dev\scratch\quant_engine\lineage\v2\x\accounts.csv"
+    )
+    assert not _is_data_root_relative(
+        r"C:\Dev\scratch\quant_engine\lineage\v2\x\accounts.csv"
+    )
+    assert not _is_data_root_relative("/Dev/scratch/quant_engine/accounts.csv")
+    for good in (
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "dataPortfolio/provider-ledger/generations/<sha>/provider-ledger.json",
+        "dataQuantbase/source-runs/run/artifacts/csv/accounts.csv",
+        "dataMatrixport/source-runs/run/csv/nav_daily.csv",
+        "evidence/capture-run/evidence.json",
+        "schemas/core/account.json",
+    ):
+        assert _is_data_root_relative(good), good
+    # prefix must match at a component boundary, not as a loose substring
+    assert not _is_data_root_relative("contracts-evil/payload.json")
 
 
 def test_tolerance_classes_match_spec() -> None:
@@ -140,3 +203,78 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
         assert isinstance(row["entity"], str) and row["entity"]
         assert "expected" not in row
         assert "reason_a" in row and "reason_b" in row
+
+
+# --- v2 row set (successor of PR #485's v1; inputs acceptance/v2/*) ---
+
+V2_COMMITS = {
+    "a": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea",
+    "b": "dac6e410046045ed6e5b37899eae039679d137ac",
+}
+V2_AGREE_COUNT = 91
+V2_NOT_DERIVABLE_COUNT = 14
+
+
+def _find(
+    doc: dict[str, Any], metric_id: str, entity: str, window: Any = None
+) -> dict[str, Any]:
+    matches = [
+        row
+        for row in doc["metrics"]
+        if row["metric_id"] == metric_id
+        and row["entity"] == entity
+        and row.get("window") == window
+    ]
+    assert len(matches) == 1, (metric_id, entity, window, len(matches))
+    return matches[0]
+
+
+def test_v2_row_set_and_derivation_identities() -> None:
+    doc = _load()
+    assert len(doc["metrics"]) == V2_AGREE_COUNT
+    assert len(doc["not_derivable"]) == V2_NOT_DERIVABLE_COUNT
+    assert doc["derivations"]["a"]["code_commit"] == V2_COMMITS["a"]
+    assert doc["derivations"]["b"]["code_commit"] == V2_COMMITS["b"]
+    for row in doc["metrics"]:
+        assert row["derivation_a"]["code_commit"] == V2_COMMITS["a"]
+        assert row["derivation_b"]["code_commit"] == V2_COMMITS["b"]
+
+
+def test_v2_quantbase_rederived_on_finalized_capture() -> None:
+    """Volatis (Quantbase) re-derived on the finalized 52b3758a capture:
+    59,092.28 USD as of 2026-09-17, TWR 0.6765085987, MWR 0.1956573642."""
+    doc = _load()
+    for metric_id, entity in (
+        ("capital.account.cutoff", "account-58e75e8d952fa1b8"),
+        ("capital.strategy.cutoff", "volatis-strategy"),
+    ):
+        row = _find(doc, metric_id, entity)
+        assert row["as_of"] == "2026-09-17", row
+        assert Decimal(row["expected"]) == Decimal("59092.28"), row
+    assert Decimal(
+        _find(doc, "twr.strategy", "volatis-strategy", "ITD")["expected"]
+    ) == Decimal("0.676508598689")
+    assert Decimal(
+        _find(doc, "mwr.strategy", "volatis-strategy", "ITD")["expected"]
+    ) == Decimal("0.195657364162")
+    assert Decimal(
+        _find(doc, "capital.portfolio.systematic.cutoff", "portfolio")["expected"]
+    ) == Decimal("425056.98")
+
+
+def test_v2_matrixport_rows_unchanged_with_raw_observation_date() -> None:
+    """Matrixport rows keep their USD-converted values with true as_of
+    2026-09-03; date.source_last_observation is the last raw observation
+    date (2026-09-17) of the finalized f6e87f8c capture."""
+    doc = _load()
+    row = _find(doc, "capital.strategy.cutoff", "robuxio-crypto")
+    assert row["as_of"] == "2026-09-03", row
+    assert Decimal(row["expected"]) == Decimal("52055.38"), row
+    assert Decimal(
+        _find(doc, "twr.strategy", "robuxio-crypto", "ITD")["expected"]
+    ) == Decimal("0.043017076433")
+    assert Decimal(
+        _find(doc, "mwr.strategy", "robuxio-crypto", "ITD")["expected"]
+    ) == Decimal("0.058366399911")
+    observed = _find(doc, "date.source_last_observation", "account-d2e5821e608e25f1")
+    assert observed["expected"] == "2026-09-17", observed

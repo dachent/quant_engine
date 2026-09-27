@@ -58,6 +58,21 @@ from quant_engine.portfolio_ledger import (
     validate_dataset_dispositions,
     validate_provider_authority,
 )
+from quant_engine.portfolio_ledger.returns import (
+    AVAILABLE,
+    DATE_ONLY,
+    EXACT_TIMESTAMP,
+    NEGATIVE_CAPITAL_BASE,
+    NO_SUBPERIOD_AFTER_OPENING,
+    OPENING_FIRST_POSITIVE_ON_OR_AFTER_START,
+    ZERO_CAPITAL_RETURN_UNDEFINED,
+    FlowLeg,
+    OpeningPoint,
+    ReturnsError,
+    SubperiodLink,
+    link_epoch,
+    opening_point,
+)
 
 
 SCHEMA_VERSION: Final = 2
@@ -827,6 +842,25 @@ def _matrixport_daily_component_total(
     return total
 
 
+def _admitted_fx_end(
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> date:
+    """Return the last date the contract-admitted FX generation converts.
+
+    ``_portfolio_fx_rates`` proves complete daily coverage through the
+    contract interval end, so the last rate date is that boundary.
+    """
+
+    rates = fx_rates[1]
+    if not rates:
+        raise ProviderLedgerError("portfolio FX has no admitted rate")
+    return max(day for _currency, day in rates)
+
+
 def _daily_fx_evidence(
     currency: str,
     day: date,
@@ -865,8 +899,14 @@ def _excluded_source_row(
     cutoff: date,
     *,
     original_source_dates: Mapping[str, str] | None = None,
+    status: str = "OUTSIDE_FINANCIAL_CUTOFF",
 ) -> None:
-    """Retain the identity of a native row excluded before derivation."""
+    """Retain the identity of a native row excluded before derivation.
+
+    ``OUTSIDE_ADMITTED_FX_BOUNDARY`` records a native row inside the financial
+    cutoff that has no contract-admitted USD conversion; its boundary is the
+    admitted FX interval end.
+    """
     if findings is None:
         return
     row_hash = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
@@ -878,8 +918,14 @@ def _excluded_source_row(
         or row.get("time")
         or row_hash
     )
+    if status not in {"OUTSIDE_FINANCIAL_CUTOFF", "OUTSIDE_ADMITTED_FX_BOUNDARY"}:
+        raise ProviderLedgerError("excluded source row status is unknown")
     finding: dict[str, Any] = {
-        "financial_cutoff": cutoff.isoformat(),
+        (
+            "financial_cutoff"
+            if status == "OUTSIDE_FINANCIAL_CUTOFF"
+            else "fx_boundary"
+        ): cutoff.isoformat(),
         "fact_type": fact_type,
         "original_record_id": source_id,
         "original_source_date": observed.isoformat(),
@@ -888,7 +934,7 @@ def _excluded_source_row(
         "source_artifact_id": artifact_id,
         "source_record_id": source_id,
         "source_row_sha256": row_hash,
-        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+        "status": status,
     }
     if original_source_dates is not None:
         finding["original_source_dates"] = dict(original_source_dates)
@@ -922,6 +968,8 @@ def _matrixport_daily_fx_totals(
     totals: dict[date, Decimal] = defaultdict(Decimal)
     evidence: dict[date, dict[str, dict[str, Any]]] = defaultdict(dict)
     incomplete_days: set[date] = set()
+    fx_end = _admitted_fx_end(fx_rates)
+    unconverted: list[tuple[date, str]] = []
     with localcontext() as context:
         context.prec = 80
         for row in rows:
@@ -945,6 +993,23 @@ def _matrixport_daily_fx_totals(
                     "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
                 )
             if share == 0:
+                # An inactive zero-share row holds nothing to convert, so the
+                # FX boundary does not disposition it.
+                continue
+            if day > fx_end:
+                # The contract admits USD conversion only through its FX
+                # interval end: no USD value exists for a later active row.
+                unconverted.append((day, str(row.get("currency") or "")))
+                _excluded_source_row(
+                    cutoff_findings,
+                    "matrixport",
+                    "nav_observations",
+                    artifact_id,
+                    row,
+                    day,
+                    fx_end,
+                    status="OUTSIDE_ADMITTED_FX_BOUNDARY",
+                )
                 continue
             native = _observed_decimal(
                 row.get("native_value"), "matrixport native holding value"
@@ -963,6 +1028,11 @@ def _matrixport_daily_fx_totals(
         totals.pop(day, None)
         evidence.pop(day, None)
     if not totals:
+        if unconverted:
+            day, currency = min(unconverted)
+            raise ProviderLedgerError(
+                f"portfolio FX lacks {currency}/USD on {day.isoformat()}"
+            )
         raise ProviderLedgerError(
             "MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE: no active daily holdings exist"
         )
@@ -1118,6 +1188,14 @@ def _matrixport_flows(
                 )
                 continue
             currency = _text(row.get("currency"), "matrixport wallet currency")
+            if timestamp.date() > _admitted_fx_end(fx_rates):
+                # A wallet flow the admitted FX cannot value fails closed like
+                # the anchor path: an unvalued movement is never a silently
+                # dropped flow, whatever its currency.
+                raise ProviderLedgerError(
+                    "portfolio FX lacks "
+                    f"{currency}/USD on {timestamp.date().isoformat()}"
+                )
             signed = amount * sign
             projected.append(
                 {
@@ -1180,10 +1258,10 @@ def _matrixport_nav_observations(
             catalog.get("observed_boundary_date"),
             "matrixport observed_boundary_date",
         )
-        expected_snapshot = (
-            min(snapshot_date, financial_cutoff)
-            if financial_cutoff is not None
-            else snapshot_date
+        expected_snapshot = min(
+            snapshot_date,
+            financial_cutoff if financial_cutoff is not None else snapshot_date,
+            _admitted_fx_end(fx_rates),
         )
         if max(daily_totals) != expected_snapshot:
             raise ProviderLedgerError(
@@ -1499,6 +1577,14 @@ def _matrixport_capital_anchors(
                 financial_cutoff,
             )
             continue
+        if fx_rates is not None and recognition_day > _admitted_fx_end(fx_rates):
+            # A subscription the admitted FX cannot value is not a silently
+            # skipped anchor: the account's opening has no USD value.
+            raise ProviderLedgerError(
+                "portfolio FX lacks "
+                f"{_text(row.get('subscription_currency'), 'currency')}/USD on "
+                f"{recognition_day.isoformat()}"
+            )
         qualified = (
             recognition_day in source_backed_dates
             if fx_daily_totals is None
@@ -1717,6 +1803,11 @@ def _quantbase_capital_anchors(
     cost-basis increase supplies its later NAV-recognition date, but must not
     overwrite the source activity date or turn the allocation into an
     account-external deposit.
+
+    The allocation's economic moment is the last fill of the fund orders it
+    created (order ``transaction`` = allocation ``id``).  That exact timestamp
+    is the money-weighted cash date, and the recognizing NAV must be the first
+    dashboard value after it; an allocation without its fills fails closed.
     """
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
@@ -1743,9 +1834,37 @@ def _quantbase_capital_anchors(
     activity_rows = _verified_csv_rows(
         _exact_file(run_root, activity_rel, "quantbase account activity"),
         activity_artifact.sha256,
-        {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
+        {
+            "activity_type",
+            "amount",
+            "filled_at",
+            "fund",
+            "id",
+            "is_rebalance",
+            "time",
+            "transaction",
+            "type",
+        },
         "quantbase account activity",
     )
+    order_fills: dict[str, list[datetime]] = defaultdict(list)
+    for row in activity_rows:
+        filled_at = str(row.get("filled_at") or "").strip()
+        transaction = str(row.get("transaction") or "").strip()
+        if (
+            row.get("activity_type") != "order"
+            or row.get("fund") != _QUANTBASE_FUND_ID
+            or not filled_at
+            or not transaction
+        ):
+            continue
+        order_fills[transaction].append(
+            datetime.fromisoformat(
+                _utc_timestamp(filled_at, "quantbase order filled_at").replace(
+                    "Z", "+00:00"
+                )
+            )
+        )
 
     for row in activity_rows:
         if (
@@ -1764,7 +1883,7 @@ def _quantbase_capital_anchors(
                 "quantbase non-fee fund sell requires admitted withdrawal"
             )
 
-    contributions: list[tuple[datetime, Decimal]] = []
+    contributions: list[tuple[datetime, Decimal, datetime]] = []
     for row in activity_rows:
         if (
             row["activity_type"] != "filled_txn"
@@ -1792,7 +1911,12 @@ def _quantbase_capital_anchors(
                 financial_cutoff,
             )
             continue
-        contributions.append((observed, amount))
+        fills = order_fills.get(str(row.get("id") or "").strip())
+        if not fills:
+            raise ProviderLedgerError(
+                "quantbase capital allocation lacks its order fill timestamp"
+            )
+        contributions.append((observed, amount, max(fills)))
     contributions.sort(key=lambda item: item[0])
 
     history: list[tuple[date, Decimal, Decimal | None]] = []
@@ -1821,10 +1945,10 @@ def _quantbase_capital_anchors(
         )
     history.sort(key=lambda item: item[0])
 
-    pending: list[tuple[datetime, Decimal]] = []
+    pending: list[tuple[datetime, Decimal, datetime]] = []
     contribution_index = 0
     previous_cost_basis = Decimal(0)
-    booked_anchors: list[tuple[datetime, Decimal, date, Decimal]] = []
+    booked_anchors: list[tuple[datetime, Decimal, date, Decimal, datetime]] = []
     tolerance = Decimal("0.02")
     for day, cost_basis, nav_value in history:
         while (
@@ -1837,7 +1961,7 @@ def _quantbase_capital_anchors(
         if delta > tolerance and pending:
             running = Decimal(0)
             matched_count = 0
-            for index, (_timestamp, amount) in enumerate(pending):
+            for index, (_timestamp, amount, _fill) in enumerate(pending):
                 running += amount
                 if abs(running - delta) <= tolerance:
                     matched_count = index + 1
@@ -1850,19 +1974,27 @@ def _quantbase_capital_anchors(
                         "quantbase capital recognition lacks a positive NAV"
                     )
                 booked_anchors.extend(
-                    (timestamp, amount, day, nav_value)
-                    for timestamp, amount in pending[:matched_count]
+                    (timestamp, amount, day, nav_value, fill)
+                    for timestamp, amount, fill in pending[:matched_count]
                 )
                 pending = pending[matched_count:]
         previous_cost_basis = cost_basis
     if contribution_index != len(contributions) or pending:
         raise ProviderLedgerError("quantbase capital additions do not reconcile")
 
+    history_days = [day for day, _cost_basis, _value in history]
     anchors: list[dict[str, Any]] = []
-    for index, (timestamp, amount, recognition_day, nav_value) in enumerate(
+    for index, (timestamp, amount, recognition_day, nav_value, fill) in enumerate(
         sorted(booked_anchors, key=lambda item: item[0])
     ):
         event_day = timestamp.date()
+        if (
+            min((day for day in history_days if day > fill.date()), default=None)
+            != recognition_day
+        ):
+            raise ProviderLedgerError(
+                "quantbase capital recognition is not the first NAV after its fill"
+            )
         # Keep the activity timestamp as the economic capital date, but map
         # against the first dashboard NAV that recognizes the allocation.
         strategy_id, mapping_status = _mapped_strategy_for_account(
@@ -1880,6 +2012,7 @@ def _quantbase_capital_anchors(
                 if index == 0
                 else "STRATEGY_CAPITAL_ALLOCATION"
             ),
+            "economic_fill_timestamp": fill.isoformat(),
             "event_date": event_day.isoformat(),
             "evidence_layer": "ACCOUNT_LIVE",
             "generation_id": generation_id,
@@ -2929,15 +3062,36 @@ def _provider(
     return identity, manifest, catalog, artifacts, root
 
 
+def _contract_fx_segment(financial_contract: Mapping[str, Any]) -> dict[str, Any]:
+    segments = [
+        row
+        for row in _objects(
+            financial_contract.get("source_segments"), "financial MVP source_segments"
+        )
+        if row.get("source_id") == "portfolio-fx-rates"
+    ]
+    if len(segments) != 1:
+        raise ProviderLedgerError("portfolio FX contract segment is absent")
+    return segments[0]
+
+
 def _portfolio_fx_rates(
     value: object,
     baseline_as_of: date,
+    financial_contract: Mapping[str, Any],
 ) -> tuple[
     str,
     dict[tuple[str, date], Decimal],
     tuple[SourceArtifact, SourceArtifact],
 ]:
-    """Load an explicitly selected, hash-bound daily FX candidate."""
+    """Load the contract-admitted, hash-bound daily FX generation.
+
+    The spec's owner-selection label is not authority on its own: the
+    generation and manifest hash must be the financial contract's
+    ``portfolio-fx-rates.current_generation`` and its rates must cover exactly
+    the contract interval.  A later candidate stays unadmitted until the
+    contract selects it, so no USD value is derived past the admitted end.
+    """
 
     ref = _object(value, "portfolio_fx_rates")
     expected = {
@@ -2953,6 +3107,18 @@ def _portfolio_fx_rates(
         raise ProviderLedgerError("portfolio FX owner selection is absent")
     root = Path(_text(ref["root"], "portfolio_fx_rates.root")).resolve()
     generation_id = _run_id(ref["generation_id"], "portfolio_fx_rates.generation_id")
+    segment = _contract_fx_segment(financial_contract)
+    admitted = _object(
+        segment.get("current_generation"), "portfolio FX contract current_generation"
+    )
+    if (
+        admitted.get("generation_id") != generation_id
+        or admitted.get("sha256") != ref["manifest_sha256"]
+    ):
+        raise ProviderLedgerError(
+            "portfolio FX generation is not the contract-admitted generation"
+        )
+    admitted_interval = _object(segment.get("interval"), "portfolio FX interval")
     generation_root = root / "generations" / generation_id
     manifest, manifest_hash, manifest_size = _manifest(
         _exact_file(
@@ -3054,6 +3220,14 @@ def _portfolio_fx_rates(
     start = _day(coverage.get("observed_start"), "portfolio FX observed_start")
     end = _day(coverage.get("observed_end"), "portfolio FX observed_end")
     expected_dates = (end - start).days + 1
+    if start != _day(
+        admitted_interval.get("observed_start"), "portfolio FX admitted start"
+    ) or end != _day(
+        admitted_interval.get("observed_end"), "portfolio FX admitted end"
+    ):
+        raise ProviderLedgerError(
+            "portfolio FX coverage differs from its contract interval"
+        )
     if (
         start != manifest.coverage.observed_start
         or end != manifest.coverage.observed_end
@@ -5469,6 +5643,328 @@ def _catalog_decimal_context(function: Callable[..., Any]) -> Callable[..., Any]
     return wrapped
 
 
+_EXACT_TIMESTAMP_FLOW_TIMING: Final = "EXACT_TIMESTAMP_BEGINNING_OF_SUBPERIOD"
+_FUNDED_MEMBERSHIP: Final = "FUNDED_MEMBERSHIP"
+_OMITTED_STRATEGY_LINK_REASONS: Final = frozenset(
+    {ZERO_CAPITAL_RETURN_UNDEFINED, NEGATIVE_CAPITAL_BASE}
+)
+PerformanceMembership = Mapping[
+    tuple[str, str], Sequence[tuple[date, date | None, str]]
+]
+
+
+class _MemberEpoch(NamedTuple):
+    """One account's funded run in one strategy, opened per R1."""
+
+    provider_id: str
+    account_id: str
+    strategy_id: str
+    opening: OpeningPoint
+    last_day: date
+    observations: dict[date, Decimal]
+    record_ids: dict[date, str]
+    unavailable_days: frozenset[date]
+    legs: tuple[FlowLeg, ...]
+
+
+def _return_leg(
+    *,
+    amount: Decimal,
+    internal: bool,
+    event_day: date,
+    recognition_day: date,
+    timing: str,
+    record_id: object = None,
+    economic_day: date | None = None,
+) -> FlowLeg:
+    """Express one admitted capital movement for the shared return engine."""
+
+    direction = "IN" if amount > 0 else "OUT"
+    try:
+        return FlowLeg(
+            amount=amount,
+            flow_class=f"{'INTERNAL' if internal else 'EXTERNAL'}_{direction}",
+            event_date=event_day,
+            nav_recognition_date=recognition_day,
+            timing=timing,
+            economic_date=economic_day,
+            source_record_ids=(
+                (record_id,) if isinstance(record_id, str) and record_id else ()
+            ),
+        )
+    except ReturnsError as exc:
+        raise ProviderLedgerError(f"account return flow is invalid: {exc}") from exc
+
+
+def _census_performance_membership(
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    financial_contract: Mapping[str, Any],
+    account_providers: Mapping[str, str],
+    strategy_ids: set[str],
+) -> tuple[
+    dict[tuple[str, str], tuple[tuple[date, date | None, str], ...]],
+    list[dict[str, Any]],
+]:
+    """Bind each mapped account epoch to its current-census membership status.
+
+    The census names accounts only by redacted sleeve alias, so a provenance
+    assignment is matched on its exact provider, strategy and effective
+    interval.  Every mapped required-strategy epoch must match census rows of
+    exactly one status; otherwise the performance perimeter is unknown and the
+    ledger fails closed.  Only ``FUNDED_MEMBERSHIP`` epochs
+    carry performance (R2); an ``ASSIGNMENT_ONLY`` epoch keeps its NAV mapping
+    for capital but never enters a strategy return.
+    """
+
+    census = _object(financial_contract.get("current_census"), "current census")
+    census_statuses: dict[tuple[str, str, str | None, str | None], list[str]] = (
+        defaultdict(list)
+    )
+    for sleeve in _objects(census.get("account_sleeves"), "census account_sleeves"):
+        provider = _text(sleeve.get("provider_id"), "census sleeve provider_id")
+        for item in _objects(sleeve.get("assignments"), "census sleeve assignments"):
+            census_statuses[
+                (
+                    provider.upper(),
+                    _text(item.get("strategy_id"), "census assignment strategy_id"),
+                    item.get("effective_start"),
+                    item.get("effective_end"),
+                )
+            ].append(_text(item.get("status"), "census assignment status"))
+    provenance_rows: dict[
+        tuple[str, str, str | None, str | None], list[tuple[str, str]]
+    ] = defaultdict(list)
+    for account_id, account_assignments in sorted(assignments.items()):
+        account_provider = account_providers.get(account_id)
+        if account_provider is None:
+            continue
+        for assignment in account_assignments:
+            strategy_id = assignment.get("strategy_id")
+            if (
+                assignment.get("mapping_status") != "MAPPED"
+                or strategy_id not in strategy_ids
+            ):
+                continue
+            provenance_rows[
+                (
+                    account_provider.upper(),
+                    str(strategy_id),
+                    assignment.get("effective_start") or None,
+                    assignment.get("effective_end") or None,
+                )
+            ].append((account_id, str(strategy_id)))
+    membership: dict[tuple[str, str], list[tuple[date, date | None, str]]] = (
+        defaultdict(list)
+    )
+    disclosures: list[dict[str, Any]] = []
+    for signature, rows in sorted(
+        provenance_rows.items(), key=lambda item: str(item[0])
+    ):
+        statuses = census_statuses.get(signature, [])
+        if not statuses:
+            raise ProviderLedgerError(
+                "mapped strategy epoch lacks a current-census membership"
+            )
+        if len(set(statuses)) != 1:
+            raise ProviderLedgerError(
+                "mapped strategy epoch has an ambiguous current-census membership"
+            )
+        _provider, strategy_id, raw_start, raw_end = signature
+        start = _day(raw_start, "mapped assignment effective_start")
+        end = (
+            None
+            if raw_end is None
+            else _day(raw_end, "mapped assignment effective_end")
+        )
+        for account_id, _strategy in rows:
+            membership[(account_id, strategy_id)].append((start, end, statuses[0]))
+            if statuses[0] != _FUNDED_MEMBERSHIP:
+                disclosures.append(
+                    {
+                        "account_id": account_id,
+                        "census_status": statuses[0],
+                        "effective_end": raw_end,
+                        "effective_start": raw_start,
+                        "performance_effect": "EXCLUDED_FROM_STRATEGY_RETURNS",
+                        "strategy_id": strategy_id,
+                    }
+                )
+    return (
+        {key: tuple(sorted(value, key=str)) for key, value in membership.items()},
+        sorted(disclosures, key=lambda row: (row["account_id"], row["strategy_id"])),
+    )
+
+
+def _unobserved_flow_recognitions(
+    nav_rows: Sequence[Mapping[str, Any]],
+    flow_rows: Sequence[Mapping[str, Any]],
+    authoritative_provider_ids: set[str],
+) -> list[str]:
+    """Name mapped capital flows recognized on a date without an account NAV.
+
+    The return engine books such a flow in the sub-period ending at the next
+    observation; the identities are published so the placement is visible.
+    """
+
+    observed = {
+        (
+            str(row.get("provider_id")),
+            str(row.get("account_id")),
+            str(row.get("as_of_date")),
+        )
+        for row in nav_rows
+    }
+    names: list[str] = []
+    for row in flow_rows:
+        provider_id = str(row.get("provider_id") or "")
+        if (
+            row.get("mapping_status") != "MAPPED"
+            or provider_id not in authoritative_provider_ids
+            or row.get("capital_disposition") == "NON_CAPITAL"
+        ):
+            continue
+        day = str(row.get("nav_recognition_date") or row.get("event_date") or "")
+        if day and (provider_id, str(row.get("account_id")), day) not in observed:
+            names.append(str(row.get("record_id") or f"{provider_id}:{day}"))
+    return sorted(names)
+
+
+def _strategy_path_links(
+    members: Sequence[_MemberEpoch],
+) -> tuple[list[SubperiodLink], frozenset[date]]:
+    """Link one strategy's summed member values through ``returns.link_epoch``.
+
+    A member enters as an end-of-day transfer of its opening value and leaves
+    as a beginning-of-day transfer of its last value, so the linked factor of
+    every sub-period is ``(sum V_end - F_eod) / (sum V_begin + F_bod)``.  A date
+    on which an active member's value is unavailable is not a strategy
+    observation; the omitted days are returned with the links.
+    """
+
+    unavailable = frozenset(
+        day for member in members for day in member.unavailable_days
+    )
+    series: dict[date, Decimal] = {}
+    for day in sorted({day for member in members for day in member.observations}):
+        if day in unavailable:
+            continue
+        values: list[Decimal] = []
+        for member in members:
+            if not member.opening.as_of <= day <= member.last_day:
+                continue
+            value = member.observations.get(day)
+            if value is None:
+                raise ProviderLedgerError(
+                    "strategy member accounts do not share NAV observation dates"
+                )
+            values.append(value)
+        series[day] = values[0] if len(values) == 1 else sum(values[1:], values[0])
+    if not series:
+        return [], unavailable
+    first_day = min(series)
+    legs: list[FlowLeg] = [leg for member in members for leg in member.legs]
+    for member in members:
+        included = [
+            day for day in series if member.opening.as_of <= day <= member.last_day
+        ]
+        if member.opening.as_of > first_day:
+            legs.append(
+                _return_leg(
+                    amount=member.opening.value,
+                    internal=True,
+                    event_day=member.opening.as_of,
+                    recognition_day=member.opening.as_of,
+                    timing=DATE_ONLY,
+                )
+            )
+        later = [day for day in series if included and day > included[-1]]
+        exit_value = member.observations[included[-1]] if included else Decimal(0)
+        if later and exit_value != 0:
+            legs.append(
+                _return_leg(
+                    amount=-exit_value,
+                    internal=True,
+                    event_day=later[0],
+                    recognition_day=later[0],
+                    timing=EXACT_TIMESTAMP,
+                )
+            )
+    links: list[SubperiodLink] = []
+    opening = OpeningPoint(first_day, series[first_day], members[0].opening.basis)
+    while True:
+        remaining = {
+            day: value for day, value in series.items() if day >= opening.as_of
+        }
+        period_legs = [leg for leg in legs if leg.nav_recognition_date > opening.as_of]
+        epoch = link_epoch(remaining, period_legs, opening)
+        if epoch.rejected_legs:
+            # A member flow recognized after the strategy's last valued date
+            # would leave the money identity incomplete.
+            raise ProviderLedgerError("flow-adjusted account return is invalid")
+        if epoch.status == AVAILABLE:
+            links.extend(epoch.links)
+            break
+        if epoch.reason == NO_SUBPERIOD_AFTER_OPENING:
+            break
+        if (
+            epoch.reason not in _OMITTED_STRATEGY_LINK_REASONS
+            or epoch.failed_subperiod is None
+        ):
+            raise ProviderLedgerError("flow-adjusted account return is invalid")
+        # An unavailable epoch keeps the sub-periods linked before the failure;
+        # each is a valid daily return, only the epoch index is withheld.
+        links.extend(epoch.links)
+        _failed_start, failed_end = epoch.failed_subperiod
+        # R3: capital cannot appear without a flow.  The undefined sub-period
+        # is omitted and the path re-opens at the next positive value.
+        reopened = opening_point(
+            {day: value for day, value in series.items() if day >= failed_end},
+            failed_end,
+        )
+        if reopened is None:
+            break
+        opening = reopened
+    return links, unavailable
+
+
+def _membership_segments(
+    run_days: Sequence[date],
+    intervals: Sequence[tuple[date, date | None, str]],
+) -> list[tuple[list[date], str]]:
+    """Split one same-strategy NAV run at its census membership boundaries.
+
+    A status transition that keeps the same strategy leaves no single census
+    interval covering the whole contiguous run.  The run is split where the
+    covering status changes, so only the non-performance epoch is excluded
+    instead of the whole run failing.  A day no census interval covers, or a
+    day two statuses cover, still fails closed.
+    """
+
+    segments: list[tuple[list[date], str]] = []
+    start = 0
+    current: str | None = None
+    for index, day in enumerate(run_days):
+        covering = {
+            status
+            for interval_start, interval_end, status in intervals
+            if interval_start <= day and (interval_end is None or day <= interval_end)
+        }
+        if len(covering) != 1:
+            raise ProviderLedgerError(
+                "mapped NAV run lacks exactly one census membership"
+            )
+        status = covering.pop()
+        if current is None:
+            current = status
+        elif status != current:
+            segments.append((list(run_days[start:index]), current))
+            start = index
+            current = status
+    if current is not None:
+        segments.append((list(run_days[start:]), current))
+    return segments
+
+
 @_catalog_decimal_context
 def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
@@ -5477,12 +5973,29 @@ def _broker_strategy_returns(
     *,
     capital_anchors: Sequence[Mapping[str, Any]] = (),
     declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]] | None = None,
+    performance_membership: PerformanceMembership | None = None,
 ) -> list[dict[str, Any]]:
-    """Create flow-adjusted account-live returns from admitted broker NAV.
+    """Recompute account-live strategy returns from admitted broker NAV.
 
-    A return is emitted only when both adjacent NAV observations map to the same
-    accepted strategy. Date-only flows use the documented end-of-day convention.
-    Multiple accounts assigned to one strategy are beginning-capital weighted.
+    Each strategy's daily path links the summed values of its funded member
+    accounts through ``quant_engine.portfolio_ledger.returns``:
+
+    * R1: a member epoch opens at the last observation before its first
+      funded date when that value is positive, otherwise at its first positive
+      funded observation.  A Quantbase epoch opens at its opening capital
+      anchor, the first capital-reconciled NAV.
+    * R2: with ``performance_membership`` only census ``FUNDED_MEMBERSHIP``
+      epochs enter; an assignment-only epoch never carries a return.  A
+      same-strategy status transition splits the run at its membership
+      boundary, so only the non-performance epoch is excluded.
+    * Date-only flows leave the ending value of the sub-period that ends at
+      their NAV recognition date (or the next observation after it).
+      Exact-timestamp Quantbase allocations join its beginning capital.
+    * Members enter and leave as transfers at their boundaries, so value that
+      appears on a member's zero capital is strategy return, not a weight.
+    * R3: a strategy sub-period with no capital and a non-zero result is
+      undefined and omitted; the path re-opens at the next positive value.
+      Sub-periods across a declared NAV gap are not daily returns.
     """
 
     declared_gaps = declared_nav_gap_dates_by_provider or {}
@@ -5498,7 +6011,7 @@ def _broker_strategy_returns(
             internal_accounts_by_activity[
                 (str(row.get("provider_id") or ""), activity_id)
             ].add(account_id)
-    flows: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    legs_by_account: dict[tuple[str, str], list[FlowLeg]] = defaultdict(list)
     flow_timing_by_provider: dict[str, set[str]] = defaultdict(set)
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
@@ -5558,24 +6071,35 @@ def _broker_strategy_returns(
                 # either external capital or a zero-valued cash movement.
                 continue
             raise ProviderLedgerError("mapped flow amount is unavailable")
-        flows[(provider_id, account_id, day)] += amount
+        if amount == 0:
+            continue
+        recognition = _day(day, "flow NAV recognition date")
+        # A date-only flow is placed by the NAV that proves it.  Its own cash
+        # date stays on the flow fact: a provider may post cash after the NAV
+        # has already recognized it.
+        legs_by_account[(provider_id, account_id)].append(
+            _return_leg(
+                amount=amount,
+                internal=str(row.get("flow_type") or "").startswith(
+                    "TRANSFER:INTERNAL"
+                ),
+                event_day=recognition,
+                recognition_day=recognition,
+                timing=DATE_ONLY,
+                record_id=row.get("record_id"),
+            )
+        )
 
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in nav_rows:
-        if row.get("mapping_status") != "MAPPED":
-            continue
         provider_id = str(row["provider_id"])
         if provider_id not in authoritative_provider_ids:
             continue
         by_account[(provider_id, str(row["account_id"]))].append(row)
 
-    quantbase_anchor_adjustments: dict[tuple[str, str, str], Decimal] = defaultdict(
-        Decimal
-    )
-    quantbase_opening_dates: set[tuple[str, str, str]] = set()
     quantbase_anchor_strategies: dict[tuple[str, str, str], str] = {}
-    quantbase_opening_accounts: set[tuple[str, str, str]] = set()
-    quantbase_allocation_accounts: set[tuple[str, str, str]] = set()
+    quantbase_openings: dict[tuple[str, str], date] = {}
+    quantbase_allocation_accounts: set[tuple[str, str]] = set()
     seen_quantbase_anchor_ids: set[str] = set()
     for row in capital_anchors:
         if row.get("provider_id") != "quantbase":
@@ -5622,7 +6146,6 @@ def _broker_strategy_returns(
             "STRATEGY_CAPITAL_ALLOCATION",
         }:
             raise ProviderLedgerError("quantbase capital anchor type is invalid")
-        account_strategy = ("quantbase", account_id, strategy_id)
         anchor_key = ("quantbase", account_id, recognition_day.isoformat())
         previous_strategy = quantbase_anchor_strategies.setdefault(
             anchor_key, strategy_id
@@ -5632,17 +6155,38 @@ def _broker_strategy_returns(
                 "quantbase capital anchors conflict at NAV recognition date"
             )
         if capital_type == "OPENING_CAPITAL_ANCHOR":
-            if account_strategy in quantbase_opening_accounts:
+            if (account_id, strategy_id) in quantbase_openings:
                 raise ProviderLedgerError("duplicate quantbase opening capital anchor")
-            quantbase_opening_accounts.add(account_strategy)
-            quantbase_opening_dates.add(anchor_key)
+            quantbase_openings[(account_id, strategy_id)] = recognition_day
         else:
-            quantbase_allocation_accounts.add(account_strategy)
-            quantbase_anchor_adjustments[anchor_key] += amount_value
-            flow_timing_by_provider["quantbase"].add("PROVIDER_NAV_RECOGNITION_DATE")
+            quantbase_allocation_accounts.add((account_id, strategy_id))
+            raw_fill = row.get("economic_fill_timestamp")
+            if raw_fill in {None, ""}:
+                raise ProviderLedgerError(
+                    "quantbase capital allocation lacks its economic fill timestamp"
+                )
+            fill_day = datetime.fromisoformat(
+                _utc_timestamp(
+                    raw_fill, "quantbase capital anchor economic_fill_timestamp"
+                ).replace("Z", "+00:00")
+            ).date()
+            # The fund allocation fills at an exact time, so it is capital at
+            # risk from the start of its recognizing sub-period.
+            legs_by_account[("quantbase", account_id)].append(
+                _return_leg(
+                    amount=amount_value,
+                    internal=True,
+                    event_day=min(event_day, fill_day),
+                    recognition_day=recognition_day,
+                    timing=EXACT_TIMESTAMP,
+                    record_id=record_id,
+                    economic_day=fill_day,
+                )
+            )
+            flow_timing_by_provider["quantbase"].add(_EXACT_TIMESTAMP_FLOW_TIMING)
 
     for account_strategy in quantbase_allocation_accounts:
-        if account_strategy not in quantbase_opening_accounts:
+        if account_strategy not in quantbase_openings:
             raise ProviderLedgerError(
                 "quantbase capital allocation lacks an opening capital anchor"
             )
@@ -5661,117 +6205,197 @@ def _broker_strategy_returns(
                 "quantbase capital anchor does not match a mapped recognized NAV"
             )
 
-    contributions: dict[
-        tuple[str, str], list[tuple[Decimal, Decimal, str, str, str]]
-    ] = defaultdict(list)
-    quantbase_return_paths: set[tuple[str, str, str]] = set()
+    members_by_strategy: dict[str, list[_MemberEpoch]] = defaultdict(list)
     for (provider_id, account_id), rows in by_account.items():
         ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
-        for previous, current in zip(ordered, ordered[1:]):
-            if previous.get("strategy_id") != current.get("strategy_id"):
-                continue
-            previous_day = _day(previous.get("as_of_date"), "prior NAV date")
-            current_day = _day(current.get("as_of_date"), "ending NAV date")
-            provider_gaps = declared_gaps.get(provider_id, frozenset())
-            if previous_day in provider_gaps or current_day in provider_gaps:
-                raise ProviderLedgerError(
-                    "declared NAV gap contains an admitted NAV observation"
-                )
-            if any(previous_day < gap < current_day for gap in provider_gaps):
-                # The next observed account value spans an explicitly missing
-                # source date.  It is valid NAV evidence but not a one-period
-                # daily return and therefore cannot enter strategy_returns.
-                continue
-            prior_nav = _observed_decimal(previous.get("nav"), "prior NAV")
-            ending_nav = _observed_decimal(current.get("nav"), "ending NAV")
-            if prior_nav is None or ending_nav is None:
-                continue
-            if prior_nav <= 0 or ending_nav < 0:
-                continue
-            day = str(current["as_of_date"])
-            strategy_id = _text(current.get("strategy_id"), "strategy_id")
-            if provider_id == "quantbase":
-                quantbase_return_paths.add((provider_id, account_id, strategy_id))
-            anchor_key = (provider_id, account_id, day)
-            if anchor_key in quantbase_opening_dates:
-                # An opening anchor establishes the first funded NAV baseline;
-                # it is not a period cash flow and must not fabricate a return.
-                continue
-            net_flow = flows.get((provider_id, account_id, day), Decimal(0))
-            net_flow += quantbase_anchor_adjustments.get(anchor_key, Decimal(0))
-            period_return = (ending_nav - net_flow) / prior_nav - Decimal(1)
-            if period_return <= -1:
-                raise ProviderLedgerError("flow-adjusted account return is invalid")
-            contributions[(strategy_id, day)].append(
-                (
-                    prior_nav,
-                    period_return,
-                    provider_id,
-                    account_id,
-                    str(current["record_id"]),
-                )
+        values: dict[date, Decimal] = {}
+        record_ids: dict[date, str] = {}
+        runs: list[list[Mapping[str, Any]]] = []
+        run_open = False
+        for row in ordered:
+            observed_day = _day(row.get("as_of_date"), "NAV date")
+            if observed_day in record_ids:
+                raise ProviderLedgerError("account NAV observation date is duplicated")
+            record_ids[observed_day] = str(row.get("record_id") or "")
+            value = _observed_decimal(row.get("nav"), "NAV")
+            if value is not None:
+                values[observed_day] = value
+            strategy = (
+                row.get("strategy_id")
+                if row.get("mapping_status") == "MAPPED"
+                else None
             )
-
-    for return_path in quantbase_return_paths:
-        if return_path not in quantbase_opening_accounts:
-            raise ProviderLedgerError(
-                "quantbase mapped NAV lacks exactly one opening capital anchor"
-            )
+            if not isinstance(strategy, str) or not strategy:
+                run_open = False
+                continue
+            if run_open and runs[-1][0].get("strategy_id") == strategy:
+                runs[-1].append(row)
+            else:
+                runs.append([row])
+            run_open = True
+        provider_gaps = declared_gaps.get(provider_id, frozenset())
+        for run in runs:
+            strategy_id = _text(run[0].get("strategy_id"), "strategy_id")
+            run_days = [_day(row.get("as_of_date"), "NAV date") for row in run]
+            if performance_membership is None:
+                segments = [(run_days, _FUNDED_MEMBERSHIP)]
+            else:
+                intervals = performance_membership.get((account_id, strategy_id), ())
+                statuses = {
+                    status
+                    for start, end, status in intervals
+                    if start <= run_days[0] and (end is None or run_days[-1] <= end)
+                }
+                if len(statuses) == 1:
+                    segments = [(run_days, next(iter(statuses)))]
+                else:
+                    # No single census interval covers the whole contiguous
+                    # run: a same-strategy status transition splits it at its
+                    # membership boundaries instead of failing the run.
+                    segments = _membership_segments(run_days, intervals)
+            for segment_days, membership_status in segments:
+                if membership_status != _FUNDED_MEMBERSHIP:
+                    continue
+                first_day, last_day = segment_days[0], segment_days[-1]
+                if provider_id == "quantbase":
+                    anchor_day = quantbase_openings.get((account_id, strategy_id))
+                    if anchor_day is None:
+                        if len(segment_days) > 1:
+                            raise ProviderLedgerError(
+                                "quantbase mapped NAV lacks exactly one opening capital anchor"
+                            )
+                        continue
+                    anchor_value = values.get(anchor_day)
+                    if (
+                        anchor_day not in segment_days
+                        or anchor_value is None
+                        or anchor_value <= 0
+                    ):
+                        raise ProviderLedgerError(
+                            "quantbase opening capital anchor does not open its NAV"
+                        )
+                    # An opening anchor establishes the first funded NAV baseline;
+                    # earlier dashboard values are not funded performance.
+                    opening: OpeningPoint | None = OpeningPoint(
+                        anchor_day,
+                        anchor_value,
+                        OPENING_FIRST_POSITIVE_ON_OR_AFTER_START,
+                    )
+                else:
+                    opening = opening_point(
+                        {
+                            day: value
+                            for day, value in values.items()
+                            if day <= last_day
+                        },
+                        first_day,
+                    )
+                if opening is None:
+                    continue
+                observations = {
+                    day: value
+                    for day, value in values.items()
+                    if opening.as_of <= day <= last_day
+                }
+                if any(day in provider_gaps for day in observations):
+                    raise ProviderLedgerError(
+                        "declared NAV gap contains an admitted NAV observation"
+                    )
+                members_by_strategy[strategy_id].append(
+                    _MemberEpoch(
+                        provider_id=provider_id,
+                        account_id=account_id,
+                        strategy_id=strategy_id,
+                        opening=opening,
+                        last_day=last_day,
+                        observations=observations,
+                        record_ids={day: record_ids[day] for day in observations},
+                        unavailable_days=frozenset(
+                            day
+                            for day in segment_days
+                            if day not in values and day > opening.as_of
+                        ),
+                        legs=tuple(
+                            leg
+                            for leg in legs_by_account.get(
+                                (provider_id, account_id), ()
+                            )
+                            if opening.as_of < leg.nav_recognition_date <= last_day
+                        ),
+                    )
+                )
 
     result: list[dict[str, Any]] = []
-    for (strategy_id, day), items in sorted(contributions.items()):
-        denominator = sum((item[0] for item in items), Decimal(0))
-        if denominator <= 0:
-            continue
-        # A one-account sleeve is already its own exact return.  Multiplying
-        # and dividing it by the same beginning capital applies Decimal
-        # context rounding a second time and can change the final digit.
-        composite = (
-            items[0][1]
-            if len(items) == 1
-            else sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
-            / denominator
+    for strategy_id, members in sorted(members_by_strategy.items()):
+        links, unavailable = _strategy_path_links(members)
+        omitted_days = unavailable.union(
+            *(declared_gaps.get(member.provider_id, frozenset()) for member in members)
         )
-        providers = sorted({item[2] for item in items})
-        timing_modes = {
-            mode
-            for provider in providers
-            for mode in flow_timing_by_provider.get(provider, {"DATE_ONLY_END_OF_DAY"})
-        }
-        account_ids = sorted({item[3] for item in items})
-        source_record_ids = sorted(item[4] for item in items)
-        result.append(
-            {
-                "account_reconciliation_sha256": hashlib.sha256(
-                    canonical_json_bytes(
-                        {
-                            "account_ids": account_ids,
-                            "date": day,
-                            "source_record_ids": source_record_ids,
-                            "strategy_id": strategy_id,
-                        }
-                    )
-                ).hexdigest(),
-                "component_account_count": len(items),
-                "component_account_ids": account_ids,
-                "beginning_capital": format(denominator, "f"),
-                "date": day,
-                "evidence_layer": "ACCOUNT_LIVE",
-                "flow_timing": (
-                    next(iter(timing_modes))
-                    if len(timing_modes) == 1
-                    else "MIXED_PROVIDER_FLOW_TIMING"
-                ),
-                "provider_id": providers[0]
-                if len(providers) == 1
-                else "multi-provider",
-                "return": format(composite, "f"),
-                "return_basis": "NET",
-                "return_type": "TOTAL",
-                "source_record_ids": source_record_ids,
-                "strategy_id": strategy_id,
+        for link in links:
+            if link.zero_capital_neutral or link.beginning_capital <= 0:
+                continue
+            if any(link.start_date < day < link.end_date for day in omitted_days):
+                # The next observed value spans an explicitly missing source
+                # date.  It is valid NAV evidence but not a one-period daily
+                # return and therefore cannot enter strategy_returns.
+                continue
+            components = [
+                member
+                for member in members
+                if member.opening.as_of <= link.start_date
+                and link.end_date <= member.last_day
+                and (
+                    member.observations.get(link.start_date, Decimal(0)) != 0
+                    or member.observations.get(link.end_date, Decimal(0)) != 0
+                )
+            ]
+            if not components:
+                continue
+            day = link.end_date.isoformat()
+            providers = sorted({member.provider_id for member in components})
+            timing_modes = {
+                mode
+                for provider in providers
+                for mode in flow_timing_by_provider.get(
+                    provider, {"DATE_ONLY_END_OF_DAY"}
+                )
             }
-        )
+            account_ids = sorted({member.account_id for member in components})
+            source_record_ids = sorted(
+                member.record_ids[link.end_date] for member in components
+            )
+            result.append(
+                {
+                    "account_reconciliation_sha256": hashlib.sha256(
+                        canonical_json_bytes(
+                            {
+                                "account_ids": account_ids,
+                                "date": day,
+                                "source_record_ids": source_record_ids,
+                                "strategy_id": strategy_id,
+                            }
+                        )
+                    ).hexdigest(),
+                    "component_account_count": len(account_ids),
+                    "component_account_ids": account_ids,
+                    "beginning_capital": format(link.beginning_capital, "f"),
+                    "date": day,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "flow_timing": (
+                        next(iter(timing_modes))
+                        if len(timing_modes) == 1
+                        else "MIXED_PROVIDER_FLOW_TIMING"
+                    ),
+                    "provider_id": providers[0]
+                    if len(providers) == 1
+                    else "multi-provider",
+                    "return": format(link.period_return, "f"),
+                    "return_basis": "NET",
+                    "return_type": "TOTAL",
+                    "source_record_ids": source_record_ids,
+                    "strategy_id": strategy_id,
+                }
+            )
     return result
 
 
@@ -6035,46 +6659,50 @@ def _merge_account_returns(
     *,
     provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Apply the contract-selected account-return authority for each strategy."""
+    """Select the admitted-NAV recompute as every ACCOUNT_LIVE authority.
 
+    A retained tracker or pinned-segment return is stale evidence wherever the
+    admitted NAV recomputes the strategy: it never overrides the recompute.
+    Retained ACCOUNT_LIVE rows survive only for strategies the admitted NAV
+    does not cover; the superseded rows stay comparison evidence in
+    ``_strategy_return_overlap_checks``.
+    """
+
+    for broker_row in broker_rows:
+        if not _complete_broker_rollforward(broker_row):
+            raise ProviderLedgerError(
+                "recomputed account return lacks a complete NAV rollforward"
+            )
+    recomputed = {
+        str(row["strategy_id"])
+        for row in broker_rows
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
+    superseded = set(provider_native_strategy_ids) | recomputed
     result = [
         dict(item)
         for item in source_rows
         if not (
             item.get("evidence_layer") == "ACCOUNT_LIVE"
-            and str(item.get("strategy_id")) in provider_native_strategy_ids
+            and str(item.get("strategy_id")) in superseded
         )
     ]
-    retained_account_rows = {
-        (str(row["strategy_id"]), str(row["date"])): row
-        for row in result
-        if row.get("evidence_layer") == "ACCOUNT_LIVE"
-    }
-    last_source: dict[str, str] = {}
-    for row in result:
-        if row.get("evidence_layer") == "ACCOUNT_LIVE":
-            strategy_id = str(row["strategy_id"])
-            last_source[strategy_id] = max(
-                last_source.get(strategy_id, ""), str(row["date"])
-            )
+    recomputed_rows: list[dict[str, Any]] = []
     for broker_row in broker_rows:
         strategy_id = str(broker_row["strategy_id"])
-        if strategy_id not in provider_native_strategy_ids and str(
-            broker_row["date"]
-        ) <= last_source.get(strategy_id, ""):
-            retained = retained_account_rows.get((strategy_id, str(broker_row["date"])))
-            if retained is not None and _complete_broker_rollforward(broker_row):
-                retained.update(
-                    {field: broker_row[field] for field in _ROLLFORWARD_FIELDS}
-                )
-            continue
-        result.append(
+        if strategy_id not in strategy_names:
+            raise ProviderLedgerError(
+                "recomputed account return lacks a provenance strategy name: "
+                f"{strategy_id}"
+            )
+        recomputed_rows.append(
             {
                 **broker_row,
                 "cost": None,
                 "strategy_name": strategy_names[strategy_id],
             }
         )
+    result.extend(recomputed_rows)
     result.sort(
         key=lambda item: (
             str(item["strategy_id"]),
@@ -6091,7 +6719,12 @@ def _strategy_return_overlap_checks(
     *,
     provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Retain explicit parity evidence and state which overlapping path won."""
+    """Publish how every superseded retained path differs from the recompute.
+
+    A recomputed strategy whose retained rows are fully date-disjoint from the
+    recompute still publishes its overlap row: the retained-only dates are the
+    comparison evidence that the recompute supersedes a disjoint retained path.
+    """
 
     tolerance = Decimal("0.000001")
     source = {
@@ -6099,28 +6732,62 @@ def _strategy_return_overlap_checks(
         for row in source_rows
         if row.get("evidence_layer") == "ACCOUNT_LIVE"
     }
-    comparisons: dict[str, list[tuple[Decimal, Decimal]]] = defaultdict(list)
+    recomputed_dates: dict[str, set[str]] = defaultdict(set)
+    comparisons: dict[str, list[tuple[str, Decimal, Decimal, Decimal]]] = defaultdict(
+        list
+    )
     for broker in broker_rows:
         identity = (str(broker["strategy_id"]), str(broker["date"]))
+        recomputed_dates[identity[0]].add(identity[1])
         inherited = source.get(identity)
         if inherited is None:
             continue
-        difference = abs(
-            _decimal(inherited["return"], "inherited strategy return")
-            - _decimal(broker["return"], "broker strategy return")
+        comparisons[identity[0]].append(
+            (
+                identity[1],
+                _decimal(inherited["return"], "inherited strategy return"),
+                _decimal(broker["return"], "broker strategy return"),
+                _decimal(
+                    broker.get("beginning_capital") or "0", "broker beginning capital"
+                ),
+            )
         )
-        beginning_capital = _decimal(
-            broker.get("beginning_capital") or "0", "broker beginning capital"
-        )
-        comparisons[identity[0]].append((difference, beginning_capital))
+    retained_strategies = {
+        str(row["strategy_id"])
+        for row in source_rows
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
+    disjoint_recomputed = {
+        strategy_id
+        for strategy_id in recomputed_dates
+        if strategy_id in retained_strategies and strategy_id not in comparisons
+    }
     rows: list[dict[str, object]] = []
-    for strategy_id, comparisons_for_strategy in sorted(comparisons.items()):
-        differences = [item[0] for item in comparisons_for_strategy]
-        exception_count = sum(item > tolerance for item in differences)
+    for strategy_id in sorted([*comparisons, *disjoint_recomputed]):
+        comparisons_for_strategy = comparisons.get(strategy_id, [])
+        differences = [abs(item[1] - item[2]) for item in comparisons_for_strategy]
+        divergences = [
+            {
+                "absolute_difference": format(abs(retained - recomputed), "f"),
+                "date": day,
+                "estimated_dollar_impact": format(
+                    abs(retained - recomputed) * capital, "f"
+                ),
+                "recomputed_return": format(recomputed, "f"),
+                "retained_return": format(retained, "f"),
+            }
+            for day, retained, recomputed, capital in sorted(comparisons_for_strategy)
+            if abs(retained - recomputed) > tolerance
+        ]
+        retained_only = sorted(
+            day
+            for source_strategy, day in source
+            if source_strategy == strategy_id
+            and day not in recomputed_dates[strategy_id]
+        )
         dollar_impacts = [
-            difference * capital
-            for difference, capital in comparisons_for_strategy
-            if difference > tolerance
+            _decimal(item["estimated_dollar_impact"], "divergence impact")
+            for item in divergences
         ]
         rows.append(
             {
@@ -6128,27 +6795,26 @@ def _strategy_return_overlap_checks(
                     "CONTRACT_SELECTED_PROVIDER_GENERATION; retained tracker path "
                     "is comparison evidence only"
                     if strategy_id in provider_native_strategy_ids
-                    else "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker "
-                    "account path retains its correction set; broker NAV path is "
-                    "retained as reconciliation evidence and rollforward input only"
+                    else "ADMITTED_NAV_RECOMPUTE; retained tracker path is "
+                    "comparison evidence only"
                 ),
                 "authority_effect": (
                     "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
                     "RETAINED_ACCOUNT_PATH_SUPERSEDED"
-                    if strategy_id in provider_native_strategy_ids
-                    else "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
                 ),
                 "blocking": False,
                 "check_id": f"strategy-return-overlap-{strategy_id}",
                 "compared_date_count": len(differences),
-                "exception_date_count": exception_count,
-                "maximum_absolute_difference": format(max(differences), "f"),
+                "divergences": divergences,
+                "exception_date_count": len(divergences),
+                "maximum_absolute_difference": (
+                    format(max(differences), "f") if differences else "0"
+                ),
                 "maximum_estimated_dollar_impact": (
                     format(max(dollar_impacts), "f") if dollar_impacts else "0"
                 ),
-                "status": (
-                    "PASS_WITH_ADJUDICATED_VARIANCE" if exception_count else "PASS"
-                ),
+                "retained_only_dates": retained_only,
+                "status": ("PASS_WITH_ADJUDICATED_VARIANCE" if divergences else "PASS"),
                 "strategy_id": strategy_id,
                 "tolerance": format(tolerance, "f"),
             }
@@ -8396,7 +9062,11 @@ def build_catalog(
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
     run_observation = authority.get("run_observation")
     fx_rates = (
-        _portfolio_fx_rates(spec["portfolio_fx_rates"], as_of)
+        _portfolio_fx_rates(
+            spec["portfolio_fx_rates"],
+            as_of,
+            _object(authority.get("contract"), "financial MVP contract"),
+        )
         if "portfolio_fx_rates" in spec
         else None
     )
@@ -8609,12 +9279,32 @@ def build_catalog(
         combined.get("flows", []),
         combined.get("transactions", []),
     )
+    account_providers: dict[str, str] = {}
+    for row in combined.get("nav_observations", []):
+        provider_id = str(row.get("provider_id"))
+        if provider_id not in authoritative_provider_ids:
+            continue
+        known = account_providers.setdefault(str(row.get("account_id")), provider_id)
+        if known != provider_id:
+            raise ProviderLedgerError("account NAV is claimed by two providers")
+    performance_membership, non_performance_epochs = _census_performance_membership(
+        assignments,
+        _object(authority.get("contract"), "financial MVP contract"),
+        account_providers,
+        authoritative_strategy_ids,
+    )
     broker_returns = _broker_strategy_returns(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         authoritative_provider_ids,
         capital_anchors=combined.get("capital_anchors", []),
         declared_nav_gap_dates_by_provider=declared_nav_gaps,
+        performance_membership=performance_membership,
+    )
+    unobserved_flow_recognitions = _unobserved_flow_recognitions(
+        combined.get("nav_observations", []),
+        combined.get("flows", []),
+        authoritative_provider_ids,
     )
     strategy_returns: Sequence[Mapping[str, Any]] = _merge_account_returns(
         source_strategy_returns,
@@ -8634,24 +9324,25 @@ def build_catalog(
         strategy_returns,
         funded_boundaries,
     )
-    superseded_retained_return_count = sum(
-        row.get("evidence_layer") == "ACCOUNT_LIVE"
-        and str(row.get("strategy_id")) in provider_native_strategy_ids
+    recomputed_strategy_ids = provider_native_strategy_ids | {
+        str(row["strategy_id"]) for row in broker_returns
+    }
+    superseded_retained_rows = {
+        (str(row.get("strategy_id")), str(row.get("date")))
         for row in eligible_source_strategy_returns
-    )
-    promoted_provider_return_count = sum(
-        row.get("evidence_layer") == "ACCOUNT_LIVE"
-        and str(row.get("strategy_id")) in provider_native_strategy_ids
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in recomputed_strategy_ids
+    }
+    promoted_rows = {
+        (str(row.get("strategy_id")), str(row.get("date")))
         for row in strategy_returns
-    )
-    retained_source_return_count = (
-        len(eligible_source_strategy_returns) - superseded_retained_return_count
-    )
-    appended_broker_return_count = (
-        len(strategy_returns)
-        - retained_source_return_count
-        - promoted_provider_return_count
-    )
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in recomputed_strategy_ids
+    }
+    superseded_retained_return_count = len(superseded_retained_rows)
+    promoted_provider_return_count = len(promoted_rows)
+    appended_broker_return_count = len(promoted_rows - superseded_retained_rows)
+    retained_only_return_count = len(superseded_retained_rows - promoted_rows)
     overlap_checks = _strategy_return_overlap_checks(
         source_strategy_returns,
         broker_returns,
@@ -8805,8 +9496,23 @@ def build_catalog(
                 "appended_broker_return_count": appended_broker_return_count,
                 "check_id": "broker-nav-rollforward",
                 "promoted_provider_return_count": promoted_provider_return_count,
+                "recomputed_strategy_ids": sorted(recomputed_strategy_ids),
+                "retained_only_return_count": retained_only_return_count,
                 "status": "PASS",
                 "superseded_retained_return_count": (superseded_retained_return_count),
+            },
+            {
+                "check_id": "strategy-return-funded-membership",
+                "non_performance_epochs": non_performance_epochs,
+                "status": "PASS",
+            },
+            {
+                "check_id": "strategy-return-flow-recognition",
+                "status": "PASS",
+                "unobserved_recognition_flow_count": len(unobserved_flow_recognitions),
+                "unobserved_recognition_flow_record_ids": (
+                    unobserved_flow_recognitions
+                ),
             },
             *overlap_checks,
         ],
