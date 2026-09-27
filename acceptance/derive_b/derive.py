@@ -796,12 +796,16 @@ def matrixport_raw_observations(
     account_id: str,
     fx_rates: dict[date, Decimal] | None = None,
     fx_unconverted: list[date] | None = None,
+    raw_nav_dates: list[date] | None = None,
 ) -> list[tuple[date, Decimal]]:
     """Use raw Matrixport subscription units and USD-converted NAV, never ledger values.
 
     Unit-holding rows after the admitted FX boundary (R6 v2) are not converted:
     their dates are recorded in fx_unconverted and no value is emitted. A missing
-    rate at or before the boundary remains a fail-closed error.
+    rate at or before the boundary remains a fail-closed error. Every raw NAV
+    observation date at or before the cutoff is recorded in raw_nav_dates so the
+    source_last_observation metric can report the last raw date even when the
+    last converted value ends earlier at the FX boundary.
     """
     nav_rows = list(nav_rows)
     subscriptions = matrixport_subscription_units(nav_rows, bill_rows)
@@ -813,6 +817,8 @@ def matrixport_raw_observations(
             continue
         observed_on = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date()
         if observed_on <= CUTOFF:
+            if raw_nav_dates is not None:
+                raw_nav_dates.append(observed_on)
             units = sum(
                 (
                     subscription_units
@@ -936,6 +942,7 @@ def raw_provider_data(
     crosswalk_rows: list[dict[str, object]],
     membership_starts: dict[str, date] | None = None,
     paths: dict[str, Path] | None = None,
+    raw_last_dates: dict[str, date] | None = None,
 ) -> tuple[
     dict[str, list[tuple[date, Decimal]]],
     dict[str, FlowData],
@@ -949,6 +956,10 @@ def raw_provider_data(
     failure for the affected account's metrics; the caller must emit
     not_derivable and must not substitute ledger values. The fifth return value
     carries per-account disclosure notes (for example FX-unconverted raw dates).
+    When raw_last_dates is given, it is populated with each successfully loaded
+    account's last raw provider observation date at or before the cutoff
+    (Quantbase pricehistory dates, Matrixport raw nav_daily dates) regardless of
+    FX conversion, for the date.source_last_observation metric.
     """
     paths = paths or default_input_paths()
     price_history_path = paths["quantbase_price_history"]
@@ -1014,6 +1025,8 @@ def raw_provider_data(
                     }
                 else:
                     observations[account_id] = values
+                    if raw_last_dates is not None:
+                        raw_last_dates[account_id] = values[-1][0]
                     used.append(price_history_path)
                     if not (qe_root / activity_path).is_file():
                         failures[account_id] = {
@@ -1089,6 +1102,7 @@ def raw_provider_data(
                     bill_rows = list(csv.DictReader(bill_handle))
                     fx_rates = usdt_usd_fx_rates(qe_root / fx_path)
                     fx_unconverted: list[date] = []
+                    raw_nav_dates: list[date] = []
                     values = matrixport_raw_observations(
                         csv.DictReader(nav_handle),
                         deposit_rows,
@@ -1096,6 +1110,7 @@ def raw_provider_data(
                         account_id,
                         fx_rates,
                         fx_unconverted,
+                        raw_nav_dates,
                     )
                     if not values:
                         raise ValueError(
@@ -1117,6 +1132,8 @@ def raw_provider_data(
                 }
             else:
                 observations[account_id] = values
+                if raw_last_dates is not None and raw_nav_dates:
+                    raw_last_dates[account_id] = max(raw_nav_dates)
                 flows[account_id] = FlowData(
                     cash_flows=cash_flows,
                     twr_end_flows=cash_flows,
@@ -1129,7 +1146,10 @@ def raw_provider_data(
                         f"from {fx_unconverted[0].isoformat()} to "
                         f"{fx_unconverted[-1].isoformat()} follow the admitted FX "
                         f"boundary {FX_LAST_ADMITTED_DATE.isoformat()} and are "
-                        "FX-unconverted; no converted value is emitted for them."
+                        "FX-unconverted; no converted value is emitted for them, "
+                        "and date.source_last_observation reports the last raw "
+                        "NAV date while USD capital as_of stays at the last "
+                        "FX-converted date."
                     )
                 used.extend(matrixport_paths)
     return observations, flows, used, failures, notes
@@ -1253,13 +1273,16 @@ def derive(
         for row in crosswalk["rows"]
     }
     ledger_observations, observation_conflicts = latest_observations(ledger)
+    raw_last_dates: dict[str, date] = {}
     (
         raw_observations,
         raw_flow_data,
         raw_paths,
         raw_failures,
         raw_notes,
-    ) = raw_provider_data(qe_root, crosswalk["rows"], membership_starts, input_paths)
+    ) = raw_provider_data(
+        qe_root, crosswalk["rows"], membership_starts, input_paths, raw_last_dates
+    )
     observations = {**ledger_observations, **raw_observations}
     for account_id, failure in raw_failures.items():
         if "capital.account.cutoff" in failure["metrics"]:
@@ -1375,6 +1398,7 @@ def derive(
             continue
         end_date, end_value = account_observations[-1]
         account_values[account_id] = end_value
+        source_date = raw_last_dates.get(account_id, end_date)
         metrics.append(
             metric(
                 "capital.account.cutoff",
@@ -1390,10 +1414,10 @@ def derive(
             metric(
                 "date.source_last_observation",
                 account_id,
-                end_date.isoformat(),
+                source_date.isoformat(),
                 "date",
                 used_inputs,
-                end_date.isoformat(),
+                source_date.isoformat(),
                 notes=account_notes,
             )
         )
@@ -1559,6 +1583,7 @@ def derive(
                 )
             continue
         end_date, end_value = account_observations[-1]
+        source_date = raw_last_dates.get(account_id, end_date)
         metrics.append(
             metric(
                 "capital.account.cutoff",
@@ -1574,10 +1599,10 @@ def derive(
             metric(
                 "date.source_last_observation",
                 account_id,
-                end_date.isoformat(),
+                source_date.isoformat(),
                 "date",
                 used_inputs,
-                end_date.isoformat(),
+                source_date.isoformat(),
                 notes=account_notes,
             )
         )
