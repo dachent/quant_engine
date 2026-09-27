@@ -1589,6 +1589,60 @@ def _admitted_strategy_returns(catalog: Mapping[str, Any]) -> list[dict[str, Any
     return accepted
 
 
+def _capital_anchor_flow(anchor: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one strategy-perimeter capital anchor into a flow fact (D2).
+
+    A ``STRATEGY_CAPITAL_ALLOCATION`` anchor is the only admitted evidence
+    that capital entered a Quantbase or Matrixport strategy's NAV perimeter:
+    the linked-account deposit that funds it is booked separately, stays
+    ``UNMAPPED`` (account-level, outside the strategy perimeter), and is
+    never projected here.  The anchor amount is always positive (the ledger
+    fails closed rather than admit a non-fee sale as an anchor), so it is a
+    genuine external contribution establishing basis in the strategy, not an
+    internal transfer paired against a same-day opposite leg.  The caller
+    excludes ``OPENING_CAPITAL_ANCHOR`` rows: the opening anchor is the
+    performance opening basis (R1), not a funding event, and is read
+    directly from the ledger's own ``capital_anchors`` by the manifest
+    engine (``parse_capital_anchors``), not through this projection.
+
+    B7 / M9 fail-closed rule: a Matrixport allocation anchor is denominated
+    in its native subscription currency (e.g. USDT) unless and until a
+    contract-admitted FX conversion has replaced it with a USD amount; it is
+    never assumed to be at par with USD.  The caller filters non-USD anchors
+    out before calling this function and records an explicit NOT_READY
+    finding instead; this function re-asserts the same invariant so no other
+    caller can silently mint a mislabeled USD flow from a native-currency
+    anchor.
+    """
+
+    amount = anchor["amount"]
+    if not isinstance(amount, Mapping) or amount.get("currency") != "USD":
+        raise BaselineValidationError(
+            "capital-anchor flow projection requires a USD amount; a "
+            "native-currency anchor (e.g. Matrixport USDT) must never be "
+            "treated as USD -- admit it only after a contract-admitted FX "
+            "conversion"
+        )
+    return {
+        "account_id": anchor["account_id"],
+        "amount": amount,
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "evidence_layer": anchor.get("evidence_layer"),
+        "event_date": anchor["event_date"],
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "generation_id": anchor.get("generation_id"),
+        "mapping_basis": anchor.get("mapping_basis"),
+        "mapping_status": anchor["mapping_status"],
+        "provider": anchor.get("provider"),
+        "provider_id": anchor.get("provider_id"),
+        "record_id": f"capital-allocation-flow:{anchor['record_id']}",
+        "source_artifact_id": anchor.get("source_artifact_id"),
+        "source_key": anchor.get("source_key"),
+        "source_record_id": anchor.get("source_record_id"),
+        "strategy_id": anchor.get("strategy_id"),
+    }
+
+
 def _provider_ledger_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
@@ -1693,7 +1747,39 @@ def _provider_ledger_facts(
         return accepted
 
     provider_nav = admitted("nav_observations")
-    provider_flows = admitted("flows")
+    # capital_anchors postdates catalog_schema_version 1 (no ledger emits it
+    # there); its absence means no anchors, not a malformed catalog.
+    provider_capital_anchors = (
+        admitted("capital_anchors") if "capital_anchors" in catalog else []
+    )
+    strategy_allocation_flows: list[dict[str, Any]] = []
+    capital_anchor_currency_findings: list[dict[str, Any]] = []
+    for item in provider_capital_anchors:
+        if item.get("capital_type") != "STRATEGY_CAPITAL_ALLOCATION":
+            continue
+        anchor_currency = _object(item.get("amount"), "capital_anchors.amount").get(
+            "currency"
+        )
+        if anchor_currency != "USD":
+            # B7 / M9: a native-currency allocation (Matrixport USDT) has no
+            # contract-admitted USD conversion at this layer -- exclude it
+            # rather than assume par, and record why explicitly instead of
+            # letting it vanish silently.  Admission resumes once the
+            # producing ledger generation (T4) supplies a USD amount here.
+            capital_anchor_currency_findings.append(
+                {
+                    "account_in_provenance": True,
+                    "currency": anchor_currency,
+                    "effective_date": item.get("event_date"),
+                    "fact_type": "capital_anchors",
+                    "provider_id": item.get("provider_id"),
+                    "record_id": item.get("record_id"),
+                    "status": "NOT_READY_AWAITING_CONTRACT_FX",
+                }
+            )
+            continue
+        strategy_allocation_flows.append(_capital_anchor_flow(item))
+    provider_flows = [*admitted("flows"), *strategy_allocation_flows]
     provider_transactions = admitted("transactions")
     provider_positions = admitted("positions")
 
@@ -1759,9 +1845,10 @@ def _provider_ledger_facts(
             )
         }
     )
-    quality_findings = _objects(
-        catalog.get("quality_findings"), "provider-ledger.quality_findings"
-    )
+    quality_findings = [
+        *_objects(catalog.get("quality_findings"), "provider-ledger.quality_findings"),
+        *capital_anchor_currency_findings,
+    ]
     reconciliation = {
         "admitted_flow_count": len(provider_flows),
         "admitted_nav_count": len(provider_nav),
@@ -3524,11 +3611,16 @@ def build_catalog(
             provider_catalog.get("provider_strategy_returns"),
             "provider-ledger.provider_strategy_returns",
         )
-        grouped_unmapped: dict[tuple[str, str], int] = {}
+        grouped_unmapped: dict[tuple[str, str, str], int] = {}
         for item in raw_provider_unmapped:
             key = (
                 _text(item.get("provider_id"), "quality provider_id"),
                 _text(item.get("fact_type"), "quality fact_type"),
+                # Most quality findings are a genuine account/strategy
+                # mapping miss ("UNMAPPED"); a few (e.g. a native-currency
+                # capital anchor awaiting contract FX, D2/B7) carry their own
+                # more specific status and must not be relabeled UNMAPPED.
+                _text(item.get("status") or "UNMAPPED", "quality status"),
             )
             grouped_unmapped[key] = grouped_unmapped.get(key, 0) + 1
         provider_unmapped = [
@@ -3537,9 +3629,11 @@ def build_catalog(
                 "provider_id": provider_id,
                 "record_count": count,
                 "source_key": "provider-ledger",
-                "status": "UNMAPPED",
+                "status": status,
             }
-            for (provider_id, fact_type), count in sorted(grouped_unmapped.items())
+            for (provider_id, fact_type, status), count in sorted(
+                grouped_unmapped.items()
+            )
         ]
         for record in nav:
             provider_dates.setdefault(
