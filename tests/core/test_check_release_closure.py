@@ -213,6 +213,165 @@ def test_governance_ledger_subtree_is_not_reported(tmp_path: Path) -> None:
     assert report["missing_count"] == 0
 
 
+def test_missing_portfolio_fx_rates_field_is_reported(tmp_path: Path) -> None:
+    """Fix round 1 (Kimi r0, Critical): the top-level `portfolio_fx_rates` object pins
+    an FX generation through the same flat-field shape as `providers.*` -- and was
+    invisible to the walk before this fix (`tools/provider_ledger.py:2942-2949`)."""
+    spec = json.dumps(
+        {
+            "portfolio_fx_rates": {
+                "catalog_sha256": "1" * 64,
+                "manifest_sha256": "2" * 64,
+                "generation_id": "3" * 64,
+                "root": "C:\\fake\\portfolio-fx-rates",
+                "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+            }
+        }
+    ).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(spec)}).encode("utf-8")
+
+    release_dir = tmp_path / "release"
+    _seal_release(release_dir, {"runner-input-config.json": runner, "spec.json": spec})
+
+    report = checker.walk(release_dir)
+
+    missing_shas = {item["sha256"] for item in report["missing"]}
+    assert missing_shas == {"1" * 64, "2" * 64}
+    # `generation_id` is deliberately not a pin (see module docstring): it never appears.
+    assert "3" * 64 not in missing_shas
+
+
+def test_captured_portfolio_fx_rates_field_is_clean(tmp_path: Path) -> None:
+    """Paired good case for the fix above: the generation the field pins is captured."""
+    catalog = b"fx catalog bytes"
+    manifest = b"fx manifest bytes"
+    spec = json.dumps(
+        {
+            "portfolio_fx_rates": {
+                "catalog_sha256": _sha256(catalog),
+                "manifest_sha256": _sha256(manifest),
+                "generation_id": "3" * 64,
+                "root": "C:\\fake\\portfolio-fx-rates",
+                "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+            }
+        }
+    ).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(spec)}).encode("utf-8")
+
+    release_dir = tmp_path / "release"
+    _seal_release(
+        release_dir,
+        {
+            "runner-input-config.json": runner,
+            "spec.json": spec,
+            "dataPortfolio/portfolio-fx-rates/generations/3.../catalog.json": catalog,
+            "dataPortfolio/portfolio-fx-rates/generations/3.../generation.json": manifest,
+        },
+    )
+
+    report = checker.walk(release_dir)
+
+    assert report["missing_count"] == 0
+
+
+def test_missing_financial_mvp_field_is_reported(tmp_path: Path) -> None:
+    """Fix round 1 (Kimi r0, Important): `financial_mvp.{contract,registry,schema}_sha256`
+    (`tools/provider_ledger.py:2148-2158`) are also flat sha256 pins and were likewise
+    invisible before this fix -- checked, not merely documented as excluded."""
+    spec = json.dumps(
+        {
+            "financial_mvp": {
+                "contract_path": "C:\\fake\\contract.json",
+                "contract_sha256": "4" * 64,
+                "registry_path": "C:\\fake\\registry.json",
+                "registry_sha256": "5" * 64,
+                "schema_path": "C:\\fake\\schema.json",
+                "schema_sha256": "6" * 64,
+            }
+        }
+    ).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(spec)}).encode("utf-8")
+
+    release_dir = tmp_path / "release"
+    _seal_release(release_dir, {"runner-input-config.json": runner, "spec.json": spec})
+
+    report = checker.walk(release_dir)
+
+    missing_shas = {item["sha256"] for item in report["missing"]}
+    assert missing_shas == {"4" * 64, "5" * 64, "6" * 64}
+
+
+def test_corrupted_document_is_reported_distinctly_from_missing(tmp_path: Path) -> None:
+    """Fix round 1 (Kimi r0, Important): resolution must re-hash content, not trust the
+    manifest's declared sha256 -> path mapping. A closure member whose bytes were
+    swapped after sealing must fail, not silently resolve."""
+    real_spec = json.dumps({"purpose": "the real spec"}).encode("utf-8")
+    swapped_spec = json.dumps({"purpose": "different bytes entirely"}).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(real_spec)}).encode("utf-8")
+
+    release_dir = tmp_path / "release"
+    _seal_release(
+        release_dir, {"runner-input-config.json": runner, "spec.json": real_spec}
+    )
+    # Rewrite the archive member's bytes without updating inputs.manifest.json's
+    # declared sha256 for it -- exactly what a corrupted or hand-edited zip looks like.
+    archive_path = release_dir / "inputs.zip"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr("runner-input-config.json", runner)
+        zf.writestr("spec.json", swapped_spec)
+
+    report = checker.walk(release_dir)
+
+    assert report["missing_count"] == 0, report["missing"]
+    assert report["corrupt_count"] == 1
+    assert report["corrupt"][0]["sha256"] == _sha256(real_spec)
+    assert report["corrupt"][0]["declaring_document"] == "runner-input-config.json"
+
+
+def test_main_exits_nonzero_when_a_document_is_corrupted(tmp_path: Path) -> None:
+    real_spec = json.dumps({"purpose": "the real spec"}).encode("utf-8")
+    swapped_spec = json.dumps({"purpose": "different bytes entirely"}).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(real_spec)}).encode("utf-8")
+    release_dir = tmp_path / "release"
+    _seal_release(
+        release_dir, {"runner-input-config.json": runner, "spec.json": real_spec}
+    )
+    with zipfile.ZipFile(release_dir / "inputs.zip", "w") as zf:
+        zf.writestr("runner-input-config.json", runner)
+        zf.writestr("spec.json", swapped_spec)
+
+    result = _run_cli(str(release_dir))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "CORRUPT" in result.stdout
+
+
+def test_unreadable_archive_member_does_not_crash_the_walk(tmp_path: Path) -> None:
+    """Fix round 1 (Kimi r0, Minor): `zipfile.read` can raise more than `KeyError` for
+    a corrupt or unsupported member; the walk must report it, not traceback."""
+    runner = json.dumps({"provider_ledger_spec": _pin(b"never opened")}).encode("utf-8")
+    release_dir = tmp_path / "release"
+    _seal_release(release_dir, {"runner-input-config.json": runner})
+
+    closure = checker._Closure(
+        release_dir,
+        archive_name=checker.DEFAULT_ARCHIVE_NAME,
+        manifest_name=checker.DEFAULT_MANIFEST_NAME,
+        supplement_dirname=checker.DEFAULT_SUPPLEMENT_DIRNAME,
+        supplement_manifest_name=checker.DEFAULT_SUPPLEMENT_MANIFEST_NAME,
+    )
+    try:
+
+        def _raise(_name: str) -> bytes:
+            raise zipfile.BadZipFile("simulated corrupt member")
+
+        closure._zip.read = _raise  # type: ignore[method-assign]
+        sha = next(iter(closure._by_sha))
+        assert closure.read(sha) is None
+    finally:
+        closure.close()
+
+
 def test_no_recipe_entrypoint_raises(tmp_path: Path) -> None:
     release_dir = tmp_path / "release"
     _seal_release(release_dir, {"unrelated.json": b"{}"})
@@ -246,10 +405,23 @@ def test_main_exits_nonzero_when_a_pin_is_missing(tmp_path: Path) -> None:
 
 
 def test_main_exits_zero_when_closure_is_complete(tmp_path: Path) -> None:
-    runner = json.dumps({"purpose": "no recipe companions to pin"}).encode("utf-8")
+    """Fix round 1 (Kimi r0, Minor): assert against a walk that actually resolved a
+    pin, not a vacuous one with zero pins checked -- a regression that made pin
+    collection yield nothing would still pass the old version of this test."""
+    contract = b"the contract bytes"
+    runner = json.dumps(
+        {"financial_input_contract": _pin(contract, path="contract.json")}
+    ).encode("utf-8")
     release_dir = tmp_path / "release"
-    _seal_release(release_dir, {"runner-input-config.json": runner})
+    _seal_release(
+        release_dir,
+        {"runner-input-config.json": runner, "contract.json": contract},
+    )
 
     result = _run_cli(str(release_dir))
 
     assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["pins_checked"] > 0
+    assert payload["missing_count"] == 0
+    assert payload["corrupt_count"] == 0
