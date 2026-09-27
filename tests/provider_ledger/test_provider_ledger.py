@@ -1234,8 +1234,16 @@ def _quantbase_anchor(
     }
 
 
-def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() -> None:
-    """A later Volatis allocation is not performance or an external flow."""
+def test_broker_returns_book_quantbase_allocation_at_start_of_recognizing_period() -> (
+    None
+):
+    """A later Volatis allocation is capital at risk, not performance.
+
+    The fund allocation carries an exact timestamp, so it joins the beginning
+    capital of the sub-period that ends at its NAV recognition date.  Booking
+    it at the end of that day, (165 - 50) / 110 - 1 = 0.0454..., overstates the
+    return on the allocated capital (the 2025-11-13 Volatis pattern).
+    """
 
     nav = [
         {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
@@ -1273,10 +1281,13 @@ def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() ->
     assert anchors[1]["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
     assert [(row["date"], row["return"]) for row in rows] == [
         ("2026-01-02", "0.1"),
-        # (165 - 50) / 110 - 1: the raw 50% NAV jump is a capital allocation.
-        ("2026-01-03", "0.045454545454545454545454545"),
+        # 165 / (110 + 50) - 1: the raw 50% NAV jump is a capital allocation.
+        ("2026-01-03", "0.03125"),
     ]
-    assert {row["flow_timing"] for row in rows} == {"PROVIDER_NAV_RECOGNITION_DATE"}
+    assert rows[-1]["beginning_capital"] == "160"
+    assert {row["flow_timing"] for row in rows} == {
+        "EXACT_TIMESTAMP_BEGINNING_OF_SUBPERIOD"
+    }
 
 
 def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
@@ -1337,7 +1348,7 @@ def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_an
         capital_anchors=[opening, allocation, foreign],
     )
 
-    assert rows[-1]["return"] == "0.045454545454545454545454545"
+    assert rows[-1]["return"] == "0.03125"
     with pytest.raises(
         ledger.ProviderLedgerError, match="duplicate quantbase capital anchor"
     ):
@@ -1437,7 +1448,8 @@ def test_matrixport_catalog_returns_ignore_ambient_decimal_context() -> None:
         context.rounding = ROUND_DOWN
         altered = ledger._broker_strategy_returns(nav, [], {"matrixport"})
 
-    expected = "0.200000000000000000000000000"
+    # (4 + 8) / (3 + 7) - 1, linked on the summed member values.
+    expected = "0.2"
     assert baseline[0]["return"] == expected
     assert altered[0]["return"] == expected
 
@@ -1639,7 +1651,443 @@ def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
         ledger._broker_strategy_returns(nav, flows, {"schwab"})
 
 
-def test_account_rollforward_appends_only_dates_newer_than_accepted_history() -> None:
+def _account_nav(
+    account: str,
+    day: str,
+    value: str,
+    strategy: str | None = "strategy-a",
+    *,
+    provider: str = "schwab",
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "as_of_date": day,
+        "mapping_status": "MAPPED" if strategy else "UNMAPPED",
+        "nav": value,
+        "provider_id": provider,
+        "record_id": f"{account}:{day}",
+        "strategy_id": strategy,
+    }
+
+
+def _account_flow(
+    account: str, day: str, amount: str, *, provider: str = "schwab"
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "amount": amount,
+        "event_date": day,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": day,
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+        "provider_id": provider,
+        "record_id": f"{account}:flow:{day}",
+    }
+
+
+def test_broker_returns_open_day_s_from_the_prior_positive_observation() -> None:
+    """R1: capital funded from day S earns day S's return on the S-1 value.
+
+    The previous kernel needed both adjacent NAVs mapped to the strategy, so
+    the funded day's return (the p123-ai 2026-01-22 and tt 2025-11-25 pattern)
+    never entered the path.
+    """
+
+    nav = [
+        _account_nav("a", "2026-01-21", "100", None),
+        _account_nav("a", "2026-01-22", "101"),
+        _account_nav("a", "2026-01-23", "102.01"),
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+    assert [(row["date"], row["return"], row["beginning_capital"]) for row in rows] == [
+        ("2026-01-22", "0.01", "100"),
+        ("2026-01-23", "0.01", "101"),
+    ]
+    assert rows[0]["source_record_ids"] == ["a:2026-01-22"]
+
+
+def test_broker_returns_open_at_first_funded_value_after_an_empty_prior_day() -> None:
+    """R1: an empty S-1 opens the epoch at the end of day S, flows embedded."""
+
+    nav = [
+        _account_nav("a", "2025-11-18", "250", None),
+        _account_nav("a", "2025-11-19", "0", None),
+        _account_nav("a", "2025-11-20", "4700"),
+        _account_nav("a", "2025-11-21", "4747"),
+    ]
+    funding = [_account_flow("a", "2025-11-20", "4700")]
+
+    rows = ledger._broker_strategy_returns(nav, funding, {"schwab"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [("2025-11-21", "0.01")]
+
+
+def _membership(
+    *rows: tuple[str, str, str, str | None, str],
+) -> dict[tuple[str, str], tuple[tuple[date, date | None, str], ...]]:
+    result: dict[tuple[str, str], list[tuple[date, date | None, str]]] = defaultdict(
+        list
+    )
+    for account, strategy, start, end, status in rows:
+        result[(account, strategy)].append(
+            (
+                date.fromisoformat(start),
+                None if end is None else date.fromisoformat(end),
+                status,
+            )
+        )
+    return {key: tuple(value) for key, value in result.items()}
+
+
+def test_broker_returns_admit_only_census_funded_membership() -> None:
+    """R2: an assignment-only epoch keeps its mapping but never a return.
+
+    The 38b6/98f5 pattern: accounts assigned to TT before their QSI funding.
+    Without the census the predecessor epoch is weighted into the TT path.
+    """
+
+    nav = [
+        _account_nav("tt", "2025-11-24", "100", None),
+        _account_nav("tt", "2025-11-25", "101", "tt-portfolio"),
+        _account_nav("tt", "2025-11-26", "102.01", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-24", "400", None),
+        _account_nav("qsi", "2025-11-25", "400", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-26", "300", "tt-portfolio"),
+        _account_nav("qsi", "2025-11-27", "330", "qsi"),
+    ]
+    membership = _membership(
+        ("tt", "tt-portfolio", "2025-11-25", None, "FUNDED_MEMBERSHIP"),
+        ("qsi", "tt-portfolio", "2025-11-25", "2025-11-26", "ASSIGNMENT_ONLY"),
+        ("qsi", "qsi", "2025-11-27", None, "FUNDED_MEMBERSHIP"),
+    )
+
+    unscoped = ledger._broker_strategy_returns(nav, [], {"schwab"})
+    funded = ledger._broker_strategy_returns(
+        nav, [], {"schwab"}, performance_membership=membership
+    )
+
+    assert {row["date"]: row["component_account_ids"] for row in unscoped} == {
+        "2025-11-25": ["qsi", "tt"],
+        "2025-11-26": ["qsi", "tt"],
+        "2025-11-27": ["qsi"],
+    }
+    assert [
+        (row["strategy_id"], row["date"], row["return"], row["component_account_ids"])
+        for row in funded
+    ] == [
+        # QSI opens on the predecessor-epoch value of 2025-11-26 (R1).
+        ("qsi", "2025-11-27", "0.1", ["qsi"]),
+        ("tt-portfolio", "2025-11-25", "0.01", ["tt"]),
+        ("tt-portfolio", "2025-11-26", "0.01", ["tt"]),
+    ]
+    with pytest.raises(ledger.ProviderLedgerError, match="one census membership"):
+        ledger._broker_strategy_returns(
+            nav,
+            [],
+            {"schwab"},
+            performance_membership=_membership(
+                ("tt", "tt-portfolio", "2025-11-25", None, "FUNDED_MEMBERSHIP")
+            ),
+        )
+
+
+def _census_contract(*sleeves: tuple[str, list[dict[str, object]]]) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {"provider_id": provider, "assignments": assignments}
+                for provider, assignments in sleeves
+            ]
+        }
+    }
+
+
+def test_census_membership_binds_exact_epoch_signature() -> None:
+    assignments = {
+        "account-a": [
+            {
+                "effective_end": "2026-01-04",
+                "effective_start": "2025-11-25",
+                "mapping_status": "MAPPED",
+                "strategy_id": "tt-portfolio",
+            },
+            {
+                "effective_end": None,
+                "effective_start": "2026-01-05",
+                "mapping_status": "MAPPED",
+                "strategy_id": "qsi",
+            },
+            {
+                "effective_end": "2025-11-25",
+                "effective_start": "2024-05-24",
+                "mapping_status": "UNMAPPED",
+                "strategy_id": None,
+            },
+        ],
+        "account-b": [
+            {
+                "effective_end": None,
+                "effective_start": "2025-11-25",
+                "mapping_status": "MAPPED",
+                "strategy_id": "tt-portfolio",
+            }
+        ],
+    }
+    contract = _census_contract(
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": "2026-01-04",
+                    "effective_start": "2025-11-25",
+                    "status": "ASSIGNMENT_ONLY",
+                    "strategy_id": "tt-portfolio",
+                },
+                {
+                    "effective_end": None,
+                    "effective_start": "2026-01-05",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "qsi",
+                },
+            ],
+        ),
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+    )
+    providers = {"account-a": "schwab", "account-b": "schwab"}
+    strategies = {"qsi", "tt-portfolio"}
+
+    membership, disclosures = ledger._census_performance_membership(
+        assignments, contract, providers, strategies
+    )
+
+    assert membership == {
+        ("account-a", "qsi"): ((date(2026, 1, 5), None, "FUNDED_MEMBERSHIP"),),
+        ("account-a", "tt-portfolio"): (
+            (date(2025, 11, 25), date(2026, 1, 4), "ASSIGNMENT_ONLY"),
+        ),
+        ("account-b", "tt-portfolio"): (
+            (date(2025, 11, 25), None, "FUNDED_MEMBERSHIP"),
+        ),
+    }
+    assert disclosures == [
+        {
+            "account_id": "account-a",
+            "census_status": "ASSIGNMENT_ONLY",
+            "effective_end": "2026-01-04",
+            "effective_start": "2025-11-25",
+            "performance_effect": "EXCLUDED_FROM_STRATEGY_RETURNS",
+            "strategy_id": "tt-portfolio",
+        }
+    ]
+    with pytest.raises(ledger.ProviderLedgerError, match="lacks a current-census"):
+        ledger._census_performance_membership(
+            assignments, contract, {"account-a": "ibkr"}, strategies
+        )
+    conflicting = _census_contract(
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "FUNDED_MEMBERSHIP",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+        (
+            "SCHWAB",
+            [
+                {
+                    "effective_end": None,
+                    "effective_start": "2025-11-25",
+                    "status": "ASSIGNMENT_ONLY",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        ),
+    )
+    with pytest.raises(ledger.ProviderLedgerError, match="ambiguous"):
+        ledger._census_performance_membership(
+            {"account-b": assignments["account-b"]},
+            conflicting,
+            {"account-b": "schwab"},
+            strategies,
+        )
+
+
+def test_broker_returns_count_value_appearing_on_zero_member_capital() -> None:
+    """A member's gain on zero capital is strategy return (the 702c pattern).
+
+    On 2026-07-15 the summed strategy value moves from 100 to 113 with no
+    flow.  A beginning-capital weighted composite gives the zero-capital
+    member no weight and reports 0.1, losing the 3 that appeared.
+    """
+
+    nav = [
+        _account_nav("a", "2026-07-12", "100"),
+        _account_nav("a", "2026-07-13", "100"),
+        _account_nav("a", "2026-07-14", "100"),
+        _account_nav("a", "2026-07-15", "110"),
+        _account_nav("b", "2026-07-12", "10"),
+        _account_nav("b", "2026-07-13", "0"),
+        _account_nav("b", "2026-07-14", "0"),
+        _account_nav("b", "2026-07-15", "3"),
+    ]
+    flows = [_account_flow("b", "2026-07-13", "-10")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
+
+    by_day = {row["date"]: row for row in rows}
+    assert by_day["2026-07-13"]["return"] == "0"
+    assert by_day["2026-07-13"]["component_account_ids"] == ["a", "b"]
+    assert by_day["2026-07-14"]["component_account_ids"] == ["a"]
+    assert by_day["2026-07-15"]["return"] == "0.13"
+    assert by_day["2026-07-15"]["beginning_capital"] == "100"
+    assert by_day["2026-07-15"]["component_account_ids"] == ["a", "b"]
+
+
+def test_broker_returns_link_member_entry_and_exit_as_boundary_transfers() -> None:
+    """Joining or leaving a strategy is a transfer, never strategy return."""
+
+    nav = [
+        _account_nav("a", "2026-01-01", "100"),
+        _account_nav("a", "2026-01-02", "110"),
+        _account_nav("a", "2026-01-03", "121"),
+        _account_nav("a", "2026-01-04", "133.1"),
+        _account_nav("b", "2026-01-02", "50"),
+        _account_nav("b", "2026-01-03", "45"),
+        _account_nav("b", "2026-01-04", "90", "strategy-b"),
+    ]
+
+    rows = [
+        row
+        for row in ledger._broker_strategy_returns(nav, [], {"schwab"})
+        if row["strategy_id"] == "strategy-a"
+    ]
+
+    assert [(row["date"], row["return"], row["beginning_capital"]) for row in rows] == [
+        ("2026-01-02", "0.1", "100"),
+        # (121 + 45) / (110 + 50) - 1
+        ("2026-01-03", "0.0375", "160"),
+        # b left at the start of 01-04: 133.1 / (166 - 45) - 1
+        ("2026-01-04", "0.1", "121"),
+    ]
+    assert [row["component_account_ids"] for row in rows] == [
+        ["a"],
+        ["a", "b"],
+        ["a"],
+    ]
+
+
+def test_broker_returns_book_flow_recognized_between_observations_at_next_nav() -> None:
+    """A flow recognized on a day without NAV belongs to the next observation.
+
+    The previous kernel applied a flow only on an exact NAV date, so a
+    weekend-recognized deposit was silently booked as return (0.5 here).
+    """
+
+    nav = [
+        {**_account_nav("a", "2026-01-02", "100"), "provider_id": "ibkr"},
+        {**_account_nav("a", "2026-01-05", "150"), "provider_id": "ibkr"},
+    ]
+    flows = [_account_flow("a", "2026-01-03", "50", provider="ibkr")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"ibkr"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [("2026-01-05", "0")]
+    assert ledger._unobserved_flow_recognitions(nav, flows, {"ibkr"}) == [
+        "a:flow:2026-01-03"
+    ]
+    assert ledger._unobserved_flow_recognitions(nav, flows, {"schwab"}) == []
+
+
+def test_broker_returns_omit_undefined_zero_capital_period_and_reopen() -> None:
+    """R3: value cannot appear on zero capital; the path re-opens after it."""
+
+    nav = [
+        _account_nav("a", "2026-01-01", "100"),
+        _account_nav("a", "2026-01-02", "0"),
+        _account_nav("a", "2026-01-03", "0"),
+        _account_nav("a", "2026-01-04", "5"),
+        _account_nav("a", "2026-01-05", "6"),
+    ]
+    flows = [_account_flow("a", "2026-01-02", "-100")]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-02", "0"),
+        ("2026-01-05", "0.2"),
+    ]
+
+
+def test_strategy_return_overlap_publishes_retained_only_dates() -> None:
+    source = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        }
+        for day in ("2026-01-01", "2026-01-02")
+    ]
+    broker = [_recomputed_row("strategy-a", "2026-01-02", "0.01")]
+
+    (check,) = ledger._strategy_return_overlap_checks(source, broker)
+
+    assert check["retained_only_dates"] == ["2026-01-01"]
+    assert check["divergences"] == []
+    assert check["status"] == "PASS"
+
+
+def _recomputed_row(
+    strategy_id: str,
+    day: str,
+    value: str,
+    *,
+    provider_id: str = "schwab",
+    capital: str = "100",
+) -> dict[str, object]:
+    """A complete admitted-NAV rollforward row as the recompute emits it."""
+
+    return {
+        "account_reconciliation_sha256": "a" * 64,
+        "beginning_capital": capital,
+        "component_account_count": 1,
+        "component_account_ids": [f"{strategy_id}-account"],
+        "date": day,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "flow_timing": "PROVIDER_NAV_RECOGNITION_DATE",
+        "provider_id": provider_id,
+        "return": value,
+        "return_basis": "NET",
+        "return_type": "TOTAL",
+        "source_record_ids": [f"{strategy_id}-nav-{day}"],
+        "strategy_id": strategy_id,
+    }
+
+
+def test_admitted_recompute_supersedes_retained_account_rows() -> None:
+    """A retained pinned return never overrides the admitted NAV (C1 M5).
+
+    The previous merge kept the retained 0.01 on every date up to the last
+    retained date and appended the recompute only after it.
+    """
+
     source = [
         {
             "date": "2026-01-02",
@@ -1649,107 +2097,56 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
         }
     ]
     broker = [
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.02",
-            "beginning_capital": "100",
-            "strategy_id": "strategy-a",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.03",
-            "strategy_id": "strategy-a",
-        },
+        _recomputed_row("strategy-a", "2026-01-02", "0.02"),
+        _recomputed_row("strategy-a", "2026-01-03", "0.03"),
     ]
 
     rows = ledger._merge_account_returns(source, broker, {"strategy-a": "Strategy A"})
 
-    assert [row["date"] for row in rows] == ["2026-01-02", "2026-01-03"]
-    assert rows[-1]["strategy_name"] == "Strategy A"
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-02", "0.02"),
+        ("2026-01-03", "0.03"),
+    ]
+    assert {row["strategy_name"] for row in rows} == {"Strategy A"}
+    assert {row["cost"] for row in rows} == {None}
 
 
-def test_non_native_overlap_retains_source_return_and_projects_broker_rollforward() -> (
-    None
-):
-    """A retained non-native return still carries broker NAV rollforward proof."""
+def test_retained_account_rows_survive_only_without_an_admitted_recompute() -> None:
+    """History the admitted NAV does not cover stays retained evidence."""
 
     source = [
         {
             "cost": "0.0007",
             "date": "2026-01-02",
             "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "matrixport",
+            "provider_id": "alpaca",
             "return": "0.0123",
-            "return_basis": "NET",
-            "return_type": "TOTAL",
-            "source_id": "owner-account-live-history",
-            "strategy_id": "strategy-owner",
-        }
-    ]
-    broker = [
+            "strategy_id": "strategy-history",
+        },
         {
-            "account_reconciliation_sha256": "a" * 64,
-            "beginning_capital": "12345.67",
-            "component_account_count": 2,
-            "component_account_ids": ["ibkr-b", "schwab-a"],
             "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-            "provider_id": "schwab",
-            "return": "0.7777",
-            "return_basis": "NET",
-            "return_type": "TOTAL",
-            "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-            "strategy_id": "strategy-owner",
-        }
+            "evidence_layer": "BACKTEST",
+            "provider_id": "portfolio123",
+            "return": "0.5",
+            "strategy_id": "strategy-a",
+        },
     ]
+    broker = [_recomputed_row("strategy-a", "2026-01-02", "0.7777")]
 
     rows = ledger._merge_account_returns(
-        source, broker, {"strategy-owner": "Owner Strategy"}
+        source,
+        broker,
+        {"strategy-a": "Strategy A", "strategy-history": "History"},
     )
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert {
-        field: row[field]
-        for field in (
-            "cost",
-            "provider_id",
-            "return",
-            "return_basis",
-            "return_type",
-            "source_id",
-        )
-    } == {
-        "cost": "0.0007",
-        "provider_id": "matrixport",
-        "return": "0.0123",
-        "return_basis": "NET",
-        "return_type": "TOTAL",
-        "source_id": "owner-account-live-history",
-    }
-    assert {
-        field: row[field]
-        for field in (
-            "account_reconciliation_sha256",
-            "beginning_capital",
-            "component_account_count",
-            "component_account_ids",
-            "flow_timing",
-            "source_record_ids",
-        )
-    } == {
-        "account_reconciliation_sha256": "a" * 64,
-        "beginning_capital": "12345.67",
-        "component_account_count": 2,
-        "component_account_ids": ["ibkr-b", "schwab-a"],
-        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-    }
+    assert [
+        (row["strategy_id"], row["evidence_layer"], row["return"]) for row in rows
+    ] == [
+        ("strategy-a", "ACCOUNT_LIVE", "0.7777"),
+        ("strategy-a", "BACKTEST", "0.5"),
+        ("strategy-history", "ACCOUNT_LIVE", "0.0123"),
+    ]
+    assert rows[0]["account_reconciliation_sha256"] == "a" * 64
 
 
 @pytest.mark.parametrize(
@@ -1773,11 +2170,11 @@ def test_non_native_overlap_retains_source_return_and_projects_broker_rollforwar
         ({"source_record_ids": ["schwab-nav-2", " "]}, None),
     ],
 )
-def test_non_native_overlap_does_not_project_an_incomplete_broker_rollforward(
+def test_incomplete_broker_rollforward_cannot_become_account_authority(
     rollforward_override: dict[str, object],
     missing_field: str | None,
 ) -> None:
-    """A malformed broker bundle cannot partially enrich an inherited return."""
+    """A malformed recompute bundle fails closed instead of replacing history."""
 
     source = [
         {
@@ -1789,27 +2186,18 @@ def test_non_native_overlap_does_not_project_an_incomplete_broker_rollforward(
         }
     ]
     broker = {
-        "account_reconciliation_sha256": "a" * 64,
-        "beginning_capital": "12345.67",
+        **_recomputed_row("strategy-owner", "2026-01-02", "0.7777"),
         "component_account_count": 2,
         "component_account_ids": ["ibkr-b", "schwab-a"],
-        "date": "2026-01-02",
-        "evidence_layer": "ACCOUNT_LIVE",
-        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
-        "provider_id": "schwab",
-        "return": "0.7777",
-        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
-        "strategy_id": "strategy-owner",
     }
     broker.update(rollforward_override)
     if missing_field is not None:
         del broker[missing_field]
 
-    rows = ledger._merge_account_returns(
-        source, [broker], {"strategy-owner": "Owner Strategy"}
-    )
-
-    assert rows == source
+    with pytest.raises(ledger.ProviderLedgerError, match="complete NAV rollforward"):
+        ledger._merge_account_returns(
+            source, [broker], {"strategy-owner": "Owner Strategy"}
+        )
 
 
 def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
@@ -1828,34 +2216,14 @@ def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
         },
     ]
     broker = [
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "quantbase",
-            "return": "-0.06",
-            "strategy_id": "strategy-native",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "quantbase",
-            "return": "0.02",
-            "strategy_id": "strategy-native",
-        },
-        {
-            "date": "2026-01-02",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.99",
-            "strategy_id": "strategy-owner",
-        },
-        {
-            "date": "2026-01-03",
-            "evidence_layer": "ACCOUNT_LIVE",
-            "provider_id": "schwab",
-            "return": "0.03",
-            "strategy_id": "strategy-owner",
-        },
+        _recomputed_row(
+            "strategy-native", "2026-01-02", "-0.06", provider_id="quantbase"
+        ),
+        _recomputed_row(
+            "strategy-native", "2026-01-03", "0.02", provider_id="quantbase"
+        ),
+        _recomputed_row("strategy-owner", "2026-01-02", "0.99"),
+        _recomputed_row("strategy-owner", "2026-01-03", "0.03"),
     ]
 
     rows = ledger._merge_account_returns(
@@ -1871,7 +2239,7 @@ def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
     assert [(row["strategy_id"], row["date"], row["return"]) for row in rows] == [
         ("strategy-native", "2026-01-02", "-0.06"),
         ("strategy-native", "2026-01-03", "0.02"),
-        ("strategy-owner", "2026-01-02", "0.01"),
+        ("strategy-owner", "2026-01-02", "0.99"),
         ("strategy-owner", "2026-01-03", "0.03"),
     ]
     assert rows[0]["strategy_name"] == "Native Strategy"
@@ -1973,22 +2341,34 @@ def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> No
 
     checks = ledger._strategy_return_overlap_checks(source, broker)
 
+    # The retained path is superseded; its divergence is published, the way
+    # the retained grizzly and qsi 2026-07-17 values are.
     assert checks == [
         {
             "adjudication": (
-                "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
-                "path retains its correction set; broker NAV path is retained "
-                "as reconciliation evidence and rollforward input only"
+                "ADMITTED_NAV_RECOMPUTE; retained tracker path is comparison "
+                "evidence only"
             ),
             "authority_effect": (
-                "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+                "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
+                "RETAINED_ACCOUNT_PATH_SUPERSEDED"
             ),
             "blocking": False,
             "check_id": "strategy-return-overlap-strategy-a",
             "compared_date_count": 1,
+            "divergences": [
+                {
+                    "absolute_difference": "0.01",
+                    "date": "2026-01-02",
+                    "estimated_dollar_impact": "1.00",
+                    "recomputed_return": "0.02",
+                    "retained_return": "0.01",
+                }
+            ],
             "exception_date_count": 1,
             "maximum_absolute_difference": "0.01",
             "maximum_estimated_dollar_impact": "1.00",
+            "retained_only_dates": [],
             "status": "PASS_WITH_ADJUDICATED_VARIANCE",
             "strategy_id": "strategy-a",
             "tolerance": "0.000001",

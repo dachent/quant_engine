@@ -899,12 +899,14 @@ def _source_bound_stage(
                     "account_id": ledger._CSV_FACT_ACCOUNT[provider_id],
                     "strategy_id": strategy_id,
                     "mapping_status": "MAPPED",
-                    "effective_start": "2025-12-06",
+                    # Each mapped epoch carries its current-census funded
+                    # interval: the census is the performance perimeter (R2).
+                    "effective_start": effective_start,
                     "source_classification": "financial_mvp_funded_membership_reconciled",
                 }
-                for provider_id, strategy_id in (
-                    ("matrixport", "robuxio-crypto"),
-                    ("quantbase", "volatis-strategy"),
+                for provider_id, strategy_id, effective_start in (
+                    ("matrixport", "robuxio-crypto", "2025-12-06"),
+                    ("quantbase", "volatis-strategy", "2024-10-15"),
                 )
             ],
         },
@@ -1347,6 +1349,9 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
         ledger, "_validate_nav_observation_value_bases", lambda *_args: None
     )
     monkeypatch.setattr(ledger, "_validate_nav_observation_moves", lambda *_args: None)
+    monkeypatch.setattr(
+        ledger, "_census_performance_membership", lambda *_args: ({}, [])
+    )
     monkeypatch.setattr(
         ledger, "_broker_strategy_returns", lambda *_args, **_kwargs: []
     )
