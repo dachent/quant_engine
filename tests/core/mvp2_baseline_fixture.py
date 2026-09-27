@@ -193,6 +193,184 @@ def _evidence_rows(
     return rows, canonical
 
 
+def _epoch_key(
+    row: Mapping[str, Any],
+) -> tuple[str, str, str, str | None]:
+    return (
+        str(row["account_id"]),
+        str(row["strategy_id"]),
+        str(row["effective_start"]),
+        row["effective_end"],
+    )
+
+
+def _account_observations(
+    baseline_doc: dict[str, Any],
+) -> dict[str, dict[date, Decimal]]:
+    observations: dict[str, dict[date, Decimal]] = {}
+    for row in baseline_doc["nav_observations"]:
+        account = observations.setdefault(str(row["account_id"]), {})
+        account[date.fromisoformat(str(row["as_of_date"]))] = Decimal(
+            str(row["nav"]["value"])
+        )
+    return observations
+
+
+def _window(
+    series: Mapping[date, Decimal], start: date, end: date | None
+) -> dict[date, Decimal]:
+    return {
+        day: value
+        for day, value in series.items()
+        if start <= day and (end is None or day <= end)
+    }
+
+
+def _epoch_details(
+    payloads: Mapping[tuple[str, str, str, str | None], dict[str, Any]],
+) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
+    """Wrap recomputed payloads in the manifest epoch-detail shape the report consumes."""
+
+    return {
+        key: {
+            "account_label": None,
+            "last_four": None,
+            "epoch_admission_status": "FUNDED",
+            "epoch_output_status": "OK",
+            "epoch_blocking_reason": None,
+            "performance_payload": payload,
+        }
+        for key, payload in payloads.items()
+    }
+
+
+def _engine_epoch_payloads(
+    baseline_doc: dict[str, Any],
+) -> tuple[
+    dict[tuple[str, str, str, str | None], dict[str, Any]],
+    set[tuple[str, str, str, str | None]],
+]:
+    """Recompute each required epoch's expected report payload from the engine.
+
+    Conventions R1-R4 (state/briefs/acceptance-metric-spec.md) as implemented
+    by ``quant_engine.portfolio_ledger.returns``: the R1 opening point is the
+    last positive observation before the funded start, otherwise the first
+    positive observation on or after it; exact-timestamp legs enter at the
+    beginning of the sub-period ending at their NAV recognition date and
+    date-only legs at its end; each account epoch carries its OWN linked path
+    (a strategy-level composite is never substituted), and gap spans enter only
+    where epoch HPR receipts bind -- this synthetic source binds none.  The
+    synthetic source also binds no strategy-mapped flow legs, so each path is
+    the pure chain-linked account NAV series inside the assignment window,
+    linked in the manifest's 40-digit epoch context.  Returns the expected
+    payloads plus the keys whose R1 opening is a pre-start observation (the
+    P1-era window-first opening differs exactly there).
+    """
+
+    from quant_engine.portfolio_ledger import decimal_text
+    from quant_engine.portfolio_ledger.returns import (
+        AVAILABLE,
+        link_epoch,
+        opening_point,
+    )
+
+    if any(row.get("strategy_id") is not None for row in baseline_doc["flows"]):
+        raise AssertionError(
+            "synthetic MVP-2 oracle expects no strategy-mapped flow legs"
+        )
+    observations = _account_observations(baseline_doc)
+    payloads: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
+    pre_start_keys: set[tuple[str, str, str, str | None]] = set()
+    for assignment in baseline_doc["assignments"]:
+        strategy_id = assignment["strategy_id"]
+        if strategy_id in EXCLUDED_STRATEGIES:
+            continue
+        start = date.fromisoformat(assignment["effective_start"])
+        end = (
+            None
+            if assignment["effective_end"] is None
+            else date.fromisoformat(assignment["effective_end"])
+        )
+        series = observations[str(assignment["account_id"])]
+        window = _window(series, start, end)
+        opening = opening_point(series, start)
+        if opening is None:
+            raise AssertionError(
+                f"synthetic epoch {assignment['assignment_id']} has no R1 opening"
+            )
+        linked_observations = dict(window)
+        linked_observations[opening.as_of] = opening.value
+        with localcontext() as context:
+            context.prec = 40
+            linked = link_epoch(linked_observations, [], opening)
+        if linked.status != AVAILABLE or linked.twr is None:
+            raise AssertionError(
+                f"synthetic epoch {assignment['assignment_id']} does not link: "
+                f"{linked.reason}"
+            )
+        key = _epoch_key(assignment)
+        payloads[key] = {
+            "twr": decimal_text(linked.twr),
+            "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+            "flow_count": 0,
+            "flow_timing": None,
+            "nav_observations": len(window),
+            "observed_start": min(window).isoformat(),
+            "observed_end": max(window).isoformat(),
+        }
+        if opening.basis == "LAST_OBSERVATION_BEFORE_START":
+            pre_start_keys.add(key)
+    return payloads, pre_start_keys
+
+
+def _p1_era_epoch_payloads(
+    baseline_doc: dict[str, Any],
+) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
+    """Recompute the retired P1-era oracle values this fixture once encoded.
+
+    The retired report loop opened at the first NAV inside the assignment
+    window (never a pre-start observation) and booked strategy flows as
+    end-of-day subtractions; the synthetic source binds no strategy-mapped
+    flows, so the window-first opening is the only semantic difference.
+    """
+
+    from quant_engine.portfolio_ledger import decimal_text
+
+    observations = _account_observations(baseline_doc)
+    payloads: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
+    for assignment in baseline_doc["assignments"]:
+        strategy_id = assignment["strategy_id"]
+        if strategy_id in EXCLUDED_STRATEGIES:
+            continue
+        start = date.fromisoformat(assignment["effective_start"])
+        end = (
+            None
+            if assignment["effective_end"] is None
+            else date.fromisoformat(assignment["effective_end"])
+        )
+        window = _window(observations[str(assignment["account_id"])], start, end)
+        days = sorted(window)
+        if len(days) < 2:
+            raise AssertionError(
+                f"synthetic epoch {assignment['assignment_id']} lacks P1-era NAV pairs"
+            )
+        with localcontext() as context:
+            context.prec = 34
+            product = Decimal(1)
+            for prior_day, day in zip(days, days[1:]):
+                product *= window[day] / window[prior_day]
+        payloads[_epoch_key(assignment)] = {
+            "twr": decimal_text(product - Decimal(1)),
+            "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+            "flow_count": 0,
+            "flow_timing": None,
+            "nav_observations": len(days),
+            "observed_start": days[0].isoformat(),
+            "observed_end": days[-1].isoformat(),
+        }
+    return payloads
+
+
 def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) -> None:
     """Enrich a 13-epoch synthetic baseline from its projected provider ledger.
 
@@ -649,7 +827,10 @@ def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) ->
     )
 
     project_coverage_metadata(baseline_doc, ledger_doc)
-    performance = reporter._account_strategy_performance(baseline_doc)
+    expected_payloads, pre_start_keys = _engine_epoch_payloads(baseline_doc)
+    performance = reporter._account_strategy_performance(
+        baseline_doc, current_epoch_details=_epoch_details(expected_payloads)
+    )
     required_performance = [
         row for row in performance if row["strategy_id"] in required_ids
     ]
@@ -662,3 +843,33 @@ def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) ->
         )
     ):
         raise AssertionError("synthetic baseline does not reach report performance")
+    for row in required_performance:
+        expected = expected_payloads[_epoch_key(row)]
+        for field, value in expected.items():
+            if row[field] != value:
+                raise AssertionError(
+                    "synthetic report performance field "
+                    f"{field} for {row['assignment_id']}: "
+                    f"{row[field]!r} != {value!r}"
+                )
+    # Paired fail-before: the P1-era oracle values this fixture originally
+    # encoded (window-first opening, strategy flows booked as returns) must
+    # fail against the engine-correct report.  With no strategy-mapped flow
+    # legs the only moving rule is the R1 opening point, so exactly the
+    # successor epochs with a pre-start observation move.
+    stale_payloads = _p1_era_epoch_payloads(baseline_doc)
+    stale_performance = reporter._account_strategy_performance(
+        baseline_doc, current_epoch_details=_epoch_details(stale_payloads)
+    )
+    stale_by_key = {_epoch_key(row): row for row in stale_performance}
+    moved = {
+        key
+        for key, payload in expected_payloads.items()
+        if abs(Decimal(stale_by_key[key]["twr"]) - Decimal(payload["twr"]))
+        > Decimal("1e-12")
+    }
+    if moved != pre_start_keys:
+        raise AssertionError(
+            f"synthetic P1-era fail-before proof moved {sorted(moved)}, "
+            f"expected exactly {sorted(pre_start_keys)}"
+        )
