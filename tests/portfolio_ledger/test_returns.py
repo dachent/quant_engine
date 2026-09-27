@@ -10,8 +10,11 @@ import pytest
 
 from quant_engine.portfolio_ledger import (
     DATE_ONLY,
+    EpochLink,
     EXACT_TIMESTAMP,
     INFERRED_TIMING,
+    OPENING_FIRST_POSITIVE_ON_OR_AFTER_START,
+    OPENING_LAST_OBSERVATION_BEFORE_START,
     FlowLeg,
     MemberReturn,
     OpeningPoint,
@@ -27,8 +30,6 @@ from quant_engine.portfolio_ledger import (
     splice_spans,
     xirr,
 )
-from quant_engine.portfolio_ledger import returns
-
 
 D = Decimal
 VECTORS_PATH = (
@@ -36,8 +37,8 @@ VECTORS_PATH = (
     / "contracts"
     / "portfolio-performance-policy-v1.json"
 )
-PRIOR = returns.OPENING_LAST_OBSERVATION_BEFORE_START
-FIRST = returns.OPENING_FIRST_POSITIVE_ON_OR_AFTER_START
+PRIOR = OPENING_LAST_OBSERVATION_BEFORE_START
+FIRST = OPENING_FIRST_POSITIVE_ON_OR_AFTER_START
 
 
 def _vectors() -> dict[str, Any]:
@@ -77,7 +78,7 @@ def series(**values: str) -> dict[date, Decimal]:
 
 def _link_from_start(
     observations: dict[date, Decimal], legs: list[FlowLeg], start: str
-) -> returns.EpochLink:
+) -> EpochLink:
     opening = opening_point(observations, day(start))
     assert opening is not None
     return link_epoch(observations, legs, opening)
@@ -134,6 +135,7 @@ def test_contract_composite_is_beginning_capital_weighted() -> None:
             day("2025-01-02"),
             D(item["beginning_capital"]),
             D(item["return"]),
+            day("2025-01-01"),
         )
         for index, item in enumerate(case["members"])
     ]
@@ -232,7 +234,13 @@ def test_zero_run_is_neutral_and_reopen_without_inflow_is_undefined() -> None:
     assert bad.status == "UNAVAILABLE"
     assert bad.reason == "ZERO_CAPITAL_RETURN_UNDEFINED"
     assert bad.failed_subperiod == (day("2026-07-15"), day("2026-07-16"))
-    assert bad.twr is None and bad.links == ()
+    assert bad.twr is None and bad.hwm_index is None and bad.max_drawdown is None
+    # The sub-periods linked before the failure survive as the trace.
+    assert [link.end_date for link in bad.links] == [
+        day("2026-07-14"),
+        day("2026-07-15"),
+    ]
+    assert bad.linked_legs == (liquidation,)
     assert good.status == "AVAILABLE"
     assert good.twr == D(0)
     assert [link.zero_capital_neutral for link in good.links] == [False, True]
@@ -307,6 +315,24 @@ def test_opening_point_prefers_the_observation_before_start() -> None:
     assert opening_point(series(d2026_01_21="0"), day("2026-01-21")) is None
 
 
+def test_opening_never_reaches_past_an_empty_boundary() -> None:
+    # 50 on S-2, empty (0) on S-1, funded on S.  The funding inflow is embedded
+    # in the first positive value on or after S (R3); an older positive
+    # observation is pre-funding history.  Opening there would link the
+    # pre-funding liquidation 50 -> 0 into the epoch and lose it entirely.
+    observations = series(d2026_01_19="50", d2026_01_20="0", d2026_01_21="102")
+
+    selected = opening_point(observations, day("2026-01-21"))
+    older_positive = link_epoch(
+        observations, [], OpeningPoint(day("2026-01-19"), D("50"), PRIOR)
+    )
+
+    assert selected == OpeningPoint(day("2026-01-21"), D("102"), FIRST)
+    assert older_positive.status == "UNAVAILABLE"
+    assert older_positive.reason == "NONPOSITIVE_LINK_FACTOR"
+    assert older_positive.failed_subperiod == (day("2026-01-19"), day("2026-01-20"))
+
+
 def test_opening_before_start_includes_the_first_day_return() -> None:
     observations = series(d2026_01_20="100", d2026_01_21="101", d2026_01_22="102.01")
 
@@ -329,10 +355,53 @@ def test_flows_on_or_before_opening_are_embedded_and_late_flows_fail() -> None:
 
     assert result.embedded_legs == (embedded,)
     assert result.linked_legs == (linked,)
+    assert result.rejected_legs == ()
     assert result.twr == D("0.01")
     assert late.reason == "FLOW_AFTER_CLOSING_OBSERVATION"
+    assert late.twr is None
     with pytest.raises(ReturnsError):
         link_epoch(observations, [], OpeningPoint(day("2026-02-01"), D("99"), FIRST))
+
+
+def test_unavailable_results_keep_every_leg_and_the_linked_trace() -> None:
+    observations = series(d2026_02_01="100", d2026_02_02="150", d2026_02_03="151.5")
+    opening = OpeningPoint(day("2026-02-01"), D("100"), FIRST)
+    embedded = leg("100", "2026-02-01", event="2026-01-31")
+    linked = leg("50", "2026-02-02")
+    late = leg("5", "2026-02-04")
+
+    result = link_epoch(observations, [embedded, linked, late], opening)
+
+    assert result.status == "UNAVAILABLE"
+    assert result.reason == "FLOW_AFTER_CLOSING_OBSERVATION"
+    assert result.embedded_legs == (embedded,)
+    assert result.linked_legs == (linked,)
+    assert result.rejected_legs == (late,)
+    assert result.flags == (INFERRED_TIMING,)
+    assert [link.end_date for link in result.links] == [
+        day("2026-02-02"),
+        day("2026-02-03"),
+    ]
+    assert result.twr is None and result.hwm_index is None
+
+    lone = link_epoch(series(d2026_02_01="100"), [embedded, late], opening)
+    assert lone.reason == "NO_SUBPERIOD_AFTER_OPENING"
+    assert lone.embedded_legs == (embedded,)
+    assert lone.rejected_legs == (late,)
+
+    wiped_out = {**observations, day("2026-02-03"): D("0")}
+    failed = link_epoch(wiped_out, [linked, late], opening)
+    # The rejected leg keeps precedence as the reason; the link failure is
+    # still located and the links before it survive.
+    assert failed.reason == "FLOW_AFTER_CLOSING_OBSERVATION"
+    assert failed.failed_subperiod == (day("2026-02-02"), day("2026-02-03"))
+    assert [link.end_date for link in failed.links] == [day("2026-02-02")]
+    assert failed.linked_legs == (linked,)
+    assert failed.rejected_legs == (late,)
+    only_failure = link_epoch(wiped_out, [linked], opening)
+    assert only_failure.reason == "NONPOSITIVE_LINK_FACTOR"
+    assert only_failure.failed_subperiod == (day("2026-02-02"), day("2026-02-03"))
+    assert only_failure.linked_legs == (linked,)
 
 
 # --- admitted gap spans ---------------------------------------------------------
@@ -376,6 +445,21 @@ def test_gap_span_must_replace_a_gap() -> None:
         splice_spans([(day("2026-01-27"), D("0")), (day("2026-01-26"), D("0"))])
     with pytest.raises(ReturnsError):
         splice_spans([])
+
+
+def test_gap_span_after_the_last_daily_observation_is_refused() -> None:
+    # A span from the final daily date would compound a return past the
+    # published observed_end with no later observation bracketing it.
+    daily = [(day("2026-09-01"), D("0.01")), (day("2026-09-02"), D("0.02"))]
+    trailing = ReturnSpan(day("2026-09-02"), day("2026-09-04"), D("0.5"))
+    bracketed = ReturnSpan(day("2026-09-02"), day("2026-09-04"), D("0.5"))
+
+    with pytest.raises(ReturnsError, match="later daily observation"):
+        splice_spans(daily, [trailing])
+    good = splice_spans([*daily, (day("2026-09-05"), D("0"))], [bracketed])
+
+    assert good.observed_end == day("2026-09-05")
+    assert good.cumulative_return == D("1.01") * D("1.02") * D("1.5") - 1
 
 
 # --- MWR leg dating (R4) -------------------------------------------------------
@@ -509,6 +593,71 @@ def test_composite_equals_summed_series_with_entry_and_exit_as_transfers() -> No
     for item, link in zip(combined, reference.links):
         assert item.beginning_capital == link.beginning_capital
         assert abs(item.period_return - link.period_return) < D("1e-25")
+
+
+def test_composite_refuses_a_member_not_valued_on_a_union_boundary() -> None:
+    # A: 100 -> 110 -> 121 on Jan 1/2/3; B: 100 -> 121 on Jan 1/3 only.  The
+    # summed series is 200 -> ? -> 242: B cannot be valued on Jan 2 without
+    # filling, so B's two-day move must not be weighted into Jan 3 alone
+    # (that silently gave 26.76 % instead of the summed 21 %).
+    a_obs = series(d2026_01_01="100", d2026_01_02="110", d2026_01_03="121")
+    b_obs = series(d2026_01_01="100", d2026_01_03="121")
+    start = "2026-01-02"
+    a = member_returns("a", _link_from_start(a_obs, [], start))
+    b = member_returns("b", _link_from_start(b_obs, [], start))
+
+    with pytest.raises(ReturnsError, match="not valued on every boundary"):
+        composite([*a, *b])
+
+    b_valued = member_returns(
+        "b", _link_from_start({**b_obs, day("2026-01-02"): D("110")}, [], start)
+    )
+    good = composite([*a, *b_valued])
+    summed = link_epoch(
+        series(d2026_01_01="200", d2026_01_02="220", d2026_01_03="242"),
+        [],
+        OpeningPoint(day("2026-01-01"), D("200"), PRIOR),
+    )
+    wealth = D(1)
+    for item in good:
+        wealth *= 1 + item.period_return
+    assert summed.twr == D("0.21")
+    assert abs(wealth - 1 - summed.twr) < D("1e-25")
+
+
+def test_composite_refuses_entry_on_a_date_another_member_does_not_value() -> None:
+    a = member_returns(
+        "a",
+        link_epoch(
+            series(d2026_01_01="100", d2026_01_03="110"),
+            [],
+            OpeningPoint(day("2026-01-01"), D("100"), FIRST),
+        ),
+    )
+    b = member_returns(
+        "b",
+        link_epoch(
+            series(d2026_01_02="50", d2026_01_03="55"),
+            [],
+            OpeningPoint(day("2026-01-02"), D("50"), FIRST),
+        ),
+    )
+
+    with pytest.raises(ReturnsError, match="not valued on every boundary"):
+        composite([*a, *b])
+
+
+def test_composite_needs_start_dates_to_prove_alignment() -> None:
+    members = [
+        MemberReturn("a", day("2026-01-02"), D("1"), D("0.1")),
+        MemberReturn("b", day("2026-01-02"), D("1"), D("0.1"), day("2026-01-01")),
+    ]
+    with pytest.raises(ReturnsError, match="start date"):
+        composite(members)
+    with pytest.raises(ReturnsError, match="empty"):
+        composite(
+            [MemberReturn("a", day("2026-01-02"), D("1"), D("0"), day("2026-01-02"))]
+        )
 
 
 def test_composite_passes_a_lone_member_through_unchanged() -> None:
