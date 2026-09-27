@@ -1326,6 +1326,7 @@ def derive(
     }
     metrics: list[dict[str, object]] = output["metrics"]
     account_values: dict[str, Decimal] = {}
+    account_value_dates: dict[str, date] = {}
     account_flow_data: dict[str, FlowData | None] = {}
     account_window_observations: dict[str, list[tuple[date, Decimal]]] = {}
 
@@ -1413,6 +1414,11 @@ def derive(
             continue
         end_date, end_value = account_observations[-1]
         account_values[account_id] = end_value
+        # USD-converted value rows are dated by the admitted value basis (the
+        # last FX-converted/ledger-admitted observation), never the raw NAV
+        # date past an FX boundary; only date.source_last_observation carries
+        # the raw date.
+        account_value_dates[account_id] = end_date
         source_date = raw_last_dates.get(account_id, end_date)
         metrics.append(
             metric(
@@ -1474,6 +1480,7 @@ def derive(
                 money(sum(flow_data.cash_flows.values(), Decimal("0"))),
                 "USD",
                 used_inputs,
+                end_date.isoformat(),
                 window="ITD",
                 notes=account_notes,
             )
@@ -1485,6 +1492,7 @@ def derive(
                 str(flow_data.count),
                 "count",
                 used_inputs,
+                end_date.isoformat(),
                 window="ITD",
                 notes=account_notes,
             )
@@ -1505,6 +1513,7 @@ def derive(
                     ratio(twr),
                     "ratio",
                     used_inputs,
+                    end_date.isoformat(),
                     window="ITD",
                     notes=account_notes,
                 )
@@ -1537,6 +1546,7 @@ def derive(
                     ratio(mwr),
                     "ratio",
                     used_inputs,
+                    end_date.isoformat(),
                     window="ITD",
                     notes=account_notes,
                 )
@@ -1678,6 +1688,11 @@ def derive(
                     money(aggregate["strategies"][strategy_id]),
                     "USD",
                     used_inputs,
+                    max(
+                        account_value_dates[member]
+                        for member in members
+                        if member in account_value_dates
+                    ).isoformat(),
                 )
             )
     if missing_included:
@@ -1845,6 +1860,7 @@ def derive(
                         ),
                         "ratio",
                         used_inputs,
+                        strategy_observations[-1][0].isoformat(),
                         window="ITD",
                     )
                 )
@@ -1879,6 +1895,7 @@ def derive(
                     ratio(mwr),
                     "ratio",
                     used_inputs,
+                    strategy_observations[-1][0].isoformat(),
                     window="ITD",
                 )
             )
