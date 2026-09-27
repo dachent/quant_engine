@@ -5899,6 +5899,10 @@ def _strategy_path_links(
         }
         period_legs = [leg for leg in legs if leg.nav_recognition_date > opening.as_of]
         epoch = link_epoch(remaining, period_legs, opening)
+        if epoch.rejected_legs:
+            # A member flow recognized after the strategy's last valued date
+            # would leave the money identity incomplete.
+            raise ProviderLedgerError("flow-adjusted account return is invalid")
         if epoch.status == AVAILABLE:
             links.extend(epoch.links)
             break
@@ -5909,20 +5913,10 @@ def _strategy_path_links(
             or epoch.failed_subperiod is None
         ):
             raise ProviderLedgerError("flow-adjusted account return is invalid")
-        failed_start, failed_end = epoch.failed_subperiod
-        if failed_start > opening.as_of:
-            prefix = link_epoch(
-                {day: value for day, value in remaining.items() if day <= failed_start},
-                [
-                    leg
-                    for leg in period_legs
-                    if leg.nav_recognition_date <= failed_start
-                ],
-                opening,
-            )
-            if prefix.status != AVAILABLE:
-                raise ProviderLedgerError("flow-adjusted account return is invalid")
-            links.extend(prefix.links)
+        # An unavailable epoch keeps the sub-periods linked before the failure;
+        # each is a valid daily return, only the epoch index is withheld.
+        links.extend(epoch.links)
+        _failed_start, failed_end = epoch.failed_subperiod
         # R3: capital cannot appear without a flow.  The undefined sub-period
         # is omitted and the path re-opens at the next positive value.
         reopened = opening_point(
