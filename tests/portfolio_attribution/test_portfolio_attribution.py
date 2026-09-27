@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,8 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
+
+_NO_OVERRIDE = object()
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -38,11 +41,26 @@ def _baseline(
     *,
     generation_as_of_date: date = date(2026, 1, 3),
     retained_source_as_of_date: date | None = None,
+    account_live_returns: dict[date, str] | None = None,
+    strategy_returns: object = _NO_OVERRIDE,
 ) -> Path:
     root = tmp_path / "baseline"
     strategies = [
         {"name": f"Strategy {index}", "strategy_id": f"strategy-{index}"}
         for index in range(1, 10)
+    ]
+    if account_live_returns is None:
+        account_live_returns = {date(2026, 1, 2): "0.01", date(2026, 1, 3): "-0.02"}
+    computed_strategy_returns = [
+        {
+            "component_account_ids": ["synthetic-account"],
+            "date": day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "synthetic",
+            "return": value,
+            "strategy_id": "strategy-1",
+        }
+        for day, value in sorted(account_live_returns.items())
     ]
     catalog = {
         "allocations": [
@@ -68,6 +86,14 @@ def _baseline(
             for index in range(1, 10)
         ],
         "strategies": strategies,
+        # Strategy 1 is the only strategy exercised with AVAILABLE_STATUSES
+        # comparisons in `_inputs()`; the account side of those comparisons
+        # (B3 fix) reads this ACCOUNT_LIVE series, not the return-source CSV.
+        "strategy_returns": (
+            computed_strategy_returns
+            if strategy_returns is _NO_OVERRIDE
+            else strategy_returns
+        ),
     }
     content = canonical_json_bytes(catalog)
     source = SourceArtifact(
@@ -106,7 +132,10 @@ def _baseline(
 
 
 def _inputs(
-    tmp_path: Path, *, source_manifest_as_of_date: str = "2026-01-03"
+    tmp_path: Path,
+    *,
+    source_manifest_as_of_date: str = "2026-01-03",
+    observed_start: str = "2026-01-02",
 ) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     returns = tmp_path / "returns.csv"
@@ -159,7 +188,7 @@ def _inputs(
             else "No reference series.",
             "expected_legacy_cumulative_gap": "-0.02" if index == 1 else None,
             "observed_end": "2026-01-03" if index == 1 else None,
-            "observed_start": "2026-01-02" if index == 1 else None,
+            "observed_start": observed_start if index == 1 else None,
             "periods_per_year": 252,
             "reference_series_id": "provider" if index == 1 else None,
             "status": attribution.AVAILABLE_STATUS if index == 1 else "UNAVAILABLE",
@@ -180,7 +209,7 @@ def _inputs(
             ),
             "expected_legacy_cumulative_gap": None,
             "observed_end": "2026-01-03" if index == 1 else None,
-            "observed_start": "2026-01-02" if index == 1 else None,
+            "observed_start": observed_start if index == 1 else None,
             "periods_per_year": 252,
             "reference_series_id": "benchmark" if index == 1 else None,
             "status": (
@@ -239,6 +268,160 @@ def test_exact_date_metrics_costs_and_legacy_baseline_are_explicit(
     benchmark = catalog["benchmark_comparisons"][0]
     assert benchmark["metrics"]["observations"] == 2
     assert benchmark["metrics"]["beta"] is not None
+
+
+def test_account_cumulative_return_includes_a_non_benchmark_date(
+    tmp_path: Path,
+) -> None:
+    """B3: the account side compounds its own full admitted window.
+
+    The reference ("provider") series only has 2026-01-02 and 2026-01-03.
+    The baseline's ACCOUNT_LIVE series additionally has an admitted
+    2026-01-01 observation inside the (widened) comparison window. Before
+    the fix, `_comparison_metrics` compounded the account only over dates
+    common with the reference, so this extra date was invisible and the
+    result was identical to the two-date case (cumulative_gap == "-0.02",
+    exactly the value in `test_exact_date_metrics_costs_and_legacy_baseline_
+    are_explicit`). After the fix, the account's own full window is used, so
+    the 01-01 return changes the result.
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={
+            date(2026, 1, 1): "0.03",
+            date(2026, 1, 2): "0.01",
+            date(2026, 1, 3): "-0.02",
+        },
+    )
+    spec, _ = _inputs(tmp_path, observed_start="2026-01-01")
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    comparison = catalog["comparisons"][0]
+    metrics = comparison["metrics"]
+    # Both exact-common-date stats are unaffected: still just the two shared
+    # dates with the reference series.
+    assert metrics["observations"] == 2
+    # The account side now compounds all three of its own admitted dates
+    # (0.03, 0.01, -0.02), not just the two shared with the reference.
+    assert metrics["account_cumulative_return"] == "0.019494"
+    assert metrics["cumulative_gap"] == "0.009694"
+    # A pre-fix compound (restricted to the two common dates) would have
+    # reproduced exactly "-0.02", indistinguishable from the no-extra-date
+    # case; the fix must diverge from that value.
+    assert metrics["cumulative_gap"] != "-0.02"
+    assert comparison["legacy_baseline_disposition"] == (
+        "CORRECTED_BY_CURRENT_EXACT_DATE_SOURCE"
+    )
+
+
+def test_benchmark_comparison_account_cumulative_return_includes_a_non_benchmark_date(
+    tmp_path: Path,
+) -> None:
+    """B3's actual flip target: the benchmark-comparison call site.
+
+    Same defect as the paired `comparisons` test above, but exercised through
+    `benchmark_comparisons` (tools/portfolio_attribution.py:575-579), which is
+    what `returns.benchmark_account_return` reads. The reference ("benchmark")
+    series only has 2026-01-02 and 2026-01-03; the account has an extra
+    admitted 2026-01-01 date inside the widened window.
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={
+            date(2026, 1, 1): "0.03",
+            date(2026, 1, 2): "0.01",
+            date(2026, 1, 3): "-0.02",
+        },
+    )
+    spec, _ = _inputs(tmp_path, observed_start="2026-01-01")
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    benchmark_comparison = catalog["benchmark_comparisons"][0]
+    metrics = benchmark_comparison["metrics"]
+    # Exact-common-date stats: still just the two shared dates.
+    assert metrics["observations"] == 2
+    # The account side compounds all three of its own admitted dates.
+    assert metrics["account_cumulative_return"] == "0.019494"
+    assert metrics["cumulative_gap"] == "0.019519"
+    # A pre-fix compound (restricted to the two common dates) would have
+    # reproduced "-0.0102" (identical to the no-extra-date case).
+    assert metrics["account_cumulative_return"] != "-0.0102"
+
+
+def _strategy_return_row(day: str, value: str) -> dict[str, Any]:
+    return {
+        "component_account_ids": ["synthetic-account"],
+        "date": day,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "provider_id": "synthetic",
+        "return": value,
+        "strategy_id": "strategy-1",
+    }
+
+
+def test_account_live_series_rejects_non_array_strategy_returns(
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline(tmp_path, strategy_returns="not-an-array")
+    spec, _ = _inputs(tmp_path)
+    with pytest.raises(
+        attribution.AttributionValidationError, match="must be an array"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_account_live_series_rejects_return_at_or_below_negative_one(
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline(
+        tmp_path, strategy_returns=[_strategy_return_row("2026-01-02", "-1")]
+    )
+    spec, _ = _inputs(tmp_path)
+    with pytest.raises(attribution.AttributionValidationError, match="greater than -1"):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_account_live_series_rejects_conflicting_dates(tmp_path: Path) -> None:
+    baseline = _baseline(
+        tmp_path,
+        strategy_returns=[
+            _strategy_return_row("2026-01-02", "0.01"),
+            _strategy_return_row("2026-01-02", "0.02"),
+        ],
+    )
+    spec, _ = _inputs(tmp_path)
+    with pytest.raises(
+        attribution.AttributionValidationError, match="conflicting dates"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_account_live_series_accepts_repeated_identical_rows_and_boundary_return(
+    tmp_path: Path,
+) -> None:
+    """The good counterpart to the three bad fixtures above: an array of
+
+    rows, a repeated row with the *same* value (not a conflict), and a
+    return just above -1, are all accepted.
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        strategy_returns=[
+            _strategy_return_row("2026-01-02", "-0.999999"),
+            _strategy_return_row("2026-01-02", "-0.999999"),
+            _strategy_return_row("2026-01-03", "-0.02"),
+        ],
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    assert catalog["comparisons"][0]["metrics"]["observations"] == 2
 
 
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:

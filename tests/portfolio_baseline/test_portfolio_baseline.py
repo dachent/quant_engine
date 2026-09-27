@@ -1317,6 +1317,378 @@ def test_provider_ledger_v2_consumes_only_effective_authoritative_account_facts(
     assert [row["record_id"] for row in result[result_index]] == [f"{fact_type}-schwab"]
 
 
+def _capital_anchor(
+    *,
+    account_id: str,
+    provider_id: str,
+    strategy_id: str | None,
+    capital_type: str,
+    mapping_status: str,
+    event_date: str,
+    amount: str,
+    record_id: str,
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        "capital_type": capital_type,
+        "event_date": event_date,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "generation-provider-ledger",
+        "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+        "mapping_status": mapping_status,
+        "nav_recognition_date": event_date,
+        "nav_source_artifact_id": "source/csv/dashboard.csv",
+        "provider_id": provider_id,
+        "record_id": record_id,
+        "source_artifact_id": "source/csv/account_activity.csv",
+        "source_record_id": record_id,
+        "strategy_id": strategy_id,
+    }
+
+
+def _capital_anchor_admission(*, account_id: str, provider_id: str) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "account_reconciliation_sha256": hashlib.sha256(
+            f"{provider_id}-capital-anchors".encode()
+        ).hexdigest(),
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-01-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "capital_anchors",
+        "pool_id": None,
+        "provider_id": provider_id,
+        "strategy_id": None,
+    }
+
+
+def _capital_anchor_catalog(anchors: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "admissions": [
+            _capital_anchor_admission(
+                account_id="account-quantbase", provider_id="quantbase"
+            )
+        ],
+        "capital_anchors": anchors,
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+
+def test_provider_ledger_v2_capital_anchor_strategy_allocation_becomes_a_flow() -> None:
+    """D2: the sleeve-funding capital anchor is the only admitted flow evidence.
+
+    Bad (pre-fix): capital_anchors is never read by the baseline, so the two
+    STRATEGY_CAPITAL_ALLOCATION legs contribute 0 admitted flow records.
+    Good (this test, against the fix): they become 2 MAPPED, strategy-tagged
+    flow facts, and the opening anchor -- the performance opening basis, not
+    a funding event -- is never among them.
+    """
+
+    opening = _capital_anchor(
+        account_id="account-quantbase",
+        provider_id="quantbase",
+        strategy_id="strategy-volatis",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+        mapping_status="MAPPED",
+        event_date="2026-01-04",
+        amount="5000.00",
+        record_id="quantbase-capital-anchor:opening",
+    )
+    allocations = [
+        _capital_anchor(
+            account_id="account-quantbase",
+            provider_id="quantbase",
+            strategy_id="strategy-volatis",
+            capital_type="STRATEGY_CAPITAL_ALLOCATION",
+            mapping_status="MAPPED",
+            event_date=event_date,
+            amount=amount,
+            record_id=f"quantbase-capital-anchor:{index}",
+        )
+        for index, (event_date, amount) in enumerate(
+            (("2026-02-01", "1000.00"), ("2026-03-01", "1500.00")), start=1
+        )
+    ]
+    catalog = _capital_anchor_catalog([opening, *allocations])
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": "account-quantbase"}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    flows = result[1]
+    reconciliation = result[6]
+    assert {row["record_id"] for row in flows} == {
+        "capital-allocation-flow:quantbase-capital-anchor:1",
+        "capital-allocation-flow:quantbase-capital-anchor:2",
+    }
+    assert all(row["flow_type"] == "EXTERNAL_CONTRIBUTION" for row in flows)
+    assert all(row["capital_disposition"] == "EXTERNAL_CAPITAL" for row in flows)
+    assert all(row["strategy_id"] == "strategy-volatis" for row in flows)
+    assert all(row["mapping_status"] == "MAPPED" for row in flows)
+    assert {row["amount"]["value"] for row in flows} == {"1000.00", "1500.00"}
+    assert reconciliation["admitted_flow_count"] == 2
+
+
+def test_provider_ledger_v2_capital_anchor_requires_mapped_strategy() -> None:
+    """An unmapped allocation stays non-performance: it must not leak into flows."""
+
+    unmapped = _capital_anchor(
+        account_id="account-quantbase",
+        provider_id="quantbase",
+        strategy_id=None,
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="UNMAPPED",
+        event_date="2026-02-01",
+        amount="1000.00",
+        record_id="quantbase-capital-anchor:1",
+    )
+    catalog = _capital_anchor_catalog([unmapped])
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": "account-quantbase"}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    assert result[1] == []
+    assert result[6]["admitted_flow_count"] == 0
+
+
+def test_provider_ledger_v2_without_capital_anchors_key_does_not_raise() -> None:
+    """A catalog that predates capital_anchors has no anchors, not a bad shape."""
+
+    catalog = {
+        "admissions": [],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": "account-a"}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    assert result[1] == []
+
+
+def test_coverage_evidence_flows_status_flips_once_capital_anchor_flows_are_admitted() -> (
+    None
+):
+    """D2: gates[flows] moves off NO_REPORTED_EVENTS once the anchor-derived
+    flow is admitted -- the exact fact-matrix note in the flip list."""
+
+    account = {
+        "account_id": "account-quantbase",
+        "base_currency": "USD",
+        "provider": "quantbase",
+        "role": "INVESTMENT",
+    }
+    admission = {
+        "account_id": "account-quantbase",
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-01-01",
+        "fact_type": "flows",
+    }
+    admitted_flow = {
+        "account_id": "account-quantbase",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1000.00"},
+        "event_date": "2026-02-01",
+        "record_id": "capital-allocation-flow:quantbase-capital-anchor:1",
+    }
+
+    def flows_status(flows: list[dict[str, Any]]) -> str:
+        matrix, _, _ = baseline._coverage_evidence(
+            accounts=[account],
+            assignments=[],
+            provider_admissions=[admission],
+            provider_coverage=[],
+            nav=[],
+            positions=[],
+            transactions=[],
+            flows=flows,
+            as_of_date=date(2026, 7, 30),
+        )
+        row = next(
+            item
+            for item in matrix
+            if item["fact_type"] == "flows"
+            and item["account_id"] == "account-quantbase"
+        )
+        return str(row["status"])
+
+    assert flows_status([]) == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    assert flows_status([admitted_flow]) == "OBSERVED_NOT_COMPLETENESS_PROOF"
+
+
+def test_provider_ledger_v2_capital_anchor_native_currency_is_not_ready() -> None:
+    """B7/M9 fail-closed rule: a native-currency allocation (Matrixport's
+    subscription currency, e.g. USDT) must never be treated as USD.  It is
+    excluded from flows and recorded as an explicit NOT_READY finding, not
+    silently admitted at par and not silently dropped."""
+
+    account_id = "account-matrixport"
+    native = _capital_anchor(
+        account_id=account_id,
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    native["amount"]["currency"] = "USDT"
+    catalog = {
+        "admissions": [
+            _capital_anchor_admission(account_id=account_id, provider_id="matrixport")
+        ],
+        "capital_anchors": [native],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": account_id}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    flows, quality_findings = result[1], result[5]
+    assert flows == []
+    finding = next(
+        item
+        for item in quality_findings
+        if item["record_id"] == "matrixport-capital-anchor:1"
+    )
+    assert finding["status"] == "NOT_READY_AWAITING_CONTRACT_FX"
+    assert finding["currency"] == "USDT"
+    assert finding["provider_id"] == "matrixport"
+    assert finding["fact_type"] == "capital_anchors"
+
+
+def test_provider_ledger_v2_capital_anchor_flow_requires_usd_currency() -> None:
+    """Defense in depth: the projection helper itself refuses a non-USD
+    anchor, so no other caller can silently mint a mislabeled USD flow."""
+
+    anchor = _capital_anchor(
+        account_id="account-matrixport",
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    anchor["amount"]["currency"] = "USDT"
+
+    with pytest.raises(baseline.BaselineValidationError, match="requires a USD amount"):
+        baseline._capital_anchor_flow(anchor)
+
+
+def test_provider_ledger_v2_matrixport_capital_anchor_becomes_a_flow_once_usd_admitted() -> (
+    None
+):
+    """The Matrixport half of D2 is blocked on T4 (lane cp/c1-t4-ledger):
+    ``_matrixport_capital_anchors`` computes a contract-admitted USD
+    ``opening_nav`` only for the OPENING anchor; a later
+    ``STRATEGY_CAPITAL_ALLOCATION`` leg carries only its native subscription
+    currency today, so the pinned catalog (run baseline-950733c, ledger
+    3b1445ee) has zero Matrixport STRATEGY_CAPITAL_ALLOCATION anchors and
+    this code path is currently exercised by Quantbase alone.
+
+    This test simulates T4's landed state -- a USD-denominated allocation
+    anchor -- to prove T5's projection is already correct and provider-
+    agnostic for it.  It will flip from exercising this synthetic anchor to
+    exercising T4's real output the day T4 merges a USD conversion, with no
+    further change to portfolio_baseline.py required.
+    """
+
+    account_id = "account-matrixport"
+    anchor = _capital_anchor(
+        account_id=account_id,
+        provider_id="matrixport",
+        strategy_id="strategy-robuxio",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        mapping_status="MAPPED",
+        event_date="2026-02-01",
+        amount="500.00",
+        record_id="matrixport-capital-anchor:1",
+    )
+    catalog = {
+        "admissions": [
+            _capital_anchor_admission(account_id=account_id, provider_id="matrixport")
+        ],
+        "capital_anchors": [anchor],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": account_id}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    flows = result[1]
+    assert [row["record_id"] for row in flows] == [
+        "capital-allocation-flow:matrixport-capital-anchor:1"
+    ]
+    assert flows[0]["flow_type"] == "EXTERNAL_CONTRIBUTION"
+    assert flows[0]["provider"] == "MATRIXPORT"
+
+
 @pytest.mark.parametrize(
     ("observed_at", "expects_position"),
     (
