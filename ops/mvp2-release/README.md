@@ -54,3 +54,31 @@ explicit owner authorization.
 repo alone: the epoch crosswalk, the account-interval receipt authority, the HWM governed result
 and calendar authority, the invested-capital result and its input generation, and the base
 decomposition spec. Everything else the drivers touch is either in the repo or rebuilt per run.
+
+## Release record closure (corrective program N1/T1.5)
+
+No script in this repository assembles `evidence/releases/<date>/` (`inputs.zip` +
+`inputs.manifest.json` + `run-records.zip` + the QC/plan/execute JSON files above) --
+`run_production.sh` writes its own scratch `production/` directory (`$P` above), and the
+`evidence/releases/<date>/` record itself is sealed by hand from that plus the working tree's
+own input closure (see that record's own `README.md`, "This record was moved here from
+`docs/code-review/...`, when the working trees it ran from were removed"). That manual sealing
+step is exactly where defect N1 was introduced: `inputs.zip` was captured without three of its
+own frozen recipe's pinned companions (the Alpaca and Fidelity provider catalogs, and the Schwab
+native NAV-capture binding evidence), so the 2026-09-23 release could not be replayed from its
+own record.
+
+Until that sealing step has a driver of its own (`#414`), treat this as a required manual step
+whenever `evidence/releases/<date>/` is sealed, mirroring how `build_vertical.sh` gates on
+`tools/check_retained_authority_pins.py` before it will proceed (`#444`):
+
+```
+python tools/check_release_closure.py evidence/releases/<date>
+```
+
+Exit 1 lists every pin in the release's own `runner-input-config.json` -> `provider_ledger_spec`
+-> `run_observation` chain whose sha256 does not resolve inside `inputs.zip` or
+`inputs-supplement/` (see that tool's module docstring for exactly what it walks and why). A
+release record is not complete until this exits 0. The 2026-09-23 record's own gap was closed by
+promoting the 60 recovered files into `inputs-supplement/` (copies only; see that record's
+`README.md` addendum and `inputs-supplement/MANIFEST.json`), not by re-sealing `inputs.zip`.
