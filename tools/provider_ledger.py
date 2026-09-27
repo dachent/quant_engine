@@ -985,9 +985,20 @@ def _matrixport_daily_fx_totals(
                     financial_cutoff,
                 )
                 continue
+            share = _observed_decimal(
+                row.get("share"), "matrixport daily holdings share"
+            )
+            if share is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+                )
+            if share == 0:
+                # An inactive zero-share row holds nothing to convert, so the
+                # FX boundary does not disposition it.
+                continue
             if day > fx_end:
                 # The contract admits USD conversion only through its FX
-                # interval end: no USD value exists for a later native row.
+                # interval end: no USD value exists for a later active row.
                 unconverted.append((day, str(row.get("currency") or "")))
                 _excluded_source_row(
                     cutoff_findings,
@@ -999,15 +1010,6 @@ def _matrixport_daily_fx_totals(
                     fx_end,
                     status="OUTSIDE_ADMITTED_FX_BOUNDARY",
                 )
-                continue
-            share = _observed_decimal(
-                row.get("share"), "matrixport daily holdings share"
-            )
-            if share is None:
-                raise ProviderLedgerError(
-                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
-                )
-            if share == 0:
                 continue
             native = _observed_decimal(
                 row.get("native_value"), "matrixport native holding value"
@@ -1185,19 +1187,15 @@ def _matrixport_flows(
                     financial_cutoff,
                 )
                 continue
-            if timestamp.date() > _admitted_fx_end(fx_rates):
-                _excluded_source_row(
-                    cutoff_findings,
-                    "matrixport",
-                    "flows",
-                    artifact_id,
-                    row,
-                    timestamp.date(),
-                    _admitted_fx_end(fx_rates),
-                    status="OUTSIDE_ADMITTED_FX_BOUNDARY",
-                )
-                continue
             currency = _text(row.get("currency"), "matrixport wallet currency")
+            if timestamp.date() > _admitted_fx_end(fx_rates):
+                # A wallet flow the admitted FX cannot value fails closed like
+                # the anchor path: an unvalued movement is never a silently
+                # dropped flow, whatever its currency.
+                raise ProviderLedgerError(
+                    "portfolio FX lacks "
+                    f"{currency}/USD on {timestamp.date().isoformat()}"
+                )
             signed = amount * sign
             projected.append(
                 {
@@ -5929,6 +5927,44 @@ def _strategy_path_links(
     return links, unavailable
 
 
+def _membership_segments(
+    run_days: Sequence[date],
+    intervals: Sequence[tuple[date, date | None, str]],
+) -> list[tuple[list[date], str]]:
+    """Split one same-strategy NAV run at its census membership boundaries.
+
+    A status transition that keeps the same strategy leaves no single census
+    interval covering the whole contiguous run.  The run is split where the
+    covering status changes, so only the non-performance epoch is excluded
+    instead of the whole run failing.  A day no census interval covers, or a
+    day two statuses cover, still fails closed.
+    """
+
+    segments: list[tuple[list[date], str]] = []
+    start = 0
+    current: str | None = None
+    for index, day in enumerate(run_days):
+        covering = {
+            status
+            for interval_start, interval_end, status in intervals
+            if interval_start <= day and (interval_end is None or day <= interval_end)
+        }
+        if len(covering) != 1:
+            raise ProviderLedgerError(
+                "mapped NAV run lacks exactly one census membership"
+            )
+        status = covering.pop()
+        if current is None:
+            current = status
+        elif status != current:
+            segments.append((list(run_days[start:index]), current))
+            start = index
+            current = status
+    if current is not None:
+        segments.append((list(run_days[start:]), current))
+    return segments
+
+
 @_catalog_decimal_context
 def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
@@ -5949,7 +5985,9 @@ def _broker_strategy_returns(
       funded observation.  A Quantbase epoch opens at its opening capital
       anchor, the first capital-reconciled NAV.
     * R2: with ``performance_membership`` only census ``FUNDED_MEMBERSHIP``
-      epochs enter; an assignment-only epoch never carries a return.
+      epochs enter; an assignment-only epoch never carries a return.  A
+      same-strategy status transition splits the run at its membership
+      boundary, so only the non-performance epoch is excluded.
     * Date-only flows leave the ending value of the sub-period that ends at
       their NAV recognition date (or the next observation after it).
       Exact-timestamp Quantbase allocations join its beginning capital.
@@ -6199,80 +6237,93 @@ def _broker_strategy_returns(
         for run in runs:
             strategy_id = _text(run[0].get("strategy_id"), "strategy_id")
             run_days = [_day(row.get("as_of_date"), "NAV date") for row in run]
-            first_day, last_day = run_days[0], run_days[-1]
-            if performance_membership is not None:
+            if performance_membership is None:
+                segments = [(run_days, _FUNDED_MEMBERSHIP)]
+            else:
+                intervals = performance_membership.get((account_id, strategy_id), ())
                 statuses = {
                     status
-                    for start, end, status in performance_membership.get(
-                        (account_id, strategy_id), ()
-                    )
-                    if start <= first_day and (end is None or last_day <= end)
+                    for start, end, status in intervals
+                    if start <= run_days[0] and (end is None or run_days[-1] <= end)
                 }
-                if len(statuses) != 1:
-                    raise ProviderLedgerError(
-                        "mapped NAV run lacks exactly one census membership"
-                    )
-                if statuses != {_FUNDED_MEMBERSHIP}:
+                if len(statuses) == 1:
+                    segments = [(run_days, next(iter(statuses)))]
+                else:
+                    # No single census interval covers the whole contiguous
+                    # run: a same-strategy status transition splits it at its
+                    # membership boundaries instead of failing the run.
+                    segments = _membership_segments(run_days, intervals)
+            for segment_days, membership_status in segments:
+                if membership_status != _FUNDED_MEMBERSHIP:
                     continue
-            if provider_id == "quantbase":
-                anchor_day = quantbase_openings.get((account_id, strategy_id))
-                if anchor_day is None:
-                    if len(run_days) > 1:
+                first_day, last_day = segment_days[0], segment_days[-1]
+                if provider_id == "quantbase":
+                    anchor_day = quantbase_openings.get((account_id, strategy_id))
+                    if anchor_day is None:
+                        if len(segment_days) > 1:
+                            raise ProviderLedgerError(
+                                "quantbase mapped NAV lacks exactly one opening capital anchor"
+                            )
+                        continue
+                    anchor_value = values.get(anchor_day)
+                    if (
+                        anchor_day not in segment_days
+                        or anchor_value is None
+                        or anchor_value <= 0
+                    ):
                         raise ProviderLedgerError(
-                            "quantbase mapped NAV lacks exactly one opening capital anchor"
+                            "quantbase opening capital anchor does not open its NAV"
                         )
-                    continue
-                anchor_value = values.get(anchor_day)
-                if (
-                    anchor_day not in run_days
-                    or anchor_value is None
-                    or anchor_value <= 0
-                ):
-                    raise ProviderLedgerError(
-                        "quantbase opening capital anchor does not open its NAV"
+                    # An opening anchor establishes the first funded NAV baseline;
+                    # earlier dashboard values are not funded performance.
+                    opening: OpeningPoint | None = OpeningPoint(
+                        anchor_day,
+                        anchor_value,
+                        OPENING_FIRST_POSITIVE_ON_OR_AFTER_START,
                     )
-                # An opening anchor establishes the first funded NAV baseline;
-                # earlier dashboard values are not funded performance.
-                opening: OpeningPoint | None = OpeningPoint(
-                    anchor_day, anchor_value, OPENING_FIRST_POSITIVE_ON_OR_AFTER_START
+                else:
+                    opening = opening_point(
+                        {
+                            day: value
+                            for day, value in values.items()
+                            if day <= last_day
+                        },
+                        first_day,
+                    )
+                if opening is None:
+                    continue
+                observations = {
+                    day: value
+                    for day, value in values.items()
+                    if opening.as_of <= day <= last_day
+                }
+                if any(day in provider_gaps for day in observations):
+                    raise ProviderLedgerError(
+                        "declared NAV gap contains an admitted NAV observation"
+                    )
+                members_by_strategy[strategy_id].append(
+                    _MemberEpoch(
+                        provider_id=provider_id,
+                        account_id=account_id,
+                        strategy_id=strategy_id,
+                        opening=opening,
+                        last_day=last_day,
+                        observations=observations,
+                        record_ids={day: record_ids[day] for day in observations},
+                        unavailable_days=frozenset(
+                            day
+                            for day in segment_days
+                            if day not in values and day > opening.as_of
+                        ),
+                        legs=tuple(
+                            leg
+                            for leg in legs_by_account.get(
+                                (provider_id, account_id), ()
+                            )
+                            if opening.as_of < leg.nav_recognition_date <= last_day
+                        ),
+                    )
                 )
-            else:
-                opening = opening_point(
-                    {day: value for day, value in values.items() if day <= last_day},
-                    first_day,
-                )
-            if opening is None:
-                continue
-            observations = {
-                day: value
-                for day, value in values.items()
-                if opening.as_of <= day <= last_day
-            }
-            if any(day in provider_gaps for day in observations):
-                raise ProviderLedgerError(
-                    "declared NAV gap contains an admitted NAV observation"
-                )
-            members_by_strategy[strategy_id].append(
-                _MemberEpoch(
-                    provider_id=provider_id,
-                    account_id=account_id,
-                    strategy_id=strategy_id,
-                    opening=opening,
-                    last_day=last_day,
-                    observations=observations,
-                    record_ids={day: record_ids[day] for day in observations},
-                    unavailable_days=frozenset(
-                        day
-                        for day in run_days
-                        if day not in values and day > opening.as_of
-                    ),
-                    legs=tuple(
-                        leg
-                        for leg in legs_by_account.get((provider_id, account_id), ())
-                        if opening.as_of < leg.nav_recognition_date <= last_day
-                    ),
-                )
-            )
 
     result: list[dict[str, Any]] = []
     for strategy_id, members in sorted(members_by_strategy.items()):
@@ -6636,14 +6687,22 @@ def _merge_account_returns(
             and str(item.get("strategy_id")) in superseded
         )
     ]
-    result.extend(
-        {
-            **broker_row,
-            "cost": None,
-            "strategy_name": strategy_names[str(broker_row["strategy_id"])],
-        }
-        for broker_row in broker_rows
-    )
+    recomputed_rows: list[dict[str, Any]] = []
+    for broker_row in broker_rows:
+        strategy_id = str(broker_row["strategy_id"])
+        if strategy_id not in strategy_names:
+            raise ProviderLedgerError(
+                "recomputed account return lacks a provenance strategy name: "
+                f"{strategy_id}"
+            )
+        recomputed_rows.append(
+            {
+                **broker_row,
+                "cost": None,
+                "strategy_name": strategy_names[strategy_id],
+            }
+        )
+    result.extend(recomputed_rows)
     result.sort(
         key=lambda item: (
             str(item["strategy_id"]),
@@ -6660,7 +6719,12 @@ def _strategy_return_overlap_checks(
     *,
     provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Publish how every superseded retained path differs from the recompute."""
+    """Publish how every superseded retained path differs from the recompute.
+
+    A recomputed strategy whose retained rows are fully date-disjoint from the
+    recompute still publishes its overlap row: the retained-only dates are the
+    comparison evidence that the recompute supersedes a disjoint retained path.
+    """
 
     tolerance = Decimal("0.000001")
     source = {
@@ -6688,8 +6752,19 @@ def _strategy_return_overlap_checks(
                 ),
             )
         )
+    retained_strategies = {
+        str(row["strategy_id"])
+        for row in source_rows
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
+    disjoint_recomputed = {
+        strategy_id
+        for strategy_id in recomputed_dates
+        if strategy_id in retained_strategies and strategy_id not in comparisons
+    }
     rows: list[dict[str, object]] = []
-    for strategy_id, comparisons_for_strategy in sorted(comparisons.items()):
+    for strategy_id in sorted([*comparisons, *disjoint_recomputed]):
+        comparisons_for_strategy = comparisons.get(strategy_id, [])
         differences = [abs(item[1] - item[2]) for item in comparisons_for_strategy]
         divergences = [
             {
@@ -6732,7 +6807,9 @@ def _strategy_return_overlap_checks(
                 "compared_date_count": len(differences),
                 "divergences": divergences,
                 "exception_date_count": len(divergences),
-                "maximum_absolute_difference": format(max(differences), "f"),
+                "maximum_absolute_difference": (
+                    format(max(differences), "f") if differences else "0"
+                ),
                 "maximum_estimated_dollar_impact": (
                     format(max(dollar_impacts), "f") if dollar_impacts else "0"
                 ),
