@@ -130,6 +130,10 @@ _PATH_STAGES = {
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/merge_readiness.py": [],
+    # Acceptance runner entrypoint (corrective program WS5). Its checks live in
+    # top-level `acceptance/validate/`; it reads published outputs and imports no
+    # producer, so a change to it affects no execution stage.
+    "tools/validate_generation.py": [],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
