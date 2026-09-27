@@ -139,6 +139,29 @@ def test_epoch_manifest_workbook_snapshot_rejects_incomplete_or_changed_binding(
         )
 
 
+def _membership_census(
+    *assignments: tuple[str, str, str | None, str | None, str],
+) -> dict[str, object]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "assignments": [
+                        {
+                            "strategy_id": strategy_id,
+                            "status": status,
+                            "effective_start": start,
+                            "effective_end": end,
+                        }
+                    ],
+                }
+                for provider, strategy_id, start, end, status in assignments
+            ]
+        }
+    }
+
+
 def _verified_schema9_epoch_bundle(
     tmp_path: Path,
     *,
@@ -170,6 +193,7 @@ def _verified_schema9_epoch_bundle(
     ]
     rows: list[dict[str, object]] = []
     blocker_chains: list[dict[str, object]] = []
+    census_assignments: list[tuple[str, str, str | None, str | None, str]] = []
     for row in included:
         assignment = {
             field: row[field]
@@ -254,6 +278,15 @@ def _verified_schema9_epoch_bundle(
                 }
             )
         rows.append(manifest_row)
+        census_assignments.append(
+            (
+                row["provider"],
+                row["strategy_id"],
+                row["effective_start"],
+                row["effective_end"],
+                "FUNDED_MEMBERSHIP" if funded else "ASSIGNMENT_ONLY",
+            )
+        )
         blocker_chains.append(
             {
                 "assignment": assignment,
@@ -294,6 +327,7 @@ def _verified_schema9_epoch_bundle(
         ),
     }
     assignment_identity = {"sha256": "4" * 64, "count": 15}
+    census_bytes = canonical_json_bytes(_membership_census(*census_assignments))
     manifest_payload: dict[str, object] = {
         "schema_version": manifest_schema_version,
         "calculation_cutoff_date": manifest_cutoff,
@@ -801,6 +835,10 @@ def _verified_schema9_epoch_bundle(
             "size_bytes": len(receipt_authority_bytes),
         },
         "admission_policy": {"sha256": "d" * 64, "size_bytes": 13},
+        "membership_census": {
+            "sha256": hashlib.sha256(census_bytes).hexdigest(),
+            "size_bytes": len(census_bytes),
+        },
         "manifest_schema": {
             "sha256": hashlib.sha256(manifest_schema_bytes).hexdigest(),
             "size_bytes": len(manifest_schema_bytes),
