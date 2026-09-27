@@ -2048,7 +2048,17 @@ def test_universe_active_epoch_selection_is_cutoff_relative(tmp_path: Path) -> N
     cutoff. Before the fix, ``future`` was wrongly counted active (only
     ``effective_end is None`` was checked) and ``ending-later`` was wrongly
     excluded (its non-null ``effective_end`` was enough to drop it, cutoff or
-    not)."""
+    not).
+
+    Both endpoints are inclusive of their own day (cross-family review
+    follow-up, confirmed against the adjacent-day transition convention in
+    ``contracts/portfolio-financial-mvp-source-v1.json``'s ``schwab-qsi-01``
+    sleeve: predecessor ``effective_end`` and successor ``effective_start``
+    are exactly one day apart, never the same day): ``ends-on-cutoff``
+    (``effective_end == cutoff``) must still be active (its last in-effect
+    day), ``ended-day-before`` (``effective_end == cutoff - 1``) must be
+    excluded, and ``starts-day-after`` (``effective_start == cutoff + 1``)
+    must be excluded."""
     generation = load_generation(build(tmp_path), discover=False)
     generation.external.crosswalk = {
         "rows": [
@@ -2073,6 +2083,27 @@ def test_universe_active_epoch_selection_is_cutoff_relative(tmp_path: Path) -> N
                 "effective_end": "2026-12-31",
                 "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
             },
+            {
+                "account_id": "B1",
+                "strategy_id": "ends-on-cutoff",
+                "effective_start": "2025-01-01",
+                "effective_end": "2026-09-17",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+            {
+                "account_id": "C1",
+                "strategy_id": "ended-day-before",
+                "effective_start": "2025-01-01",
+                "effective_end": "2026-09-16",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+            {
+                "account_id": "D1",
+                "strategy_id": "starts-day-after",
+                "effective_start": "2026-09-18",
+                "effective_end": None,
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
         ]
     }
     generation.external.crosswalk_path = "test-crosswalk.json"
@@ -2083,11 +2114,17 @@ def test_universe_active_epoch_selection_is_cutoff_relative(tmp_path: Path) -> N
     reference = checks.universe(context)
 
     assert reference is not None
-    assert reference.active_strategies == frozenset({"alpha", "ending-later"})
-    assert reference.active_accounts == frozenset({"A1", "E1"})
+    assert reference.active_strategies == frozenset(
+        {"alpha", "ending-later", "ends-on-cutoff"}
+    )
+    assert reference.active_accounts == frozenset({"A1", "E1", "B1"})
     assert "future" in reference.excluded_strategies
     assert "F1" in reference.excluded_accounts
     assert reference.excluded_accounts["F1"].startswith("EPOCH_NOT_YET_STARTED_")
+    assert "ended-day-before" in reference.excluded_strategies
+    assert reference.excluded_accounts["C1"] == "EPOCH_ENDED_2026-09-16"
+    assert "starts-day-after" in reference.excluded_strategies
+    assert reference.excluded_accounts["D1"].startswith("EPOCH_NOT_YET_STARTED_")
 
 
 GOOD_APP_NEGATED_ATTRIBUTES = GOOD_APP_JS.replace(

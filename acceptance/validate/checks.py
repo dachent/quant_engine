@@ -428,8 +428,18 @@ def _epoch_covers_cutoff(row: Mapping[str, Any], cutoff: date) -> bool:
     ``effective_end`` before it. A merely open-ended (``effective_end is
     None``) row is not enough -- a future-dated ``effective_start`` has not
     started yet as of the cutoff, and a non-null ``effective_end`` that falls
-    *after* the cutoff has not ended yet either. An unparseable or missing
-    ``effective_start`` fails closed (not active).
+    on or *after* the cutoff has not ended yet either. An unparseable or
+    missing ``effective_start`` fails closed (not active).
+
+    Both endpoints are inclusive of their own day (cross-family review,
+    T2.8 follow-up): the crosswalk/MVP-source transition convention pairs a
+    predecessor's ``effective_end`` with the successor's ``effective_start``
+    exactly one day later (e.g. ``contracts/portfolio-financial-mvp-source-
+    v1.json``'s ``schwab-qsi-01`` sleeve -- ``tt-portfolio`` ends
+    2026-01-04, ``qsi`` starts 2026-01-05 -- with no gap and no overlap), and
+    this file's own ``weekdays_between`` already documents an end-inclusive
+    half-open ``(start, end]`` day-counting convention. So ``effective_end
+    == cutoff`` is still the epoch's last active day, not yet ended.
     """
 
     if row.get("product_epoch_disposition") != "INCLUDED_PRODUCT_EPOCH":
@@ -438,7 +448,7 @@ def _epoch_covers_cutoff(row: Mapping[str, Any], cutoff: date) -> bool:
     if start is None or start > cutoff:
         return False
     end = to_date(row.get("effective_end"))
-    return end is None or end > cutoff
+    return end is None or end >= cutoff
 
 
 def universe(ctx: Context) -> Universe | None:
