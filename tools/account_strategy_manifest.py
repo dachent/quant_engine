@@ -3086,12 +3086,13 @@ class _EpochLeg:
     def signed_amount(self) -> Decimal:
         return self.amount if _FLOW_SIGN[self.flow_class] > 0 else -self.amount
 
-    def sort_key(self) -> tuple[str, str, str, str, Decimal]:
+    def sort_key(self) -> tuple[str, str, str, str, str, Decimal]:
         return (
             self.event_date,
             self.nav_recognition_date,
             self.flow_class,
-            self.source_record_id or "",
+            self.timing,
+            self.economic_date or "",
             self.amount,
         )
 
@@ -3207,7 +3208,6 @@ def _performance_flow_leg_entry(leg: _EpochLeg) -> dict[str, Any]:
         "economic_date": leg.economic_date,
         "timing": leg.timing,
         "amount": leg.amount,
-        "source_record_id": leg.source_record_id,
     }
 
 
@@ -3948,13 +3948,11 @@ def _mwr_flow_leg(raw: object, field: str) -> FlowLeg:
         "economic_date",
         "timing",
         "amount",
-        "source_record_id",
     }:
         raise ManifestError(f"{field} is invalid")
     flow_class = _require_nonempty_text(raw.get("class"), f"{field}.class")
     amount = _money(raw.get("amount"), f"{field}.amount")
     economic = raw.get("economic_date")
-    source_record_id = raw.get("source_record_id")
     try:
         return FlowLeg(
             amount=amount if flow_class.endswith("_IN") else -amount,
@@ -3972,11 +3970,6 @@ def _mwr_flow_leg(raw: object, field: str) -> FlowLeg:
                 None
                 if economic is None
                 else date.fromisoformat(_iso_date(economic, f"{field}.economic_date"))
-            ),
-            source_record_ids=(
-                ()
-                if source_record_id is None
-                else (_require_nonempty_text(source_record_id, f"{field}.source"),)
             ),
         )
     except ReturnsError as exc:
@@ -4013,7 +4006,10 @@ def _mwr_payloads_from_governed_inputs(
         currency = _require_nonempty_text(nav_value.get("currency"), "MWR NAV currency")
         nav_sources[(account_id, nav_date)].append((record_id, value_basis, currency))
 
-    flow_sources: dict[str, tuple[str, str, str, str]] = {}
+    # A performance leg is one source record; its provenance is every record
+    # carrying exactly its account, class, dates and amount (records identical
+    # in all of these fall on the same investor cash date).
+    flow_sources: dict[tuple[str, str, str, str, Decimal], set[str]] = defaultdict(set)
     for event in events:
         account_id = _require_nonempty_text(event.get("account_id"), "MWR flow account")
         event_date = _iso_date(event.get("event_date"), "MWR flow date")
@@ -4032,14 +4028,19 @@ def _mwr_payloads_from_governed_inputs(
         source_id = _require_nonempty_text(
             event.get("source_record_id"), "MWR flow source"
         )
-        flow_sources[source_id] = (
-            account_id,
-            f"{disposition}_{direction}",
-            event_date,
-            recognition_date,
-        )
+        flow_sources[
+            (
+                account_id,
+                f"{disposition}_{direction}",
+                event_date,
+                recognition_date,
+                abs(amount),
+            )
+        ].add(source_id)
 
-    allocation_sources: dict[str, tuple[str, str, str, str]] = {}
+    allocation_sources: dict[tuple[str, str, str, str, Decimal], set[str]] = (
+        defaultdict(set)
+    )
     opening_anchor_sources: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(
         list
     )
@@ -4060,12 +4061,15 @@ def _mwr_payloads_from_governed_inputs(
             anchor.get("source_record_id"), "MWR anchor source"
         )
         if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
-            allocation_sources[source_id] = (
-                account_id,
-                strategy_id,
-                event_date,
-                recognition_date,
-            )
+            allocation_sources[
+                (
+                    account_id,
+                    strategy_id,
+                    event_date,
+                    recognition_date,
+                    _money(anchor.get("amount"), "MWR anchor amount"),
+                )
+            ].add(source_id)
         elif anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR":
             # Opening capital recognized on or before the performance opening
             # is inside that opening valuation; the anchor is its provenance,
@@ -4143,28 +4147,19 @@ def _mwr_payloads_from_governed_inputs(
             _mwr_flow_leg(raw, f"MWR performance flow leg {index}")
             for index, raw in enumerate(raw_legs)
         ]
-        sources_complete = True
+        leg_sources: list[set[str]] = []
         for leg in legs:
-            if len(leg.source_record_ids) != 1:
-                sources_complete = False
-                continue
-            source_id = leg.source_record_ids[0]
             identity = (
                 leg.event_date.isoformat(),
                 leg.nav_recognition_date.isoformat(),
+                abs(leg.amount),
             )
-            if leg.timing == EXACT_TIMESTAMP:
-                sources_complete = sources_complete and (
-                    allocation_sources.get(source_id)
-                    == (account_id, strategy_id, *identity)
-                    and leg.flow_class == "INTERNAL_IN"
-                )
-            else:
-                sources_complete = sources_complete and (
-                    flow_sources.get(source_id)
-                    == (account_id, leg.flow_class, *identity)
-                )
-        if not sources_complete:
+            leg_sources.append(
+                set(allocation_sources.get((account_id, strategy_id, *identity), ()))
+                if leg.timing == EXACT_TIMESTAMP and leg.flow_class == "INTERNAL_IN"
+                else set(flow_sources.get((account_id, leg.flow_class, *identity), ()))
+            )
+        if not all(leg_sources):
             row.update(
                 _blocked_mwr_payload(
                     "BLOCKED_ADMISSION", "FLOW_SOURCE_IDENTITY_UNAVAILABLE", "COMPLETE"
@@ -4203,14 +4198,14 @@ def _mwr_payloads_from_governed_inputs(
             ]
             if recognition_date == opening_date
         )
-        for leg in legs:
+        for leg, source_ids in zip(legs, leg_sources):
             cash_date = (
                 leg.economic_date
                 if leg.timing == EXACT_TIMESTAMP
                 else leg.nav_recognition_date
             )
             assert cash_date is not None
-            source_ids_by_date[cash_date.isoformat()].update(leg.source_record_ids)
+            source_ids_by_date[cash_date.isoformat()].update(source_ids)
         source_ids_by_date[end].update(item[0] for item in terminal_nav_sources)
         result = classify_xirr(cashflows)
         row.update(
@@ -4297,7 +4292,6 @@ _PERFORMANCE_FLOW_LEG_KEYS = frozenset(
         "economic_date",
         "timing",
         "amount",
-        "source_record_id",
     }
 )
 _TRACE_LINK_KEYS = frozenset(
@@ -4416,7 +4410,6 @@ def _validate_row_performance(
             else _iso_date(economic_raw, f"{field}.economic_date")
         )
         amount = _manifest_decimal(leg.get("amount"), f"{field}.amount", money=True)
-        source_record_id = leg.get("source_record_id")
         if (
             amount <= 0
             or recognition_date < event_date
@@ -4430,10 +4423,6 @@ def _validate_row_performance(
                 and not event_date <= economic_date <= recognition_date
             )
             or (timing == EXACT_TIMESTAMP and flow_class != "INTERNAL_IN")
-            or (
-                source_record_id is not None
-                and (not isinstance(source_record_id, str) or not source_record_id)
-            )
         ):
             raise ManifestError(f"{field} is invalid")
         signed = amount * _FLOW_SIGN[str(flow_class)]
@@ -4609,13 +4598,16 @@ def _validate_row_performance(
         raise ManifestError(f"row {index} observation trace summary is invalid")
 
 
-def _performance_flow_leg_sort_key(leg: object) -> tuple[str, str, str, str, Decimal]:
+def _performance_flow_leg_sort_key(
+    leg: object,
+) -> tuple[str, str, str, str, str, Decimal]:
     assert isinstance(leg, Mapping)
     return (
         str(leg.get("event_date")),
         str(leg.get("nav_recognition_date")),
         str(leg.get("class")),
-        str(leg.get("source_record_id") or ""),
+        str(leg.get("timing")),
+        str(leg.get("economic_date") or ""),
         Decimal(str(leg.get("amount"))),
     )
 

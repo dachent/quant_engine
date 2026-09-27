@@ -4235,7 +4235,6 @@ def _date_only_leg(event: str, recognition: str, amount: str) -> dict[str, Any]:
         "economic_date": None,
         "timing": "DATE_ONLY",
         "amount": amount,
-        "source_record_id": f"flow-{event}",
     }
 
 
@@ -4291,7 +4290,6 @@ def _allocation_leg(economic: str | None) -> dict[str, Any]:
         "economic_date": economic,
         "timing": "EXACT_TIMESTAMP",
         "amount": "40",
-        "source_record_id": "fill-1",
     }
 
 
@@ -4301,6 +4299,7 @@ _ALLOCATION_ANCHOR = {
     "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
     "event_date": "2025-03-01",
     "nav_recognition_date": "2025-03-05",
+    "amount": Decimal("40"),
     "source_record_id": "fill-1",
 }
 

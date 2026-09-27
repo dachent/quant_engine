@@ -71,9 +71,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "manifest_schema",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "1b38424867fd9ad8a42eed2d433a0c48d9c095a50f3d2b14668b98a2944371bd"
+    "7b6fb1d9c181f40e518780eca00bcdb63b4f9699c1b8777c314b79df60539455"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 29226
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 29130
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -1050,12 +1050,13 @@ class _IndependentFlowFact:
     def signed_amount(self) -> Decimal:
         return self.amount * _FLOW_SIGNS[self.classification]
 
-    def order_key(self) -> tuple[str, str, str, str, Decimal]:
+    def order_key(self) -> tuple[str, str, str, str, str, Decimal]:
         return (
             self.event_date.isoformat(),
             self.recognition.isoformat(),
             self.classification,
-            self.source_record_id or "",
+            self.timing,
+            "" if self.economic_date is None else self.economic_date.isoformat(),
             self.amount,
         )
 
@@ -1469,7 +1470,6 @@ def _independent_leg_row(flow: _IndependentFlowFact) -> dict[str, object]:
         ),
         "timing": flow.timing,
         "amount": flow.amount,
-        "source_record_id": flow.source_record_id,
     }
 
 
@@ -1906,7 +1906,6 @@ _NUMERIC_LEG_FIELDS: Final[frozenset[str]] = frozenset(
         "economic_date",
         "timing",
         "amount",
-        "source_record_id",
     }
 )
 _NUMERIC_CLASSES: Final[frozenset[str]] = frozenset(
@@ -2066,17 +2065,10 @@ def _parse_numeric_projection(
     for leg in raw_legs:
         if not isinstance(leg, Mapping) or set(leg) != _NUMERIC_LEG_FIELDS:
             _fail()
-        if (
-            leg["class"] not in _NUMERIC_CLASSES
-            or leg["timing"] not in {_DATE_ONLY, _EXACT_TIMESTAMP}
-            or (
-                leg["source_record_id"] is not None
-                and (
-                    type(leg["source_record_id"]) is not str
-                    or not leg["source_record_id"]
-                )
-            )
-        ):
+        if leg["class"] not in _NUMERIC_CLASSES or leg["timing"] not in {
+            _DATE_ONLY,
+            _EXACT_TIMESTAMP,
+        }:
             _fail()
         parsed_legs.append(
             (
@@ -2086,9 +2078,21 @@ def _parse_numeric_projection(
                 optional_date(leg["economic_date"]),
                 leg["timing"],
                 decimal_value(leg["amount"], money=True),
-                leg["source_record_id"],
             )
         )
+    # Observation metrics exist exactly when the performance is available.
+    observation_metrics = rates[3:]
+    if (status == "AVAILABLE") != all(
+        value is not None for value in observation_metrics
+    ):
+        _fail()
+    if status == "UNAVAILABLE" and (
+        any(value is not None for value in observation_metrics)
+        or parsed_links
+        or flags
+        or reason is None
+    ):
+        _fail()
 
     return (
         *dates,
@@ -2279,7 +2283,7 @@ def _derive_independent_mwr_projection(
         )
 
     opening_anchor_ids: set[str] = set()
-    allocation_by_id: dict[str, tuple[str, str, date, date]] = {}
+    allocation_ids: dict[tuple[str, str, date, date, Decimal], set[str]] = {}
     for anchor in anchors:
         if not isinstance(anchor, Mapping):
             _fail()
@@ -2290,12 +2294,19 @@ def _derive_independent_mwr_projection(
         recognition_date = _parse_canonical_date(anchor.get("nav_recognition_date"))
         source_id = _fact_text(anchor.get("source_record_id"))
         if anchor_type == "STRATEGY_CAPITAL_ALLOCATION":
-            allocation_by_id[source_id] = (
-                anchor_account,
-                anchor_strategy,
-                event_date,
-                recognition_date,
-            )
+            money = anchor.get("amount")
+            if not isinstance(money, Mapping):
+                _fail()
+            allocation_ids.setdefault(
+                (
+                    anchor_account,
+                    anchor_strategy,
+                    event_date,
+                    recognition_date,
+                    _parse_retained_source_decimal(money.get("value")),
+                ),
+                set(),
+            ).add(source_id)
         elif anchor_type == "OPENING_CAPITAL_ANCHOR":
             if (
                 anchor_account == account_id
@@ -2324,7 +2335,7 @@ def _derive_independent_mwr_projection(
     basis = next(iter(bases))
     currency = next(iter(currencies))
 
-    event_by_id: dict[str, tuple[str, str, date, date]] = {}
+    event_ids: dict[tuple[str, str, date, date, Decimal], set[str]] = {}
     for event in events:
         if not isinstance(event, Mapping):
             _fail()
@@ -2335,57 +2346,54 @@ def _derive_independent_mwr_projection(
         disposition = event.get("disposition")
         if disposition not in {"EXTERNAL", "INTERNAL"}:
             _fail()
-        event_by_id[_fact_text(event.get("source_record_id"))] = (
-            event_account,
-            f"{disposition}_{'IN' if amount > 0 else 'OUT'}",
-            _parse_canonical_date(event.get("event_date")),
-            _parse_canonical_date(event.get("nav_recognition_date")),
-        )
+        event_ids.setdefault(
+            (
+                event_account,
+                f"{disposition}_{'IN' if amount > 0 else 'OUT'}",
+                _parse_canonical_date(event.get("event_date")),
+                _parse_canonical_date(event.get("nav_recognition_date")),
+                abs(amount),
+            ),
+            set(),
+        ).add(_fact_text(event.get("source_record_id")))
 
     legs = numeric.get("performance_flow_legs")
     if not isinstance(legs, list):
         _fail()
     complete = True
-    dated: list[tuple[date, Decimal, str]] = []
+    dated: list[tuple[date, Decimal, set[str]]] = []
     missing_fill_date = False
     for leg in legs:
         if not isinstance(leg, Mapping):
             _fail()
-        source_id = leg.get("source_record_id")
         flow_class = _fact_text(leg.get("class"))
         event_date = _parse_canonical_date(leg.get("event_date"))
         recognition_date = _parse_canonical_date(leg.get("nav_recognition_date"))
         amount = leg.get("amount")
         if type(amount) is not Decimal:
             _fail()
-        if not isinstance(source_id, str):
-            complete = False
-            continue
-        if leg.get("timing") == _EXACT_TIMESTAMP:
-            complete = (
-                complete
-                and flow_class == "INTERNAL_IN"
-                and (
-                    allocation_by_id.get(source_id)
-                    == (account_id, strategy_id, event_date, recognition_date)
-                )
+        if leg.get("timing") == _EXACT_TIMESTAMP and flow_class == "INTERNAL_IN":
+            source_ids = allocation_ids.get(
+                (account_id, strategy_id, event_date, recognition_date, amount), set()
             )
+        else:
+            source_ids = event_ids.get(
+                (account_id, flow_class, event_date, recognition_date, amount), set()
+            )
+        complete = complete and bool(source_ids)
+        if leg.get("timing") == _EXACT_TIMESTAMP:
             economic = leg.get("economic_date")
             if economic is None:
                 missing_fill_date = True
                 continue
             cash_date = _parse_canonical_date(economic)
         else:
-            complete = complete and (
-                event_by_id.get(source_id)
-                == (account_id, flow_class, event_date, recognition_date)
-            )
             cash_date = recognition_date
         with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
             investor_amount = (
                 -amount if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else amount
             )
-        dated.append((cash_date, investor_amount, source_id))
+        dated.append((cash_date, investor_amount, set(source_ids)))
     if not complete:
         return _mwr_blocked_projection(
             "BLOCKED_ADMISSION", "FLOW_SOURCE_IDENTITY_UNAVAILABLE", coverage="COMPLETE"
@@ -2413,8 +2421,8 @@ def _derive_independent_mwr_projection(
         opening_leg,
         {item[0] for item in opening_navs} | opening_anchor_ids,
     )
-    for cash_date, investor_amount, source_id in dated:
-        add(cash_date, investor_amount, {source_id})
+    for cash_date, investor_amount, source_ids in dated:
+        add(cash_date, investor_amount, source_ids)
     add(terminal_date, terminal_value, {item[0] for item in terminal_navs})
     cashflows = [
         (when, amount) for when, (amount, _) in sorted(grouped.items()) if amount

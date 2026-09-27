@@ -373,15 +373,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["class", "event_date", "nav_recognition_date", "economic_date", "timing", "amount", "source_record_id"],
+        "required": ["class", "event_date", "nav_recognition_date", "economic_date", "timing", "amount"],
         "properties": {
           "class": {"enum": ["EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"]},
           "event_date": {"$ref": "#/$defs/date"},
           "nav_recognition_date": {"$ref": "#/$defs/date"},
           "economic_date": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
           "timing": {"enum": ["EXACT_TIMESTAMP", "DATE_ONLY"]},
-          "amount": {"$ref": "#/$defs/decimal"},
-          "source_record_id": {"type": ["string", "null"], "minLength": 1}
+          "amount": {"$ref": "#/$defs/decimal"}
         }
       }
     },
