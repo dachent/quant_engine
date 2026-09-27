@@ -1702,6 +1702,11 @@ def _prepare_attended_inputs(
         )
 
     crosswalk = root / "preparation" / "current-epoch-crosswalk.json"
+    epoch_membership_census = (
+        _pin(config["epoch_membership_census"], "epoch membership census")
+        if config.get("epoch_membership_census") is not None
+        else ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
     epoch_checkpoint = reuse("epoch")
     if epoch_checkpoint is not None:
         epoch = dict(epoch_checkpoint["epoch"])
@@ -1774,6 +1779,7 @@ def _prepare_attended_inputs(
             admission_policy_path=_pin(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
+            membership_census_path=epoch_membership_census,
             receipt_paths=receipt_paths,
             output_generation_root=root / "stages" / "epoch",
         )
@@ -1848,6 +1854,7 @@ def _prepare_attended_inputs(
             "account_manifest_admission_policy_path": _pin(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
+            "membership_census_path": epoch_membership_census,
             "account_manifest_flow_classification_policy_path": ROOT
             / "contracts"
             / "account-strategy-flow-classification-policy-v1.json",

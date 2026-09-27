@@ -144,6 +144,7 @@ def stage_current_epoch_manifest(
     manifest_schema_path: Path,
     receipt_authority_path: Path,
     admission_policy_path: Path,
+    membership_census_path: Path,
     receipt_paths: Mapping[str, Path],
     output_generation_root: Path,
 ) -> dict[str, object]:
@@ -191,6 +192,7 @@ def stage_current_epoch_manifest(
         current_epoch_crosswalk=_capture(crosswalk_path, "current-epoch crosswalk"),
         receipt_authority=_capture(receipt_authority_path, "receipt authority"),
         admission_policy=_capture(admission_policy_path, "admission policy"),
+        membership_census=_capture(membership_census_path, "membership census"),
         manifest_schema=_capture(manifest_schema_path, "account-manifest schema"),
     )
     if selected.provider_ledger_generation_id != provider_ledger_generation_id:
@@ -273,6 +275,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--receipt-authority", type=Path, required=True)
     parser.add_argument("--admission-policy", type=Path, required=True)
     parser.add_argument(
+        "--membership-census",
+        type=Path,
+        required=True,
+        help=(
+            "governed financial MVP source contract whose current census must "
+            "agree with every funded admission (R2)"
+        ),
+    )
+    parser.add_argument(
         "--receipt", action="append", type=_receipt_argument, required=True
     )
     parser.add_argument("--output-generation-root", type=Path, required=True)
@@ -305,6 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_schema_path=args.manifest_schema,
             receipt_authority_path=args.receipt_authority,
             admission_policy_path=args.admission_policy,
+            membership_census_path=args.membership_census,
             receipt_paths=_receipt_mapping(args.receipt),
             output_generation_root=args.output_generation_root,
         )

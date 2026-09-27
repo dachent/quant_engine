@@ -2554,10 +2554,16 @@ def _validate_admissions_against_census(
             raise ManifestError(
                 "admission policy funds an interval absent from the membership census"
             )
-        if count > sum(status == "FUNDED_MEMBERSHIP" for status in statuses):
+        funded_count = sum(status == "FUNDED_MEMBERSHIP" for status in statuses)
+        if count > funded_count:
+            if funded_count == 0:
+                raise ManifestError(
+                    "admission policy funds a census ASSIGNMENT_ONLY interval: "
+                    f"{key[0]}/{key[1]}/{key[2]}/{key[3]}"
+                )
             raise ManifestError(
-                "admission policy funds a census ASSIGNMENT_ONLY interval: "
-                f"{key[0]}/{key[1]}/{key[2]}/{key[3]}"
+                "admission policy funds more epochs than census funded memberships "
+                f"grant: {key[0]}/{key[1]}/{key[2]}/{key[3]} grants {funded_count}"
             )
 
 
@@ -2567,15 +2573,16 @@ def load_admission_policy(
     assignments: list[dict[str, Any]],
     ledger: Mapping[str, Any],
     *,
-    membership_census: Mapping[CensusIntervalKey, Sequence[str]] | None = None,
-    providers: Mapping[str, str] | None = None,
+    membership_census: Mapping[CensusIntervalKey, Sequence[str]],
+    providers: Mapping[str, str],
 ) -> tuple[dict[tuple[str, str, str, str | None], dict[str, Any]], dict[str, object]]:
     """Load an explicit, hash-bound membership/admission policy.
 
     A policy is not a substitute for financial evidence.  It only identifies
     which exact baseline epochs have an admitted funded membership; when it is
-    absent, incomplete, or non-bijective, this producer cannot calculate.  With
-    a membership census selected, the policy must also agree with it (R2).
+    absent, incomplete, or non-bijective, this producer cannot calculate.  The
+    policy must also agree with the governed membership census (R2): a census
+    interval without funded membership can never be admitted as funded.
     """
     required = {
         "schema_version",
@@ -2723,10 +2730,9 @@ def load_admission_policy(
         raise ManifestError(
             "admission policy coverage differs from baseline assignments"
         )
-    if membership_census is not None:
-        if providers is None:
-            raise ManifestError("membership census check requires account providers")
-        _validate_admissions_against_census(admissions, membership_census, providers)
+    if providers is None:
+        raise ManifestError("membership census check requires account providers")
+    _validate_admissions_against_census(admissions, membership_census, providers)
     artifact = _source_artifact_from_snapshot(
         policy_snapshot,
         artifact_id=payload["artifact_id"],
@@ -3167,6 +3173,13 @@ def _epoch_legs(
             if economic_raw is None
             else _iso_date(economic_raw, "capital flow economic_date")
         )
+        if economic_day is not None and not (
+            event_day <= economic_day <= recognition_day
+        ):
+            raise ManifestError(
+                f"{flow_class} economic_date must lie between event_date "
+                "and nav_recognition_date"
+            )
         if not _in_window(event_day, w0, w1):
             continue
         key = (event_day, recognition_day, record_id, economic_day)
@@ -3562,6 +3575,8 @@ def _epoch_performance(
     observations: dict[str, Decimal]
     if prev_closing is not None:
         assert prev_closing_date is not None
+        if prev_closing <= 0:
+            raise ManifestError("predecessor closing NAV must be strictly positive")
         if (
             pre_start_observation is not None
             and pre_start_observation[0] > prev_closing_date
@@ -4113,6 +4128,8 @@ def _mwr_payloads_from_governed_inputs(
         # still holds governed monetary facts as Decimal values.
         opening_value = _money(row.get("performance_opening_value"), "MWR opening")
         terminal_value = _money(row.get("current_value"), "MWR terminal value")
+        if opening_value <= 0:
+            raise ManifestError("MWR opening value must be strictly positive")
         opening_nav_sources = nav_sources.get((account_id, opening_date), [])
         terminal_nav_sources = nav_sources.get((account_id, end), [])
         if not opening_nav_sources or not terminal_nav_sources:
@@ -5098,9 +5115,17 @@ def format_table(manifest: dict[str, Any]) -> str:
             "—" if row[f] is None else f"{(_dec(row[f], f) * 100):.2f}"
             for f in PCT_FIELDS[:3]
         )
-        hwm = f"{_dec(row['observed_hwm_index'], 'observed_hwm_index'):.2f}"
+        # R3: an OK row whose performance is unavailable carries no observed
+        # HWM or drawdown; the table renders that state instead of parsing it.
+        hwm = (
+            "unavailable"
+            if row["observed_hwm_index"] is None
+            else f"{_dec(row['observed_hwm_index'], 'observed_hwm_index'):.2f}"
+        )
         maxdd = (
-            f"{(_dec(row['observed_max_drawdown'], 'observed_max_drawdown') * 100):.2f}"
+            "unavailable"
+            if row["observed_max_drawdown"] is None
+            else f"{(_dec(row['observed_max_drawdown'], 'observed_max_drawdown') * 100):.2f}"
         )
         lines.append(
             f"| {row['account_id']} | {row['strategy_id']} "
@@ -5125,10 +5150,10 @@ class ManifestCandidateSnapshots:
     calculation_code: InputSnapshot
     manifest_schema: InputSnapshot
     baseline_generation_id: str
+    membership_census: InputSnapshot
     receipt_authority: InputSnapshot | None = None
     selected_assignment_keys: tuple[tuple[str, str, str, str | None], ...] | None = None
     supporting_internal_counterparty_source_record_ids: tuple[str, ...] = ()
-    membership_census: InputSnapshot | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -5158,11 +5183,8 @@ class ManifestCandidateSnapshots:
             and type(self.receipt_authority) is not InputSnapshot
         ):
             raise ManifestError("receipt_authority must be an InputSnapshot")
-        if (
-            self.membership_census is not None
-            and type(self.membership_census) is not InputSnapshot
-        ):
-            raise ManifestError("membership_census must be an InputSnapshot")
+        if type(self.membership_census) is not InputSnapshot:
+            raise ManifestError("membership_census is a required selected input")
         object.__setattr__(
             self, "retrieval_receipts", MappingProxyType(dict(self.retrieval_receipts))
         )
@@ -5288,12 +5310,8 @@ def _build_manifest_candidate_from_snapshots_impl(
         admission_policy_snapshot,
         mapped_assignments,
         ledger,
-        membership_census=(
-            None
-            if inputs.membership_census is None
-            else load_membership_census(
-                inputs.membership_census.json_object("membership census")
-            )
+        membership_census=load_membership_census(
+            inputs.membership_census.json_object("membership census")
         ),
         providers={
             account_id: str(account.get("provider") or "")
@@ -5457,9 +5475,9 @@ def _capture_manifest_candidate_inputs(
     classification_policy_path: Path,
     admission_policy_path: Path,
     flow_coverage_path: Path,
+    membership_census_path: Path,
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
     receipt_authority_path: Path | None = None,
-    membership_census_path: Path | None = None,
 ) -> dict[str, Any]:
     """Capture every selected path once, then delegate to the byte-only producer."""
     selected_baseline_generation_id = _generation_id(
@@ -5511,12 +5529,8 @@ def _capture_manifest_candidate_inputs(
                             receipt_authority_path, "receipt authority"
                         )
                     ),
-                    membership_census=(
-                        None
-                        if membership_census_path is None
-                        else InputSnapshot.capture(
-                            membership_census_path, "membership census"
-                        )
+                    membership_census=InputSnapshot.capture(
+                        membership_census_path, "membership census"
                     ),
                     calculation_code=InputSnapshot.capture(
                         Path(__file__), "calculation code"
@@ -5551,9 +5565,9 @@ def build_manifest_candidate(
     classification_policy_path: Path,
     admission_policy_path: Path,
     flow_coverage_path: Path,
+    membership_census_path: Path,
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
     receipt_authority_path: Path | None = None,
-    membership_census_path: Path | None = None,
 ) -> dict[str, Any]:
     """Capture public inputs using only immutable retained receipt authority."""
     return _capture_manifest_candidate_inputs(
@@ -5565,9 +5579,9 @@ def build_manifest_candidate(
         classification_policy_path=classification_policy_path,
         admission_policy_path=admission_policy_path,
         flow_coverage_path=flow_coverage_path,
+        membership_census_path=membership_census_path,
         retrieval_receipt_paths=retrieval_receipt_paths,
         receipt_authority_path=receipt_authority_path,
-        membership_census_path=membership_census_path,
     )
 
 
@@ -5630,6 +5644,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--membership-census-json",
         type=Path,
+        required=True,
         help=(
             "governed financial MVP source contract whose current census must "
             "agree with every funded admission (R2)"

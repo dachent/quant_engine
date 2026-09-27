@@ -69,6 +69,7 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "receipt_authority",
     "admission_policy",
     "manifest_schema",
+    "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
     "7b6fb1d9c181f40e518780eca00bcdb63b4f9699c1b8777c314b79df60539455"
@@ -127,6 +128,14 @@ _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
 )
 _MWR_VALUE_BASES: Final[frozenset[str]] = frozenset(
     {"ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"}
+)
+_CENSUS_MEMBERSHIP_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "ASSIGNMENT_ONLY",
+        "DEPRECATED_HISTORY_ONLY",
+        "EXCLUDED_IMMATERIAL",
+        "FUNDED_MEMBERSHIP",
+    }
 )
 _MWR_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -468,6 +477,7 @@ class IndependentVerifierInputs:
     receipt_authority: InputSnapshot | None = None
     admission_policy: InputSnapshot | None = None
     manifest_schema: InputSnapshot | None = None
+    membership_census: InputSnapshot | None = None
 
     def __post_init__(self) -> None:
         for snapshot in _snapshot_roles(self):
@@ -482,6 +492,7 @@ class IndependentVerifierInputs:
             self.receipt_authority,
             self.admission_policy,
             self.manifest_schema,
+            self.membership_census,
         )
         if any(value is None for value in optional) != all(
             value is None for value in optional
@@ -546,13 +557,14 @@ def _snapshot_roles(selected: IndependentVerifierInputs) -> tuple[InputSnapshot,
 
 def _mixed_snapshot_roles(
     selected: IndependentVerifierInputs,
-) -> tuple[InputSnapshot, InputSnapshot, InputSnapshot]:
+) -> tuple[InputSnapshot, InputSnapshot, InputSnapshot, InputSnapshot]:
     """Return the closed mixed-only snapshots in transport-role order."""
 
     return (
         _require_snapshot(selected.receipt_authority),
         _require_snapshot(selected.admission_policy),
         _require_snapshot(selected.manifest_schema),
+        _require_snapshot(selected.membership_census),
     )
 
 
@@ -2283,7 +2295,9 @@ def _derive_independent_mwr_projection(
         )
 
     opening_anchor_ids: set[str] = set()
-    allocation_ids: dict[tuple[str, str, date, date, Decimal], set[str]] = {}
+    allocation_economics: dict[
+        tuple[str, str, date, date, Decimal], dict[date | None, set[str]]
+    ] = {}
     for anchor in anchors:
         if not isinstance(anchor, Mapping):
             _fail()
@@ -2297,7 +2311,18 @@ def _derive_independent_mwr_projection(
             money = anchor.get("amount")
             if not isinstance(money, Mapping):
                 _fail()
-            allocation_ids.setdefault(
+            raw_economic = anchor.get("economic_date")
+            economic_date = (
+                None if raw_economic is None else _parse_canonical_date(raw_economic)
+            )
+            if economic_date is not None and not (
+                event_date <= economic_date <= recognition_date
+            ):
+                _fail()
+            # The raw anchor economic date is part of the allocation identity:
+            # an exact-timestamp fill binds its MWR cash date to this source
+            # value, never to a published flow leg's own economic date.
+            allocation_economics.setdefault(
                 (
                     anchor_account,
                     anchor_strategy,
@@ -2305,8 +2330,8 @@ def _derive_independent_mwr_projection(
                     recognition_date,
                     _parse_retained_source_decimal(money.get("value")),
                 ),
-                set(),
-            ).add(source_id)
+                {},
+            ).setdefault(economic_date, set()).add(source_id)
         elif anchor_type == "OPENING_CAPITAL_ANCHOR":
             if (
                 anchor_account == account_id
@@ -2372,17 +2397,29 @@ def _derive_independent_mwr_projection(
         amount = leg.get("amount")
         if type(amount) is not Decimal:
             _fail()
+        economic = leg.get("economic_date")
         if leg.get("timing") == _EXACT_TIMESTAMP and flow_class == "INTERNAL_IN":
-            source_ids = allocation_ids.get(
-                (account_id, strategy_id, event_date, recognition_date, amount), set()
+            economics = allocation_economics.get(
+                (account_id, strategy_id, event_date, recognition_date, amount)
             )
+            if economics is None:
+                source_ids: set[str] = set()
+            elif economic is None:
+                source_ids = economics.get(None, set())
+            else:
+                leg_economic = _parse_canonical_date(economic)
+                # The published leg's economic date must bind to the raw
+                # anchor's economic date; the MWR cash date is that matched
+                # source value, and a differing published date fails closed.
+                source_ids = economics.get(leg_economic, set())
+                if not source_ids:
+                    _fail()
         else:
             source_ids = event_ids.get(
                 (account_id, flow_class, event_date, recognition_date, amount), set()
             )
         complete = complete and bool(source_ids)
         if leg.get("timing") == _EXACT_TIMESTAMP:
-            economic = leg.get("economic_date")
             if economic is None:
                 missing_fill_date = True
                 continue
@@ -2616,6 +2653,9 @@ def _selected_identity(
         )
         result["manifest_schema"] = _snapshot_identity(
             _require_snapshot(selected.manifest_schema)
+        )
+        result["membership_census"] = _snapshot_identity(
+            _require_snapshot(selected.membership_census)
         )
     if selected.current_epoch_crosswalk is not None:
         result["current_epoch_crosswalk"] = _snapshot_identity(
@@ -5503,6 +5543,46 @@ def _selected_mixed_admission_bytes(
     return canonical_json_bytes(policy), policy
 
 
+def _independent_membership_census(
+    payload: Mapping[str, object],
+) -> dict[tuple[str, str, str, str | None], list[str]]:
+    """Index the governed current census without the producer's loader.
+
+    The census names redacted sleeve aliases, not account ids, so an interval
+    is identified by ``(provider, strategy, effective_start, effective_end)``
+    and carries the multiset of its sleeves' membership statuses.  That is
+    enough to bound how many account epochs of one interval can be funded
+    (R2) without the private account crosswalk.
+    """
+
+    census = payload.get("current_census")
+    sleeves = census.get("account_sleeves") if isinstance(census, Mapping) else None
+    if not isinstance(sleeves, list):
+        _fail()
+    statuses: dict[tuple[str, str, str, str | None], list[str]] = {}
+    for sleeve in sleeves:
+        if not isinstance(sleeve, Mapping) or not isinstance(
+            sleeve.get("assignments"), list
+        ):
+            _fail()
+        provider = _fact_text(sleeve.get("provider_id")).upper()
+        for assignment in sleeve["assignments"]:
+            if not isinstance(assignment, Mapping):
+                _fail()
+            status = _fact_text(assignment.get("status"))
+            if status not in _CENSUS_MEMBERSHIP_STATUSES:
+                _fail()
+            end = assignment.get("effective_end")
+            interval = (
+                provider,
+                _fact_text(assignment.get("strategy_id")),
+                _parse_canonical_date(assignment.get("effective_start")).isoformat(),
+                None if end is None else _parse_canonical_date(end).isoformat(),
+            )
+            statuses.setdefault(interval, []).append(status)
+    return statuses
+
+
 def _verify_mixed_admission(
     selected: IndependentVerifierInputs,
     normalized: Mapping[str, bytes],
@@ -5655,6 +5735,38 @@ def _verify_mixed_admission(
         full_by_account.setdefault(account_id, []).append(raw_assignment)
     for chain in full_by_account.values():
         chain.sort(key=lambda row: str(row["effective_start"]))
+    # R2: only census FUNDED_MEMBERSHIP intervals may be admitted as funded.
+    # Each census interval bounds how many account epochs of the same
+    # provider, strategy and interval may be funded; every other funded
+    # admission fails closed.  A FUNDED-to-ASSIGNMENT_ONLY membership
+    # transition inside one strategy is judged per epoch: an epoch inside
+    # the census funded interval stays admissible and only a funded epoch
+    # of the post-transition interval is rejected.
+    census_payload = _strict_object(
+        _require_snapshot(selected.membership_census).contents
+    )
+    census = _independent_membership_census(census_payload)
+    census_providers = _baseline_account_providers(baseline.get("accounts"))
+    funded_counts: dict[tuple[str, str, str, str | None], int] = {}
+    for key, policy_row in admission_by_key.items():
+        if policy_row.get("status") != "FUNDED":
+            continue
+        provider = census_providers.get(str(key[0]))
+        if not isinstance(provider, str) or not provider:
+            _fail()
+        interval = (
+            provider.upper(),
+            _fact_text(key[1]),
+            _parse_canonical_date(key[2]).isoformat(),
+            None if key[3] is None else _parse_canonical_date(key[3]).isoformat(),
+        )
+        funded_counts[interval] = funded_counts.get(interval, 0) + 1
+    for interval, count in funded_counts.items():
+        interval_statuses = census.get(interval)
+        if interval_statuses is None:
+            _fail()
+        if count > sum(status == "FUNDED_MEMBERSHIP" for status in interval_statuses):
+            _fail()
     predecessor_by_key: dict[tuple[object, ...], dict[str, object]] = {}
     for key, policy_row in admission_by_key.items():
         if policy_row["continuity_to_successor"] is not True:

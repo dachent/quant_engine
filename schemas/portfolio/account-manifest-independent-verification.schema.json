@@ -266,6 +266,7 @@
         "receipt_authority",
         "admission_policy",
         "manifest_schema",
+        "membership_census",
         "current_epoch_crosswalk"
       ],
       "properties": {
@@ -295,6 +296,7 @@
         "receipt_authority": {"$ref": "#/$defs/snapshot_identity"},
         "admission_policy": {"$ref": "#/$defs/snapshot_identity"},
         "manifest_schema": {"$ref": "#/$defs/snapshot_identity"},
+        "membership_census": {"$ref": "#/$defs/snapshot_identity"},
         "current_epoch_crosswalk": {"$ref": "#/$defs/snapshot_identity"}
       }
     },
