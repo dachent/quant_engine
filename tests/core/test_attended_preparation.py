@@ -972,6 +972,7 @@ def _preparation_function_fixture(
                 "target_series",
                 "account_manifest_generation",
                 "account_strategy_manifest",
+                "portfolio_returns",
                 "verify_account_manifest_generation",
                 "baseline_producer",
                 "core_authority",

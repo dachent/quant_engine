@@ -137,7 +137,9 @@ def _docs(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "start_date": interval_start.isoformat(),
                     "end_date": interval_end.isoformat(),
                     "base_nav": str(base),
+                    "beginning_flow": "0",
                     "ending_nav": str(ending),
+                    "ending_flow": "0",
                     "net_flow": "0",
                     "factor": str(factor),
                     "cumulative_index": str(cumulative),
@@ -1402,14 +1404,14 @@ def _zero_nav_strategy_rows() -> tuple[
         with localcontext() as context:
             context.prec = 40
             context.rounding = ROUND_HALF_EVEN
-            factor = Decimal("1") + (
-                Decimal(ending) - Decimal(base) - Decimal(flow)
-            ) / Decimal(base)
+            factor = (Decimal(ending) - Decimal(flow)) / Decimal(base)
         return {
             "start_date": interval_start,
             "end_date": interval_end,
             "base_nav": base,
+            "beginning_flow": "0",
             "ending_nav": ending,
+            "ending_flow": flow,
             "net_flow": flow,
             "factor": str(factor),
         }

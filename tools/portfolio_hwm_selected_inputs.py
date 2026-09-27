@@ -704,6 +704,9 @@ def _validated_account_sources(
         raise SelectedHwmInputError("selected epoch has no daily NAV observations")
 
     flows_by_date: dict[str, Decimal] = defaultdict(Decimal)
+    # Provider fund allocations are exact-timestamp fills: the account manifest
+    # links them at the beginning of their sub-period, classified flows at its end.
+    beginning_flows_by_date: dict[str, Decimal] = defaultdict(Decimal)
     flow_evidence_by_date: dict[str, list[Row]] = defaultdict(list)
     for index, raw_anchor in enumerate(
         _rows(calculation.get("capital_anchors"), "capital anchors")
@@ -733,6 +736,7 @@ def _validated_account_sources(
             )
         recognition_text = recognition_day.isoformat()
         flows_by_date[recognition_text] += amount
+        beginning_flows_by_date[recognition_text] += amount
         flow_evidence_by_date[recognition_text].append(anchor)
 
     flow_by_identity: dict[str, tuple[str, str, Decimal]] = {}
@@ -818,10 +822,33 @@ def _validated_account_sources(
             raise SelectedHwmInputError(
                 "trace net flow differs from classified dated source flows"
             )
+        native_beginning_flow = sum(
+            (
+                amount
+                for recognition_day, amount in beginning_flows_by_date.items()
+                if start.isoformat() < recognition_day <= end.isoformat()
+            ),
+            Decimal("0"),
+        )
+        beginning_flow = _decimal(
+            link.get("beginning_flow"), f"trace link {index}.beginning_flow"
+        )
+        ending_flow = _decimal(
+            link.get("ending_flow"), f"trace link {index}.ending_flow"
+        )
+        if (
+            beginning_flow != native_beginning_flow
+            or ending_flow != native_net_flow - native_beginning_flow
+        ):
+            raise SelectedHwmInputError(
+                "trace flow timing differs from classified dated source flows"
+            )
+        # The manifest links every epoch through the portfolio return engine:
+        # factor = (V_end - F_end_of_day) / (V_begin + F_beginning_of_day).
         with localcontext() as context:
             context.prec = 40
             context.rounding = ROUND_HALF_EVEN
-            expected_factor = Decimal("1") + (ending - base - net_flow) / base
+            expected_factor = (ending - ending_flow) / (base + beginning_flow)
         if factor != expected_factor:
             raise SelectedHwmInputError(
                 "trace factor differs from the canonical 40-digit source NAV calculation"

@@ -227,7 +227,9 @@ def _verified_schema9_epoch_bundle(
                                 "start_date": "2026-08-11",
                                 "end_date": "2026-08-13",
                                 "base_nav": "100",
+                                "beginning_flow": "0",
                                 "ending_nav": "101",
+                                "ending_flow": "0",
                                 "net_flow": "0",
                                 "factor": "1.01",
                                 "cumulative_index": "1.01",
@@ -238,6 +240,17 @@ def _verified_schema9_epoch_bundle(
                     },
                     "capital_flow_trace": [],
                     "nav_observations": 3,
+                    "opening_capital_date": "2026-08-11",
+                    "performance_status": "AVAILABLE",
+                    "performance_reason": None,
+                    "performance_opening_date": "2026-08-11",
+                    "performance_opening_value": "100",
+                    "performance_opening_basis": (
+                        "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+                    ),
+                    "performance_flags": [],
+                    "performance_flow_legs": [],
+                    "flow_count": 0,
                 }
             )
         rows.append(manifest_row)
