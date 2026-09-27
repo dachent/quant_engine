@@ -2039,6 +2039,57 @@ def test_without_crosswalk_fails_closed_instead_of_self_reference(
     }
 
 
+def test_universe_active_epoch_selection_is_cutoff_relative(tmp_path: Path) -> None:
+    """T2.8 (PR #487 bot finding 4113723393): activity must require
+    ``effective_start <= cutoff`` and no ``effective_end`` before it -- not
+    merely an open-ended (null) ``effective_end``. A future-dated open-ended
+    row is not yet active on this historical cutoff; a row whose
+    ``effective_end`` falls *after* the cutoff has not ended yet as of the
+    cutoff. Before the fix, ``future`` was wrongly counted active (only
+    ``effective_end is None`` was checked) and ``ending-later`` was wrongly
+    excluded (its non-null ``effective_end`` was enough to drop it, cutoff or
+    not)."""
+    generation = load_generation(build(tmp_path), discover=False)
+    generation.external.crosswalk = {
+        "rows": [
+            {
+                "account_id": "A1",
+                "strategy_id": "alpha",
+                "effective_start": START,
+                "effective_end": None,
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+            {
+                "account_id": "F1",
+                "strategy_id": "future",
+                "effective_start": "2026-10-01",
+                "effective_end": None,
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+            {
+                "account_id": "E1",
+                "strategy_id": "ending-later",
+                "effective_start": "2025-01-01",
+                "effective_end": "2026-12-31",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+        ]
+    }
+    generation.external.crosswalk_path = "test-crosswalk.json"
+    context = checks.Context(
+        gen=generation, cutoff=checks.date(2026, 9, 17), cutoff_source="test"
+    )
+
+    reference = checks.universe(context)
+
+    assert reference is not None
+    assert reference.active_strategies == frozenset({"alpha", "ending-later"})
+    assert reference.active_accounts == frozenset({"A1", "E1"})
+    assert "future" in reference.excluded_strategies
+    assert "F1" in reference.excluded_accounts
+    assert reference.excluded_accounts["F1"].startswith("EPOCH_NOT_YET_STARTED_")
+
+
 GOOD_APP_NEGATED_ATTRIBUTES = GOOD_APP_JS.replace(
     "<p>${formatDate",
     '<span title="NOT RELEASED" aria-label="not yet published" '

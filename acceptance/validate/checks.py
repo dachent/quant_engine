@@ -420,6 +420,27 @@ class Universe:
     known_accounts: frozenset[str]
 
 
+def _epoch_covers_cutoff(row: Mapping[str, Any], cutoff: date) -> bool:
+    """R7-consistent activity test (T2.8, PR #487 bot finding 4113723393).
+
+    An ``INCLUDED_PRODUCT_EPOCH`` row is active exactly when its interval
+    covers the fixed historical cutoff: ``effective_start <= cutoff`` and no
+    ``effective_end`` before it. A merely open-ended (``effective_end is
+    None``) row is not enough -- a future-dated ``effective_start`` has not
+    started yet as of the cutoff, and a non-null ``effective_end`` that falls
+    *after* the cutoff has not ended yet either. An unparseable or missing
+    ``effective_start`` fails closed (not active).
+    """
+
+    if row.get("product_epoch_disposition") != "INCLUDED_PRODUCT_EPOCH":
+        return False
+    start = to_date(row.get("effective_start"))
+    if start is None or start > cutoff:
+        return False
+    end = to_date(row.get("effective_end"))
+    return end is None or end > cutoff
+
+
 def universe(ctx: Context) -> Universe | None:
     """The active universe from the authoritative epoch crosswalk, or ``None``.
 
@@ -442,25 +463,27 @@ def universe(ctx: Context) -> Universe | None:
         known: set[str] = set()
         for row in crosswalk_rows:
             account = str(row.get("account_id"))
-            strategy = str(row.get("strategy_id"))
-            disposition = str(row.get("product_epoch_disposition"))
             known.add(account)
-            if (
-                disposition == "INCLUDED_PRODUCT_EPOCH"
-                and row.get("effective_end") is None
-            ):
-                active_strategies.add(strategy)
+            if _epoch_covers_cutoff(row, ctx.cutoff):
+                active_strategies.add(str(row.get("strategy_id")))
                 active_accounts.add(account)
         for row in crosswalk_rows:
             account = str(row.get("account_id"))
             strategy = str(row.get("strategy_id"))
             disposition = str(row.get("product_epoch_disposition"))
             if account not in active_accounts:
-                excluded_accounts[account] = (
-                    disposition
-                    if disposition != "INCLUDED_PRODUCT_EPOCH"
-                    else f"EPOCH_ENDED_{row.get('effective_end')}"
-                )
+                if disposition != "INCLUDED_PRODUCT_EPOCH":
+                    excluded_accounts[account] = disposition
+                else:
+                    start = to_date(row.get("effective_start"))
+                    if start is not None and start > ctx.cutoff:
+                        excluded_accounts[account] = (
+                            f"EPOCH_NOT_YET_STARTED_{row.get('effective_start')}"
+                        )
+                    else:
+                        excluded_accounts[account] = (
+                            f"EPOCH_ENDED_{row.get('effective_end')}"
+                        )
             if strategy not in active_strategies:
                 excluded_strategies[strategy] = disposition
         if active_strategies:
