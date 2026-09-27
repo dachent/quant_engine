@@ -137,6 +137,21 @@
         "bundle_id": {"$ref": "#/$defs/sha256"},
         "evaluated_on": {"type": "string", "format": "date"},
         "evidence_mode_policy": {"type": "object"},
+        "epoch_hpr_receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidence_layer", "receipt", "source_generation_id", "source_id", "strategy_id"],
+            "properties": {
+              "evidence_layer": {"const": "ACCOUNT_LIVE"},
+              "receipt": {"type": "object"},
+              "source_generation_id": {"$ref": "#/$defs/sha256"},
+              "source_id": {"type": "string", "minLength": 1},
+              "strategy_id": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "returns_sha256": {"$ref": "#/$defs/sha256"},
         "returns_size_bytes": {"type": "integer", "minimum": 1},
         "schema": {"enum": ["portfolio-current-dependence-source/1", "portfolio-target-series-evidence-proof/1"]},
