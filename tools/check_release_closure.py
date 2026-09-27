@@ -271,14 +271,26 @@ class _Closure:
         self._zip.close()
 
 
-def _document(closure: _Closure, sha256: str) -> Any | None:
+def _document(closure: _Closure, sha256: str) -> tuple[Any | None, bool]:
+    """Resolve, re-hash, and JSON-parse a closure member.
+
+    Returns ``(document, invalid_json)``. ``document`` is ``None`` when the
+    sha256 is absent from the closure or ``_Closure.read`` already refused it
+    as hash-corrupt; ``invalid_json`` is ``True`` when the bytes resolved and
+    re-hashed correctly but are not valid UTF-8/JSON -- a distinct failure
+    from a missing or hash-mismatched pin (T2.8, PR #487 bot finding
+    4113723383: previously this collapsed to ``None`` indistinguishably from
+    "nothing pinned this", so a walked document that failed to decode was
+    silently skipped -- zero scanned documents, zero findings, exit 0 --
+    instead of being recorded as a closure failure).
+    """
     raw = closure.read(sha256)
     if raw is None:
-        return None
+        return None, False
     try:
-        return json.loads(raw)
+        return json.loads(raw), False
     except (UnicodeDecodeError, ValueError):
-        return None
+        return None, True
 
 
 def walk(
@@ -316,13 +328,9 @@ def walk(
         corrupt_seen: set[str] = set()
         corrupt: list[dict[str, str | None]] = []
 
-        def check(
+        def _record_missing(
             declaring_document: str, declared_path: str | None, declared_sha: str
         ) -> None:
-            nonlocal pins_checked
-            pins_checked += 1
-            if declared_sha in closure:
-                return
             key = (declaring_document, declared_path, declared_sha)
             if key in missing_seen:
                 return
@@ -335,27 +343,66 @@ def walk(
                 }
             )
 
+        def _record_corrupt(
+            declaring_document: str, declared_path: str | None, declared_sha: str
+        ) -> None:
+            if declared_sha in corrupt_seen:
+                return
+            corrupt_seen.add(declared_sha)
+            corrupt.append(
+                {
+                    "declaring_document": declaring_document,
+                    "declared_path": declared_path,
+                    "sha256": declared_sha,
+                }
+            )
+
+        def check(
+            declaring_document: str, declared_path: str | None, declared_sha: str
+        ) -> None:
+            """Verify a pin resolves to real, byte-correct closure bytes.
+
+            Membership in ``closure`` (the manifest's own sha256 -> path index)
+            only proves the manifest *declared* this hash; it says nothing about
+            whether the archive/supplement member it names still exists or still
+            has those bytes. For a terminal pin (never opened as a further
+            document by this walk) that membership check used to be the only
+            check performed, so a deleted or replaced terminal source produced
+            ``missing_count == 0`` and ``corrupt_count == 0`` as long as the
+            stale manifest entry remained (T2.8, PR #487 bot finding
+            4113723377). Resolve and hash the member here instead of trusting
+            the index: a sha256 the index has never heard of is ``missing``; one
+            the index knows but whose member cannot be retrieved intact (absent
+            from the archive/supplement, or present with different bytes) is
+            ``missing`` (physically absent) or ``corrupt`` (bytes present but
+            wrong), respectively.
+            """
+            nonlocal pins_checked
+            pins_checked += 1
+            if declared_sha not in closure:
+                _record_missing(declaring_document, declared_path, declared_sha)
+                return
+            if closure.read(declared_sha) is None:
+                if declared_sha in closure.corrupted:
+                    _record_corrupt(declaring_document, declared_path, declared_sha)
+                else:
+                    _record_missing(declaring_document, declared_path, declared_sha)
+
         def open_document(
             declaring_document: str, declared_path: str | None, declared_sha: str
         ) -> Any | None:
             """Resolve, re-hash, and JSON-parse a pinned companion in one step.
 
             A pin whose sha256 is present in the closure but whose bytes re-hash to
-            something else is a distinct failure from an absent pin -- ``_document``
-            (via ``_Closure.read``) already refuses to return corrupt bytes; this
-            records *which pin* that refusal was for, once per sha256.
+            something else, or whose bytes are not valid UTF-8/JSON, is a distinct
+            failure from an absent pin (T2.8, PR #487 bot finding 4113723383: an
+            invalid document used to be indistinguishable from "nothing pinned
+            this" and was silently skipped); this records *which pin* that
+            refusal was for, once per sha256.
             """
-            document = _document(closure, declared_sha)
-            if document is None and declared_sha in closure.corrupted:
-                if declared_sha not in corrupt_seen:
-                    corrupt_seen.add(declared_sha)
-                    corrupt.append(
-                        {
-                            "declaring_document": declaring_document,
-                            "declared_path": declared_path,
-                            "sha256": declared_sha,
-                        }
-                    )
+            document, invalid_json = _document(closure, declared_sha)
+            if document is None and (declared_sha in closure.corrupted or invalid_json):
+                _record_corrupt(declaring_document, declared_path, declared_sha)
             return document
 
         for seed_sha in seeds:

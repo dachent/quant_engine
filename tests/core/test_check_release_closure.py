@@ -328,6 +328,77 @@ def test_corrupted_document_is_reported_distinctly_from_missing(tmp_path: Path) 
     assert report["corrupt"][0]["declaring_document"] == "runner-input-config.json"
 
 
+def test_terminal_pin_bytes_are_rehashed_not_just_indexed(tmp_path: Path) -> None:
+    """T2.8 (PR #487 bot finding 4113723377): a TERMINAL pin -- one this walk
+    never opens as a further JSON document, like a provider's flat
+    `catalog_sha256` field -- used to be checked only by membership in the
+    manifest's own sha256 index (`declared_sha in closure`), never by
+    actually resolving and re-hashing the archive member it names. A deleted
+    or replaced terminal source therefore used to pass with
+    `missing_count == 0` and `corrupt_count == 0` as long as the stale
+    manifest entry remained."""
+    catalog = b"alpaca catalog bytes"
+    spec = json.dumps(
+        {"providers": {"alpaca": {"catalog_sha256": _sha256(catalog)}}}
+    ).encode("utf-8")
+    runner = json.dumps({"provider_ledger_spec": _pin(spec)}).encode("utf-8")
+    release_dir = tmp_path / "release"
+    _seal_release(
+        release_dir,
+        {
+            "runner-input-config.json": runner,
+            "spec.json": spec,
+            "dataAlpaca/alpaca-generation.json": catalog,
+        },
+    )
+    # Replace the archive member's bytes after sealing without updating
+    # inputs.manifest.json's declared sha256 for it -- exactly what a
+    # deleted/replaced terminal source looks like: the manifest still
+    # declares the original hash, so membership alone would still say
+    # "resolved".
+    with zipfile.ZipFile(release_dir / "inputs.zip", "w") as zf:
+        zf.writestr("runner-input-config.json", runner)
+        zf.writestr("spec.json", spec)
+        zf.writestr("dataAlpaca/alpaca-generation.json", b"replaced bytes")
+
+    report = checker.walk(release_dir)
+
+    assert report["missing_count"] == 0, report["missing"]
+    assert report["corrupt_count"] == 1
+    assert report["corrupt"][0]["sha256"] == _sha256(catalog)
+
+
+def test_invalid_json_entrypoint_is_reported_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    """T2.8 (PR #487 bot finding 4113723383): a walked document (recipe,
+    provider-ledger spec, or run-observation) whose bytes match their
+    declared hash but are not valid UTF-8/JSON used to make `_document`
+    return `None` indistinguishably from "nothing pinned this" -- the walk
+    just skipped it silently (zero documents scanned, zero missing, zero
+    corrupt), so a malformed recipe entry point passed with exit 0."""
+    invalid_json = b"{not valid json"
+    release_dir = tmp_path / "release"
+    _seal_release(release_dir, {"runner-input-config.json": invalid_json})
+
+    report = checker.walk(release_dir)
+
+    assert report["documents_scanned"] == 0
+    assert report["corrupt_count"] == 1
+    assert report["corrupt"][0]["sha256"] == _sha256(invalid_json)
+
+
+def test_main_exits_nonzero_when_entrypoint_is_invalid_json(tmp_path: Path) -> None:
+    invalid_json = b"{not valid json"
+    release_dir = tmp_path / "release"
+    _seal_release(release_dir, {"runner-input-config.json": invalid_json})
+
+    result = _run_cli(str(release_dir))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "CORRUPT" in result.stdout
+
+
 def test_main_exits_nonzero_when_a_document_is_corrupted(tmp_path: Path) -> None:
     real_spec = json.dumps({"purpose": "the real spec"}).encode("utf-8")
     swapped_spec = json.dumps({"purpose": "different bytes entirely"}).encode("utf-8")
