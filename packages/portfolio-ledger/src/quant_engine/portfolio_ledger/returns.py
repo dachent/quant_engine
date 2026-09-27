@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Context, Decimal, getcontext, localcontext
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar, cast
 
 
 EXACT_TIMESTAMP = "EXACT_TIMESTAMP"
@@ -165,9 +165,13 @@ def opening_point(
     """Select the R1 opening observation for an entity funded from ``start``.
 
     Capital enters at the beginning of day ``start``, so the last observation
-    before it is the opening when positive; otherwise the first positive
-    observation on or after ``start`` opens the epoch.  Earlier observations
-    never open it.  ``None`` means no positive opening exists.
+    before it (the boundary valuation) is the opening when positive.  When the
+    boundary valuation is zero the entity is empty at ``start``: a sub-period
+    cannot start at zero capital, so the funding inflow is embedded in the
+    opening and the first positive observation on or after ``start`` opens the
+    epoch (R3).  An older positive observation behind an empty boundary is
+    pre-funding history and never opens it; linking from it would chain
+    through the empty boundary.  ``None`` means no positive opening exists.
     """
 
     _require_date(start, "funded start")
@@ -216,6 +220,13 @@ class EpochLink:
     ``cumulative_index`` starts at 1 (the manifest's 100-based index has the same
     significant digits); ``drawdown`` values are non-negative magnitudes
     ``1 - index / running_hwm``.
+
+    Every input leg lands in exactly one of ``embedded_legs`` (recognized on or
+    before the opening), ``linked_legs`` (recognized inside an observed
+    sub-period) or ``rejected_legs`` (recognized after the last observation),
+    whatever the status.  An unavailable result keeps the sub-periods linked
+    before the failure in ``links`` as a diagnostic trace; ``twr``, ``hwm_index``
+    and ``max_drawdown`` are then ``None`` and must not be read from ``links``.
     """
 
     status: str
@@ -229,30 +240,11 @@ class EpochLink:
     hwm_index: Decimal | None
     max_drawdown: Decimal | None
     failed_subperiod: tuple[date, date] | None = None
+    rejected_legs: tuple[FlowLeg, ...] = ()
 
     @property
     def end_date(self) -> date | None:
         return self.links[-1].end_date if self.links else None
-
-
-def _unavailable(
-    opening: OpeningPoint,
-    reason: str,
-    failed: tuple[date, date] | None = None,
-) -> EpochLink:
-    return EpochLink(
-        status=UNAVAILABLE,
-        reason=reason,
-        opening=opening,
-        links=(),
-        linked_legs=(),
-        embedded_legs=(),
-        flags=(),
-        twr=None,
-        hwm_index=None,
-        max_drawdown=None,
-        failed_subperiod=failed,
-    )
 
 
 def link_epoch(
@@ -265,8 +257,9 @@ def link_epoch(
     Each leg belongs to the sub-period ending at the first observation on or
     after its NAV recognition date.  Legs recognized on or before the opening
     are embedded in the opening value; a leg recognized after the last
-    observation makes the epoch unavailable (its money identity would be
-    incomplete).  Observations before the opening are ignored.
+    observation is rejected and makes the epoch unavailable (its money
+    identity would be incomplete).  Observations before the opening are
+    ignored.
     """
 
     _checked_observations(observations)
@@ -277,17 +270,40 @@ def link_epoch(
     if not all(isinstance(leg, FlowLeg) for leg in legs):
         raise ReturnsError("legs must be FlowLeg values")
     days = sorted(day for day in observations if day > opening.as_of)
+    closing = days[-1] if days else opening.as_of
     embedded = tuple(leg for leg in legs if leg.nav_recognition_date <= opening.as_of)
-    linked = tuple(leg for leg in legs if leg.nav_recognition_date > opening.as_of)
-    if not days:
-        return _unavailable(opening, NO_SUBPERIOD_AFTER_OPENING)
-    if any(leg.nav_recognition_date > days[-1] for leg in linked):
-        return _unavailable(opening, FLOW_AFTER_CLOSING_OBSERVATION)
+    linked = tuple(
+        leg for leg in legs if opening.as_of < leg.nav_recognition_date <= closing
+    )
+    rejected = tuple(leg for leg in legs if leg.nav_recognition_date > closing)
+    flags = (INFERRED_TIMING,) if any(leg.timing == DATE_ONLY for leg in linked) else ()
 
     index = Decimal(1)
     hwm = Decimal(1)
     max_drawdown = Decimal(0)
     links: list[SubperiodLink] = []
+
+    def unavailable(reason: str, failed: tuple[date, date] | None = None) -> EpochLink:
+        return EpochLink(
+            status=UNAVAILABLE,
+            reason=reason,
+            opening=opening,
+            links=tuple(links),
+            linked_legs=linked,
+            embedded_legs=embedded,
+            flags=flags,
+            twr=None,
+            hwm_index=None,
+            max_drawdown=None,
+            failed_subperiod=failed,
+            rejected_legs=rejected,
+        )
+
+    if not days:
+        return unavailable(NO_SUBPERIOD_AFTER_OPENING)
+    # A rejected leg takes precedence as the reason, but the observed
+    # sub-periods are still linked so the trace survives the failure.
+    rejected_reason = FLOW_AFTER_CLOSING_OBSERVATION if rejected else None
     prior_day = opening.as_of
     prior_value = opening.value
     for day in days:
@@ -305,20 +321,18 @@ def link_epoch(
         # exact Decimal so a flow-free period reproduces its published digits.
         base = prior_value + beginning_flow if beginning_legs else prior_value
         numerator = ending_value - ending_flow
-        neutral = False
+        neutral = base == 0
+        factor = Decimal(1) if base <= 0 else numerator / base
+        failure: str | None = None
         if base < 0:
-            return _unavailable(opening, NEGATIVE_CAPITAL_BASE, (prior_day, day))
-        if base == 0:
-            if numerator != 0:
-                return _unavailable(
-                    opening, ZERO_CAPITAL_RETURN_UNDEFINED, (prior_day, day)
-                )
-            neutral = True
-            factor = Decimal(1)
-        else:
-            factor = numerator / base
-            if factor <= 0:
-                return _unavailable(opening, NONPOSITIVE_LINK_FACTOR, (prior_day, day))
+            failure = NEGATIVE_CAPITAL_BASE
+        elif neutral and numerator != 0:
+            failure = ZERO_CAPITAL_RETURN_UNDEFINED
+        elif not neutral and factor <= 0:
+            failure = NONPOSITIVE_LINK_FACTOR
+        if failure is not None:
+            return unavailable(rejected_reason or failure, (prior_day, day))
+        if not neutral:
             index *= factor
         hwm = max(hwm, index)
         drawdown = Decimal(1) - index / hwm
@@ -341,6 +355,8 @@ def link_epoch(
         )
         prior_day = day
         prior_value = ending_value
+    if rejected_reason is not None:
+        return unavailable(rejected_reason)
     return EpochLink(
         status=AVAILABLE,
         reason=None,
@@ -348,9 +364,7 @@ def link_epoch(
         links=tuple(links),
         linked_legs=linked,
         embedded_legs=embedded,
-        flags=(
-            (INFERRED_TIMING,) if any(leg.timing == DATE_ONLY for leg in linked) else ()
-        ),
+        flags=flags,
         twr=index - Decimal(1),
         hwm_index=hwm,
         max_drawdown=max_drawdown,
@@ -359,12 +373,17 @@ def link_epoch(
 
 @dataclass(frozen=True)
 class MemberReturn:
-    """One member's sub-period return ending on ``end_date``."""
+    """One member's sub-period return over ``(start_date, end_date]``.
+
+    ``start_date`` is optional only so a single-member series can be built from
+    end dates alone; ``composite`` requires it whenever two members exist.
+    """
 
     member_id: str
     end_date: date
     beginning_capital: Decimal
     period_return: Decimal
+    start_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -392,7 +411,11 @@ def member_returns(member_id: str, epoch: EpochLink) -> tuple[MemberReturn, ...]
         raise ReturnsError("an unavailable epoch cannot enter a composite")
     return tuple(
         MemberReturn(
-            member_id, link.end_date, link.beginning_capital, link.period_return
+            member_id,
+            link.end_date,
+            link.beginning_capital,
+            link.period_return,
+            link.start_date,
         )
         for link in epoch.links
         if not link.zero_capital_neutral
@@ -402,20 +425,32 @@ def member_returns(member_id: str, epoch: EpochLink) -> tuple[MemberReturn, ...]
 def composite(members: Iterable[MemberReturn]) -> tuple[CompositeReturn, ...]:
     """Beginning-capital weight member returns on the union of their dates.
 
-    With capital ``V_begin + F_bod`` per member this equals linking the summed
-    member values and flows when member sub-periods share their dates.  A lone
-    member's return is passed through unchanged so no second rounding touches
-    it.  Dates without capital at risk are omitted.  Members are summed in
-    input order; Decimal addition rounds, so a caller reproducing published
-    digits keeps its member order.
+    The composite is the summed member values and flows linked on the union of
+    every member's sub-period boundaries, with membership entry and exit as
+    transfers.  With capital ``V_begin + F_bod`` per member that equals the
+    beginning-capital weighted return, but only when every member is valued on
+    every boundary it spans.  Values are never filled, so a member sub-period
+    that spans another member's boundary (it cannot be valued there) fails
+    closed; with two or more members every input must carry ``start_date`` so
+    this can be proved.
+
+    A lone member's return is passed through unchanged so no second rounding
+    touches it.  A zero-capital member (return 0) carries no weight and is left
+    out of that date's ``member_ids``; dates without capital at risk are
+    omitted.  Members are summed in input order; Decimal addition rounds, so a
+    caller reproducing published digits keeps its member order.
     """
 
     by_day: dict[date, list[MemberReturn]] = defaultdict(list)
     seen: set[tuple[str, date]] = set()
+    accepted: list[MemberReturn] = []
     for member in members:
         if not isinstance(member, MemberReturn):
             raise ReturnsError("composite members must be MemberReturn values")
-        _require_date(member.end_date, "member end_date")
+        end = _require_date(member.end_date, "member end_date")
+        if member.start_date is not None:
+            if _require_date(member.start_date, "member start_date") >= end:
+                raise ReturnsError("composite member sub-period is empty")
         capital = _require_decimal(member.beginning_capital, "member capital")
         value = _require_decimal(member.period_return, "member return")
         key = (member.member_id, member.end_date)
@@ -429,6 +464,23 @@ def composite(members: Iterable[MemberReturn]) -> tuple[CompositeReturn, ...]:
         if value <= -1:
             raise ReturnsError("composite member return is invalid")
         by_day[member.end_date].append(member)
+        accepted.append(member)
+    if len({member.member_id for member in accepted}) > 1:
+        if any(member.start_date is None for member in accepted):
+            raise ReturnsError(
+                "composite alignment needs every member's sub-period start date"
+            )
+        boundaries = sorted(
+            {member.end_date for member in accepted}
+            | {cast(date, member.start_date) for member in accepted}
+        )
+        previous = dict(zip(boundaries[1:], boundaries))
+        for member in accepted:
+            if previous[member.end_date] != member.start_date:
+                raise ReturnsError(
+                    f"composite member {member.member_id} is not valued on every "
+                    f"boundary of ({member.start_date}, {member.end_date}]"
+                )
     result: list[CompositeReturn] = []
     for day in sorted(by_day):
         items = [item for item in by_day[day] if item.beginning_capital > 0]
@@ -491,9 +543,12 @@ def splice_spans(
 ) -> CompoundedPath:
     """Compound a daily path, splicing each span after its start date.
 
-    A span must start on an observed daily date and no daily observation may
-    fall inside it, so it replaces the declared gap instead of double counting.
-    With no spans this is the plain geometric compound of the daily path.
+    A span must start on an observed daily date, no daily observation may fall
+    inside it, and a later daily observation must follow its end: it replaces
+    a declared gap between observations instead of double counting, and never
+    extends the path past ``observed_end``.  At most one span may start on a
+    date (aggregate several receipts for one gap before calling).  With no
+    spans this is the plain geometric compound of the daily path.
     """
 
     if not daily:
@@ -519,6 +574,8 @@ def splice_spans(
             raise ReturnsError("span does not start on a distinct observed date")
         if any(start < day <= end for day in days):
             raise ReturnsError("span does not replace a gap")
+        if end >= days[-1]:
+            raise ReturnsError("span is not followed by a later daily observation")
         spans_by_start[start] = span
     wealth = Decimal("1")
     daily_wealth = Decimal("1")
