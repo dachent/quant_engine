@@ -110,6 +110,7 @@ def _valid_selected_inputs(existing_fixtures: Any, builder_module: Any) -> objec
                 "current admission policy", canonical_json_bytes(admission)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return builder_module.AccountManifestSelectedInputs(**values)
@@ -158,6 +159,9 @@ def _materialize_inputs(tmp_path: Path, selected: Any) -> dict[str, object]:
     admission_policy = _write(
         authority_root / "admission-policy.json", selected.admission_policy.contents
     )
+    membership_census = _write(
+        authority_root / "membership-census.json", selected.membership_census.contents
+    )
     receipts = {
         artifact_id: _write(
             authority_root / "receipts" / f"receipt-{index}.json", snapshot.contents
@@ -176,6 +180,7 @@ def _materialize_inputs(tmp_path: Path, selected: Any) -> dict[str, object]:
         "manifest_schema_path": manifest_schema,
         "receipt_authority_path": receipt_authority,
         "admission_policy_path": admission_policy,
+        "membership_census_path": membership_census,
         "receipt_paths": receipts,
     }
 
@@ -526,6 +531,8 @@ def test_cli_emits_only_generation_and_exact_artifact_identities(
         str(arguments["receipt_authority_path"]),
         "--admission-policy",
         str(arguments["admission_policy_path"]),
+        "--membership-census",
+        str(arguments["membership_census_path"]),
     ]
     for artifact_id, path in arguments["receipt_paths"].items():
         argv.extend(["--receipt", f"{artifact_id}={path}"])

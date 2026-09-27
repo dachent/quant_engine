@@ -546,6 +546,7 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
                 "static mixed admission", fixture.canonical_json_bytes(admission_policy)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     if policy_after_data:
@@ -607,6 +608,7 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     static_selected = producer.AccountManifestSelectedInputs(**values)
@@ -650,6 +652,7 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
             "receipt_authority": static_selected.receipt_authority,
             "admission_policy": static_selected.admission_policy,
             "manifest_schema": static_selected.manifest_schema,
+            "membership_census": static_selected.membership_census,
             "epoch_producer_source": fixture.InputSnapshot.from_bytes(
                 "attested epoch producer",
                 (ROOT / "tools" / "account_strategy_manifest.py").read_bytes(),

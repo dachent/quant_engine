@@ -840,6 +840,29 @@ def _selected_inputs(
             "receipt_authority": receipt_authority,
             "admission_policy": admission_policy,
             "manifest_schema": base_selected.manifest_schema,
+            "membership_census": fixture.InputSnapshot.from_bytes(
+                "HWM membership census",
+                canonical_json_bytes(
+                    {
+                        "current_census": {
+                            "account_sleeves": [
+                                {
+                                    "provider_id": str(row["provider"]).upper(),
+                                    "assignments": [
+                                        {
+                                            "strategy_id": row["strategy_id"],
+                                            "effective_start": row["effective_start"],
+                                            "effective_end": row["effective_end"],
+                                            "status": "FUNDED_MEMBERSHIP",
+                                        }
+                                    ],
+                                }
+                                for row in included
+                            ]
+                        }
+                    },
+                ),
+            ),
         }
     )
     selected = builder.AccountManifestSelectedInputs(**values)
@@ -925,6 +948,9 @@ def _fixture(
     )
     (roles / "account-strategy-flow-classification-policy.json").write_bytes(
         selected.flow_classification_policy.contents
+    )
+    (roles / "membership-census.json").write_bytes(
+        selected.membership_census.contents
     )
     account_bundle = builder.stage_account_manifest_generation(
         selected, tmp_path / "account-manifest"
@@ -1059,6 +1085,7 @@ def _fixture(
         "flow_classification_policy": (
             roles / "account-strategy-flow-classification-policy.json"
         ),
+        "membership_census": roles / "membership-census.json",
         "provider_generation": provider_path,
         "baseline_generation": baseline_path,
         "contract": contract_path,
@@ -1081,6 +1108,7 @@ def _build(paths: dict[str, Path]) -> dict[str, Any]:
         calendar_authority_path=paths["calendar"],
         provider_admission_path=paths["receipt"],
         hwm_policy_path=paths["policy"],
+        membership_census_path=paths["membership_census"],
     )
 
 
@@ -1140,6 +1168,7 @@ def test_derives_current_calendar_return_from_verified_selected_rows(
         calendar_authority_path=paths["calendar"],
         provider_admission_path=paths["receipt"],
         hwm_policy_path=paths["policy"],
+        membership_census_path=paths["membership_census"],
     )
     derived_values = {
         (
@@ -1191,6 +1220,7 @@ def test_rejects_selected_source_gap_without_accepted_topology(tmp_path: Path) -
             calendar_authority_path=paths["calendar"],
             provider_admission_path=paths["receipt"],
             hwm_policy_path=paths["policy"],
+            membership_census_path=paths["membership_census"],
         )
 
 

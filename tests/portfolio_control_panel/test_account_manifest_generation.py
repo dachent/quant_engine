@@ -458,6 +458,7 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
             "receipt_authority": selected_base.receipt_authority,
             "admission_policy": selected_base.admission_policy,
             "manifest_schema": selected_base.manifest_schema,
+            "membership_census": selected_base.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "interleaved current epoch crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -872,6 +873,7 @@ def _with_later_baseline_date(module: Any, selected: object) -> object:
                 "receipt_authority": selected.receipt_authority,
                 "admission_policy": selected.admission_policy,
                 "manifest_schema": selected.manifest_schema,
+                "membership_census": selected.membership_census,
             }
         )
     return module.AccountManifestSelectedInputs(**values)
@@ -1850,6 +1852,8 @@ def test_v7_excludes_v8_subjects_and_old_admission_loader_rejects_generated_v1(
             ),
             [],
             {},
+            membership_census={},
+            providers={},
         )
 
 
@@ -21518,6 +21522,56 @@ def test_blocked_builder_rejects_a_complete_mixed_selection(
         )
 
 
+def _mixed_membership_census_snapshot() -> InputSnapshot:
+    """One governed FUNDED membership sleeve per mapped synthetic interval.
+
+    The two-receipt fixture also funds the SYNTHETIC2 lane account-02 epoch,
+    so that interval carries its own sleeve.
+    """
+
+    intervals = [
+        ("SYNTHETIC", f"synthetic-strategy-{number:02d}", "2025-01-01", None)
+        for number in range(1, 12)
+    ]
+    intervals.extend(
+        (
+            "SYNTHETIC",
+            f"synthetic-strategy-{number:02d}",
+            "2025-01-01",
+            "2025-12-31",
+        )
+        for number in range(12, 16)
+    )
+    intervals.append(("SYNTHETIC2", "synthetic-strategy-02", "2025-01-01", None))
+    intervals.extend(
+        (
+            ("SYNTHETIC", "synthetic-strategy-01a", "2025-01-01", "2026-01-28"),
+            ("SYNTHETIC", "synthetic-strategy-01b", "2026-01-29", None),
+        )
+    )
+    census = {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": provider,
+                    "assignments": [
+                        {
+                            "strategy_id": strategy_id,
+                            "effective_start": start,
+                            "effective_end": end,
+                            "status": "FUNDED_MEMBERSHIP",
+                        }
+                    ],
+                }
+                for provider, strategy_id, start, end in intervals
+            ]
+        }
+    }
+    return InputSnapshot.from_bytes(
+        "mixed membership census", canonical_json_bytes(census)
+    )
+
+
 def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
@@ -21725,6 +21779,7 @@ def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
             "manifest_schema": InputSnapshot.from_bytes(
                 "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
             ),
+            "membership_census": _mixed_membership_census_snapshot(),
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -21796,6 +21851,7 @@ def _mixed_crosswalk_selected_inputs(perimeter_module: Any) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "synthetic current epoch crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -22108,6 +22164,7 @@ def test_current_cutoff_excludes_future_economic_flow_despite_earlier_recognitio
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "earlier current cutoff", canonical_json_bytes(crosswalk)
             ),
@@ -22169,6 +22226,7 @@ def test_post_cutoff_allocation_is_source_lineage_not_calculation_input(
                 "later source admission", canonical_json_bytes(admission)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -22436,6 +22494,7 @@ def test_gate1_synthetic_crosswalk_stages_and_reads_back(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "epoch_producer_source": InputSnapshot.from_bytes(
                 "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
             ),
@@ -22467,6 +22526,7 @@ def test_gate1_mixed_stage_rejects_missing_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "epoch_producer_source": InputSnapshot.from_bytes(
                 "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
             ),
@@ -22496,6 +22556,7 @@ def test_gate1_mixed_verifier_rejects_missing_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(verifier_module.IndependentVerificationError):
@@ -22511,6 +22572,7 @@ def _with_gate1_crosswalk(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
             "current_epoch_crosswalk": InputSnapshot.from_bytes(
                 "mutated Gate 1 crosswalk", canonical_json_bytes(crosswalk)
             ),
@@ -23108,6 +23170,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
             "manifest_schema": InputSnapshot.from_bytes(
                 "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
             ),
+            "membership_census": selected.membership_census,
         }
     )
     values["current_epoch_crosswalk"] = _rebound_current_epoch_crosswalk(
@@ -23304,6 +23367,7 @@ def _mixed_reselect_receipts(
                 )
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -23669,6 +23733,7 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
                 "continuity admission", canonical_json_bytes(admission)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**provisional)
@@ -24020,6 +24085,7 @@ def test_mixed_receipt_identifiers_reject_dynamic_path_collisions(
                 "receipt_authority": selected.receipt_authority,
                 "admission_policy": selected.admission_policy,
                 "manifest_schema": selected.manifest_schema,
+                "membership_census": selected.membership_census,
             }
         )
         with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
@@ -24149,6 +24215,7 @@ def test_mixed_receipt_cardinality_is_closed_at_fifteen(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     verifier_selected = verifier_module.IndependentVerifierInputs(**values)
@@ -24410,6 +24477,7 @@ def test_mixed_composer_retains_the_producer_validated_earlier_authority_date(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     rebuilt = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -24515,6 +24583,7 @@ def test_mixed_composer_rejects_receipt_provider_generation_mismatch(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24557,6 +24626,7 @@ def test_mixed_composer_rejects_a_lowercase_baseline_provider_alias(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24597,6 +24667,7 @@ def test_mixed_composer_rejects_a_self_consistent_receipt_authority_evidence_mut
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24632,6 +24703,7 @@ def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     with pytest.raises(
@@ -24650,6 +24722,7 @@ def _mixed_verifier_inputs(verifier_module: Any, selected: object) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return verifier_module.IndependentVerifierInputs(**values)
@@ -24679,6 +24752,7 @@ def _mixed_selected_with_ledger(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     if policy is not None:
@@ -25716,6 +25790,7 @@ def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
         "receipt_authority_base64",
         "admission_policy_base64",
         "manifest_schema_base64",
+        "membership_census_base64",
     }
     assert [item["path"] for item in parsed["subjects"]] == [
         "authority/account-assignment-perimeter.json",
@@ -25875,6 +25950,7 @@ def _rebound_mixed_verifier_inputs(
     receipt_authority: InputSnapshot | None = None,
     admission_policy: InputSnapshot | None = None,
     manifest_schema: InputSnapshot | None = None,
+    membership_census: InputSnapshot | None = None,
 ) -> object:
     values = _selected_input_kwargs(selected)
     values.update(
@@ -25896,6 +25972,11 @@ def _rebound_mixed_verifier_inputs(
             ),
             "manifest_schema": (
                 selected.manifest_schema if manifest_schema is None else manifest_schema
+            ),
+            "membership_census": (
+                selected.membership_census
+                if membership_census is None
+                else membership_census
             ),
         }
     )
@@ -26079,6 +26160,149 @@ def test_mixed_independent_verifier_rejects_rebound_manifest_schema(
         verifier.verify(verifier_inputs, mutated)
 
 
+def _mutated_assignment_only_census(selected: object) -> InputSnapshot:
+    """Flip only the funded account-01 census membership to ASSIGNMENT_ONLY."""
+
+    census_snapshot = getattr(selected, "membership_census", None)
+    assert isinstance(census_snapshot, InputSnapshot)
+    census = census_snapshot.json_object()
+    for sleeve in census["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            if (
+                sleeve["provider_id"] == "SYNTHETIC"
+                and assignment["strategy_id"] == "synthetic-strategy-01"
+            ):
+                assignment["status"] = "ASSIGNMENT_ONLY"
+    return InputSnapshot.from_bytes(
+        "mutated membership census", canonical_json_bytes(census)
+    )
+
+
+def test_mixed_generation_requires_a_membership_census_selected_input(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """R2 fails closed: no mixed candidate builds or verifies without a census."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    values["membership_census"] = None
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="membership_census",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def test_mixed_builder_rejects_when_only_the_census_membership_changes(
+    perimeter_module: Any,
+) -> None:
+    """C1 (a): a census ASSIGNMENT_ONLY mutation alone must fail the build."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    perimeter_module.build_account_manifest_payloads(selected)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    values["membership_census"] = _mutated_assignment_only_census(selected)
+    mutated = perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(RuntimeError, match="ASSIGNMENT_ONLY"):
+        perimeter_module.build_account_manifest_payloads(mutated)
+
+
+def test_mixed_independent_verifier_rejects_when_only_the_census_membership_changes(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """C1 (b): the same census mutation must fail independent verification."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module,
+        selected,
+        membership_census=_mutated_assignment_only_census(selected),
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, payloads)
+
+
+def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """C2: the MWR cash date is bound to the raw anchor economic date.
+
+    Only the candidate's published flow-leg economic date is mutated here;
+    the source ledger keeps its raw anchor economic date, so the MWR cash
+    date derived from that source value no longer agrees and verification
+    fails closed.
+    """
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    opening = ledger["capital_anchors"][0]
+    ledger["capital_anchors"].append(
+        {
+            "record_id": "mixed-exact-fill-allocation",
+            "account_id": opening["account_id"],
+            "provider_id": opening["provider_id"],
+            "generation_id": opening["generation_id"],
+            "strategy_id": opening["strategy_id"],
+            "mapping_status": "MAPPED",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-02-01",
+            "economic_date": "2026-01-31",
+            "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+            "source_artifact_id": "raw/synthetic.json",
+            "nav_source_artifact_id": "raw/synthetic.json",
+            "source_record_id": "synthetic-exact-fill-allocation",
+            "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    leg = next(
+        item
+        for item in row["performance_flow_legs"]
+        if item["timing"] == "EXACT_TIMESTAMP"
+    )
+    assert leg["economic_date"] == "2026-01-31"
+    assert any(
+        cashflow["date"] == "2026-01-31" for cashflow in row["mwr_cashflows"]
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+    leg["economic_date"] = "2026-02-01"
+    payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+
+
 def test_verifier_manifest_schema_pin_matches_repository_bytes(
     verifier_module: Any,
 ) -> None:
@@ -26194,6 +26418,7 @@ def test_mixed_independent_verifier_accepts_older_anchored_provider_generation(
             "receipt_authority": authority_snapshot,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     older_selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26470,6 +26695,7 @@ def test_mixed_route_preserves_later_admission_authority_date_and_provenance(
             "receipt_authority": authority_snapshot,
             "admission_policy": admission_snapshot,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26574,6 +26800,7 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     verifier_selected = verifier_module.IndependentVerifierInputs(**values)
@@ -26646,6 +26873,7 @@ def test_mixed_independent_verifier_accepts_multiple_valid_funded_nav_ids(
             "admission_policy": admission,
             "receipt_authority": base.receipt_authority,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26707,6 +26935,7 @@ def test_mixed_independent_verifier_ignores_null_start_reserve_assignment(
             "receipt_authority": base.receipt_authority,
             "admission_policy": base.admission_policy,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26758,6 +26987,7 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
             "receipt_authority": base.receipt_authority,
             "admission_policy": base.admission_policy,
             "manifest_schema": base.manifest_schema,
+            "membership_census": base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -26997,6 +27227,7 @@ def _generation_composer_selected_inputs(perimeter_module: Any) -> object:
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27359,6 +27590,27 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
             admission["effective_end"] = None
         elif admission["strategy_id"] == "echotrade-growth-pivots":
             admission["effective_end"] = "2025-11-24"
+    account_providers = {
+        account["account_id"]: str(account["provider"]).upper()
+        for account in selected_baseline["accounts"]
+    }
+    census = {"current_census": {"account_sleeves": []}}
+    for admission in admission_policy["admissions"]:
+        if admission["status"] != "FUNDED":
+            continue
+        census["current_census"]["account_sleeves"].append(
+            {
+                "provider_id": account_providers[admission["account_id"]],
+                "assignments": [
+                    {
+                        "strategy_id": admission["strategy_id"],
+                        "effective_start": admission["effective_start"],
+                        "effective_end": admission["effective_end"],
+                        "status": "FUNDED_MEMBERSHIP",
+                    }
+                ],
+            }
+        )
     ledger = selected.provider_ledger.json_object()
     ledger["reconciliation_checks"] = []
     for nav in ledger["nav_observations"]:
@@ -27446,6 +27698,9 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
                 "mixed report-policy admission", canonical_json_bytes(admission_policy)
             ),
             "manifest_schema": selected.manifest_schema,
+            "membership_census": InputSnapshot.from_bytes(
+                "remapped membership census", canonical_json_bytes(census)
+            ),
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27825,6 +28080,7 @@ def test_schema9_generation_coverage_boundary_is_version_neutral(
             "receipt_authority": selected_base.receipt_authority,
             "admission_policy": selected_base.admission_policy,
             "manifest_schema": selected_base.manifest_schema,
+            "membership_census": selected_base.membership_census,
         }
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27909,6 +28165,7 @@ def test_generation_composer_rejects_executing_source_mismatch_before_writes(
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     mismatched = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -27988,6 +28245,7 @@ def test_generation_composer_rejects_receipt_authority_rebinding_before_staging(
             ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
         }
     )
     rebound = perimeter_module.AccountManifestSelectedInputs(**values)

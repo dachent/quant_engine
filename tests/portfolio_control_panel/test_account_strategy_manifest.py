@@ -240,6 +240,7 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
             "account strategy manifest schema",
         ),
         baseline_generation_id=BASELINE_GENERATION_ID,
+        membership_census=InputSnapshot.capture(inputs["census"], "membership census"),
     )
 
     assert manifest_module.build_manifest_candidate_from_snapshots(snapshots) == (
@@ -251,6 +252,7 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
         )
     )
@@ -270,6 +272,7 @@ def test_public_producer_rejects_valid_looking_synthetic_receipts_without_select
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -299,6 +302,7 @@ def test_selected_receipt_authority_emits_funded_first_epoch_and_preserves_block
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -386,6 +390,7 @@ def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -409,6 +414,7 @@ def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
@@ -436,6 +442,7 @@ def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewr
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={
             "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
@@ -465,6 +472,7 @@ def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewr
             classified_flows_path=inputs["flows"],
             classification_policy_path=inputs["classification_policy"],
             admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
             flow_coverage_path=inputs["flow_coverage"],
             retrieval_receipt_paths={
                 "receipt/synthetic-2026-01-01-2026-01-03.json": receipt_path
@@ -489,6 +497,7 @@ def test_end_to_end_producer_emits_only_blocked_rows_without_retained_receipts(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
     )
     assert [row["status"] for row in manifest["rows"]] == [
@@ -541,6 +550,7 @@ def test_snapshot_native_producer_never_reopens_any_captured_input(
             "account strategy manifest schema",
         ),
         baseline_generation_id=BASELINE_GENERATION_ID,
+        membership_census=InputSnapshot.capture(inputs["census"], "membership census"),
     )
     expected = manifest_module.build_manifest_candidate_from_snapshots(snapshots)
     for path in (
@@ -550,6 +560,7 @@ def test_snapshot_native_producer_never_reopens_any_captured_input(
         inputs["flows"],
         inputs["classification_policy"],
         inputs["policy"],
+        inputs["census"],
         inputs["flow_coverage"],
         calculation_code_copy,
         manifest_schema_copy,
@@ -601,6 +612,7 @@ def test_snapshot_and_coverage_reject_non_mapping_or_blank_receipt_keys(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
 
     inputs = _write_valid_inputs(tmp_path / "inputs")
@@ -649,6 +661,7 @@ def test_manifest_candidate_snapshots_reject_duck_typed_snapshot_lookalikes(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
     with pytest.raises(manifest_module.ManifestError, match="retrieval receipts"):
         manifest_module.ManifestCandidateSnapshots(
@@ -663,6 +676,7 @@ def test_manifest_candidate_snapshots_reject_duck_typed_snapshot_lookalikes(
             calculation_code=snapshot,
             manifest_schema=snapshot,
             baseline_generation_id="0" * 64,
+            membership_census=snapshot,
         )
 
 
@@ -1861,6 +1875,29 @@ def _admission_policy(
     }
 
 
+def _membership_census(
+    *intervals: tuple[str, str, str | None],
+) -> dict[str, Any]:
+    return {
+        "current_census": {
+            "account_sleeves": [
+                {
+                    "provider_id": "SYNTHETIC",
+                    "assignments": [
+                        {
+                            "strategy_id": strategy_id,
+                            "effective_start": start,
+                            "effective_end": end,
+                            "status": "FUNDED_MEMBERSHIP",
+                        }
+                    ],
+                }
+                for strategy_id, start, end in intervals
+            ]
+        }
+    }
+
+
 def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     ledger_path = tmp_path / "provider-ledger.json"
@@ -1955,6 +1992,16 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
     # producer fixture buildable by describing two independently blocked epochs,
     # rather than asserting an unprovable capital-continuity handoff.
     _write_json(policy_path, _admission_policy(assignments, continuity=False))
+    census_path = tmp_path / "membership-census.json"
+    _write_json(
+        census_path,
+        _membership_census(
+            ("synthetic-strategy-a", "2026-01-01", "2026-01-03"),
+            ("synthetic-strategy-b", "2026-01-04", None),
+            ("synthetic-strategy-b", "2026-01-05", None),
+            ("mapped-strategy", "2026-01-01", None),
+        ),
+    )
 
     classification_policy_path = tmp_path / "flow-classification-policy.json"
     _write_json(classification_policy_path, _flow_classification_policy("2026-01-06"))
@@ -2045,6 +2092,7 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "ledger_identity": ledger_identity_path,
         "baseline_root": baseline_root,
         "policy": policy_path,
+        "census": census_path,
         "classification_policy": classification_policy_path,
         "flows": flows_path,
         "flow_coverage": coverage_path,
@@ -3067,6 +3115,8 @@ def _producer_argv(inputs: dict[str, Path]) -> list[str]:
         BASELINE_GENERATION_ID,
         "--admission-policy-json",
         str(inputs["policy"]),
+        "--membership-census-json",
+        str(inputs["census"]),
         "--flow-classes-json",
         str(inputs["flows"]),
         "--classification-policy-json",
@@ -3133,6 +3183,7 @@ def _manifest_from_cli(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths=selected_receipts,
     )
@@ -3372,6 +3423,7 @@ def test_reusable_build_candidate_matches_cli_output(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
         flow_coverage_path=inputs["flow_coverage"],
         retrieval_receipt_paths={},
     )
@@ -6546,7 +6598,9 @@ def test_t2_r2_funded_admission_of_a_census_assignment_only_interval_raises(
     with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
         manifest_module._validate_admissions_against_census(bad, census, providers)
     too_many = {**good, ("d", "tt", "2025-11-25", None): funded}
-    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+    with pytest.raises(
+        manifest_module.ManifestError, match="funds more epochs than census"
+    ):
         manifest_module._validate_admissions_against_census(
             too_many, census, {**providers, "d": "SCHWAB"}
         )
@@ -6574,3 +6628,129 @@ def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
         manifest_module._validate_admissions_against_census(
             {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
         )
+
+
+def test_c1_membership_transition_excludes_only_the_post_boundary_epoch(
+    manifest_module: Any,
+) -> None:
+    """A FUNDED->ASSIGNMENT_ONLY transition inside one strategy is per-epoch.
+
+    The same strategy's contiguous NAV run is split at the census membership
+    boundary: the epoch inside the census funded interval stays admissible,
+    only a funded epoch of the post-transition interval is rejected, and the
+    whole run cannot be funded across the boundary as one epoch.
+    """
+
+    census = manifest_module.load_membership_census(
+        _t2_census(
+            ("SCHWAB", "tt", "2025-01-01", "2026-06-30", "FUNDED_MEMBERSHIP"),
+            ("SCHWAB", "tt", "2026-07-01", None, "ASSIGNMENT_ONLY"),
+        )
+    )
+    providers = {"a": "SCHWAB"}
+    funded = {"status": "FUNDED"}
+    blocked = {"status": "BLOCKED"}
+    good = {
+        ("a", "tt", "2025-01-01", "2026-06-30"): funded,
+        ("a", "tt", "2026-07-01", None): blocked,
+    }
+    manifest_module._validate_admissions_against_census(good, census, providers)
+    with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
+        manifest_module._validate_admissions_against_census(
+            {**good, ("a", "tt", "2026-07-01", None): funded},
+            census,
+            providers,
+        )
+    with pytest.raises(manifest_module.ManifestError, match="absent from"):
+        manifest_module._validate_admissions_against_census(
+            {("a", "tt", "2025-01-01", None): funded}, census, providers
+        )
+
+
+def test_cli_table_renders_unavailable_performance_on_ok_rows(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R3 (702c-like): an OK row with unavailable performance still tables.
+
+    Pre-change the default table formatter parsed observed_hwm_index and
+    observed_max_drawdown unconditionally, so an OK row whose performance is
+    unavailable raised ManifestError instead of rendering.
+    """
+
+    inputs = _write_valid_inputs(tmp_path)
+    authority_path = _write_selected_first_receipt_authority(inputs)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    for record, day, value in (
+        ("nav-1", "2026-01-01", "32.15"),
+        ("nav-2", "2026-01-02", "0"),
+        ("nav-3", "2026-01-03", "3.81"),
+    ):
+        observation = next(
+            item
+            for item in ledger["nav_observations"]
+            if item["record_id"] == record
+        )
+        observation["as_of_date"] = day
+        observation["nav"]["value"] = value
+    ledger["flows"] = [
+        {
+            "record_id": "raw-flow-1",
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-02",
+            "flow_type": "EXTERNAL_WITHDRAWAL",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-32.15"},
+        }
+    ]
+    _write_json(inputs["ledger"], ledger)
+    classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
+    classified["events"] = [
+        {
+            "event_id": "classified-flow-1",
+            "source_record_id": "raw-flow-1",
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-02",
+            "amount": "-32.15",
+            "disposition": "EXTERNAL",
+        }
+    ]
+    _write_json(inputs["flows"], classified)
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][0]["funded_nav_record_ids"] = ["nav-1"]
+    _write_json(inputs["policy"], policy)
+    _refresh_ledger_identity(inputs)
+
+    manifest = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+        membership_census_path=inputs["census"],
+        flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"]
+        },
+        receipt_authority_path=authority_path,
+    )
+    first, second = manifest["rows"]
+    assert first["status"] == "OK"
+    assert first["performance_status"] == "UNAVAILABLE"
+    assert first["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert first["observed_hwm_index"] is None
+    assert first["observed_max_drawdown"] is None
+    assert second["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+
+    displayed = manifest_module.format_table(manifest).splitlines()[-2].split("|")
+    assert sum("unavailable" in cell for cell in displayed) == 2
+
+    argv = _producer_argv(inputs)
+    argv.extend(["--receipt-authority-json", str(authority_path)])
+    argv[argv.index("--format") + 1] = "table"
+    assert manifest_module.main(argv) == 0
+    table = capsys.readouterr().out
+    assert table == manifest_module.format_table(manifest) + "\n"
+    assert sum("unavailable" in cell for cell in table.splitlines()[-2].split("|")) == 2
