@@ -12,6 +12,14 @@ import sys
 
 import pytest
 
+from quant_engine.core.contracts import (
+    AdapterIdentity,
+    CoverageClaim,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_target_series.py"
@@ -171,6 +179,131 @@ def _rebind_matrixport_daily_holdings(
         artifact["size_bytes"] = daily_size
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
     return daily
+
+
+def _matrixport_usd_conversion_fixture(
+    nav_days: int,
+    rate_days: int,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], bytes]:
+    """Build the layered-history conversion preimage with an independent FX end.
+
+    The native NAV always runs ``nav_days`` daily observations from
+    2026-09-01 while the admitted FX generation covers only ``rate_days``.
+    """
+
+    start = date(2026, 9, 1)
+    nav_lines = ["product_id,timestamp_utc,nav"]
+    for offset in range(nav_days):
+        day = start + timedelta(days=offset)
+        nav = (
+            "100"
+            if offset == 0
+            else str(110 if offset == 1 else 121 + 10 * (offset - 2))
+        )
+        nav_lines.append(f"P1,{day.isoformat()}T00:00:00+00:00,{nav}")
+    nav_text = "\n".join(nav_lines) + "\n"
+    rate_lines = ["date,currency,base_currency,rate,provider,ticker,field,timing"]
+    for offset in range(rate_days):
+        day = start + timedelta(days=offset)
+        usdt_rate = "1" if offset == 0 else "1.1"
+        for currency, rate in (("USDC", "1.0001"), ("USDT", usdt_rate)):
+            rate_lines.append(
+                f"{day.isoformat()},{currency},USD,{rate},yahoo,"
+                f"{currency}-USD,Close,UTC_DAILY_CLOSE"
+            )
+    rates_text = "\n".join(rate_lines) + "\n"
+    proof: dict[str, object] = {
+        "schema_version": 1,
+        "native_currency": "USDT",
+        "reporting_currency": "USD",
+        "transform": "UNIT_NAV_RETURN_TIMES_ENDPOINT_FX_RATIO_V1",
+        "native_product_id": "P1",
+        "native_nav_csv": nav_text,
+        "rates_csv": rates_text,
+    }
+    fx_manifest = GenerationManifest.build(
+        as_of_date=start + timedelta(days=rate_days - 1),
+        adapter=AdapterIdentity("agent-market-data-terminal-yfinance", "1"),
+        coverage=CoverageClaim.from_dict(
+            {
+                "boundary": "synthetic USD daily close proof",
+                "fact_types": ["FX_RATE"],
+                "known_gaps": [],
+                "observed_start": start.isoformat(),
+                "observed_end": (start + timedelta(days=rate_days - 1)).isoformat(),
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="rates.csv",
+                sha256=hashlib.sha256(rates_text.encode("utf-8")).hexdigest(),
+                size_bytes=len(rates_text.encode("utf-8")),
+                as_of_date=start + timedelta(days=rate_days - 1),
+                schema_name="portfolio-fx-daily-close-rates",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    fx_manifest_bytes = fx_manifest.to_json_bytes()
+    provider_manifest: dict[str, object] = {
+        "as_of_date": "2026-09-17",
+        "artifacts": [
+            {
+                "artifact_id": "portfolio/fx-rates/generation.json",
+                "sha256": hashlib.sha256(fx_manifest_bytes).hexdigest(),
+                "size_bytes": len(fx_manifest_bytes),
+                "schema": {"name": "generation-manifest", "version": "1"},
+            }
+        ],
+    }
+    nav_bytes = nav_text.encode("utf-8")
+    matrixport_manifest: dict[str, object] = {
+        "artifacts": [
+            {
+                "artifact_id": "csv/nav_daily.csv",
+                "sha256": hashlib.sha256(nav_bytes).hexdigest(),
+                "size_bytes": len(nav_bytes),
+            }
+        ],
+    }
+    return proof, provider_manifest, matrixport_manifest, fx_manifest_bytes
+
+
+def test_matrixport_usd_series_ends_at_the_admitted_fx_boundary() -> None:
+    """Native returns past the admitted FX end carry no converted USD value.
+
+    The provider-ledger consumer of the same preimage (T4-b) leaves USD
+    values unemitted past the contract-admitted FX generation's end instead
+    of failing; the target-series conversion must match. Before the boundary
+    binding this raised 'Matrixport FX lacks an exact return endpoint' on
+    the first day past the FX end.
+    """
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(nav_days=10, rate_days=3)
+    )
+
+    converted, spans = target_series._matrixport_usd_conversion(
+        proof,
+        fx_manifest_content=fx_manifest_bytes,
+        provider_manifest=provider_manifest,
+        matrixport_manifest=matrixport_manifest,
+        source_gap_policy={
+            "declared_missing_source_dates": [],
+            "omitted_return_dates": [],
+            "span_return_receipts": [],
+        },
+        account_live_start=date(2026, 9, 1),
+        admission_cutoff=date(2026, 9, 17),
+    )
+
+    assert converted == [
+        {"date": "2026-09-02", "return": "0.21"},
+        {"date": "2026-09-03", "return": "0.1"},
+    ]
+    assert spans == []
 
 
 def test_matrixport_target_starts_account_live_only_after_funding(

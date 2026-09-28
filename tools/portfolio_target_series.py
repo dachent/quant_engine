@@ -2830,7 +2830,10 @@ def _matrixport_usd_conversion(
 
     Native gap approval remains unchanged.  The restricted local proof retains
     source CSV bytes so standalone verification does not trust derived returns
-    or read a provider path supplied by the artifact being verified.
+    or read a provider path supplied by the artifact being verified.  Native
+    returns whose conversion window ends past the admitted FX generation's
+    last rate carry no USD value: the USD series ends there, mirroring the
+    provider ledger's admitted-FX boundary.
     """
 
     _require_exact_keys(
@@ -2915,7 +2918,12 @@ def _matrixport_usd_conversion(
             return format(value.normalize(), "f")
 
     converted: list[dict[str, str]] = []
+    admitted_fx_end = max(rates)
     for (start, prior_nav), (end, nav) in zip(ordered, ordered[1:], strict=False):
+        if end > admitted_fx_end:
+            # The admitted FX generation converts through its last rate only;
+            # later native returns stay unconverted as in the provider ledger.
+            break
         if end in omitted:
             continue
         if (end - start).days != 1:
