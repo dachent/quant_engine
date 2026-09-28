@@ -5974,6 +5974,43 @@ def test_matrixport_inactive_holdings_past_fx_end_do_not_emit_boundary_findings(
     assert findings == []
 
 
+def test_matrixport_missing_native_past_fx_end_does_not_emit_boundary_finding(
+    tmp_path: Path,
+) -> None:
+    """An active row past the FX end without a native value is no observation.
+
+    The OUTSIDE_ADMITTED_FX_BOUNDARY finding is the raw-observation coverage
+    evidence the report builder keys raw dates on, so its date must correspond
+    to a holding that actually carries a value.  Before the reordering a
+    missing native value on 2026-09-17 still emitted the finding, so the
+    report dated raw coverage 2026-09-17 while the raw NAV series last
+    observed 2026-09-16.
+    """
+
+    manifest, run_root = _matrixport_fx_boundary_manifest(
+        tmp_path,
+        "utc_date,product_id,share,currency,native_value,valuation_source,"
+        "value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
+        "2026-09-03,P1,1,USDT,100,api_reported_usd_value,1,100,100\n"
+        "2026-09-16,P1,1,USDT,120,missing_fx,,,\n"
+        "2026-09-17,P1,1,USDT,,,,,\n",
+    )
+    findings: list[dict[str, Any]] = []
+
+    totals = ledger._matrixport_daily_fx_totals(
+        manifest,
+        run_root,
+        ("9" * 64, {("USDT", date(2026, 9, 3)): Decimal("1")}, ()),
+        date(2026, 9, 17),
+        findings,
+    )
+
+    assert sorted(day.isoformat() for day in totals) == ["2026-09-03"]
+    assert [(row["original_source_date"], row["status"]) for row in findings] == [
+        ("2026-09-16", "OUTSIDE_ADMITTED_FX_BOUNDARY")
+    ]
+
+
 def test_matrixport_no_active_holdings_names_holdings_not_missing_fx(
     tmp_path: Path,
 ) -> None:
