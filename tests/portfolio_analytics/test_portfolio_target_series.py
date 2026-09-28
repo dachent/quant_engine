@@ -12,6 +12,14 @@ import sys
 
 import pytest
 
+from quant_engine.core.contracts import (
+    AdapterIdentity,
+    CoverageClaim,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_target_series.py"
@@ -171,6 +179,327 @@ def _rebind_matrixport_daily_holdings(
         artifact["size_bytes"] = daily_size
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
     return daily
+
+
+def _matrixport_usd_conversion_fixture(
+    nav_days: int,
+    rate_days: int,
+    missing_days: frozenset[date] = frozenset(),
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], bytes]:
+    """Build the layered-history conversion preimage with an independent FX end.
+
+    The native NAV runs daily observations from 2026-09-01 spanning
+    ``nav_days`` calendar days, minus any approved ``missing_days`` source
+    gaps, while the admitted FX generation covers only ``rate_days``.
+    """
+
+    start = date(2026, 9, 1)
+    nav_lines = ["product_id,timestamp_utc,nav"]
+    for offset in range(nav_days):
+        day = start + timedelta(days=offset)
+        if day in missing_days:
+            continue
+        nav = (
+            "100"
+            if offset == 0
+            else str(110 if offset == 1 else 121 + 10 * (offset - 2))
+        )
+        nav_lines.append(f"P1,{day.isoformat()}T00:00:00+00:00,{nav}")
+    nav_text = "\n".join(nav_lines) + "\n"
+    rate_lines = ["date,currency,base_currency,rate,provider,ticker,field,timing"]
+    for offset in range(rate_days):
+        day = start + timedelta(days=offset)
+        usdt_rate = "1" if offset == 0 else "1.1"
+        for currency, rate in (("USDC", "1.0001"), ("USDT", usdt_rate)):
+            rate_lines.append(
+                f"{day.isoformat()},{currency},USD,{rate},yahoo,"
+                f"{currency}-USD,Close,UTC_DAILY_CLOSE"
+            )
+    rates_text = "\n".join(rate_lines) + "\n"
+    proof: dict[str, object] = {
+        "schema_version": 1,
+        "native_currency": "USDT",
+        "reporting_currency": "USD",
+        "transform": "UNIT_NAV_RETURN_TIMES_ENDPOINT_FX_RATIO_V1",
+        "native_product_id": "P1",
+        "native_nav_csv": nav_text,
+        "rates_csv": rates_text,
+    }
+    fx_manifest = GenerationManifest.build(
+        as_of_date=start + timedelta(days=rate_days - 1),
+        adapter=AdapterIdentity("agent-market-data-terminal-yfinance", "1"),
+        coverage=CoverageClaim.from_dict(
+            {
+                "boundary": "synthetic USD daily close proof",
+                "fact_types": ["FX_RATE"],
+                "known_gaps": [],
+                "observed_start": start.isoformat(),
+                "observed_end": (start + timedelta(days=rate_days - 1)).isoformat(),
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="rates.csv",
+                sha256=hashlib.sha256(rates_text.encode("utf-8")).hexdigest(),
+                size_bytes=len(rates_text.encode("utf-8")),
+                as_of_date=start + timedelta(days=rate_days - 1),
+                schema_name="portfolio-fx-daily-close-rates",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    fx_manifest_bytes = fx_manifest.to_json_bytes()
+    provider_manifest: dict[str, object] = {
+        "as_of_date": "2026-09-17",
+        "artifacts": [
+            {
+                "artifact_id": "portfolio/fx-rates/generation.json",
+                "sha256": hashlib.sha256(fx_manifest_bytes).hexdigest(),
+                "size_bytes": len(fx_manifest_bytes),
+                "schema": {"name": "generation-manifest", "version": "1"},
+            }
+        ],
+    }
+    nav_bytes = nav_text.encode("utf-8")
+    matrixport_manifest: dict[str, object] = {
+        "artifacts": [
+            {
+                "artifact_id": "csv/nav_daily.csv",
+                "sha256": hashlib.sha256(nav_bytes).hexdigest(),
+                "size_bytes": len(nav_bytes),
+            }
+        ],
+    }
+    return proof, provider_manifest, matrixport_manifest, fx_manifest_bytes
+
+
+def _matrixport_span_receipt(
+    start: date, end: date, start_nav: str, end_nav: str
+) -> dict[str, object]:
+    """Build one approved gap-span receipt with the exact native return."""
+
+    with localcontext(target_series.MATRIXPORT_DECIMAL_CONTEXT):
+        value = Decimal(end_nav) / Decimal(start_nav) - Decimal(1)
+    return {
+        "return": format(value.normalize(), "f"),
+        "span_days": (end - start).days,
+        "span_end_date": end.isoformat(),
+        "span_start_date": start.isoformat(),
+    }
+
+
+def test_matrixport_usd_series_ends_at_the_admitted_fx_boundary() -> None:
+    """Native returns past the admitted FX end carry no converted USD value.
+
+    The provider-ledger consumer of the same preimage (T4-b) leaves USD
+    values unemitted past the contract-admitted FX generation's end instead
+    of failing; the target-series conversion must match. Before the boundary
+    binding this raised 'Matrixport FX lacks an exact return endpoint' on
+    the first day past the FX end.
+    """
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(nav_days=10, rate_days=3)
+    )
+
+    converted, spans = target_series._matrixport_usd_conversion(
+        proof,
+        fx_manifest_content=fx_manifest_bytes,
+        provider_manifest=provider_manifest,
+        matrixport_manifest=matrixport_manifest,
+        source_gap_policy={
+            "declared_missing_source_dates": [],
+            "omitted_return_dates": [],
+            "span_return_receipts": [],
+        },
+        account_live_start=date(2026, 9, 1),
+        admission_cutoff=date(2026, 9, 17),
+    )
+
+    assert converted == [
+        {"date": "2026-09-02", "return": "0.21"},
+        {"date": "2026-09-03", "return": "0.1"},
+    ]
+    assert spans == []
+
+
+def test_matrixport_usd_in_bound_gap_span_keeps_its_converted_value() -> None:
+    """An approved gap span fully inside the admitted FX window stays converted.
+
+    Paired with the past-boundary drop test: before the boundary binding an
+    in-bound span converted exactly as here, and the fix must not narrow
+    that.
+    """
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(
+            nav_days=6,
+            rate_days=5,
+            missing_days=frozenset({date(2026, 9, 4)}),
+        )
+    )
+    receipt = _matrixport_span_receipt(date(2026, 9, 3), date(2026, 9, 5), "121", "141")
+
+    converted, spans = target_series._matrixport_usd_conversion(
+        proof,
+        fx_manifest_content=fx_manifest_bytes,
+        provider_manifest=provider_manifest,
+        matrixport_manifest=matrixport_manifest,
+        source_gap_policy={
+            "declared_missing_source_dates": ["2026-09-04"],
+            "omitted_return_dates": ["2026-09-05"],
+            "span_return_receipts": [receipt],
+        },
+        account_live_start=date(2026, 9, 1),
+        admission_cutoff=date(2026, 9, 17),
+    )
+
+    assert converted == [
+        {"date": "2026-09-02", "return": "0.21"},
+        {"date": "2026-09-03", "return": "0.1"},
+    ]
+    # The fixture's USDT rate is flat at 1.1 across the span endpoints, so
+    # the converted span return equals the native return exactly.
+    assert spans == [{**receipt, "return": "0.165289256198347107438016529"}]
+
+
+def test_matrixport_usd_gap_span_ending_past_the_admitted_fx_boundary_is_dropped() -> (
+    None
+):
+    """A valid native gap span ending past the FX end neither aborts nor converts.
+
+    Reproduces the round-2 defect: the span Sep 3 → Sep 5 is native-valid with
+    the approved Sep 4 source gap, but its conversion window ends past the
+    admitted FX end (Sep 3). Before the fix this raised 'Matrixport FX lacks
+    an exact return endpoint' and aborted the whole USD-series build.
+    """
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(
+            nav_days=6,
+            rate_days=3,
+            missing_days=frozenset({date(2026, 9, 4)}),
+        )
+    )
+    receipt = _matrixport_span_receipt(date(2026, 9, 3), date(2026, 9, 5), "121", "141")
+
+    converted, spans = target_series._matrixport_usd_conversion(
+        proof,
+        fx_manifest_content=fx_manifest_bytes,
+        provider_manifest=provider_manifest,
+        matrixport_manifest=matrixport_manifest,
+        source_gap_policy={
+            "declared_missing_source_dates": ["2026-09-04"],
+            "omitted_return_dates": ["2026-09-05"],
+            "span_return_receipts": [receipt],
+        },
+        account_live_start=date(2026, 9, 1),
+        admission_cutoff=date(2026, 9, 17),
+    )
+
+    assert converted == [
+        {"date": "2026-09-02", "return": "0.21"},
+        {"date": "2026-09-03", "return": "0.1"},
+    ]
+    assert spans == []
+
+
+def test_matrixport_usd_gap_span_crossing_the_admitted_fx_boundary_is_dropped() -> None:
+    """A span starting inside and ending past the FX end gets no partial conversion.
+
+    The USD series ends at the admitted FX boundary, so a crossing gap span
+    follows the ledger's landed semantics: it is not emitted at all, and the
+    daily series still ends at the boundary rather than carrying a partial
+    span value.
+    """
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(
+            nav_days=6,
+            rate_days=3,
+            missing_days=frozenset({date(2026, 9, 3)}),
+        )
+    )
+    receipt = _matrixport_span_receipt(date(2026, 9, 2), date(2026, 9, 4), "110", "131")
+
+    converted, spans = target_series._matrixport_usd_conversion(
+        proof,
+        fx_manifest_content=fx_manifest_bytes,
+        provider_manifest=provider_manifest,
+        matrixport_manifest=matrixport_manifest,
+        source_gap_policy={
+            "declared_missing_source_dates": ["2026-09-03"],
+            "omitted_return_dates": ["2026-09-04"],
+            "span_return_receipts": [receipt],
+        },
+        account_live_start=date(2026, 9, 1),
+        admission_cutoff=date(2026, 9, 17),
+    )
+
+    assert converted == [{"date": "2026-09-02", "return": "0.21"}]
+    assert spans == []
+
+
+def test_matrixport_usd_gap_span_past_the_boundary_stays_native_validated() -> None:
+    """Bounding the conversion does not waive native gap-span validation."""
+
+    proof, provider_manifest, matrixport_manifest, fx_manifest_bytes = (
+        _matrixport_usd_conversion_fixture(
+            nav_days=6,
+            rate_days=3,
+            missing_days=frozenset({date(2026, 9, 4)}),
+        )
+    )
+    policy = {
+        "declared_missing_source_dates": ["2026-09-04"],
+        "omitted_return_dates": ["2026-09-05"],
+    }
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="Matrixport native gap span return differs from source authority",
+    ):
+        target_series._matrixport_usd_conversion(
+            proof,
+            fx_manifest_content=fx_manifest_bytes,
+            provider_manifest=provider_manifest,
+            matrixport_manifest=matrixport_manifest,
+            source_gap_policy={
+                **policy,
+                "span_return_receipts": [
+                    {
+                        **_matrixport_span_receipt(
+                            date(2026, 9, 3), date(2026, 9, 5), "121", "141"
+                        ),
+                        "return": "0.5",
+                    }
+                ],
+            },
+            account_live_start=date(2026, 9, 1),
+            admission_cutoff=date(2026, 9, 17),
+        )
+
+    unobserved = {
+        **policy,
+        "span_return_receipts": [
+            _matrixport_span_receipt(date(2026, 9, 3), date(2026, 9, 9), "121", "161")
+        ],
+    }
+    with pytest.raises(
+        TargetSeriesError,
+        match="Matrixport native gap span lacks exact endpoints",
+    ):
+        target_series._matrixport_usd_conversion(
+            proof,
+            fx_manifest_content=fx_manifest_bytes,
+            provider_manifest=provider_manifest,
+            matrixport_manifest=matrixport_manifest,
+            source_gap_policy=unobserved,
+            account_live_start=date(2026, 9, 1),
+            admission_cutoff=date(2026, 9, 17),
+        )
 
 
 def test_matrixport_target_starts_account_live_only_after_funding(
