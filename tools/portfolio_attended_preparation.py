@@ -13,6 +13,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+from types import ModuleType
 from typing import Any, Callable, Mapping, TypedDict, cast
 
 from quant_engine.core import run_storage
@@ -94,7 +96,9 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "ledger_admission": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/provider_admission.py",
     "ledger_hwm_inputs": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_inputs.py",
     "ledger_models": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/models.py",
+    "ledger_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "performance": "contracts/portfolio-performance-policy-v1.json",
+    "portfolio_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "provider_ledger": "tools/provider_ledger.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
     "release_builder": "tools/portfolio_release_builder.py",
@@ -135,6 +139,7 @@ _PREPARATION_STAGE_CODE = {
         "stage_current_epoch_manifest",
         "account_manifest_generation",
         "account_strategy_manifest",
+        "portfolio_returns",
         "verify_account_manifest_generation",
         "release_builder",
     ),
@@ -152,6 +157,7 @@ _PREPARATION_STAGE_CODE = {
         "attended_preparation",
         "capital_input",
         "provider_ledger",
+        "ledger_returns",
         "financial_outcomes",
         "hwm_inputs",
         "invested_capital",
@@ -603,12 +609,83 @@ def _selected_dependence_handoff(
     }
 
 
+def _head_committed_file_bytes(relative_path: str) -> bytes:
+    """Return the bytes HEAD commits for one repository-relative file."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"HEAD:{relative_path}"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        ) from exc
+    if completed.returncode != 0:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        )
+    return completed.stdout
+
+
+def _require_executing_history_tool_matches_head(history: ModuleType) -> None:
+    """Refuse a rebuild that would execute bytes the release commit does not hold.
+
+    A staleness verdict licenses rebuilding from the current code while the
+    rebuilt manifest records ``release_commit`` as its repository identity.
+    The rebuild executes the history tool's on-disk bytes, so those bytes must
+    match HEAD's committed bytes: uncommitted or tampered tool bytes would be
+    executed while the clean HEAD SHA is recorded, and the operator must commit
+    or restore first.
+    """
+
+    tool_file = getattr(history, "__file__", None)
+    if not isinstance(tool_file, str) or not tool_file:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        )
+    tool_path = Path(tool_file).resolve()
+    try:
+        relative_path = tool_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        raise AttendedPreparationError(
+            "layered history tool is outside the repository; refusing rebuild"
+        ) from None
+    committed = _head_committed_file_bytes(relative_path)
+    if (
+        hashlib.sha256(committed).digest()
+        != hashlib.sha256(tool_path.read_bytes()).digest()
+    ):
+        raise AttendedPreparationError(
+            "layered history tool has uncommitted changes; refusing rebuild"
+        )
+
+
 def _retained_history_requires_rebuild(
     history_root: Path,
     contract_path: Path,
     authorities: _HistoryAuthorities,
 ) -> bool:
-    """Distinguish stale code-bound derived history from invalid source evidence."""
+    """Distinguish stale code- or ledger-bound derived history from invalid evidence.
+
+    The verifier marks a TargetSeriesError as ``kind="staleness"`` only when a
+    well-formed retained generation is one cycle behind by design: the code
+    that defines it moved on (a recorded repository dependency differs, or
+    the history tool itself was edited after the build so its trusted
+    identity no longer matches), its current source admission proof binds a
+    previous ledger generation, or its account-live returns no longer match
+    the provider ledger after a semantics change. Each such generation is
+    rebuilt from the frozen selected bytes, and only after the executing
+    history tool's own bytes match HEAD's committed bytes: uncommitted tool
+    bytes fail closed instead of being executed under a clean recorded SHA.
+    Every other TargetSeriesError is an integrity failure of the retained
+    evidence itself (tampered artifact bytes, an invalid or non-canonical
+    manifest, a differing inventory, an unreadable generation), and raw
+    OSError escapes are unreadable evidence; both fail closed without
+    rebuilding.
+    """
 
     import portfolio_target_series as history
 
@@ -618,8 +695,13 @@ def _retained_history_requires_rebuild(
                 history_root, contract_path, require_mode=mode, **authorities
             )
         except history.TargetSeriesError as exc:
-            if str(exc).startswith("layered history repository dependency differs:"):
+            if exc.kind == "staleness":
+                _require_executing_history_tool_matches_head(history)
                 return True
+            raise AttendedPreparationError(
+                "retained layered history is invalid"
+            ) from exc
+        except OSError as exc:
             raise AttendedPreparationError(
                 "retained layered history is invalid"
             ) from exc
@@ -1700,6 +1782,11 @@ def _prepare_attended_inputs(
         )
 
     crosswalk = root / "preparation" / "current-epoch-crosswalk.json"
+    epoch_membership_census = (
+        _pin(config["epoch_membership_census"], "epoch membership census")
+        if config.get("epoch_membership_census") is not None
+        else ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
     epoch_checkpoint = reuse("epoch")
     if epoch_checkpoint is not None:
         epoch = dict(epoch_checkpoint["epoch"])
@@ -1772,6 +1859,7 @@ def _prepare_attended_inputs(
             admission_policy_path=_pin(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
+            membership_census_path=epoch_membership_census,
             receipt_paths=receipt_paths,
             output_generation_root=root / "stages" / "epoch",
         )
@@ -1846,6 +1934,7 @@ def _prepare_attended_inputs(
             "account_manifest_admission_policy_path": _pin(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
+            "membership_census_path": epoch_membership_census,
             "account_manifest_flow_classification_policy_path": ROOT
             / "contracts"
             / "account-strategy-flow-classification-policy-v1.json",

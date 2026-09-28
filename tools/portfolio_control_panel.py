@@ -181,6 +181,11 @@ FLOW_CLASSIFICATION_POLICY = (
     / "contracts"
     / "account-strategy-flow-classification-policy-v1.json"
 )
+_GOVERNED_MEMBERSHIP_CENSUS: Final[Path] = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
 PANEL_FILES: Final = (
     "index.html",
     "styles.css",
@@ -3112,9 +3117,49 @@ def _suppress_unmatched_report_performance(
     return suppressed
 
 
+def _validate_twr_payload(row: Mapping[str, Any]) -> None:
+    """Validate the manifest-bound TWR payload a report row carries.
+
+    The report TWR is the epoch manifest's own engine result; the panel
+    never recomputes it, so an available TWR must arrive with the epoch
+    observation facts it was linked over, and an unavailable TWR must
+    carry no numeric value.
+    """
+
+    twr = row.get("twr")
+    twr_status = row.get("twr_status")
+    if str(twr_status).startswith("AVAILABLE"):
+        if not isinstance(twr, str) or not twr:
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+        nav_observations = row.get("nav_observations")
+        if not isinstance(nav_observations, int) or nav_observations < 1:
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+        for field in ("observed_start", "observed_end"):
+            value = row.get(field)
+            if not isinstance(value, str):
+                raise ControlPanelValidationError("available TWR payload is incomplete")
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ControlPanelValidationError(
+                        "available TWR payload is incomplete"
+                    )
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    "available TWR payload is incomplete"
+                ) from exc
+        flow_count = row.get("flow_count")
+        if flow_count is not None and (
+            not isinstance(flow_count, int) or flow_count < 0
+        ):
+            raise ControlPanelValidationError("available TWR payload is incomplete")
+    elif twr is not None:
+        raise ControlPanelValidationError("unavailable TWR must carry no value")
+
+
 def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
-    """Keep the panel a strict projection of governed report MWR facts."""
+    """Keep the panel a strict projection of governed report TWR/MWR facts."""
     for row in rows:
+        _validate_twr_payload(row)
         status = row.get("mwr_status")
         if status == "AVAILABLE":
             required = (
@@ -9953,6 +9998,7 @@ def _account_manifest(
     admission_policy_path: Path | None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    membership_census_path: Path | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Bind one manifest snapshot and independently reproduce it when required.
 
@@ -10062,6 +10108,11 @@ def _account_manifest(
                 flow_coverage_path=flow_coverage_path,
                 classification_policy_path=classification_policy_path,
                 admission_policy_path=admission_policy_path,
+                membership_census_path=(
+                    _GOVERNED_MEMBERSHIP_CENSUS
+                    if membership_census_path is None
+                    else membership_census_path
+                ),
             )
         except ManifestError as exc:
             raise ControlPanelValidationError(
@@ -10181,6 +10232,7 @@ def _rendered_files(
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[
@@ -10428,6 +10480,7 @@ def _rendered_files(
         admission_policy_path=manifest_admission_policy_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        membership_census_path=manifest_membership_census_path,
     )
     if financial_mode:
         assert baseline_root is not None
@@ -10962,6 +11015,7 @@ def build_candidate(
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -10999,6 +11053,7 @@ def build_candidate(
         strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        manifest_membership_census_path=manifest_membership_census_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
@@ -11092,6 +11147,7 @@ def verify_candidate(
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -11129,6 +11185,7 @@ def verify_candidate(
         strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        manifest_membership_census_path=manifest_membership_census_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
@@ -12442,6 +12499,7 @@ def publish_panel(
     *,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    manifest_membership_census_path: Path | None = None,
     invested_capital_result: Mapping[str, Any] | None = None,
     invested_capital_input_generation_path: Path | None = None,
     private_stage_root: Path | None = None,
@@ -12512,6 +12570,7 @@ def publish_panel(
         manifest_admission_policy_path=manifest_admission_policy_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        manifest_membership_census_path=manifest_membership_census_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
@@ -12559,6 +12618,7 @@ def publish_panel(
         manifest_admission_policy_path=manifest_admission_policy_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        manifest_membership_census_path=manifest_membership_census_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
@@ -13062,6 +13122,14 @@ def _parser() -> argparse.ArgumentParser:
             type=Path,
             help="Selected admission-policy artifact used by the manifest",
         )
+        command.add_argument(
+            "--manifest-membership-census-json",
+            type=Path,
+            help=(
+                "Selected governed membership-census artifact used by the "
+                "manifest (defaults to the repository census contract)"
+            ),
+        )
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--freshness-health", type=Path, required=True)
         command.add_argument(
@@ -13198,6 +13266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 report_candidate=args.report_candidate,
                 strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
@@ -13247,6 +13316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 report_candidate=args.report_candidate,
                 strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
@@ -13295,6 +13365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                manifest_membership_census_path=(args.manifest_membership_census_json),
                 account_manifest_generation_root=(
                     args.account_manifest_generation_root
                 ),

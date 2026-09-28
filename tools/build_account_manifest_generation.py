@@ -33,6 +33,7 @@ from quant_engine.core.contracts import (
     canonical_json_bytes,
 )
 from tools.account_strategy_manifest import (
+    PERFORMANCE_ROW_FIELDS,
     ManifestCandidateSnapshots,
     ManifestError,
     build_manifest_candidate_from_snapshots,
@@ -599,6 +600,7 @@ class AccountManifestSelectedInputs:
     receipt_authority: InputSnapshot | None = None
     admission_policy: InputSnapshot | None = None
     manifest_schema: InputSnapshot | None = None
+    membership_census: InputSnapshot | None = None
     provider_ledger_generation_id: str = field(init=False)
     baseline_generation_id: str = field(init=False)
     generation_as_of_date: date = field(init=False)
@@ -635,23 +637,29 @@ class AccountManifestSelectedInputs:
             self.receipt_authority,
             self.admission_policy,
             self.manifest_schema,
+            self.membership_census,
         )
         if any(value is None for value in optional_snapshots) and any(
             value is not None for value in optional_snapshots
         ):
             raise AccountAssignmentPerimeterError(
-                "receipt_authority, admission_policy, and manifest_schema must be selected together"
+                "receipt_authority, admission_policy, manifest_schema, and "
+                "membership_census must be selected together"
             )
         if all(value is not None for value in optional_snapshots):
-            authority, admission, schema = optional_snapshots
+            authority, admission, schema, census = optional_snapshots
             assert (
-                authority is not None and admission is not None and schema is not None
+                authority is not None
+                and admission is not None
+                and schema is not None
+                and census is not None
             )
             authority = _require_snapshot(authority, "receipt_authority")
             admission = _require_snapshot(admission, "admission_policy")
             schema = _require_snapshot(schema, "manifest_schema")
+            census = _require_snapshot(census, "membership_census")
         else:
-            authority = admission = schema = None
+            authority = admission = schema = census = None
         if not isinstance(self.retrieval_receipts, Mapping):
             raise AccountAssignmentPerimeterError(
                 "retrieval_receipts must be a mapping"
@@ -697,6 +705,7 @@ class AccountManifestSelectedInputs:
         object.__setattr__(self, "receipt_authority", authority)
         object.__setattr__(self, "admission_policy", admission)
         object.__setattr__(self, "manifest_schema", schema)
+        object.__setattr__(self, "membership_census", census)
         object.__setattr__(self, "provider_ledger_generation_id", ledger_id)
         object.__setattr__(self, "baseline_generation_id", baseline_id)
         object.__setattr__(
@@ -759,6 +768,7 @@ def _selected_input_identities(
     if selected_inputs.receipt_authority is not None:
         assert selected_inputs.admission_policy is not None
         assert selected_inputs.manifest_schema is not None
+        assert selected_inputs.membership_census is not None
         payload["receipt_authority"] = _snapshot_identity(
             selected_inputs.receipt_authority
         )
@@ -766,6 +776,9 @@ def _selected_input_identities(
             selected_inputs.admission_policy
         )
         payload["manifest_schema"] = _snapshot_identity(selected_inputs.manifest_schema)
+        payload["membership_census"] = _snapshot_identity(
+            selected_inputs.membership_census
+        )
     if selected_inputs.current_epoch_crosswalk is not None:
         payload["current_epoch_crosswalk"] = _snapshot_identity(
             selected_inputs.current_epoch_crosswalk
@@ -3006,7 +3019,28 @@ def _mixed_admitted_fact_projection(
         raise AccountAssignmentPerimeterError(
             "receipt-routed calculation projection is incomplete"
         )
-    projected_navs = [nav for nav in navs if in_funded_epoch(nav, "as_of_date")]
+    # R1: each funded epoch opens at its account's last observation before the
+    # funded start, so that one observation (of any status) is projected too.
+    opening_record_ids: set[object] = set()
+    for route in funded_routes:
+        route_account = route["assignment"]["account_id"]
+        route_start = str(route["assignment"]["effective_start"])
+        prior = [
+            nav
+            for nav in navs
+            if nav.get("account_id") == route_account
+            and str(nav.get("as_of_date")) < route_start
+        ]
+        if prior:
+            opening_record_ids.add(
+                max(prior, key=lambda nav: str(nav.get("as_of_date"))).get("record_id")
+            )
+    projected_navs = [
+        nav
+        for nav in navs
+        if in_funded_epoch(nav, "as_of_date")
+        or nav.get("record_id") in opening_record_ids
+    ]
 
     def anchor_membership_date(anchor: Mapping[str, object]) -> str:
         if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
@@ -3485,6 +3519,9 @@ def _build_mixed_account_manifest_payloads(
             calculation_code=selected_inputs.epoch_producer_source,
             manifest_schema=selected_inputs.manifest_schema,
             baseline_generation_id=selected_inputs.baseline_generation_id,
+            membership_census=_require_snapshot(
+                selected_inputs.membership_census, "membership_census"
+            ),
             selected_assignment_keys=tuple(
                 tuple(_c3_assignment_record(assignment).values())
                 for assignment in mapped
@@ -3522,6 +3559,7 @@ def _build_mixed_account_manifest_payloads(
         "capital_flow_trace",
         "nav_observation_trace",
         "nav_observations",
+        *PERFORMANCE_ROW_FIELDS,
     }
     cutoff_excluded_keys = (
         cutoff_excluded_opening_anchor_keys
@@ -3764,6 +3802,7 @@ def _build_mixed_account_manifest_payloads(
         "capital_flow_trace",
         "nav_observation_trace",
         "nav_observations",
+        *PERFORMANCE_ROW_FIELDS,
     }
     if any(
         forbidden & set(row)
@@ -4153,6 +4192,13 @@ def stage_account_manifest_generation(
         receipt_authority=selected_inputs.receipt_authority,
         admission_policy=selected_inputs.admission_policy,
         manifest_schema=selected_inputs.manifest_schema,
+        membership_census=(
+            None
+            if selected_inputs.membership_census is None
+            else _require_snapshot(
+                selected_inputs.membership_census, "membership_census"
+            )
+        ),
         current_epoch_crosswalk=selected_inputs.current_epoch_crosswalk,
     )
     report = verifier_type().verify(verifier_inputs, subjects)

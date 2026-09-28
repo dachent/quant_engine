@@ -393,6 +393,9 @@ ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
     / "contracts"
     / "account-strategy-flow-classification-policy-v1.json"
 )
+ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS = (
+    REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+)
 HYBRID_PANEL_ROOT_IDS = {
     "dynamic-style": "hybrid-dynamic-style",
     "europe-economic": "hybrid-europe-economic",
@@ -2734,6 +2737,7 @@ def _financial_epoch_manifest_proof(
             flow_coverage_path=selected_paths["account_strategy_flow_coverage"],
             classification_policy_path=ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
             admission_policy_path=selected_paths["account_strategy_admission_policy"],
+            membership_census_path=ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise MaterializationError(

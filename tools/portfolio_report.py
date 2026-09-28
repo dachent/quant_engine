@@ -61,6 +61,11 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
+from quant_engine.portfolio_ledger.returns import (
+    ReturnsError,
+    ReturnSpan,
+    splice_spans,
+)
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -1172,46 +1177,13 @@ def _account_strategy_performance(
     *,
     calculation_cutoff_date: str | None = None,
 ) -> list[dict[str, Any]]:
-    cutoff = (
-        None
-        if calculation_cutoff_date is None
-        else _date(calculation_cutoff_date, "calculation cutoff date")
-    )
     admitted_epoch_keys = {
         key
         for key, detail in (current_epoch_details or {}).items()
         if detail.get("epoch_admission_status") == "FUNDED"
     }
-    admitted_account_ids = {key[0] for key in admitted_epoch_keys}
     admitted_strategy_ids = {key[1] for key in admitted_epoch_keys}
     admission_governed = current_epoch_details is not None
-
-    nav_by_account: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in _objects(catalog.get("nav_observations"), "nav_observations"):
-        if admission_governed and record.get("account_id") not in admitted_account_ids:
-            continue
-        if cutoff is not None and _date(record.get("as_of_date"), "nav.date") > cutoff:
-            continue
-        nav_by_account[_text(record.get("account_id"), "nav.account_id")].append(record)
-    flows_by_account: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in _objects(catalog.get("flows"), "flows"):
-        if admission_governed and record.get("account_id") not in admitted_account_ids:
-            continue
-        if cutoff is not None and _date(record.get("event_date"), "flow.date") > cutoff:
-            continue
-        flows_by_account[_text(record.get("account_id"), "flow.account_id")].append(
-            record
-        )
-    confirmed_missing: dict[str, set[date]] = defaultdict(set)
-    for record in _objects(catalog.get("calendar_coverage"), "calendar_coverage"):
-        if admission_governed and record.get("account_id") not in admitted_account_ids:
-            continue
-        if cutoff is not None and _date(record.get("date"), "calendar.date") > cutoff:
-            continue
-        if record.get("status") == "MISSING_ON_PROVIDER_OBSERVED_DATE":
-            confirmed_missing[
-                _text(record.get("account_id"), "calendar.account_id")
-            ].add(_date(record.get("date"), "calendar.date"))
 
     rows: list[dict[str, Any]] = []
     assignments = _objects(catalog.get("assignments"), "assignments")
@@ -1262,10 +1234,11 @@ def _account_strategy_performance(
                 if row.get("strategy_id") in admitted_strategy_ids
             ],
         }
-    canonical_live = _account_live_return_series(
+    account_owned_live = _account_live_return_series(
         return_catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
+        account_owned=True,
     )
     for evidence in _objects(
         catalog.get("strategy_provider_evidence", []),
@@ -1279,9 +1252,6 @@ def _account_strategy_performance(
         if evidence.get("evidence_layer") != "ACCOUNT_LIVE":
             continue
         strategy_id = _text(evidence.get("strategy_id"), "evidence.strategy_id")
-        canonical = canonical_live.get(strategy_id)
-        if canonical is None:
-            continue
         account = _object(evidence.get("account"), "evidence.account")
         account_scopes = _objects(account.get("account_scopes", []), "account_scopes")
         scoped_accounts: list[tuple[str, str, str | None]] = [
@@ -1318,17 +1288,22 @@ def _account_strategy_performance(
                         )
                     ]
         for account_id, binding, assignment_id in scoped_accounts:
+            own_path = account_owned_live.get((account_id, strategy_id))
+            if own_path is None:
+                # A per-account return path is the account's OWN path; a
+                # strategy-level composite is never substituted for it.
+                continue
             account_live_paths[(account_id, strategy_id)] = {
                 "return_path_account_binding": binding,
                 "return_path_assignment_id": assignment_id,
                 "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
-                "return_path_cumulative_return": canonical["cumulative_return"],
+                "return_path_cumulative_return": own_path["cumulative_return"],
                 "return_path_evidence_layer": "ACCOUNT_LIVE",
                 "return_path_generation_id": evidence.get("generation_id"),
-                "return_path_observations": canonical["return_observations"],
-                "return_path_observed_end": canonical["observed_end"],
-                "return_path_observed_start": canonical["observed_start"],
-                "return_path_series_sha256": canonical["return_series_sha256"],
+                "return_path_observations": own_path["return_observations"],
+                "return_path_observed_end": own_path["observed_end"],
+                "return_path_observed_start": own_path["observed_start"],
+                "return_path_series_sha256": own_path["return_series_sha256"],
                 "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
             }
     for assignment in assignments:
@@ -1355,7 +1330,7 @@ def _account_strategy_performance(
             "effective_end": end.isoformat() if end is not None else None,
             "effective_start": start.isoformat() if start is not None else None,
             "flow_count": 0,
-            "flow_timing": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING",
+            "flow_timing": None,
             "last_four": None,
             "mwr_cashflows": [],
             "mwr_coverage_status": "BLOCKED",
@@ -1422,8 +1397,8 @@ def _account_strategy_performance(
                 }
             )
             if detail is not None and detail["epoch_admission_status"] == "BLOCKED":
-                if detail.get("mwr_payload") is not None:
-                    base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
+                if detail.get("performance_payload") is not None:
+                    base.update(cast(Mapping[str, Any], detail["performance_payload"]))
                 base.update(
                     {
                         "flow_count": None,
@@ -1450,8 +1425,8 @@ def _account_strategy_performance(
                 )
                 rows.append(base)
                 continue
-            if detail is not None and detail.get("mwr_payload") is not None:
-                base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
+            if detail is not None and detail.get("performance_payload") is not None:
+                base.update(cast(Mapping[str, Any], detail["performance_payload"]))
         if mapping_status != "MAPPED" or assignment.get("strategy_id") is None:
             base["twr_status"] = "UNMAPPED"
             rows.append(base)
@@ -1462,69 +1437,39 @@ def _account_strategy_performance(
             rows.append(base)
             continue
         base.update(account_live_paths.get((account_id, strategy_id), {}))
-        nav = [
-            item
-            for item in nav_by_account.get(account_id, [])
-            if _inside(_date(item.get("as_of_date"), "nav.date"), start, end)
-        ]
-        nav.sort(key=lambda item: _date(item.get("as_of_date"), "nav.date"))
-        flows = [
-            item
-            for item in flows_by_account.get(account_id, [])
-            if item.get("strategy_id") == strategy_id
-            and _inside(_date(item.get("event_date"), "flow.date"), start, end)
-        ]
-        base["flow_count"] = len(flows)
-        base["nav_observations"] = len(nav)
-        if len(nav) < 2:
-            base["twr_status"] = "UNAVAILABLE_INSUFFICIENT_NAV"
-            rows.append(base)
-            continue
-        observed_start = _date(nav[0].get("as_of_date"), "nav.date")
-        observed_end = _date(nav[-1].get("as_of_date"), "nav.date")
-        base["observed_start"] = observed_start.isoformat()
-        base["observed_end"] = observed_end.isoformat()
-        if any(
-            observed_start <= day <= observed_end
-            for day in confirmed_missing[account_id]
-        ):
-            base["twr_status"] = "UNAVAILABLE_MISSING_NAV"
-            rows.append(base)
-            continue
-        nav_dates = {_date(item.get("as_of_date"), "nav.date") for item in nav}
-        if any(
-            _date(item.get("event_date"), "flow.date") not in nav_dates
-            for item in flows
-        ):
-            base["twr_status"] = "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV"
-            rows.append(base)
-            continue
-        if any(
-            _object(item.get("amount"), "flow.amount").get("status") != "AVAILABLE"
-            for item in flows
-        ):
-            base["twr_status"] = "UNAVAILABLE_FLOW_AMOUNT"
-            rows.append(base)
-            continue
-        flow_by_date: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
-        for flow in flows:
-            flow_by_date[_date(flow.get("event_date"), "flow.date")] += _amount(
-                flow, "amount"
+        if current_epoch_details is not None:
+            # The epoch TWR is the manifest engine's own result; it is never
+            # re-derived here from raw NAV and flow records (P1 is retired).
+            # For every single-account strategy the manifest epoch TWR must
+            # equal the account's own compounded return path -- the daily
+            # account-live series with the epoch HPR gap spans spliced in --
+            # within 1e-12, else the two engine views disagree.
+            own_path = account_owned_live.get((account_id, strategy_id))
+            payload = detail.get("performance_payload") if detail is not None else None
+            epoch_twr = (
+                payload.get("twr")
+                if isinstance(payload, Mapping) and payload.get("twr") is not None
+                else None
             )
-        product = Decimal("1")
-        with localcontext() as context:
-            context.prec = 34
-            for prior_record, current_record in zip(nav, nav[1:]):
-                prior = _amount(prior_record, "nav")
-                current = _amount(current_record, "nav")
-                if prior <= 0:
-                    base["twr_status"] = "UNAVAILABLE_NONPOSITIVE_PRIOR_NAV"
-                    break
-                current_day = _date(current_record.get("as_of_date"), "nav.date")
-                product *= (current - flow_by_date[current_day]) / prior
-            else:
-                base["twr"] = decimal_text(product - Decimal("1"))
-                base["twr_status"] = "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+            strategy_account_ids = {
+                key[0] for key in current_epoch_details if key[1] == strategy_id
+            }
+            if (
+                own_path is not None
+                and epoch_twr is not None
+                and strategy_account_ids == {account_id}
+                and abs(
+                    _decimal(epoch_twr, "epoch manifest TWR")
+                    - _decimal(
+                        own_path["cumulative_return"],
+                        "account own return path",
+                    )
+                )
+                > Decimal("1e-12")
+            ):
+                raise ReportValidationError(
+                    "single-account epoch TWR differs from the account return path"
+                )
         rows.append(base)
     return sorted(
         rows,
@@ -2118,11 +2063,25 @@ def _account_live_return_series(
     strategy_product_controls: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     calculation_cutoff_date: str | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Hash and summarize each canonical account-live strategy return path."""
+    account_owned: bool = False,
+) -> dict[str | tuple[str, str], dict[str, Any]]:
+    """Hash and summarize each canonical account-live return path.
 
-    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    A strategy-level path groups every ACCOUNT_LIVE row of one strategy; an
+    account-owned path (``account_owned``) groups only the rows that account
+    composes alone, so a per-account return path is never a strategy-level
+    composite substitution.  Both compound through the one return engine
+    (``splice_spans``); the epoch HPR gap spans are spliced in that single
+    place.  The epoch receipt's hash/count bindings hold for the strategy
+    series, so they are enforced on strategy-level paths only, and an
+    account-owned path splices the receipt's gap spans only when that account
+    is the receipt's sole component -- a multi-account member composes only
+    a subset of the bound strategy series.
+    """
+
+    grouped: dict[str | tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     providers: dict[str, set[str]] = defaultdict(set)
+    strategy_components: dict[str, set[str]] = defaultdict(set)
     cutoff = (
         None
         if calculation_cutoff_date is None
@@ -2137,9 +2096,25 @@ def _account_live_return_series(
         parsed_day = _date(row.get("date"), "strategy return.date")
         if cutoff is not None and parsed_day > cutoff:
             continue
+        row_components = row.get("component_account_ids")
+        if isinstance(row_components, list):
+            strategy_components[strategy_id].update(
+                _text(item, "strategy return.component_account_ids")
+                for item in row_components
+            )
+        if account_owned:
+            components = row.get("component_account_ids")
+            if not isinstance(components, list) or len(components) != 1:
+                continue
+            series_key: str | tuple[str, str] = (
+                _text(components[0], "strategy return.component_account_ids"),
+                strategy_id,
+            )
+        else:
+            series_key = strategy_id
         day = parsed_day.isoformat()
         value = decimal_text(_decimal(row.get("return"), "strategy return.return"))
-        grouped[strategy_id].append({"date": day, "return": value})
+        grouped[series_key].append({"date": day, "return": value})
         providers[strategy_id].add(
             _text(row.get("provider_id"), "strategy return.provider_id")
         )
@@ -2147,10 +2122,11 @@ def _account_live_return_series(
     epoch_receipts = _epoch_hpr_receipts(
         catalog, calculation_cutoff_date=calculation_cutoff_date
     )
-    if set(epoch_receipts) - set(grouped):
+    if not account_owned and set(epoch_receipts) - set(grouped):
         raise ReportValidationError("epoch HPR receipt has no daily path")
-    result: dict[str, dict[str, Any]] = {}
-    for strategy_id, rows in grouped.items():
+    result: dict[str | tuple[str, str], dict[str, Any]] = {}
+    for series_key, rows in grouped.items():
+        strategy_id = series_key if isinstance(series_key, str) else series_key[1]
         rows.sort(key=lambda item: item["date"])
         dates = [item["date"] for item in rows]
         if len(dates) != len(set(dates)):
@@ -2158,77 +2134,96 @@ def _account_live_return_series(
                 f"account-live strategy returns repeat a date for {strategy_id}"
             )
         epoch_receipt = epoch_receipts.get(strategy_id)
+        if account_owned and strategy_components.get(strategy_id, set()) != {
+            series_key[0]
+        }:
+            # The epoch receipt binds the strategy-level series.  A member of
+            # a multi-account strategy composes only a subset of that series,
+            # so the receipt's gap spans must not be spliced into the
+            # member's own path.
+            epoch_receipt = None
         with localcontext() as context:
             # Matrixport's retained source arithmetic is a 28-significant-
             # digit Decimal path.  Replaying its HPR receipt at a wider local
             # precision changes the final digit and breaks the receipt binding.
             context.prec = 28 if epoch_receipt is not None else 34
-            wealth = Decimal("1")
-            peak = wealth
-            maximum_drawdown = Decimal("0")
             spans_by_start: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            path_dependent_metrics_available = True
             if epoch_receipt is not None:
                 out_of_window = bool(epoch_receipt.get("_out_of_window"))
-                if not out_of_window and (
-                    epoch_receipt["daily_return_observations"] != len(rows)
-                    or epoch_receipt["observed_start"] != dates[0]
-                    or epoch_receipt["observed_end"] != dates[-1]
-                    or epoch_receipt["daily_return_series_sha256"]
-                    != hashlib.sha256(_canonical_json_array_bytes(rows)).hexdigest()
+                if (
+                    not account_owned
+                    and not out_of_window
+                    and (
+                        epoch_receipt["daily_return_observations"] != len(rows)
+                        or epoch_receipt["observed_start"] != dates[0]
+                        or epoch_receipt["observed_end"] != dates[-1]
+                        or epoch_receipt["daily_return_series_sha256"]
+                        != hashlib.sha256(_canonical_json_array_bytes(rows)).hexdigest()
+                    )
                 ):
                     raise ReportValidationError("epoch HPR daily path differs")
-                daily_wealth = Decimal("1")
-                for item in rows:
-                    daily_wealth *= Decimal(1) + _decimal(
-                        item["return"], "canonical strategy return"
-                    )
-                if not out_of_window and decimal_text(
-                    daily_wealth - Decimal(1)
-                ) != decimal_text(
-                    _decimal(
-                        epoch_receipt["daily_cumulative_return"],
-                        "epoch HPR daily return",
-                    )
-                ):
-                    raise ReportValidationError("epoch HPR daily return differs")
+                if not account_owned:
+                    daily_wealth = Decimal("1")
+                    for item in rows:
+                        daily_wealth *= Decimal(1) + _decimal(
+                            item["return"], "canonical strategy return"
+                        )
+                    if not out_of_window and decimal_text(
+                        daily_wealth - Decimal(1)
+                    ) != decimal_text(
+                        _decimal(
+                            epoch_receipt["daily_cumulative_return"],
+                            "epoch HPR daily return",
+                        )
+                    ):
+                        raise ReportValidationError("epoch HPR daily return differs")
                 for span in _objects(
                     epoch_receipt["span_return_receipts"], "epoch HPR spans"
                 ):
                     if out_of_window and str(span["span_end_date"]) > dates[-1]:
                         continue
                     spans_by_start[str(span["span_start_date"])].append(span)
-                path_dependent_metrics_available = not bool(spans_by_start)
-                if not out_of_window and any(
-                    start not in dates
-                    or any(
-                        start < observed <= str(span["span_end_date"])
-                        for observed in dates
+                if (
+                    not account_owned
+                    and not out_of_window
+                    and any(
+                        start not in dates
+                        or any(
+                            start < observed <= str(span["span_end_date"])
+                            for observed in dates
+                        )
+                        for start, spans in spans_by_start.items()
+                        for span in spans
                     )
-                    for start, spans in spans_by_start.items()
-                    for span in spans
                 ):
                     raise ReportValidationError("epoch HPR span does not replace a gap")
-            for item in rows:
-                wealth *= Decimal("1") + _decimal(
-                    item["return"], "canonical strategy return"
+            try:
+                compounded = splice_spans(
+                    [
+                        (
+                            date.fromisoformat(item["date"]),
+                            _decimal(item["return"], "canonical strategy return"),
+                        )
+                        for item in rows
+                    ],
+                    [
+                        ReturnSpan(
+                            date.fromisoformat(str(span["span_start_date"])),
+                            date.fromisoformat(str(span["span_end_date"])),
+                            _decimal(span["return"], "epoch HPR span return"),
+                        )
+                        for spans in spans_by_start.values()
+                        for span in spans
+                    ],
                 )
-                if path_dependent_metrics_available:
-                    peak = max(peak, wealth)
-                    drawdown = (wealth / peak) - Decimal("1")
-                    maximum_drawdown = min(maximum_drawdown, drawdown)
-                for span in spans_by_start.get(item["date"], []):
-                    wealth *= Decimal(1) + _decimal(
-                        span["return"], "epoch HPR span return"
-                    )
-            cumulative_return = wealth - Decimal("1")
-            current_drawdown = (
-                (wealth / peak) - Decimal("1")
-                if path_dependent_metrics_available
-                else None
-            )
+            except ReturnsError as exc:
+                raise ReportValidationError(
+                    f"account-live return path is invalid for {strategy_id}: {exc}"
+                ) from exc
+            cumulative_return = compounded.cumulative_return
             if (
                 epoch_receipt is not None
+                and not account_owned
                 and not epoch_receipt.get("_out_of_window")
                 and decimal_text(cumulative_return)
                 != decimal_text(
@@ -2238,30 +2233,42 @@ def _account_live_return_series(
                 )
             ):
                 raise ReportValidationError("epoch HPR return differs")
-        result[strategy_id] = {
+        current_drawdown = compounded.current_drawdown
+        maximum_drawdown = (
+            compounded.maximum_drawdown
+            if compounded.path_dependent_metrics_available
+            else None
+        )
+        result[series_key] = {
             "cumulative_return": decimal_text(cumulative_return),
-            "daily_cumulative_return": decimal_text(daily_wealth - Decimal("1"))
-            if epoch_receipt is not None
-            else decimal_text(cumulative_return),
+            "daily_cumulative_return": (
+                decimal_text(compounded.daily_cumulative_return)
+                if epoch_receipt is not None
+                else decimal_text(cumulative_return)
+            ),
             "cumulative_return_label": (
                 "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
                 if epoch_receipt is not None and epoch_receipt["span_return_receipts"]
                 else "DAILY_GEOMETRIC_TWR"
             ),
             "current_drawdown": (
-                decimal_text(current_drawdown) if current_drawdown is not None else None
+                decimal_text(-current_drawdown)
+                if current_drawdown is not None
+                else None
             ),
             "maximum_drawdown": (
-                decimal_text(maximum_drawdown)
-                if path_dependent_metrics_available
+                decimal_text(-maximum_drawdown)
+                if maximum_drawdown is not None
                 else None
             ),
             "path_dependent_metrics_status": (
-                "AVAILABLE" if path_dependent_metrics_available else "UNAVAILABLE"
+                "AVAILABLE"
+                if compounded.path_dependent_metrics_available
+                else "UNAVAILABLE"
             ),
             "path_dependent_metrics_reason": (
                 None
-                if path_dependent_metrics_available
+                if compounded.path_dependent_metrics_available
                 else "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
             ),
             "observed_end": dates[-1],
@@ -2274,8 +2281,8 @@ def _account_live_return_series(
             ).hexdigest(),
             "epoch_holding_period_link_observations": (
                 epoch_receipts[strategy_id]["epoch_holding_period_link_observations"]
-                if strategy_id in epoch_receipts
-                else len(rows)
+                if not account_owned and strategy_id in epoch_receipts
+                else compounded.link_count
             ),
         }
     return result
@@ -5478,14 +5485,14 @@ def build_report_data(
                         row["effective_end"],
                     )
                 ]["epoch_blocking_reason"],
-                "mwr_payload": verified_epoch_details[
+                "performance_payload": verified_epoch_details[
                     (
                         row["account_id"],
                         row["strategy_id"],
                         row["effective_start"],
                         row["effective_end"],
                     )
-                ]["mwr_payload"],
+                ]["performance_payload"],
             }
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
@@ -5502,18 +5509,6 @@ def build_report_data(
         current_product_catalog = _current_product_baseline_projection(
             catalog, strategy_product_controls
         )
-    performance = _account_strategy_performance(
-        catalog,
-        strategy_product_controls,
-        current_epoch_tuples,
-        current_epoch_details,
-        calculation_cutoff_date=calculation_cutoff_date,
-    )
-    strategy_provider_evidence = _strategy_provider_evidence(
-        catalog,
-        strategy_product_controls,
-        calculation_cutoff_date=calculation_cutoff_date,
-    )
     strategy_names = {
         _text(item.get("name"), "strategy.name")
         for item in _objects(catalog.get("strategies"), "strategies")
@@ -5532,17 +5527,27 @@ def build_report_data(
             and history_contract_ref.get("as_of_date") != calculation_cutoff_date
         ):
             raise ReportValidationError("strategy history calculation cutoff differs")
-        epoch_hpr_receipts = history_contract_ref.pop("epoch_hpr_receipts", [])
+        # The epoch HPR receipts stay in the published contract reference; the
+        # return path is computed from the catalog AFTER they are attached, so
+        # the spliced path and the published receipts describe one path.
+        epoch_hpr_receipts = history_contract_ref.get("epoch_hpr_receipts", [])
         if epoch_hpr_receipts:
             catalog = {**catalog, "epoch_hpr_receipts": epoch_hpr_receipts}
             current_product_catalog = _current_product_baseline_projection(
                 catalog, strategy_product_controls
             )
-            strategy_provider_evidence = _strategy_provider_evidence(
-                catalog,
-                strategy_product_controls,
-                calculation_cutoff_date=calculation_cutoff_date,
-            )
+    strategy_provider_evidence = _strategy_provider_evidence(
+        catalog,
+        strategy_product_controls,
+        calculation_cutoff_date=calculation_cutoff_date,
+    )
+    performance = _account_strategy_performance(
+        catalog,
+        strategy_product_controls,
+        current_epoch_tuples,
+        current_epoch_details,
+        calculation_cutoff_date=calculation_cutoff_date,
+    )
     implementation_contract: dict[str, dict[str, Any]] | None = None
     implementation_contract_ref: dict[str, Any] | None = None
     implementation_policy_evidence = None
@@ -9019,29 +9024,59 @@ def _verified_epoch_authority_details(
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
-            "mwr_payload": {
-                field: manifest_row.get(field)
-                for field in (
-                    "mwr_status",
-                    "mwr_xirr",
-                    "mwr_reason",
-                    "mwr_opening_date",
-                    "mwr_opening_value",
-                    "mwr_terminal_date",
-                    "mwr_terminal_value",
-                    "mwr_currency",
-                    "mwr_coverage_status",
-                    "mwr_cashflows",
-                    "mwr_label",
-                    "mwr_value_basis",
-                    "mwr_valuation_timing",
-                    "mwr_day_count",
-                    "mwr_unit",
-                    "mwr_source_binding",
-                )
-            }
-            if "mwr_status" in manifest_row
-            else None,
+            "performance_payload": (
+                {
+                    **(
+                        {
+                            field: manifest_row.get(field)
+                            for field in (
+                                "mwr_status",
+                                "mwr_xirr",
+                                "mwr_reason",
+                                "mwr_opening_date",
+                                "mwr_opening_value",
+                                "mwr_terminal_date",
+                                "mwr_terminal_value",
+                                "mwr_currency",
+                                "mwr_coverage_status",
+                                "mwr_cashflows",
+                                "mwr_label",
+                                "mwr_value_basis",
+                                "mwr_valuation_timing",
+                                "mwr_day_count",
+                                "mwr_unit",
+                                "mwr_source_binding",
+                            )
+                        }
+                        if "mwr_status" in manifest_row
+                        else {}
+                    ),
+                    **(
+                        {
+                            "twr": manifest_row.get("observation_linked_return"),
+                            "twr_status": (
+                                "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+                                if manifest_row.get("performance_status") == "AVAILABLE"
+                                else "UNAVAILABLE"
+                            ),
+                            "flow_count": manifest_row.get("flow_count"),
+                            "nav_observations": manifest_row.get("nav_observations"),
+                            "observed_start": manifest_row.get("start"),
+                            "observed_end": manifest_row.get("end"),
+                            "flow_timing": (
+                                "DATE_ONLY_END_OF_DAY_INFERRED_TIMING"
+                                if "INFERRED_TIMING"
+                                in (manifest_row.get("performance_flags") or [])
+                                else None
+                            ),
+                        }
+                        if "performance_status" in manifest_row
+                        else {}
+                    ),
+                }
+                if "mwr_status" in manifest_row or "performance_status" in manifest_row
+                else None
+            ),
         }
     if (
         set(details) != set(by_key)

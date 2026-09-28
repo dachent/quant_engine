@@ -137,6 +137,21 @@
         "bundle_id": {"$ref": "#/$defs/sha256"},
         "evaluated_on": {"type": "string", "format": "date"},
         "evidence_mode_policy": {"type": "object"},
+        "epoch_hpr_receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidence_layer", "receipt", "source_generation_id", "source_id", "strategy_id"],
+            "properties": {
+              "evidence_layer": {"const": "ACCOUNT_LIVE"},
+              "receipt": {"type": "object"},
+              "source_generation_id": {"$ref": "#/$defs/sha256"},
+              "source_id": {"type": "string", "minLength": 1},
+              "strategy_id": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "returns_sha256": {"$ref": "#/$defs/sha256"},
         "returns_size_bytes": {"type": "integer", "minimum": 1},
         "schema": {"enum": ["portfolio-current-dependence-source/1", "portfolio-target-series-evidence-proof/1"]},
@@ -466,7 +481,7 @@
         },
         "mwr_label": {"enum": ["STRATEGY_EPOCH_MWR", "ACCOUNT_EPOCH_MWR", null]},
         "mwr_value_basis": {"enum": ["STRATEGY_NAV", "ACCOUNT_TOTAL", "ACCOUNT_VALUE", null]},
-        "mwr_valuation_timing": {"enum": ["ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
+        "mwr_valuation_timing": {"enum": ["NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE", "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
         "mwr_day_count": {"enum": ["ACTUAL_365", null]},
         "mwr_unit": {"enum": ["ANNUALIZED_RETURN", null]},
         "mwr_source_binding": {"enum": ["GOVERNED_SOURCE_IDENTITIES", null]},

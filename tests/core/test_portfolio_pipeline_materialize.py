@@ -309,6 +309,7 @@ def test_assessment_two_available_requires_real_selected_source_replay(
         ],
         "provider_ledger_generation_path": selected_paths["provider_generation"],
         "baseline_generation_path": selected_paths["baseline_generation"],
+        "membership_census_path": selected_paths["membership_census"],
     }
     import portfolio_pipeline_materialize as imported_materializer
 
@@ -1769,6 +1770,28 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             ],
         },
     )
+    membership_census_path = target / "account_strategy_membership_census.json"
+    _write_json(
+        membership_census_path,
+        {
+            "census_id": "synthetic-membership-census",
+            "current_census": {
+                "account_sleeves": [
+                    {
+                        "provider_id": "SYNTHETIC",
+                        "assignments": [
+                            {
+                                "status": "FUNDED_MEMBERSHIP",
+                                "strategy_id": "synthetic-strategy",
+                                "effective_start": AS_OF.isoformat(),
+                                "effective_end": None,
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    )
     inputs = {
         "account_strategy_ledger": ledger_path,
         "account_strategy_ledger_identity": ledger_identity_path,
@@ -1788,6 +1811,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             materializer.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
         ),
         admission_policy_path=admission_policy_path,
+        membership_census_path=membership_census_path,
     )
     staged_path = proof_root / "stages" / "panel" / "account-strategy-manifest.json"
     staged_bytes = canonical_json_bytes(manifest)
@@ -2099,6 +2123,11 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
     product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
     manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    monkeypatch.setattr(
+        materializer,
+        "ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS",
+        tmp_path / "epoch-manifest" / "account_strategy_membership_census.json",
+    )
     for key, path in manifest_inputs.items():
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
@@ -2321,6 +2350,65 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         materializer._semantic_gate_payload(accepted, epoch_manifest_proof=forged_proof)
 
 
+def test_epoch_manifest_proof_rebuild_binds_the_governed_membership_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The materialization proof rebuild must supply the census like the delivered path."""
+
+    assert materializer.ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS == (
+        ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    monkeypatch.setattr(
+        materializer,
+        "ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS",
+        tmp_path / "epoch-manifest" / "account_strategy_membership_census.json",
+    )
+    rebuild_kwargs: list[dict[str, object]] = []
+    producer = materializer._account_strategy_manifest_module()
+    original_build = producer.build_manifest_candidate
+
+    def capture_build(**kwargs: object) -> dict[str, object]:
+        rebuild_kwargs.append(kwargs)
+        return original_build(**kwargs)  # type: ignore[arg-type]
+
+    producer.build_manifest_candidate = capture_build
+    monkeypatch.setattr(
+        materializer, "_account_strategy_manifest_module", lambda: producer
+    )
+    manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    for key, path in manifest_inputs.items():
+        vertical[key] = _definition(path)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 9
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    pipeline_recipe = tmp_path / "schema-v9-pipeline-recipe.json"
+
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v9-financial-manifest",
+        output=pipeline_recipe,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+
+    assert len(rebuild_kwargs) == 2
+    assert (
+        rebuild_kwargs[1]["membership_census_path"]
+        == materializer.ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS
+    )
+
+
 def test_core_pipeline_rejects_legacy_provider_admission_adapter_v4(
     tmp_path: Path,
 ) -> None:
@@ -2439,6 +2527,11 @@ def test_schema_v9_declares_the_authority_snapshot_it_emits(
     vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
     product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
     manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    monkeypatch.setattr(
+        materializer,
+        "ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS",
+        tmp_path / "epoch-manifest" / "account_strategy_membership_census.json",
+    )
     for key, path in manifest_inputs.items():
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
@@ -2508,6 +2601,11 @@ def test_schema_v9_rejects_epoch_manifest_input_drift_after_recipe_creation(
     vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
     product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
     manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    monkeypatch.setattr(
+        materializer,
+        "ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS",
+        tmp_path / "epoch-manifest" / "account_strategy_membership_census.json",
+    )
     for key, path in manifest_inputs.items():
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
@@ -3768,6 +3866,11 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
     product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
     manifest_inputs = _install_real_epoch_proof(
         prepared_root, tmp_path / "epoch-manifest"
+    )
+    monkeypatch.setattr(
+        materializer,
+        "ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS",
+        tmp_path / "epoch-manifest" / "account_strategy_membership_census.json",
     )
     for key, path in manifest_inputs.items():
         vertical[key] = _definition(path)
