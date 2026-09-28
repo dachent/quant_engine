@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from .sources import (
     Bill,
     Crosswalk,
     Flow,
+    InputError,
     InputFile,
     Ledger,
     MatrixportWallet,
@@ -122,6 +124,25 @@ PINNED_SHA256 = {
     QB_VALUES: "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
     FX_HISTORY: "416cc69b4e525e2dfba19ed6ffc324527dec8e358f9a886d1a201690c3057b4c",
 }
+# An acceptance-inputs manifest (state/briefs/acceptance-inputs*.json) names each
+# input by path; the role is the file's basename. The account-strategy manifest is
+# a production output and is never read (the cutoff is the spec's fixed fact).
+ROLE_BY_BASENAME = {
+    "provider-ledger.json": LEDGER,
+    "account-strategy-current-epoch-crosswalk.json": CROSSWALK,
+    "nav_daily.csv": MP_NAV,
+    "wallet_deposits.csv": MP_DEPOSITS,
+    "wallet_bills.csv": MP_BILLS,
+    "wallet_currency_dispositions.csv": MP_DISPOSITIONS,
+    "accounts.csv": QB_ACCOUNTS,
+    "account_activity.csv": QB_ACTIVITY,
+    "dashboard_Volatis_Strategy_pricehistory.csv": QB_VALUES,
+    "yfinance-history.json": FX_HISTORY,
+}
+IGNORED_BASENAMES = frozenset({"account-strategy-manifest.json"})
+# Only this manifest schema is accepted: a newer version may redefine field
+# semantics (paths, sha256, bytes, cutoff) and must not be silently parsed.
+INPUTS_MANIFEST_SCHEMA = "qe-cp-acceptance-inputs/2"
 PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 FLOW_POLICY = "contracts/account-strategy-flow-classification-policy-v1.json"
@@ -260,6 +281,20 @@ CONVENTION_NOTES = (
     "ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL); a date without a rate is "
     "dropped. Each Matrixport row carries an fx_provenance note and a cross-check "
     "against the ledger valuation_fx copy.",
+    "Inputs: with --inputs, every input path and sha256 (and bytes when listed) "
+    "comes from the acceptance-inputs manifest, the role being the file's "
+    "basename; an unplaceable entry, a role named by two paths, or a used path "
+    "without one pinned sha256 fails closed, as does a manifest cutoff other than "
+    "the declared cutoff (R7). Without --inputs the built-in v1 table and pins are "
+    "used. The account-strategy manifest entry is a production output and is not "
+    "read.",
+    "R6 v2: raw = the finalized capture selected by the release run-observation "
+    "(acceptance-inputs-v2). Matrixport FX boundary only: raw NAV dates after "
+    "the admitted FX boundary are reported in notes as FX-unconverted with no "
+    "USD value, and that account's date.source_last_observation is the last raw "
+    "(FX-unconverted) NAV date while capital is the last USD-converted valuation "
+    "with its true as_of; every other source's date.source_last_observation is "
+    "its last value observation on or before the cutoff.",
     "R6 ledger valuations after the last raw observation are not expected values; "
     "their count and last date/value are reported in notes. Capital at cutoff for "
     "Quantbase/Matrixport = last raw observation on or before the cutoff with its "
@@ -267,6 +302,96 @@ CONVENTION_NOTES = (
     "Money: Decimal sums, rounded once to cents (ROUND_HALF_UP). Returns: "
     "Decimal (60 digits), quantized to 1e-12 (ROUND_HALF_UP).",
 )
+
+
+@dataclass(frozen=True)
+class InputsManifest:
+    """A verified acceptance-inputs manifest resolved to derivation roles."""
+
+    path: str
+    sha256: str
+    size: int
+    schema: str
+    cutoff: dt.date | None
+    layout: Mapping[str, str]
+    pins: Mapping[str, str]
+    sizes: Mapping[str, int]
+    ignored: tuple[str, ...]
+
+
+def load_inputs_manifest(data: bytes, label: str) -> InputsManifest:
+    """Resolve every derivation input from an acceptance-inputs manifest.
+
+    Fails closed (InputError) unless ``schema`` is exactly
+    ``qe-cp-acceptance-inputs/2``, when an entry cannot be placed, a role is
+    missing or named by two paths, or a used path carries no single pinned
+    sha256.
+    """
+
+    try:
+        document = json.loads(data.decode("utf-8"))
+        entries = document["inputs"]
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise InputError(f"inputs manifest {label} does not parse") from exc
+    schema = document.get("schema")
+    if schema != INPUTS_MANIFEST_SCHEMA:
+        raise InputError(
+            f"inputs manifest {label} schema {schema!r} is not {INPUTS_MANIFEST_SCHEMA}"
+        )
+    paths: dict[str, set[str]] = {}
+    shas: dict[str, set[str]] = {}
+    sizes: dict[str, set[int]] = {}
+    ignored: list[str] = []
+    for entry in entries:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path:
+            raise InputError(f"inputs manifest {label} has an entry without a path")
+        basename = re.split(r"[\\/]", path)[-1]
+        if basename in IGNORED_BASENAMES:
+            ignored.append(path)
+            continue
+        role = ROLE_BY_BASENAME.get(basename)
+        if role is None:
+            raise InputError(f"inputs manifest {label} names an unknown input {path}")
+        paths.setdefault(role, set()).add(path)
+        if entry.get("sha256") is not None:
+            shas.setdefault(path, set()).add(str(entry["sha256"]))
+        if entry.get("bytes") is not None:
+            sizes.setdefault(path, set()).add(int(entry["bytes"]))
+    layout: dict[str, str] = {}
+    pins: dict[str, str] = {}
+    size_of: dict[str, int] = {}
+    for role in INPUT_ORDER:
+        named = paths.get(role, set())
+        if len(named) != 1:
+            raise InputError(
+                f"inputs manifest {label} names {len(named)} path(s) for {role}"
+            )
+        (path,) = named
+        digests = shas.get(path, set())
+        if len(digests) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(digests))):
+            raise InputError(
+                f"inputs manifest {label} does not pin one sha256 for {path}"
+            )
+        layout[role] = path
+        pins[path] = next(iter(digests))
+        if len(sizes.get(path, set())) > 1:
+            raise InputError(
+                f"inputs manifest {label} lists conflicting bytes for {path}"
+            )
+        if sizes.get(path):
+            size_of[path] = next(iter(sizes[path]))
+    return InputsManifest(
+        path=label,
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=len(data),
+        schema=str(document.get("schema")),
+        cutoff=iso_date(document.get("cutoff")),
+        layout=layout,
+        pins=pins,
+        sizes=size_of,
+        ignored=tuple(ignored),
+    )
 
 
 def _fixed(value: Decimal, quantum: Decimal) -> str:
@@ -355,6 +480,9 @@ class AccountSource:
     flow_coverage_end: dt.date | None = None
     flow_notes: list[str] = field(default_factory=list)
     value_notes: list[str] = field(default_factory=list)
+    # Last raw value observation when it is later than the last usable valuation
+    # (Matrixport NAV observed after the admitted FX boundary, R6 v2).
+    raw_last_observation: dt.date | None = None
     # Non-empty: the value series itself is unusable (fail closed, never thinned).
     value_issue: str = ""
     anchor: tuple[dt.date, Decimal] | None = None
@@ -562,6 +690,7 @@ def _ledger_cross_check(
     raw: Mapping[dt.date, Decimal],
     ledger: Mapping[dt.date, Decimal],
     cutoff: dt.date,
+    boundary: str = "after the last raw observation",
 ) -> list[str]:
     """R6: the ledger is a cross-check; later ledger valuations are not expected."""
 
@@ -587,8 +716,8 @@ def _ledger_cross_check(
     )
     if later:
         notes.append(
-            f"R6 NOT EXPECTED VALUES: {len(later)} provider-ledger valuation(s) after "
-            f"the last raw observation {_day(last_raw) if last_raw else '-'}, "
+            f"R6 NOT EXPECTED VALUES: {len(later)} provider-ledger valuation(s) "
+            f"{boundary} {_day(last_raw) if last_raw else '-'}, "
             f"{_day(later[0])}..{_day(later[-1])}, last {_money(ledger[later[-1]])}"
         )
     return notes
@@ -669,11 +798,8 @@ def _quantbase_source(
     sleeve: QuantbaseSleeve = parse_quantbase_sleeve(
         files[QB_ACTIVITY].data, files[QB_ACCOUNTS].data, title
     )
-    raw_values = {
-        day: value
-        for day, value in parse_quantbase_values(files[QB_VALUES].data).items()
-        if day <= cutoff
-    }
+    all_raw_values = parse_quantbase_values(files[QB_VALUES].data)
+    raw_values = {day: value for day, value in all_raw_values.items() if day <= cutoff}
     source = AccountSource(
         account_id,
         "QUANTBASE",
@@ -721,12 +847,16 @@ def _quantbase_source(
     if sleeve.other_types:
         source.flow_notes.append(f"unknown fund txn types {list(sleeve.other_types)}")
     source.value_notes.extend(_ledger_cross_check(raw_values, ledger_values, cutoff))
-    if raw_values and sleeve.snapshot_value is not None:
-        last = max(raw_values)
+    if all_raw_values and sleeve.snapshot_value is not None:
+        # The accounts.csv snapshot is taken with the capture, so it is compared
+        # with the capture's latest price-history row (which may follow the cutoff).
+        last = max(all_raw_values)
         source.value_notes.append(
             f"cross-check raw accounts.csv fund value {_money(sleeve.snapshot_value)} "
-            f"vs raw value {_day(last)} {_money(raw_values[last])} diff "
-            f"{_money(sleeve.snapshot_value - raw_values[last])}"
+            f"vs latest raw price-history row {_day(last)} "
+            f"{_money(all_raw_values[last])}"
+            + (" (after the cutoff, not used)" if last > cutoff else "")
+            + f" diff {_money(sleeve.snapshot_value - all_raw_values[last])}"
         )
     source.notes.extend(source.flow_notes + source.value_notes)
     return source
@@ -736,7 +866,7 @@ def _fx_provenance(fx: FxSource, used: Sequence[dt.date]) -> str:
     after = [day for day in used if fx.admitted_through and day > fx.admitted_through]
     return (
         "fx_provenance: USDT->USD Yahoo daily Close from the contract-bound "
-        f"{fx.contract_generation[:8]} raw capture {FX_HISTORY} (sha256 {fx.sha256}; "
+        f"{fx.contract_generation[:8]} raw capture {fx.path} (sha256 {fx.sha256}; "
         "contract source_segments[portfolio-fx-rates].current_generation "
         f"{fx.contract_generation} observed through {fx.contract_observed_end}); "
         f"matrixport-account-generation splice_policy {fx.splice_rule}; admitted "
@@ -756,6 +886,7 @@ class FxSource:
     admitted_through: dt.date | None
     splice_rule: str
     dropped_after_boundary: int = 0
+    path: str = FX_HISTORY
 
 
 def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
@@ -790,6 +921,7 @@ def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
         admitted_through=through,
         splice_rule=rule or "-",
         dropped_after_boundary=len(raw) - len(admitted),
+        path=fx_file.path,
     )
 
 
@@ -933,6 +1065,7 @@ def _matrixport_source(
         )
     # Holding value per raw NAV date: units subscribed by then x NAV x USDT-USD.
     missing_fx: list[dt.date] = []
+    unconverted: list[dt.date] = []
     values: dict[dt.date, Decimal] = {}
     if units_added:
         first_day = min(day for day, _ in units_added)
@@ -941,7 +1074,10 @@ def _matrixport_source(
                 continue
             rate = fx.rates.get(day)
             if rate is None:
-                missing_fx.append(day)
+                if fx.admitted_through is not None and day > fx.admitted_through:
+                    unconverted.append(day)
+                else:
+                    missing_fx.append(day)
                 continue
             units = sum((u for confirm, u in units_added if confirm <= day), ZERO)
             values[day] = units * wallet.nav_per_unit[day] * rate
@@ -967,6 +1103,16 @@ def _matrixport_source(
             else ""
         )
     )
+    if unconverted:
+        source.raw_last_observation = unconverted[-1]
+        source.value_notes.append(
+            f"R6 v2 FX-UNCONVERTED: {len(unconverted)} raw NAV date(s) "
+            f"{_day(unconverted[0])}..{_day(unconverted[-1])} are after the admitted "
+            f"FX boundary {_day(fx.admitted_through) if fx.admitted_through else '-'}; "
+            "no USD value is emitted for them (last raw NAV "
+            f"{_day(unconverted[-1])} "
+            f"{wallet.nav_per_unit[unconverted[-1]]} per unit)"
+        )
     source.value_notes.append(_fx_provenance(fx, sorted(set(fx_days))))
     ledger_rates = {
         day: Decimal(str(item["rate"]))
@@ -1005,7 +1151,16 @@ def _matrixport_source(
         f"{len(ledger_flows.flows) + len(ledger_flows.unusable)} record(s), latest "
         f"{_day(max(ledger_days)) if ledger_days else '-'} (not used)"
     )
-    source.value_notes.extend(_ledger_cross_check(source.values, ledger_values, cutoff))
+    source.value_notes.extend(
+        _ledger_cross_check(
+            source.values,
+            ledger_values,
+            cutoff,
+            "after the last USD-converted raw valuation"
+            if unconverted
+            else "after the last raw observation",
+        )
+    )
     source.notes.extend(source.flow_notes + source.value_notes)
     return source
 
@@ -1020,9 +1175,26 @@ def derive(
     expected_sha256: Mapping[str, str] | None = None,
     layout: Mapping[str, str] | None = None,
     declared_cutoff: dt.date = DECLARED_CUTOFF,
+    manifest: InputsManifest | None = None,
 ) -> dict[str, Any]:
-    """Derive every metric; ``layout`` may relocate inputs (synthetic tests only)."""
+    """Derive every metric.
 
+    ``manifest`` (``--inputs``) supplies every input path and pin; without it the
+    built-in v1 table and ``PINNED_SHA256`` are used. ``layout`` and
+    ``expected_sha256`` may relocate inputs directly (synthetic tests only); a
+    manifest is mutually exclusive with both (fail closed), since it must
+    override them and silent overwriting would hide a conflicting source
+    selection.
+    """
+
+    if manifest is not None:
+        if layout is not None or expected_sha256 is not None:
+            raise InputError(
+                "inputs manifest (--inputs) cannot be combined with an explicit "
+                "layout or expected_sha256"
+            )
+        layout = manifest.layout
+        expected_sha256 = manifest.pins
     with localcontext() as context:
         context.prec = PRECISION
         return _derive(
@@ -1034,6 +1206,7 @@ def derive(
             expected_sha256,
             layout,
             declared_cutoff,
+            manifest,
         )
 
 
@@ -1046,12 +1219,20 @@ def _derive(
     expected_sha256: Mapping[str, str] | None,
     layout: Mapping[str, str] | None,
     declared_cutoff: dt.date,
+    manifest: InputsManifest | None,
 ) -> dict[str, Any]:
     pins = PINNED_SHA256 if expected_sha256 is None else expected_sha256
     moved = layout or {}
     files = {
         path: read_input(qe_root, moved.get(path, path), pins) for path in INPUT_ORDER
     }
+    if manifest is not None:
+        for item in files.values():
+            listed = manifest.sizes.get(item.path)
+            if listed is not None and listed != item.size:
+                raise InputError(
+                    f"{item.path} is {item.size} bytes, manifest lists {listed}"
+                )
     contract_bytes = {
         relative: repo_root.joinpath(*relative.split("/")).read_bytes()
         for relative in CONTRACTS
@@ -1071,6 +1252,7 @@ def _derive(
             ("crosswalk.as_of_date", crosswalk.as_of_date),
             ("provider-ledger.as_of_date", ledger.as_of_date),
         )
+        + ((("inputs manifest cutoff", manifest.cutoff),) if manifest else ())
         if value != declared_cutoff
     ]
     if mismatches:
@@ -1083,14 +1265,37 @@ def _derive(
         sources = _account_sources(crosswalk, ledger, files, fx, cutoff)
         _derive_accounts(output, crosswalk, membership, sources, cutoff)
         _derive_strategies_and_portfolio(output, crosswalk, membership, sources, cutoff)
+    if manifest is not None:
+        # Per-row source provenance: every inputs_used reference names the actual
+        # selected bytes. The sources are built from the fixed v1 role paths; with
+        # --inputs those roles resolved through the manifest, so rebind each
+        # reference to files[role].path (top-level inputs records) before emitting.
+        selected = {role: files[role].path for role in INPUT_ORDER}
+        for metric in output.metrics:
+            metric["inputs_used"] = sorted(
+                {
+                    selected.get(reference, reference)
+                    for reference in metric["inputs_used"]
+                }
+            )
     output.metrics.sort(key=lambda m: (m["metric_id"], m["entity"], m["window"] or ""))
     output.not_derivable.sort(key=lambda m: (m["metric_id"], m["entity"]))
-    return {
+    document: dict[str, Any] = {
         "schema": SCHEMA,
         "derivation": DERIVATION,
         "model": model,
         "code_commit": code_commit,
         "cutoff": _day(cutoff),
+    }
+    if manifest is not None:
+        document["inputs_manifest"] = {
+            "path": manifest.path,
+            "sha256": manifest.sha256,
+            "bytes": manifest.size,
+            "schema": manifest.schema,
+            "not_read": list(manifest.ignored),
+        }
+    return document | {
         "inputs": [
             {"path": item.path, "sha256": item.sha256, "bytes": item.size}
             for item in (files[path] for path in INPUT_ORDER)
@@ -1228,15 +1433,30 @@ def _derive_accounts(
                 source.value_inputs,
                 base_notes + extra + source.notes,
             )
+            # R6 v2: the source date is the last raw observation, which for
+            # Matrixport can be later than the last USD-convertible valuation.
+            observed = source.raw_last_observation or day
+            observed_stale = (cutoff - observed).days
             output.metric(
                 "date.source_last_observation",
                 account_id,
                 None,
-                day,
-                _day(day),
+                observed,
+                _day(observed),
                 "date",
                 source.value_inputs,
-                base_notes + extra + source.value_notes,
+                base_notes
+                + (
+                    [f"observation {observed_stale} day(s) before cutoff"]
+                    if observed_stale
+                    else []
+                )
+                + (
+                    [f"last USD-converted valuation {_day(day)} (FX boundary)"]
+                    if observed != day
+                    else []
+                )
+                + source.value_notes,
             )
         windowed = (
             "flows.account.net",

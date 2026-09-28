@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import hashlib
 import json
+import re
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -20,7 +22,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPOSITORY_ROOT / "acceptance"
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from derive_a import derive, numerics, sources  # noqa: E402
+from derive_a import cli, derive, numerics, sources  # noqa: E402
 
 D = Decimal
 
@@ -649,6 +651,10 @@ def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     assert (qb_capital["value"], qb_capital["as_of"]) == ("202.00", "2026-01-08")
     assert "R6 NOT EXPECTED VALUES: 1 provider-ledger valuation" in qb_capital["notes"]
     assert metrics[("date.source_last_observation", "acct-qb")]["value"] == "2026-01-08"
+    # Without --inputs the built-in v1 role paths are the per-row provenance.
+    assert qb_capital["inputs_used"] == sorted(
+        {derive.QB_VALUES, derive.QB_ACCOUNTS, derive.LEDGER}
+    )
     # Raw BUY 100 (BOD, dated 01-03) -> 202 / (100 + 100); the fee sale is an expense
     # and the ledger account deposit is ignored.
     assert metrics[("flows.account.count", "acct-qb")]["value"] == "1"
@@ -849,6 +855,15 @@ def test_fx_rates_after_the_admitted_boundary_are_ignored(tmp_path: Path) -> Non
         "admitted boundary 2026-01-08, 3 raw rate(s) after it ignored"
         in (capital["notes"])
     )
+    # R6 v2: the raw NAV observed on 01-09 is reported as FX-unconverted, and the
+    # source date is the last raw observation, not the last USD valuation.
+    assert (
+        "R6 v2 FX-UNCONVERTED: 1 raw NAV date(s) 2026-01-09..2026-01-09"
+        in (capital["notes"])
+    )
+    observed = metrics[("date.source_last_observation", "acct-mp")]
+    assert (observed["value"], observed["as_of"]) == ("2026-01-09", "2026-01-09")
+    assert "last USD-converted valuation 2026-01-08 (FX boundary)" in observed["notes"]
 
 
 def test_fx_history_close_is_read_exactly(tmp_path: Path) -> None:
@@ -1062,6 +1077,295 @@ def test_pinned_input_identity_is_enforced(tmp_path: Path) -> None:
     pins = {LAYOUT[path]: digest for path, digest in derive.PINNED_SHA256.items()}
     with pytest.raises(sources.InputError):
         _run(tmp_path, expected_sha256=pins)
+
+
+# ------------------------------------------------------------- inputs manifest
+
+
+def _manifest_tree(root: Path, absolute_fx: bool = True) -> dict[str, Any]:
+    """Copy the synthetic inputs under their real basenames and list them."""
+
+    _synthetic_root(root)
+    entries = [
+        {
+            "family": "declared_cutoff_date",
+            "path": "m/account-strategy-manifest.json",
+            "sha256": "0" * 64,
+            "bytes": 1,
+        }
+    ]
+    for canonical in derive.INPUT_ORDER:
+        basename = canonical.replace("\\", "/").split("/")[-1]
+        data = root.joinpath(*LAYOUT[canonical].split("/")).read_bytes()
+        target = root / "m" / basename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        path = (
+            str(target)
+            if absolute_fx and canonical == derive.FX_HISTORY
+            else f"m/{basename}"
+        )
+        entries.append(
+            {
+                "family": "synthetic",
+                "path": path,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+            }
+        )
+    # The ledger listed twice with the sha only once, as the real manifests do.
+    entries.append({"family": "flow_totals", "path": "m/provider-ledger.json"})
+    return {"schema": "qe-cp-acceptance-inputs/2", "cutoff": CUTOFF, "inputs": entries}
+
+
+def _run_manifest(root: Path, manifest: dict[str, Any]) -> Any:
+    loaded = derive.load_inputs_manifest(
+        json.dumps(manifest).encode("utf-8"), "synthetic-inputs.json"
+    )
+    return derive.derive(
+        root,
+        _synthetic_repo(root),
+        cutoff=day(CUTOFF),
+        model="test",
+        code_commit="test",
+        declared_cutoff=day(CUTOFF),
+        manifest=loaded,
+    )
+
+
+def test_inputs_manifest_resolves_every_role(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    baseline = _index(_run(tmp_path))
+    document = _run_manifest(tmp_path, manifest)
+    # Same bytes under manifest paths: identical expected values.
+    assert {k: v["value"] for k, v in _index(document).items()} == {
+        k: v["value"] for k, v in baseline.items()
+    }
+    paths = [item["path"] for item in document["inputs"]]
+    assert paths[0] == "m/provider-ledger.json"
+    assert paths[-1] == str(tmp_path / "m" / "yfinance-history.json")
+    assert document["inputs_manifest"]["path"] == "synthetic-inputs.json"
+    assert document["inputs_manifest"]["not_read"] == [
+        "m/account-strategy-manifest.json"
+    ]
+
+
+def test_inputs_manifest_binds_every_rows_provenance_to_selected_bytes(
+    tmp_path: Path,
+) -> None:
+    """Per-row source provenance (PR #492 review): with --inputs, every metric's
+    ``inputs_used`` must cite the selected manifest paths -- the same paths as
+    the top-level ``inputs`` records, so the expected-baseline's
+    ``authority_pointers`` bind values to the actual selected bytes -- never the
+    built-in v1 role paths, which carry no digest in the v2 inputs records."""
+
+    manifest = _manifest_tree(tmp_path)
+    document = _run_manifest(tmp_path, manifest)
+    digest_by_path: dict[str, str] = {
+        item["path"]: item["sha256"] for item in document["inputs"]
+    }
+    digest_by_path.update(
+        {item["path"]: item["sha256"] for item in document["contracts"]}
+    )
+    assert document["metrics"]
+    for row in document["metrics"]:
+        assert row["inputs_used"], (row["metric_id"], row["entity"])
+        for reference in row["inputs_used"]:
+            assert reference not in derive.INPUT_ORDER, (
+                row["metric_id"],
+                row["entity"],
+                reference,
+            )
+            assert reference in digest_by_path, (
+                row["metric_id"],
+                row["entity"],
+                reference,
+            )
+            assert re.fullmatch(r"[0-9a-f]{64}", digest_by_path[reference]), reference
+    # The FX provenance note cites the selected capture path and its digest too.
+    notes = _index(document)[("capital.account.cutoff", "acct-mp")]["notes"]
+    provenance = notes[notes.find("fx_provenance") :]
+    selected_fx = next(
+        item
+        for item in document["inputs"]
+        if item["path"].endswith("yfinance-history.json")
+    )
+    assert selected_fx["path"] in provenance
+    assert f"sha256 {selected_fx['sha256']}" in provenance
+
+
+def test_inputs_manifest_sha256_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    for entry in manifest["inputs"]:
+        if entry["path"] == "m/nav_daily.csv":
+            entry["sha256"] = "f" * 64
+    with pytest.raises(sources.InputError, match="differs from pinned"):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_bytes_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    for entry in manifest["inputs"]:
+        if entry["path"] == "m/accounts.csv":
+            entry["bytes"] += 1
+    with pytest.raises(sources.InputError, match="manifest lists"):
+        _run_manifest(tmp_path, manifest)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("unpinned", "does not pin one sha256"),
+        ("unknown", "names an unknown input"),
+        ("duplicate", "names 2 path"),
+        ("missing", "names 0 path"),
+    ],
+)
+def test_inputs_manifest_structure_fails_closed(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    manifest = _manifest_tree(tmp_path)
+    entries = manifest["inputs"]
+    if mutation == "unpinned":
+        for entry in entries:
+            if entry["path"] == "m/wallet_bills.csv":
+                entry["sha256"] = None
+    elif mutation == "unknown":
+        entries.append({"path": "m/holdings.csv", "sha256": "0" * 64})
+    elif mutation == "duplicate":
+        entries.append({"path": "other/accounts.csv", "sha256": "0" * 64})
+    else:
+        manifest["inputs"] = [
+            e for e in entries if e["path"] != "m/wallet_deposits.csv"
+        ]
+    with pytest.raises(sources.InputError, match=message):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_cutoff_mismatch_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree(tmp_path)
+    manifest["cutoff"] = "2026-01-09"
+    document = _run_manifest(tmp_path, manifest)
+    assert document["metrics"] == []
+    assert all(
+        "inputs manifest cutoff 2026-01-09" in row["reason"]
+        for row in document["not_derivable"]
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        "qe-cp-acceptance-inputs/1",
+        "qe-cp-acceptance-inputs/3",
+        "qe-cp-acceptance-inputs/2 ",
+        None,
+    ],
+)
+def test_inputs_manifest_schema_pin_fails_closed(
+    tmp_path: Path, schema: str | None
+) -> None:
+    """M1 (PR #492 review minor): the manifest schema value was recorded but
+    never validated, so a newer manifest version whose fields may carry
+    different semantics would be silently parsed as v2. Fail closed instead."""
+    manifest = _manifest_tree(tmp_path)
+    manifest["schema"] = schema
+    with pytest.raises(sources.InputError, match="schema"):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> None:
+    """M2 (PR #492 review minor): passing a manifest together with an explicit
+    ``layout`` or ``expected_sha256`` silently overwrote both; that combination
+    must fail closed instead."""
+    manifest = _manifest_tree(tmp_path)
+    loaded = derive.load_inputs_manifest(
+        json.dumps(manifest).encode("utf-8"), "synthetic-inputs.json"
+    )
+    repo = _synthetic_repo(tmp_path)
+    with pytest.raises(sources.InputError, match="combined"):
+        derive.derive(
+            tmp_path,
+            repo,
+            cutoff=day(CUTOFF),
+            model="test",
+            code_commit="test",
+            declared_cutoff=day(CUTOFF),
+            manifest=loaded,
+            layout=LAYOUT,
+        )
+    with pytest.raises(sources.InputError, match="combined"):
+        derive.derive(
+            tmp_path,
+            repo,
+            cutoff=day(CUTOFF),
+            model="test",
+            code_commit="test",
+            declared_cutoff=day(CUTOFF),
+            manifest=loaded,
+            expected_sha256={},
+        )
+
+
+def test_cli_inputs_manifest_end_to_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M4 (PR #492 review minor): the cli.py ``--inputs`` wiring was untested.
+    main() must load the manifest, hand it to derive() and write the output
+    document. The synthetic cutoff is not the declared 2026-09-17, so the R7
+    gate fails closed (still exit 0 with a written document) -- this exercises
+    the wiring, not the arithmetic."""
+    manifest = _manifest_tree(tmp_path)
+    manifest_path = tmp_path / "inputs.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    out = tmp_path / "out" / "expected.json"
+    code = cli.main(
+        [
+            "--qe-root",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--cutoff",
+            CUTOFF,
+            "--model",
+            "test",
+            "--code-commit",
+            "test",
+            "--inputs",
+            str(manifest_path),
+        ]
+    )
+    assert code == 0
+    assert "0 metrics" in capsys.readouterr().out
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["inputs_manifest"]["path"] == manifest_path.as_posix()
+    assert document["inputs_manifest"]["not_read"] == [
+        "m/account-strategy-manifest.json"
+    ]
+    assert [item["path"] for item in document["inputs"]][0] == "m/provider-ledger.json"
+
+
+def test_cli_unreadable_inputs_manifest_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "out.json"
+    code = cli.main(
+        [
+            "--qe-root",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--cutoff",
+            CUTOFF,
+            "--code-commit",
+            "test",
+            "--inputs",
+            str(tmp_path / "missing.json"),
+        ]
+    )
+    assert code == 2
+    assert "cannot read inputs manifest" in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_every_consumed_input_is_pinned() -> None:
