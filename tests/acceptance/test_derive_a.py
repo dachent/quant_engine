@@ -22,7 +22,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPOSITORY_ROOT / "acceptance"
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from derive_a import derive, numerics, sources  # noqa: E402
+from derive_a import cli, derive, numerics, sources  # noqa: E402
 
 D = Decimal
 
@@ -1251,6 +1251,121 @@ def test_inputs_manifest_cutoff_mismatch_fails_closed(tmp_path: Path) -> None:
         "inputs manifest cutoff 2026-01-09" in row["reason"]
         for row in document["not_derivable"]
     )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        "qe-cp-acceptance-inputs/1",
+        "qe-cp-acceptance-inputs/3",
+        "qe-cp-acceptance-inputs/2 ",
+        None,
+    ],
+)
+def test_inputs_manifest_schema_pin_fails_closed(
+    tmp_path: Path, schema: str | None
+) -> None:
+    """M1 (PR #492 review minor): the manifest schema value was recorded but
+    never validated, so a newer manifest version whose fields may carry
+    different semantics would be silently parsed as v2. Fail closed instead."""
+    manifest = _manifest_tree(tmp_path)
+    manifest["schema"] = schema
+    with pytest.raises(sources.InputError, match="schema"):
+        _run_manifest(tmp_path, manifest)
+
+
+def test_inputs_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> None:
+    """M2 (PR #492 review minor): passing a manifest together with an explicit
+    ``layout`` or ``expected_sha256`` silently overwrote both; that combination
+    must fail closed instead."""
+    manifest = _manifest_tree(tmp_path)
+    loaded = derive.load_inputs_manifest(
+        json.dumps(manifest).encode("utf-8"), "synthetic-inputs.json"
+    )
+    repo = _synthetic_repo(tmp_path)
+    with pytest.raises(sources.InputError, match="combined"):
+        derive.derive(
+            tmp_path,
+            repo,
+            cutoff=day(CUTOFF),
+            model="test",
+            code_commit="test",
+            declared_cutoff=day(CUTOFF),
+            manifest=loaded,
+            layout=LAYOUT,
+        )
+    with pytest.raises(sources.InputError, match="combined"):
+        derive.derive(
+            tmp_path,
+            repo,
+            cutoff=day(CUTOFF),
+            model="test",
+            code_commit="test",
+            declared_cutoff=day(CUTOFF),
+            manifest=loaded,
+            expected_sha256={},
+        )
+
+
+def test_cli_inputs_manifest_end_to_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M4 (PR #492 review minor): the cli.py ``--inputs`` wiring was untested.
+    main() must load the manifest, hand it to derive() and write the output
+    document. The synthetic cutoff is not the declared 2026-09-17, so the R7
+    gate fails closed (still exit 0 with a written document) -- this exercises
+    the wiring, not the arithmetic."""
+    manifest = _manifest_tree(tmp_path)
+    manifest_path = tmp_path / "inputs.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    out = tmp_path / "out" / "expected.json"
+    code = cli.main(
+        [
+            "--qe-root",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--cutoff",
+            CUTOFF,
+            "--model",
+            "test",
+            "--code-commit",
+            "test",
+            "--inputs",
+            str(manifest_path),
+        ]
+    )
+    assert code == 0
+    assert "0 metrics" in capsys.readouterr().out
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["inputs_manifest"]["path"] == manifest_path.as_posix()
+    assert document["inputs_manifest"]["not_read"] == [
+        "m/account-strategy-manifest.json"
+    ]
+    assert [item["path"] for item in document["inputs"]][0] == "m/provider-ledger.json"
+
+
+def test_cli_unreadable_inputs_manifest_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "out.json"
+    code = cli.main(
+        [
+            "--qe-root",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--cutoff",
+            CUTOFF,
+            "--code-commit",
+            "test",
+            "--inputs",
+            str(tmp_path / "missing.json"),
+        ]
+    )
+    assert code == 2
+    assert "cannot read inputs manifest" in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_every_consumed_input_is_pinned() -> None:

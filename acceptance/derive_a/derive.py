@@ -140,6 +140,9 @@ ROLE_BY_BASENAME = {
     "yfinance-history.json": FX_HISTORY,
 }
 IGNORED_BASENAMES = frozenset({"account-strategy-manifest.json"})
+# Only this manifest schema is accepted: a newer version may redefine field
+# semantics (paths, sha256, bytes, cutoff) and must not be silently parsed.
+INPUTS_MANIFEST_SCHEMA = "qe-cp-acceptance-inputs/2"
 PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 FLOW_POLICY = "contracts/account-strategy-flow-classification-policy-v1.json"
@@ -286,10 +289,12 @@ CONVENTION_NOTES = (
     "used. The account-strategy manifest entry is a production output and is not "
     "read.",
     "R6 v2: raw = the finalized capture selected by the release run-observation "
-    "(acceptance-inputs-v2). Matrixport raw NAV dates after the admitted FX "
-    "boundary are reported in notes as FX-unconverted with no USD value; "
-    "date.source_last_observation is the last raw observation date, capital the "
-    "last USD-converted valuation with its true as_of.",
+    "(acceptance-inputs-v2). Matrixport FX boundary only: raw NAV dates after "
+    "the admitted FX boundary are reported in notes as FX-unconverted with no "
+    "USD value, and that account's date.source_last_observation is the last raw "
+    "(FX-unconverted) NAV date while capital is the last USD-converted valuation "
+    "with its true as_of; every other source's date.source_last_observation is "
+    "its last value observation on or before the cutoff.",
     "R6 ledger valuations after the last raw observation are not expected values; "
     "their count and last date/value are reported in notes. Capital at cutoff for "
     "Quantbase/Matrixport = last raw observation on or before the cutoff with its "
@@ -317,8 +322,10 @@ class InputsManifest:
 def load_inputs_manifest(data: bytes, label: str) -> InputsManifest:
     """Resolve every derivation input from an acceptance-inputs manifest.
 
-    Fails closed (InputError) when an entry cannot be placed, a role is missing
-    or named by two paths, or a used path carries no single pinned sha256.
+    Fails closed (InputError) unless ``schema`` is exactly
+    ``qe-cp-acceptance-inputs/2``, when an entry cannot be placed, a role is
+    missing or named by two paths, or a used path carries no single pinned
+    sha256.
     """
 
     try:
@@ -326,6 +333,11 @@ def load_inputs_manifest(data: bytes, label: str) -> InputsManifest:
         entries = document["inputs"]
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
         raise InputError(f"inputs manifest {label} does not parse") from exc
+    schema = document.get("schema")
+    if schema != INPUTS_MANIFEST_SCHEMA:
+        raise InputError(
+            f"inputs manifest {label} schema {schema!r} is not {INPUTS_MANIFEST_SCHEMA}"
+        )
     paths: dict[str, set[str]] = {}
     shas: dict[str, set[str]] = {}
     sizes: dict[str, set[int]] = {}
@@ -1169,10 +1181,18 @@ def derive(
 
     ``manifest`` (``--inputs``) supplies every input path and pin; without it the
     built-in v1 table and ``PINNED_SHA256`` are used. ``layout`` and
-    ``expected_sha256`` may relocate inputs directly (synthetic tests only).
+    ``expected_sha256`` may relocate inputs directly (synthetic tests only); a
+    manifest is mutually exclusive with both (fail closed), since it must
+    override them and silent overwriting would hide a conflicting source
+    selection.
     """
 
     if manifest is not None:
+        if layout is not None or expected_sha256 is not None:
+            raise InputError(
+                "inputs manifest (--inputs) cannot be combined with an explicit "
+                "layout or expected_sha256"
+            )
         layout = manifest.layout
         expected_sha256 = manifest.pins
     with localcontext() as context:
