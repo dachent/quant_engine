@@ -95,6 +95,7 @@ class _SelectedHwmSourceRows:
     account_generation_id: str
     source_generation_id: str
     source_generation_sha256: str
+    excluded_nonperformance_rows: list[Row]
 
 
 class SelectedHwmInputError(ValueError):
@@ -601,11 +602,36 @@ def _available_usd_amount(value: object, field: str) -> Decimal:
     return _decimal(amount.get("value"), f"{field}.value")
 
 
+def _performance_available(row: Mapping[str, Any]) -> bool:
+    """HWM consumes performance data only; everything else is excluded.
+
+    A row with null performance fields (status BLOCKED_ADMISSION, or
+    performance_status UNAVAILABLE under the zero-capital rule) carries no
+    returns and contributes no HWM data, exactly as the ledger excludes it.
+    """
+    return row.get("status") == "OK" and row.get("performance_status") == "AVAILABLE"
+
+
+def _nonperformance_disclosure(key: EpochKey, row: Mapping[str, Any]) -> Row:
+    disclosure: Row = {
+        "account_id": key[0],
+        "strategy_id": key[1],
+        "effective_start": key[2],
+        "effective_end": key[3],
+        "status": row.get("status"),
+        "performance_status": row.get("performance_status"),
+    }
+    reason = row.get("blocking_reason", row.get("performance_reason"))
+    if isinstance(reason, str) and reason:
+        disclosure["reason"] = reason
+    return disclosure
+
+
 def _source_rows(
     calculation: Mapping[str, Any],
     output: Mapping[str, Any],
     crosswalk: Mapping[str, Any],
-) -> tuple[dict[EpochKey, Row], dict[EpochKey, Row], dict[EpochKey, Row]]:
+) -> tuple[dict[EpochKey, Row], dict[EpochKey, Row], dict[EpochKey, Row], list[Row]]:
     included_crosswalk = [
         dict(row)
         for row in _rows(crosswalk.get("rows"), "account crosswalk rows")
@@ -656,10 +682,6 @@ def _source_rows(
             raise SelectedHwmInputError(
                 "output provider differs from selected crosswalk"
             )
-        if row.get("status") != "OK":
-            raise SelectedHwmInputError(
-                "selected account-manifest output row is not OK"
-            )
         output_by_key[key] = row
     if set(calculation_by_key) != set(crosswalk_by_key) or set(output_by_key) != set(
         crosswalk_by_key
@@ -667,7 +689,25 @@ def _source_rows(
         raise SelectedHwmInputError(
             "calculation, output, and crosswalk epoch sets differ"
         )
-    return crosswalk_by_key, calculation_by_key, output_by_key
+
+    performance_by_key: dict[EpochKey, Row] = {}
+    excluded: list[Row] = []
+    for key in sorted(output_by_key):
+        row = output_by_key[key]
+        if _performance_available(row):
+            performance_by_key[key] = row
+        else:
+            excluded.append(_nonperformance_disclosure(key, row))
+    empty_strategies = sorted(
+        {key[1] for key in crosswalk_by_key} - {key[1] for key in performance_by_key}
+    )
+    if empty_strategies:
+        raise SelectedHwmInputError(
+            "selected strategy has no performance-available account-manifest rows"
+            f" ({len(excluded)} non-performance rows excluded): "
+            + ", ".join(empty_strategies)
+        )
+    return crosswalk_by_key, calculation_by_key, performance_by_key, excluded
 
 
 def _validate_contract_epoch_strategy_perimeter(
@@ -925,7 +965,11 @@ def _derive_builder_rows(
     ] = defaultdict(dict)
     returns: list[Row] = []
     for strategy_id in sorted(intervals_by_strategy):
-        strategy_epochs = [key for key in crosswalk if key[1] == strategy_id]
+        # Non-performance epochs were excluded at selection: they hold no funded
+        # membership and no returns, so the HWM arithmetic never sees them.
+        strategy_epochs = [
+            key for key in crosswalk if key[1] == strategy_id and key in output
+        ]
         effective_start = min(key[2] for key in strategy_epochs)
         membership_source = {
             "account_manifest_generation_id": account_generation_id,
@@ -1218,7 +1262,7 @@ def _selected_hwm_source_rows(
     _validate_provider_admission_binding(
         receipt_bytes, receipt, source_manifest, source_generation_sha256
     )
-    crosswalk, calculation, output = _source_rows(
+    crosswalk, calculation, output, excluded_nonperformance = _source_rows(
         documents["authority/calculation-inputs.json"],
         documents["outputs/account-strategy-manifest.json"],
         documents["authority/account-assignment-crosswalk.json"],
@@ -1248,6 +1292,7 @@ def _selected_hwm_source_rows(
         account_generation_id=bundle.manifest.generation_id,
         source_generation_id=source_generation_id,
         source_generation_sha256=source_generation_sha256,
+        excluded_nonperformance_rows=excluded_nonperformance,
     )
 
 
