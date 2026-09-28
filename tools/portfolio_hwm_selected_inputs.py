@@ -605,9 +605,12 @@ def _available_usd_amount(value: object, field: str) -> Decimal:
 def _performance_available(row: Mapping[str, Any]) -> bool:
     """HWM consumes performance data only; everything else is excluded.
 
-    A row with null performance fields (status BLOCKED_ADMISSION, or
-    performance_status UNAVAILABLE under the zero-capital rule) carries no
-    returns and contributes no HWM data, exactly as the ledger excludes it.
+    Any status other than OK — the producer emits BLOCKED_ADMISSION,
+    BLOCKED_MISSING_PREDECESSOR_CONTINUITY, BLOCKED_UNPROVABLE_OPENING_FLOWS,
+    BLOCKED_UNAVAILABLE_NAV_OBSERVATION, BLOCKED_CONTINUITY_AFTER_WITHDRAWAL —
+    or an OK row whose performance_status is not AVAILABLE (the zero-capital
+    rule) carries no returns and contributes no HWM data, exactly as the
+    ledger excludes it.
     """
     return row.get("status") == "OK" and row.get("performance_status") == "AVAILABLE"
 
@@ -621,7 +624,7 @@ def _nonperformance_disclosure(key: EpochKey, row: Mapping[str, Any]) -> Row:
         "status": row.get("status"),
         "performance_status": row.get("performance_status"),
     }
-    reason = row.get("blocking_reason", row.get("performance_reason"))
+    reason = row.get("blocking_reason") or row.get("performance_reason")
     if isinstance(reason, str) and reason:
         disclosure["reason"] = reason
     return disclosure
