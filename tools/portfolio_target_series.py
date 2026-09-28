@@ -2831,9 +2831,9 @@ def _matrixport_usd_conversion(
     Native gap approval remains unchanged.  The restricted local proof retains
     source CSV bytes so standalone verification does not trust derived returns
     or read a provider path supplied by the artifact being verified.  Native
-    returns whose conversion window ends past the admitted FX generation's
-    last rate carry no USD value: the USD series ends there, mirroring the
-    provider ledger's admitted-FX boundary.
+    returns and approved gap-span receipts whose conversion window ends past
+    the admitted FX generation's last rate carry no USD value: the USD series
+    ends there, mirroring the provider ledger's admitted-FX boundary.
     """
 
     _require_exact_keys(
@@ -2950,6 +2950,12 @@ def _matrixport_usd_conversion(
             raise TargetSeriesError(
                 "Matrixport native gap span return differs from source authority"
             )
+        if end > admitted_fx_end:
+            # The native span stays validated above, but its conversion window
+            # ends past the admitted FX generation's last rate: the USD series
+            # ends there, so the span is not partially converted and carries
+            # no USD value rather than aborting the build.
+            continue
         spans.append({**span, "return": convert(native_return, start, end)})
     return converted, spans
 
