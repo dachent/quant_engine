@@ -3152,6 +3152,192 @@ def test_matrixport_usd_history_replays_daily_and_gap_conversion_offline(
     assert verified["verification"] == "VALID"
 
 
+def _matrixport_fx_boundary_fixture(tmp_path: Path) -> dict[str, Any]:
+    """Admitted FX generation ends before the native Matrixport series."""
+
+    fixture = _matrixport_fx_fixture(tmp_path)
+    # The provider ledger's own USD series already ends at the admitted FX
+    # boundary (T4-b), so its retained Robuxio rows stop there too.
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_bytes())
+    catalog["strategy_returns"] = [
+        row
+        for row in catalog["strategy_returns"]
+        if row["strategy_id"] != "robuxio-crypto" or row["date"] <= "2025-12-08"
+    ]
+    account_evidence = next(
+        row["account"]
+        for row in catalog["strategy_evidence"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    account_evidence.update(observed_end="2025-12-08", return_observations=2)
+    _write_json(catalog_path, catalog)
+    fx_manifest_path = fixture["portfolio_fx_rates_manifest_path"]
+    rates_path = fx_manifest_path.parent / "rates.csv"
+    rows = [
+        row
+        for row in csv.DictReader(io.StringIO(rates_path.read_text(encoding="utf-8")))
+        if row["date"] <= "2025-12-08"
+    ]
+    _write_csv(rates_path, list(rows[0]), rows)
+    rates_bytes = rates_path.read_bytes()
+    fx_manifest = GenerationManifest.build(
+        as_of_date=date(2025, 12, 8),
+        adapter=AdapterIdentity("agent-market-data-terminal-yfinance", "1"),
+        coverage=CoverageClaim.from_dict(
+            {
+                "boundary": "synthetic USD daily close proof",
+                "fact_types": ["FX_RATE"],
+                "known_gaps": [],
+                "observed_start": "2025-12-01",
+                "observed_end": "2025-12-08",
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="rates.csv",
+                sha256=hashlib.sha256(rates_bytes).hexdigest(),
+                size_bytes=len(rates_bytes),
+                as_of_date=date(2025, 12, 8),
+                schema_name="portfolio-fx-daily-close-rates",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    fx_manifest_path.write_bytes(fx_manifest.to_json_bytes())
+    ledger_manifest_path = fixture["provider_ledger_manifest_path"]
+    fx_identity = _artifact(fx_manifest_path, "portfolio/fx-rates/generation.json")
+    fx_identity["schema"] = {"name": "generation-manifest", "version": "1"}
+    fx_identity["as_of_date"] = "2025-12-08"
+    ledger_generation_id = _core_generation_manifest(
+        ledger_manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [
+            _artifact(
+                fixture["provider_ledger_catalog_path"],
+                "normalized/provider-ledger.json",
+            ),
+            fx_identity,
+        ],
+    )
+    _pointer(
+        fixture["provider_ledger_pointer_path"],
+        ledger_generation_id,
+        ledger_manifest_path,
+    )
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_bytes())
+    _update_source_generation(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
+    return fixture
+
+
+def _synthetic_current_admission(fixture: dict[str, Any]) -> dict[str, object]:
+    admitted = {}
+    for source_id, key in (
+        ("owner-account-live-history", "provider_ledger_manifest_path"),
+        ("matrixport-account-generation", "matrixport_manifest_path"),
+        ("quantbase-account-generation", "quantbase_manifest_path"),
+        ("portfolio123-model-generation", "portfolio123_manifest_path"),
+    ):
+        content = fixture[key].read_bytes()
+        manifest = GenerationManifest.from_json_bytes(content)
+        admitted[source_id] = {
+            "as_of": manifest.as_of_date.isoformat(),
+            "generation_id": manifest.generation_id,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    return {
+        "proof": {
+            "authority": "synthetic-current-admission",
+            "financial_input_contract_raw_sha256": hashlib.sha256(
+                fixture["contract_path"].read_bytes()
+            ).hexdigest(),
+        },
+        "source_generations": admitted,
+    }
+
+
+def test_robuxio_correction_resolution_records_the_fx_bounded_emitted_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
+) -> None:
+    """The coverage record binds the emitted segment, not the native series.
+
+    Under a current admission the native Matrixport series runs to the
+    admitted cutoff while the USD conversion ends at the admitted FX
+    generation's last rate.  The correction-resolution record must carry the
+    emitted FX-bounded bounds the verifier recomputes from the artifacts.
+    The admission authority itself is stubbed; its own receipt binding has
+    dedicated tests.
+    """
+
+    fixture = _matrixport_fx_boundary_fixture(tmp_path)
+    admission = _synthetic_current_admission(fixture)
+    monkeypatch.setattr(
+        target_series,
+        "_current_source_admission_authority",
+        lambda **kwargs: admission,
+    )
+    receipt_path = tmp_path / "admit-or-declare-receipt.json"
+    receipt_path.write_bytes(b"{}")
+    build_inputs = dict(fixture)
+    for key in (
+        "provider_ledger_pointer_path",
+        "matrixport_pointer_path",
+        "quantbase_pointer_path",
+        "portfolio123_pointer_path",
+    ):
+        build_inputs.pop(key)
+    artifacts, manifest_content = build_layered_history_generation(
+        repository_sha=target_series._trusted_layered_history_code_identity()[0],
+        source_selection_mode="IMMUTABLE_GENERATIONS",
+        provider_ledger_pointer_path=None,
+        matrixport_pointer_path=None,
+        quantbase_pointer_path=None,
+        portfolio123_pointer_path=None,
+        provider_admission_receipt_path=receipt_path,
+        financial_input_contract_path=fixture["contract_path"],
+        **build_inputs,
+    )
+    rows = list(csv.DictReader(io.StringIO(artifacts["live-only.csv"].decode("utf-8"))))
+    robuxio = [row for row in rows if "Robuxio" in row["series_id"]]
+    assert [row["date"] for row in robuxio] == ["2025-12-07", "2025-12-08"]
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]
+    assert resolution["observed_start"] == robuxio[0]["date"]
+    assert resolution["observed_end"] == robuxio[-1]["date"]
+    validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+        provider_admission_receipt_path=receipt_path,
+        financial_input_contract_path=fixture["contract_path"],
+        provider_ledger_manifest_path=fixture["provider_ledger_manifest_path"],
+        provider_ledger_catalog_path=fixture["provider_ledger_catalog_path"],
+    )
+
+
 @pytest.mark.parametrize("field", ["rates_csv", "native_nav_csv"])
 def test_matrixport_usd_history_rejects_rehashed_source_preimage_tampering(
     tmp_path: Path, synthetic_history_authority: None, field: str

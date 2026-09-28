@@ -5571,6 +5571,9 @@ def build_layered_history_generation(
         )
         if strategy_id == "qsi" and qsi_revision is not None:
             coverage_rows[-1]["source_history_revision"] = qsi_revision[0]
+    # The record binds the emitted account-live segment, which the admitted FX
+    # generation may end before the native Matrixport series does.
+    robuxio_segment = sorted(row["date"] for row in live_by_strategy["robuxio-crypto"])
     correction_resolutions: dict[str, dict[str, Any]] = {
         "echotrade-event-only-account-live-rejected": {
             "canonicalization": echo_expected_identity["canonicalization"],
@@ -5599,8 +5602,8 @@ def build_layered_history_generation(
         },
         "robuxio-account-live-after-funding": {
             "account_live_start": robuxio_coverage["account_live_start"],
-            "observed_end": robuxio_live[-1]["date"] if robuxio_live else None,
-            "observed_start": robuxio_live[0]["date"] if robuxio_live else None,
+            "observed_end": robuxio_segment[-1] if robuxio_segment else None,
+            "observed_start": robuxio_segment[0] if robuxio_segment else None,
             "source_gap_policy": raw_gap_policy,
             "status": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
             if robuxio_account_absent
