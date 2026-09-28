@@ -576,6 +576,25 @@ def _install_verifier_history_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     history_tests._install_synthetic_history_authority(monkeypatch, history)
 
 
+def _install_clean_history_tool_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bind HEAD's committed tool bytes to the on-disk bytes: a clean tree.
+
+    The staleness rebuild decision refuses to rebuild unless the executing
+    history tool's bytes match HEAD's committed bytes. Pinning the
+    committed-byte reader to the on-disk file simulates the clean tree a
+    rebuild is licensed for while keeping every path, hash, and comparison in
+    the real gate.
+    """
+
+    monkeypatch.setattr(
+        preparation,
+        "_head_committed_file_bytes",
+        lambda relative_path: preparation.ROOT.joinpath(
+            *relative_path.split("/")
+        ).read_bytes(),
+    )
+
+
 def _retained_layered_history(
     tmp_path: Path,
     *,
@@ -648,6 +667,7 @@ def test_stale_repository_dependency_kind_rebuilds_retained_history(
             generation, fixture["contract_path"], require_mode="LIVE_ONLY"
         )
     assert raised.value.kind == "staleness"
+    _install_clean_history_tool_tree(monkeypatch)
     assert (
         preparation._retained_history_requires_rebuild(
             generation,
@@ -711,6 +731,7 @@ def test_stale_tool_identity_kind_rebuilds_retained_history(
             generation, fixture["contract_path"], require_mode="LIVE_ONLY"
         )
     assert raised.value.kind == "staleness"
+    _install_clean_history_tool_tree(monkeypatch)
     assert (
         preparation._retained_history_requires_rebuild(
             generation,
@@ -721,20 +742,18 @@ def test_stale_tool_identity_kind_rebuilds_retained_history(
     )
 
 
-def test_stale_source_admission_proof_kind_rebuilds_retained_history(
+def _admitted_retained_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A retained proof bound to the previous ledger admission is staleness.
+) -> tuple[dict[str, Any], Path, Any]:
+    """Build one retained generation bound to a real current admission proof.
 
     The verifier's current-source-admission comparison, the receipt and
-    contract identities on disk, and the rebuild decision all stay real. The
-    synthetic producer below stands in for the real admission replay only,
-    because the real replay loads the admission contract through the real
+    contract identities on disk, and the build all stay real. The synthetic
+    producer below stands in for the real admission replay only, because
+    the real replay loads the admission contract through the real
     financial-MVP loader, which rejects every synthetic provider fixture;
     it is the same documented seam the layered-history fixture module uses
-    for contract parsing. One admission cycle later the recomputed proof
-    differs from the proof the retained manifest recorded, so the retained
-    generation is one ledger cycle behind and is rebuilt.
+    for contract parsing.
     """
 
     import portfolio_target_series as history
@@ -895,6 +914,26 @@ def test_stale_source_admission_proof_kind_rebuilds_retained_history(
         )["verification"]
         == "VALID"
     )
+    return fixture, generation, authorities
+
+
+def test_stale_source_admission_proof_kind_rebuilds_retained_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained proof bound to the previous ledger admission is staleness.
+
+    One admission cycle later the recomputed proof differs from the proof
+    the retained manifest recorded, so the retained generation is one ledger
+    cycle behind and, on a clean tool tree, is rebuilt.
+    """
+
+    import portfolio_target_series as history
+
+    fixture, generation, authorities = _admitted_retained_history(tmp_path, monkeypatch)
+    receipt = (
+        fixture["provider_ledger_manifest_path"].parent
+        / "admit-or-declare-receipt.json"
+    )
 
     # One admission cycle later, a new run observation is admitted.
     receipt.write_bytes(
@@ -913,12 +952,65 @@ def test_stale_source_admission_proof_kind_rebuilds_retained_history(
             generation, fixture["contract_path"], **authorities
         )
     assert raised.value.kind == "staleness"
+    _install_clean_history_tool_tree(monkeypatch)
     assert (
         preparation._retained_history_requires_rebuild(
             generation, fixture["contract_path"], authorities
         )
         is True
     )
+
+
+def test_stale_and_corrupt_retained_generation_fails_closed_before_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generation that is both stale and corrupted fails on the corruption.
+
+    The retained generation below is one admission cycle behind — its
+    recorded current-source-admission proof binds the previous ledger
+    admission — and one of its artifacts carries a flipped byte. The
+    verifier's integrity pre-pass must fail the corrupted artifact before
+    the staleness classification can raise, so the rebuild decision
+    hard-fails instead of rebuilding over corrupt evidence.
+    """
+
+    import portfolio_target_series as history
+
+    fixture, generation, authorities = _admitted_retained_history(tmp_path, monkeypatch)
+    receipt = (
+        fixture["provider_ledger_manifest_path"].parent
+        / "admit-or-declare-receipt.json"
+    )
+
+    # One admission cycle later, a new run observation is admitted, and a
+    # byte inside one retained artifact is flipped.
+    receipt.write_bytes(
+        canonical_json_bytes(
+            {
+                "admission_gate_status": "PASS",
+                "provider_generations": [],
+                "run_observation": {"financial_cutoff": "2026-01-11"},
+            }
+        )
+    )
+    corrupted = bytearray((generation / "returns.csv").read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    (generation / "returns.csv").write_bytes(bytes(corrupted))
+
+    with pytest.raises(
+        history.TargetSeriesError, match="layered history output differs: returns.csv"
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], **authorities
+        )
+    assert raised.value.kind == "integrity"
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            generation, fixture["contract_path"], authorities
+        )
 
 
 def test_stale_account_live_ledger_kind_rebuilds_retained_history(
@@ -1043,6 +1135,7 @@ def test_stale_account_live_ledger_kind_rebuilds_retained_history(
             stale_generation, fixture["contract_path"]
         )
     assert raised.value.kind == "staleness"
+    _install_clean_history_tool_tree(monkeypatch)
     assert (
         preparation._retained_history_requires_rebuild(
             stale_generation,
@@ -1062,6 +1155,73 @@ def test_stale_account_live_ledger_kind_rebuilds_retained_history(
             (),
         )
     assert quantbase.value.kind == "staleness"
+
+
+def test_staleness_rebuild_refuses_uncommitted_history_tool_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dirty history tool hard-fails the staleness rebuild; a clean one proceeds.
+
+    The rebuild executes the history tool's on-disk bytes while recording the
+    clean HEAD SHA, so before a staleness verdict licenses a rebuild the
+    executing tool's bytes must match HEAD's committed bytes: uncommitted
+    tool bytes fail closed — the operator commits or restores — while the
+    same staleness on a clean tree still reaches the rebuild.
+    """
+
+    import portfolio_target_series as history
+
+    _install_verifier_history_seams(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+    assert (
+        history.verify_layered_history_generation(generation, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+
+    monkeypatch.setattr(
+        history,
+        "_trusted_layered_history_code_identity",
+        lambda: ("0" * 40, "f" * 64),
+    )
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="layered history code identity is not trusted",
+    ) as raised:
+        history.verify_layered_history_generation(
+            generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert raised.value.kind == "staleness"
+
+    def committed_history_tool_bytes(relative_path: str) -> bytes:
+        return (
+            preparation.ROOT.joinpath(*relative_path.split("/")).read_bytes()
+            + b"\n# uncommitted edit\n"
+        )
+
+    monkeypatch.setattr(
+        preparation, "_head_committed_file_bytes", committed_history_tool_bytes
+    )
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="layered history tool has uncommitted changes; refusing rebuild",
+    ):
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+
+    _install_clean_history_tool_tree(monkeypatch)
+    assert (
+        preparation._retained_history_requires_rebuild(
+            generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+        is True
+    )
 
 
 def test_corrupt_retained_generation_fails_closed_from_real_tampered_artifact(

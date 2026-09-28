@@ -6082,6 +6082,96 @@ def _layered_history_assurance_disposition(
     }
 
 
+def _require_retained_layered_history_integrity(
+    artifacts: Mapping[str, bytes], manifest: Mapping[str, Any]
+) -> tuple[dict[str, dict[str, object]], dict[str, Any]]:
+    """Run every self-contained integrity check before staleness is classified.
+
+    This is the dedicated integrity pre-pass of
+    ``validate_layered_history_generation``. The input identities and the
+    per-artifact output identities are contained entirely in the manifest and
+    the artifact bytes, so the same checks run here — earlier — than the
+    staleness-kind comparisons that would otherwise raise first. A retained
+    generation that is both stale and corrupted therefore fails closed on the
+    corruption instead of rebuilding over it. Every check that compares the
+    manifest against current external state stays behind the staleness sites:
+    a generation that is one code or ledger cycle behind is expected to differ
+    there.
+    """
+    input_rows = manifest.get("inputs")
+    if not isinstance(input_rows, list):
+        raise TargetSeriesError("layered history input identities are absent")
+    inputs: dict[str, dict[str, object]] = {}
+    for raw in input_rows:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("layered history input identity is invalid")
+        _require_exact_keys(
+            raw,
+            frozenset(
+                {
+                    "artifact_id",
+                    "artifact_role",
+                    "as_of_date",
+                    "generation_id",
+                    "input_id",
+                    "sha256",
+                    "size_bytes",
+                }
+            ),
+            "layered history input identity",
+        )
+        input_id = str(raw.get("input_id", ""))
+        sha256 = str(raw.get("sha256", ""))
+        size = raw.get("size_bytes")
+        if (
+            not input_id
+            or input_id in inputs
+            or len(sha256) != 64
+            or not isinstance(size, int)
+            or size < 0
+            or any(
+                key in raw
+                for key in ("path", "root", "provider_entity_id", "account_id")
+            )
+        ):
+            raise TargetSeriesError("layered history input identity differs")
+        inputs[input_id] = dict(raw)
+    if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
+        raise TargetSeriesError("layered history input ordering differs")
+
+    output_rows = manifest.get("outputs")
+    if not isinstance(output_rows, dict) or set(output_rows) != set(
+        LAYERED_HISTORY_OUTPUT_NAMES
+    ):
+        raise TargetSeriesError("layered history output identities differ")
+    if set(artifacts) != set(LAYERED_HISTORY_OUTPUT_NAMES):
+        raise TargetSeriesError("layered history output set differs")
+    for name in LAYERED_HISTORY_OUTPUT_NAMES:
+        expected = output_rows.get(name)
+        content = artifacts[name]
+        if isinstance(expected, dict):
+            _require_exact_keys(
+                expected,
+                frozenset(
+                    {
+                        "artifact_id",
+                        "row_count",
+                        "schema_name",
+                        "schema_version",
+                        "sha256",
+                        "size_bytes",
+                    }
+                ),
+                f"layered history output identity {name}",
+            )
+        if not isinstance(expected, dict) or (
+            expected.get("sha256"),
+            expected.get("size_bytes"),
+        ) != (hashlib.sha256(content).hexdigest(), len(content)):
+            raise TargetSeriesError(f"layered history output differs: {name}")
+    return inputs, cast(dict[str, Any], output_rows)
+
+
 def validate_layered_history_generation(
     *,
     artifacts: Mapping[str, bytes],
@@ -6163,6 +6253,12 @@ def validate_layered_history_generation(
         raise TargetSeriesError("layered history generation as-of is invalid") from exc
     if accepted_as_of.isoformat() != raw_as_of:
         raise TargetSeriesError("layered history generation as-of is invalid")
+    # The retained evidence's own integrity precedes every staleness
+    # classification, so a generation that is both stale and corrupted fails
+    # closed on the corruption instead of rebuilding over it.
+    inputs, output_rows = _require_retained_layered_history_integrity(
+        artifacts, manifest
+    )
     admission_paths = (
         provider_admission_receipt_path,
         provider_ledger_manifest_path,
@@ -6256,47 +6352,6 @@ def validate_layered_history_generation(
         != contract["history_corrections"]["policy_version"]
     ):
         raise TargetSeriesError("layered history product authority differs")
-
-    input_rows = manifest.get("inputs")
-    if not isinstance(input_rows, list):
-        raise TargetSeriesError("layered history input identities are absent")
-    inputs: dict[str, dict[str, object]] = {}
-    for raw in input_rows:
-        if not isinstance(raw, dict):
-            raise TargetSeriesError("layered history input identity is invalid")
-        _require_exact_keys(
-            raw,
-            frozenset(
-                {
-                    "artifact_id",
-                    "artifact_role",
-                    "as_of_date",
-                    "generation_id",
-                    "input_id",
-                    "sha256",
-                    "size_bytes",
-                }
-            ),
-            "layered history input identity",
-        )
-        input_id = str(raw.get("input_id", ""))
-        sha256 = str(raw.get("sha256", ""))
-        size = raw.get("size_bytes")
-        if (
-            not input_id
-            or input_id in inputs
-            or len(sha256) != 64
-            or not isinstance(size, int)
-            or size < 0
-            or any(
-                key in raw
-                for key in ("path", "root", "provider_entity_id", "account_id")
-            )
-        ):
-            raise TargetSeriesError("layered history input identity differs")
-        inputs[input_id] = dict(raw)
-    if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
-        raise TargetSeriesError("layered history input ordering differs")
 
     comparison_input_ids = {
         "portfolio123-metadata",
@@ -6910,36 +6965,6 @@ def validate_layered_history_generation(
         )
         if manifest.get("portfolio123_version_equivalence") != expected_equivalence:
             raise TargetSeriesError("Portfolio123 version equivalence differs")
-    output_rows = manifest.get("outputs")
-    if not isinstance(output_rows, dict) or set(output_rows) != set(
-        LAYERED_HISTORY_OUTPUT_NAMES
-    ):
-        raise TargetSeriesError("layered history output identities differ")
-    if set(artifacts) != set(LAYERED_HISTORY_OUTPUT_NAMES):
-        raise TargetSeriesError("layered history output set differs")
-    for name in LAYERED_HISTORY_OUTPUT_NAMES:
-        expected = output_rows.get(name)
-        content = artifacts[name]
-        if isinstance(expected, dict):
-            _require_exact_keys(
-                expected,
-                frozenset(
-                    {
-                        "artifact_id",
-                        "row_count",
-                        "schema_name",
-                        "schema_version",
-                        "sha256",
-                        "size_bytes",
-                    }
-                ),
-                f"layered history output identity {name}",
-            )
-        if not isinstance(expected, dict) or (
-            expected.get("sha256"),
-            expected.get("size_bytes"),
-        ) != (hashlib.sha256(content).hexdigest(), len(content)):
-            raise TargetSeriesError(f"layered history output differs: {name}")
 
     segments = _csv_content_rows(
         artifacts["segments.csv"],
