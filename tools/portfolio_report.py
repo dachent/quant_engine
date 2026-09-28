@@ -4345,6 +4345,8 @@ def _provider_raw_observation_coverage(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     provider_ledger_root: Path | None = None,
+    *,
+    calculation_cutoff_date: str | None = None,
 ) -> dict[str, str]:
     """Map each account to its last raw NAV observation date.
 
@@ -4355,6 +4357,10 @@ def _provider_raw_observation_coverage(
     can extend past the last FX-converted valuation (capital's basis).  The
     finding is provider-scoped, so the account perimeter comes from the same
     hash-bound ledger's own nav observations.
+
+    A resolved calculation cutoff bounds the selection: the account's raw
+    coverage is the latest genuine raw observation on or before the cutoff,
+    never a retained finding newer than the selected cutoff.
     """
 
     references = [
@@ -4378,8 +4384,12 @@ def _provider_raw_observation_coverage(
             or finding.get("fact_type") != "nav_observations"
         ):
             continue
-        provider_id = _text(finding.get("provider_id"), "quality provider_id")
         day = _text(finding.get("original_source_date"), "quality original_source_date")
+        if calculation_cutoff_date is not None and _date(
+            day, "quality original_source_date"
+        ) > _date(calculation_cutoff_date, "calculation cutoff date"):
+            continue
+        provider_id = _text(finding.get("provider_id"), "quality provider_id")
         if (
             provider_id not in raw_end_by_provider
             or day > raw_end_by_provider[provider_id]
@@ -5455,9 +5465,6 @@ def build_report_data(
     strategy_product_controls, product_contract_provenance = _report_product_controls(
         catalog
     )
-    raw_observation_coverage = _provider_raw_observation_coverage(
-        catalog, baseline_root, provider_ledger_root
-    )
     current_product_catalog = _current_product_baseline_projection(
         catalog, strategy_product_controls
     )
@@ -5593,6 +5600,15 @@ def build_report_data(
         current_product_catalog = _current_product_baseline_projection(
             catalog, strategy_product_controls
         )
+    # Raw-coverage selection is bounded by the resolved calculation cutoff:
+    # a retained FX-boundary finding newer than the selected cutoff must not
+    # extend the report's raw observation date past the cutoff projection.
+    raw_observation_coverage = _provider_raw_observation_coverage(
+        catalog,
+        baseline_root,
+        provider_ledger_root,
+        calculation_cutoff_date=calculation_cutoff_date,
+    )
     strategy_names = {
         _text(item.get("name"), "strategy.name")
         for item in _objects(catalog.get("strategies"), "strategies")
