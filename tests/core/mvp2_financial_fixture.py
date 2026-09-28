@@ -487,6 +487,9 @@ def bind_native_history_sources(
                 for row in contract["source_segments"]
                 if row["source_id"] == "matrixport-account-generation"
             )
+            # The prepared contract is a transient producer input that is fully
+            # rewritten by bind_final_hwm_contract; this world has no declared
+            # gap, and the producer requires the policy mapping to be present.
             source["declared_gap_policy"] = history._matrixport_gap_policy(
                 nav_path=nav_path,
                 holdings_path=history_fixture["matrixport_holdings_path"],
@@ -1045,7 +1048,15 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
         first_matrix_day + timedelta(days=index)
         for index in range((common_days[-1] - first_matrix_day).days + 1)
     ]
-    pre_days = [item for item in all_matrix_days if item < common_days[0]]
+    # One declared provider outage inside the account-live era reproduces the
+    # owner-accepted #287 gap shape the contract schema requires: the NAV
+    # endpoint returns no data for the date, the daily holdings row retains the
+    # date with its NAV unavailable, and the two-day no-flow holding-period
+    # span stays admitted only to epoch cumulative TWR.  The date is the first
+    # Saturday after the shared calendar starts, so the weekday-only shared
+    # return suffix and every epoch cumulative product are unchanged.
+    gap_day = common_days[0] + timedelta(days=5 - common_days[0].weekday())
+    missing_day = gap_day.isoformat()
     history._write_csv(
         matrix_nav,
         ["nav", "product_id", "timestamp_utc"],
@@ -1056,8 +1067,10 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
                 "timestamp_utc": f"{observed.isoformat()}T00:00:00Z",
             }
             for index, observed in enumerate(all_matrix_days)
+            if observed != gap_day
         ],
     )
+    pre_days = [item for item in all_matrix_days if item < common_days[0]]
     matrix_daily = fixture["matrixport_daily_holdings_path"]
     history._write_csv(
         matrix_daily,
@@ -1067,8 +1080,8 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
                 "product_id": fixture["matrixport_product_id"],
                 "utc_date": observed.isoformat(),
                 "share": "10",
-                "nav": str(100 + index),
-                "nav_available": "true",
+                "nav": "" if observed == gap_day else str(100 + index),
+                "nav_available": "false" if observed == gap_day else "true",
             }
             for index, observed in enumerate(all_matrix_days)
         ],
@@ -1105,7 +1118,7 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
             history._artifact(matrix_daily, "csv/daily_holdings.csv"),
             history._artifact(matrix_subscriptions, "csv/subscription_details.csv"),
         ],
-        {"declared_exclusions": []},
+        {"declared_exclusions": history._matrixport_exclusions(missing_day)},
     )
     history._pointer(
         fixture["matrixport_pointer_path"], matrix_generation, matrix_manifest_path
@@ -1129,6 +1142,7 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
         if row["source_id"] == "matrixport-account-generation"
     )
     matrix_source["declared_gap_policy"] = history._matrixport_gap_policy(
+        missing_day,
         nav_path=matrix_nav,
         holdings_path=fixture["matrixport_holdings_path"],
         subscription_path=matrix_subscriptions,
@@ -1142,7 +1156,7 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
         matrix_daily,
         fixture["matrixport_product_id"],
         REQUIRED_STRATEGIES["robuxio-crypto"],
-        frozenset(),
+        frozenset({gap_day}),
     )
     catalog["strategy_returns"] = [
         row
