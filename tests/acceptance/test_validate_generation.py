@@ -475,7 +475,10 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
             for row in copy.deepcopy(report["strategy_summary"])
         ],
         "performance": [
-            {**row, "strategy_name": names[row["strategy_id"]]}
+            # A produced report row may reference a strategy outside this
+            # fixture's summary (the real producer's own catalog strategies);
+            # the panel name lookup is display-only, never a gate.
+            {**row, "strategy_name": names.get(row["strategy_id"], row["strategy_id"])}
             for row in copy.deepcopy(report["twr_mwr"])
         ],
         "gates": [
@@ -1802,10 +1805,11 @@ def test_expected_unresolvable_metric_is_not_ready(tmp_path: Path) -> None:
     ]
 
 
-# R6 v2 seam (derive_b producer -> validator consumer): raw observation coverage
-# (2026-09-17) is exposed separately from capital's converted valuation date
-# (2026-09-03); the source-date check reads the raw-coverage field while the
-# capital-date check keeps reading account_summary.as_of_date.
+# R6 v2 seam (derive_b expectations + real report producer rows -> validator
+# consumer): raw observation coverage (2026-09-17) is exposed separately from
+# capital's converted valuation date (2026-09-03); the source-date check reads
+# the raw-coverage field while the capital-date check keeps reading
+# account_summary.as_of_date.
 RAW_LAST_OBSERVATION = "2026-09-17"
 CONVERTED_AS_OF = "2026-09-03"
 
@@ -1912,31 +1916,147 @@ def _fx_bound_producer_rows(tmp_path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _fx_bound_spec(*, raw_coverage_field: bool) -> Spec:
-    as_of = CONVERTED_AS_OF if raw_coverage_field else RAW_LAST_OBSERVATION
-    account_row: dict[str, Any] = {
-        "account_id": "account-m",
-        "as_of_date": as_of,
-        "latest_value_usd": "99.00",
-        "status": "AVAILABLE_LATEST_OBSERVATION",
-    }
-    twr_row: dict[str, Any] = {
-        # The synthetic row reuses the fixture's known strategy: the
-        # source-date and capital-date views key on the account, not the
-        # strategy.
-        **_twr_row("account-m", "alpha", "99", "99", []),
-        "observed_end": as_of,
-        "mwr_terminal_date": as_of,
-    }
-    if raw_coverage_field:
-        account_row["source_last_observation"] = RAW_LAST_OBSERVATION
-        twr_row["source_last_observation"] = RAW_LAST_OBSERVATION
-    return Spec(
-        report=[
-            _append(("account_summary",), account_row),
-            _append(("twr_mwr",), twr_row),
-        ],
+def _load_report_producer_fixture() -> Any:
+    """Load the report producer's own test module for its baseline fixtures."""
+
+    spec = importlib.util.spec_from_file_location(
+        "portfolio_report_baseline_fixture",
+        REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py",
     )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fx_bound_report_surfaces(tmp_path: Path) -> dict[str, dict[str, Any]]:
+    """The real report producer's rows over FX-bound fixture inputs.
+
+    The account's USD-converted ledger observations end at the admitted FX
+    boundary (2026-09-03) while the raw capture observes through 2026-09-17,
+    retained by the hash-bound provider ledger's OUTSIDE_ADMITTED_FX_BOUNDARY
+    quality findings.  No surface field is inserted manually: the produced
+    rows are the report builder's own output.
+    """
+
+    fixture = _load_report_producer_fixture()
+    catalog = copy.deepcopy(fixture._baseline_catalog())
+    catalog["accounts"].append(
+        {
+            "account_id": "account-m",
+            "base_currency": "USD",
+            "provider": "MATRIXPORT",
+            "role": "INVESTMENT",
+        }
+    )
+    catalog["nav_observations"] += [
+        {
+            "account_id": "account-m",
+            "as_of_date": day,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+            "provider": "MATRIXPORT",
+            "record_id": record_id,
+            "source_key": "provider-ledger",
+        }
+        for day, value, record_id in (
+            ("2026-08-30", "98.00", "matrixport-nav-2026-08-30"),
+            (CONVERTED_AS_OF, "99.00", "matrixport-nav-2026-09-03"),
+        )
+    ]
+    catalog["assignments"].append(
+        {
+            "account_id": "account-m",
+            "assignment_id": "assignment-m",
+            "effective_end": None,
+            "effective_start": "2026-08-30",
+            "mapping_status": "MAPPED",
+            "observed_label": "Synthetic Strategy 3",
+            "source_classification": "SYNTHETIC",
+            "source_id": "synthetic-source",
+            "strategy_id": "strategy-3",
+        }
+    )
+    catalog["strategy_returns"] = [
+        {
+            "component_account_ids": ["account-m"],
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": value,
+            "strategy_id": "strategy-3",
+        }
+        for day, value in (("2026-08-30", "0.01"), (CONVERTED_AS_OF, "0"))
+    ]
+    catalog["strategy_provider_evidence"] = [
+        {
+            "account": {
+                "account_scopes": [{"account_id": "account-m"}],
+                "cumulative_return": "0.01",
+                "current_drawdown": "0",
+                "maximum_drawdown": "0",
+                "observed_start": "2026-08-30",
+                "observed_end": CONVERTED_AS_OF,
+                "provider_id": "matrixport",
+                "return_observations": 2,
+            },
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": "a" * 64,
+            "strategy_id": "strategy-3",
+        }
+    ]
+    ledger_catalog = {
+        "nav_observations": [
+            {
+                "account_id": "account-m",
+                "as_of_date": CONVERTED_AS_OF,
+                "provider_id": "matrixport",
+            }
+        ],
+        "quality_findings": [
+            {
+                "fact_type": "nav_observations",
+                "fx_boundary": CONVERTED_AS_OF,
+                "original_record_id": "matrixport-holdings-2026-09-17",
+                "original_source_date": RAW_LAST_OBSERVATION,
+                "provider_id": "matrixport",
+                "record_id": "matrixport:matrixport-holdings-2026-09-17",
+                "source_artifact_id": "csv/daily_holdings.csv",
+                "source_record_id": "matrixport-holdings-2026-09-17",
+                "source_row_sha256": "0" * 64,
+                "status": "OUTSIDE_ADMITTED_FX_BOUNDARY",
+            }
+        ],
+        "reconciliation_checks": [],
+    }
+    ledger_bytes = _dump(ledger_catalog)
+    ledger_root = tmp_path / "report-provider-ledger"
+    ledger_generation = ledger_root / "generations" / ("9" * 64)
+    ledger_generation.mkdir(parents=True)
+    (ledger_generation / "provider-ledger.json").write_bytes(ledger_bytes)
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": CONVERTED_AS_OF,
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": _sha(ledger_bytes),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = fixture._published_baseline(tmp_path / "report-baseline", catalog)
+    report, _content, _baseline_path = fixture.reporter.build_report_data(
+        baseline_root, provider_ledger_root=ledger_root
+    )
+    account_row = next(
+        row for row in report["account_summary"] if row.get("account_id") == "account-m"
+    )
+    twr_row = next(
+        row
+        for row in report["twr_mwr"]
+        if row.get("account_id") == "account-m" and row.get("effective_end") is None
+    )
+    return {"account": account_row, "twr": twr_row}
 
 
 def _producer_findings(
@@ -1953,12 +2073,27 @@ def _producer_findings(
 def test_source_date_check_reads_raw_coverage_when_dates_differ(
     tmp_path: Path,
 ) -> None:
-    """Both the source-date and capital-date expected checks pass when the raw
-    observation coverage (09-17) is exposed separately from capital's converted
-    valuation date (09-03)."""
+    """Both the source-date and capital-date expected checks pass on the real
+    report producer's rows when the raw observation coverage (09-17) is
+    exposed separately from capital's converted valuation date (09-03)."""
     rows = _fx_bound_producer_rows(tmp_path)
+    surfaces = _fx_bound_report_surfaces(tmp_path)
+    assert surfaces["account"]["as_of_date"] == CONVERTED_AS_OF
+    assert surfaces["account"]["latest_value_usd"] == "99"
+    assert surfaces["account"]["source_last_observation"] == RAW_LAST_OBSERVATION
+    assert surfaces["twr"]["return_path_observed_end"] == CONVERTED_AS_OF
+    assert surfaces["twr"]["source_last_observation"] == RAW_LAST_OBSERVATION
     assert (
-        _producer_findings(tmp_path, _fx_bound_spec(raw_coverage_field=True), rows)
+        _producer_findings(
+            tmp_path,
+            Spec(
+                report=[
+                    _append(("account_summary",), surfaces["account"]),
+                    _append(("twr_mwr",), surfaces["twr"]),
+                ],
+            ),
+            rows,
+        )
         == []
     )
 
@@ -1969,8 +2104,29 @@ def test_capital_date_check_keeps_the_valuation_date_without_raw_coverage(
     """A surface that carries only the raw date on as_of_date cannot satisfy
     capital's converted valuation date; the raw-coverage field is required."""
     rows = _fx_bound_producer_rows(tmp_path)
+    account_row: dict[str, Any] = {
+        "account_id": "account-m",
+        "as_of_date": RAW_LAST_OBSERVATION,
+        "latest_value_usd": "99.00",
+        "status": "AVAILABLE_LATEST_OBSERVATION",
+    }
+    twr_row: dict[str, Any] = {
+        # The synthetic row reuses the fixture's known strategy: the
+        # source-date and capital-date views key on the account, not the
+        # strategy.
+        **_twr_row("account-m", "alpha", "99", "99", []),
+        "observed_end": RAW_LAST_OBSERVATION,
+        "mwr_terminal_date": RAW_LAST_OBSERVATION,
+    }
     findings = _producer_findings(
-        tmp_path, _fx_bound_spec(raw_coverage_field=False), rows
+        tmp_path,
+        Spec(
+            report=[
+                _append(("account_summary",), account_row),
+                _append(("twr_mwr",), twr_row),
+            ],
+        ),
+        rows,
     )
     assert sorted((f.check_id, f.klass) for f in findings) == [
         ("expected.capital.account.cutoff", checks.BLOCKER_REGRESSION),
