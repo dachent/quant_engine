@@ -16,8 +16,16 @@ from typing import Any
 
 import pytest
 
-import portfolio_hwm_selected_inputs as selected_hwm
-from portfolio_hwm_selected_inputs import SelectedHwmInputError
+
+@pytest.fixture()
+def selected_hwm() -> Any:
+    # Import at test run time, not collection: test_portfolio_financial_mvp_contract
+    # swaps in a fresh portfolio_financial_mvp_contract module instance during
+    # collection, and a collection-time import of the HWM tool would bind the
+    # stale pre-swap instance, bypassing the mvp2 synthetic authority monkeypatch.
+    import portfolio_hwm_selected_inputs
+
+    return portfolio_hwm_selected_inputs
 
 
 def _documents() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -58,7 +66,7 @@ def _documents() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     )
 
 
-def test_blocked_admission_row_is_excluded_with_disclosure() -> None:
+def test_blocked_admission_row_is_excluded_with_disclosure(selected_hwm: Any) -> None:
     calculation, output, crosswalk = _documents()
     blocked = output["rows"][0]
     blocked["status"] = "BLOCKED_ADMISSION"
@@ -82,7 +90,9 @@ def test_blocked_admission_row_is_excluded_with_disclosure() -> None:
     assert disclosure["reason"] == "EPOCH_NOT_EXPLICITLY_FUNDED"
 
 
-def test_unavailable_performance_row_is_excluded_with_disclosure() -> None:
+def test_unavailable_performance_row_is_excluded_with_disclosure(
+    selected_hwm: Any,
+) -> None:
     calculation, output, crosswalk = _documents()
     unavailable = output["rows"][0]
     unavailable["performance_status"] = "UNAVAILABLE"
@@ -97,7 +107,9 @@ def test_unavailable_performance_row_is_excluded_with_disclosure() -> None:
     assert excluded[0]["reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
 
 
-def test_strategy_with_zero_performance_available_rows_still_raises() -> None:
+def test_strategy_with_zero_performance_available_rows_still_raises(
+    selected_hwm: Any,
+) -> None:
     calculation, output, crosswalk = _documents()
     blocked, unavailable = output["rows"][:2]
     blocked["status"] = "BLOCKED_ADMISSION"
@@ -107,11 +119,15 @@ def test_strategy_with_zero_performance_available_rows_still_raises() -> None:
     unavailable["performance_status"] = "UNAVAILABLE"
     unavailable["performance_reason"] = "ZERO_CAPITAL_RETURN_UNDEFINED"
 
-    with pytest.raises(SelectedHwmInputError, match="no performance-available.*alpha"):
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError, match="no performance-available.*alpha"
+    ):
         selected_hwm._source_rows(calculation, output, crosswalk)
 
 
-def _one_strategy_mixed_maps() -> tuple[
+def _one_strategy_mixed_maps(
+    selected_hwm: Any,
+) -> tuple[
     dict[tuple[str, str, str, str | None], dict[str, Any]],
     dict[tuple[str, str, str, str | None], dict[str, Any]],
     dict[tuple[str, str, str, str | None], dict[str, Any]],
@@ -182,8 +198,8 @@ def _one_strategy_mixed_maps() -> tuple[
     return crosswalk, calculation, output
 
 
-def test_builder_arithmetic_only_sees_performance_rows() -> None:
-    crosswalk, calculation, output = _one_strategy_mixed_maps()
+def test_builder_arithmetic_only_sees_performance_rows(selected_hwm: Any) -> None:
+    crosswalk, calculation, output = _one_strategy_mixed_maps(selected_hwm)
 
     memberships, capital, returns = selected_hwm._derive_builder_rows(
         crosswalk,

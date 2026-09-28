@@ -487,9 +487,11 @@ def bind_native_history_sources(
                 for row in contract["source_segments"]
                 if row["source_id"] == "matrixport-account-generation"
             )
-            # The prepared contract is a transient producer input that is fully
-            # rewritten by bind_final_hwm_contract; this world has no declared
-            # gap, and the producer requires the policy mapping to be present.
+            # bind_final_hwm_contract copies this prepared contract INTO the
+            # selected paths, so these prepared bytes are the final authority:
+            # the segment must already carry the policy mapping here. This
+            # world has no declared gap, and the layered-history producer
+            # requires the matrixport policy mapping to be present.
             source["declared_gap_policy"] = history._matrixport_gap_policy(
                 nav_path=nav_path,
                 holdings_path=history_fixture["matrixport_holdings_path"],
