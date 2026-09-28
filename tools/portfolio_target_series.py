@@ -253,6 +253,46 @@ def _committed_layered_history_dependency_sha256s(
     return identities
 
 
+@lru_cache(maxsize=16)
+def _committed_layered_history_tool_sha256(repository_sha: str) -> str:
+    """Return the tool SHA-256 the recorded repository commit itself holds.
+
+    A retained generation whose recorded tool identity differs from the
+    executing tool is repairable staleness only when the recorded identity
+    provably matches the bytes the generation's own recorded commit holds
+    for this tool. Every resolution failure — git unavailable, the recorded
+    SHA absent from a shallow or fragment checkout, or the tool path absent
+    from that commit — raises an integrity-class TargetSeriesError so the
+    unprovable identity fails closed instead of licensing a rebuild.
+    """
+
+    repository_root = Path(__file__).resolve().parents[1]
+    relative_path = Path(__file__).resolve().relative_to(repository_root).as_posix()
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "show",
+                f"{repository_sha}:{relative_path}",
+            ],
+            capture_output=True,
+            check=False,
+            env=_clean_git_environment(),
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise TargetSeriesError(
+            "layered history committed tool identity is unavailable"
+        ) from exc
+    if completed.returncode != 0:
+        raise TargetSeriesError(
+            "layered history committed tool identity is unavailable"
+        )
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
 def _require_trusted_layered_history_dependencies(
     repository_sha: str | None = None,
 ) -> None:
@@ -6320,8 +6360,13 @@ def validate_layered_history_generation(
         _trusted_layered_history_code_identity()
     )
     if tool_sha256 != trusted_tool_sha256:
+        kind = (
+            "staleness"
+            if tool_sha256 == _committed_layered_history_tool_sha256(repository_sha)
+            else "integrity"
+        )
         raise TargetSeriesError(
-            "layered history code identity is not trusted", kind="staleness"
+            "layered history code identity is not trusted", kind=kind
         )
 
     contract, strategies, sources, corrections = _history_contract(
