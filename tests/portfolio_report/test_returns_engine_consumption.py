@@ -113,6 +113,75 @@ def _owned_path_catalog() -> dict[str, Any]:
     }
 
 
+def _shared_member_catalog() -> dict[str, Any]:
+    """Every ACCOUNT_LIVE row is composed by both member accounts."""
+
+    return {
+        "assignments": [
+            _owned_assignment("account-a", "strategy-shared"),
+            _owned_assignment("account-b", "strategy-shared"),
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [
+                        {"account_id": "account-a"},
+                        {"account_id": "account-b"},
+                    ],
+                    "observed_start": "2026-01-02",
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-shared",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": ["account-a", "account-b"],
+                "date": day,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": value,
+                "strategy_id": "strategy-shared",
+            }
+            for day, value in (("2026-01-02", "0.1"), ("2026-01-05", "0.2"))
+        ],
+    }
+
+
+def _shared_member_epoch_details(
+    twr_by_account: dict[str, str | None],
+) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
+    """Manifest epoch details for the members of the shared strategy."""
+
+    return {
+        (account_id, "strategy-shared", "2026-01-01", None): {
+            "account_label": "Shared member",
+            "last_four": "4321",
+            "epoch_admission_status": "FUNDED",
+            "epoch_output_status": "OK",
+            "epoch_blocking_reason": None,
+            "performance_payload": {
+                "flow_count": 0,
+                "flow_timing": None,
+                "nav_observations": 2,
+                "observed_end": "2026-01-05",
+                "observed_start": "2026-01-02",
+                "twr": twr,
+                "twr_status": (
+                    "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+                    if twr is not None
+                    else "UNAVAILABLE"
+                ),
+            },
+        }
+        for account_id, twr in twr_by_account.items()
+    }
+
+
 def test_performance_takes_twr_from_the_manifest_epoch_payload() -> None:
     """Paired (fail-before): the P1 TWR loop is retired.
 
@@ -225,61 +294,124 @@ def test_single_account_epoch_twr_gate_rejects_a_disagreeing_own_path() -> None:
         )
 
 
-def test_multi_account_members_carry_no_strategy_level_return_path() -> None:
-    """Paired (fail-before): the strategy-level substitution is removed.
+def test_multi_account_divergent_member_twrs_fail_closed_at_the_seam() -> None:
+    """Paired (fail-before): divergent member TWRs must never pass the seam.
 
-    A member account of a multi-account strategy keeps no return path when no
-    row is the account's own; the strategy composite is never substituted.
+    W1: the ungated seam accepted both consistent member payloads and
+    deliberately divergent member TWRs 9 and 8.  A member epoch TWR that
+    disagrees with the compounded composite rows the member composes beyond
+    the composite tolerance is a divergent member TWR; the seam refuses it
+    instead of silently publishing.
     """
 
-    catalog = {
-        "assignments": [
-            _owned_assignment("account-a", "strategy-shared"),
-            _owned_assignment("account-b", "strategy-shared"),
-        ],
-        "calendar_coverage": [],
-        "flows": [],
-        "nav_observations": [],
-        "strategy_provider_evidence": [
-            {
-                "account": {
-                    "account_scopes": [
-                        {"account_id": "account-a"},
-                        {"account_id": "account-b"},
-                    ],
-                    "observed_start": "2026-01-02",
-                },
-                "evidence_layer": "ACCOUNT_LIVE",
-                "generation_id": "a" * 64,
-                "strategy_id": "strategy-shared",
-            }
-        ],
-        "strategy_returns": [
-            {
-                "component_account_ids": ["account-a", "account-b"],
-                "date": "2026-01-02",
-                "evidence_layer": "ACCOUNT_LIVE",
-                "provider_id": "synthetic",
-                "return": "0.1",
-                "strategy_id": "strategy-shared",
-            },
-            {
-                "component_account_ids": ["account-a", "account-b"],
-                "date": "2026-01-05",
-                "evidence_layer": "ACCOUNT_LIVE",
-                "provider_id": "synthetic",
-                "return": "0.2",
-                "strategy_id": "strategy-shared",
-            },
-        ],
-    }
+    epoch_details = _shared_member_epoch_details({"account-a": "9", "account-b": "8"})
 
-    rows = reporter._account_strategy_performance(catalog)
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="multi-account member epoch TWR differs from the member return path",
+    ):
+        reporter._account_strategy_performance(
+            _shared_member_catalog(),
+            None,
+            set(epoch_details),
+            epoch_details,
+        )
+
+
+def test_multi_account_member_twrs_consistent_with_the_composite_pass() -> None:
+    """Paired (fail-before): member TWRs agreeing with the composite pass.
+
+    Both members compose every row of the shared series, so each member's
+    own path is the full composite path (1.1 * 1.2 - 1 = 0.32); member epoch
+    TWRs that agree with it within the 1e-12 tolerance are accepted.
+    """
+
+    from quant_engine.portfolio_ledger.returns import splice_spans
+
+    with localcontext() as context:
+        context.prec = 34
+        composite_path = splice_spans(
+            [(date(2026, 1, 2), Decimal("0.1")), (date(2026, 1, 5), Decimal("0.2"))]
+        )
+    composite_twr = decimal_text(composite_path.cumulative_return)
+
+    epoch_details = _shared_member_epoch_details(
+        {"account-a": composite_twr, "account-b": composite_twr}
+    )
+
+    rows = reporter._account_strategy_performance(
+        _shared_member_catalog(),
+        None,
+        set(epoch_details),
+        epoch_details,
+    )
+
+    rendered = {row["account_id"]: row for row in rows}
+    assert len(rendered) == 2
+    for account_id in ("account-a", "account-b"):
+        assert rendered[account_id]["twr"] == composite_twr
+        assert (
+            rendered[account_id]["return_path_status"]
+            == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+        )
+        assert rendered[account_id]["return_path_cumulative_return"] == composite_twr
+        assert rendered[account_id]["return_path_observations"] == 2
+
+
+def test_multi_account_member_twrs_within_composite_tolerance_pass() -> None:
+    """Paired: a member TWR within the composite tolerance still renders.
+
+    A multi-account member's own NAV-linked TWR legitimately deviates from the
+    compounded composite rows the member composes (weighted blend, membership
+    boundaries, fee dispersion) -- the merged synthetic vertical oracle
+    renders deviations up to ~1.3% -- so the composite gate is a sanity
+    bound, not the single-account gate's exact equality.
+    """
+
+    epoch_details = _shared_member_epoch_details(
+        {"account-a": "0.326", "account-b": "0.314"}
+    )
+
+    rows = reporter._account_strategy_performance(
+        _shared_member_catalog(),
+        None,
+        set(epoch_details),
+        epoch_details,
+    )
+
+    rendered = {row["account_id"]: row for row in rows}
+    assert rendered["account-a"]["twr"] == "0.326"
+    assert rendered["account-b"]["twr"] == "0.314"
+    assert (
+        rendered["account-a"]["return_path_status"]
+        == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    )
+
+
+def test_multi_account_members_carry_shared_rows_in_their_own_paths() -> None:
+    """Paired (fail-before): shared rows are the members' own rows.
+
+    Every ACCOUNT_LIVE row of this strategy is composed by both members, so
+    each member's complete own path compounds the same two rows: no row-level
+    return is discarded merely because multiple accounts compose it, and each
+    member's path stays its own per-account series -- never a strategy-level
+    substitution.  Without an epoch payload the TWR stays unavailable.
+    """
+
+    rows = reporter._account_strategy_performance(_shared_member_catalog())
 
     assert len(rows) == 2
-    assert all("return_path_status" not in row for row in rows)
     assert all(row["twr"] is None for row in rows)
     assert all(row["twr_status"] == "UNAVAILABLE" for row in rows)
+    for row in rows:
+        assert row["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+        assert row["return_path_account_binding"] == "EVIDENCE_ACCOUNT_SCOPE"
+        assert row["return_path_observations"] == 2
+        assert row["return_path_observed_start"] == "2026-01-02"
+        assert row["return_path_observed_end"] == "2026-01-05"
+        # Both members compose every row, so each own path compounds the
+        # full shared series: 1.1 * 1.2 - 1 = 0.32.
+        assert row["return_path_cumulative_return"] == "0.32"
 
 
 def test_epoch_hpr_spans_are_spliced_through_the_return_engine() -> None:
@@ -608,7 +740,9 @@ def test_multi_account_members_carry_their_own_return_paths() -> None:
     per-account paths differ; the strategy composite is the beginning-capital
     weighted ``returns.composite`` over the members, never either member's
     path.  The pre-T3 code substituted the strategy-level composite for every
-    scoped member.
+    scoped member.  Each member's COMPLETE own path compounds every row-level
+    return the member composes -- including the row shared with the other
+    member -- instead of the multi-row-discarded subset.
     """
 
     from quant_engine.portfolio_ledger.returns import (
@@ -715,20 +849,59 @@ def test_multi_account_members_carry_their_own_return_paths() -> None:
     assert canonical["strategy-shared"]["cumulative_return"] == decimal_text(
         engine_compound.cumulative_return
     )
-    # Each member's row carries its own path, not the strategy composite.
-    assert rendered["account-a"]["return_path_status"] == (
-        "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
-    )
-    assert rendered["account-a"]["return_path_cumulative_return"] == "0.01"
-    assert rendered["account-a"]["return_path_observations"] == 1
+    # Each member's row carries its own COMPLETE path: every row-level return
+    # the member composes -- including the January 3 row shared with the other
+    # member -- never the multi-row-discarded subset (1%/2%) and never the
+    # strategy composite.  The member paths compound to the members'
+    # NAV-implied TWRs: account a links 100 -> 101 -> 104.03
+    # (1.01 * 1.03 - 1 = 0.0403, i.e. 104.03/100 - 1) and account b links
+    # 200 -> 206 -> 210.12 (1.03 * 1.02 - 1 = 0.0506, i.e. 210.12/200 - 1).
+    member_rows = {
+        account_id: [
+            row
+            for row in catalog["strategy_returns"]
+            if account_id in row["component_account_ids"]
+        ]
+        for account_id in ("account-a", "account-b")
+    }
+    for account_id, rows_of_member in member_rows.items():
+        # No row-level return is silently dropped between the raw member
+        # series and the published path: the published path binds exactly the
+        # member's own rows by observation count, compounded value and series
+        # hash.
+        assert rendered[account_id]["return_path_status"] == (
+            "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+        )
+        assert rendered[account_id]["return_path_observations"] == len(rows_of_member)
+        with localcontext() as context:
+            context.prec = 34
+            member_compound = splice_spans(
+                [
+                    (date.fromisoformat(row["date"]), Decimal(row["return"]))
+                    for row in rows_of_member
+                ]
+            )
+        assert rendered[account_id]["return_path_cumulative_return"] == decimal_text(
+            member_compound.cumulative_return
+        )
+        assert (
+            rendered[account_id]["return_path_series_sha256"]
+            == hashlib.sha256(
+                canonical_json_bytes(
+                    [
+                        {"date": row["date"], "return": row["return"]}
+                        for row in sorted(rows_of_member, key=lambda item: item["date"])
+                    ]
+                )
+            ).hexdigest()
+        )
+    assert rendered["account-a"]["return_path_cumulative_return"] == "0.0403"
+    assert rendered["account-a"]["return_path_observations"] == 2
     assert rendered["account-a"]["return_path_observed_start"] == "2026-01-02"
-    assert rendered["account-a"]["return_path_observed_end"] == "2026-01-02"
-    assert rendered["account-b"]["return_path_status"] == (
-        "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
-    )
-    assert rendered["account-b"]["return_path_cumulative_return"] == "0.02"
-    assert rendered["account-b"]["return_path_observations"] == 1
-    assert rendered["account-b"]["return_path_observed_start"] == "2026-01-04"
+    assert rendered["account-a"]["return_path_observed_end"] == "2026-01-03"
+    assert rendered["account-b"]["return_path_cumulative_return"] == "0.0506"
+    assert rendered["account-b"]["return_path_observations"] == 2
+    assert rendered["account-b"]["return_path_observed_start"] == "2026-01-03"
     assert rendered["account-b"]["return_path_observed_end"] == "2026-01-04"
     assert (
         rendered["account-a"]["return_path_cumulative_return"]

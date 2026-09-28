@@ -1168,6 +1168,16 @@ def _inside(day: date, start: date | None, end: date | None) -> bool:
     return (start is None or day >= start) and (end is None or day <= end)
 
 
+# A member of a multi-account strategy compounds the weighted composite rows
+# the member composes, so the member's own NAV-linked epoch TWR legitimately
+# deviates from that compounded path (weighted blend, membership boundaries,
+# fee dispersion) -- the merged synthetic vertical oracle renders deviations
+# up to ~1.3%.  The composite gate is therefore a sanity bound on that
+# deviation, not the single-account gate's exact equality: a divergent member
+# TWR fails closed here instead of silently publishing.
+_MULTI_ACCOUNT_MEMBER_TWR_TOLERANCE = Decimal("0.05")
+
+
 def _account_strategy_performance(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
@@ -1443,7 +1453,11 @@ def _account_strategy_performance(
             # For every single-account strategy the manifest epoch TWR must
             # equal the account's own compounded return path -- the daily
             # account-live series with the epoch HPR gap spans spliced in --
-            # within 1e-12, else the two engine views disagree.
+            # within 1e-12, else the two engine views disagree.  A member of a
+            # multi-account strategy is gated against its own compounded path
+            # of the composite rows the member composes, with the composite
+            # sanity bound: a divergent member TWR fails closed here, never
+            # silently publishes.
             own_path = account_owned_live.get((account_id, strategy_id))
             payload = detail.get("performance_payload") if detail is not None else None
             epoch_twr = (
@@ -1454,22 +1468,26 @@ def _account_strategy_performance(
             strategy_account_ids = {
                 key[0] for key in current_epoch_details if key[1] == strategy_id
             }
-            if (
-                own_path is not None
-                and epoch_twr is not None
-                and strategy_account_ids == {account_id}
-                and abs(
+            if own_path is not None and epoch_twr is not None:
+                twr_gap = abs(
                     _decimal(epoch_twr, "epoch manifest TWR")
                     - _decimal(
                         own_path["cumulative_return"],
                         "account own return path",
                     )
                 )
-                > Decimal("1e-12")
-            ):
-                raise ReportValidationError(
-                    "single-account epoch TWR differs from the account return path"
-                )
+                if strategy_account_ids == {account_id} and twr_gap > Decimal("1e-12"):
+                    raise ReportValidationError(
+                        "single-account epoch TWR differs from the account return path"
+                    )
+                if (
+                    len(strategy_account_ids) > 1
+                    and twr_gap > _MULTI_ACCOUNT_MEMBER_TWR_TOLERANCE
+                ):
+                    raise ReportValidationError(
+                        "multi-account member epoch TWR differs "
+                        "from the member return path"
+                    )
         rows.append(base)
     return sorted(
         rows,
@@ -2068,12 +2086,13 @@ def _account_live_return_series(
     """Hash and summarize each canonical account-live return path.
 
     A strategy-level path groups every ACCOUNT_LIVE row of one strategy; an
-    account-owned path (``account_owned``) groups only the rows that account
-    composes alone, so a per-account return path is never a strategy-level
-    composite substitution.  Both compound through the one return engine
-    (``splice_spans``); the epoch HPR gap spans are spliced in that single
-    place.  The epoch receipt's hash/count bindings hold for the strategy
-    series, so they are enforced on strategy-level paths only, and an
+    account-owned path (``account_owned``) groups every row the account
+    composes -- including rows shared with other members, so the member's
+    COMPLETE own path is delivered -- so a per-account return path is never a
+    strategy-level composite substitution.  Both compound through the one
+    return engine (``splice_spans``); the epoch HPR gap spans are spliced in
+    that single place.  The epoch receipt's hash/count bindings hold for the
+    strategy series, so they are enforced on strategy-level paths only, and an
     account-owned path splices the receipt's gap spans only when that account
     is the receipt's sole component -- a multi-account member composes only
     a subset of the bound strategy series.
@@ -2104,17 +2123,21 @@ def _account_live_return_series(
             )
         if account_owned:
             components = row.get("component_account_ids")
-            if not isinstance(components, list) or len(components) != 1:
+            if not isinstance(components, list) or not components:
                 continue
-            series_key: str | tuple[str, str] = (
-                _text(components[0], "strategy return.component_account_ids"),
-                strategy_id,
-            )
+            series_keys: list[str | tuple[str, str]] = [
+                (
+                    _text(component, "strategy return.component_account_ids"),
+                    strategy_id,
+                )
+                for component in components
+            ]
         else:
-            series_key = strategy_id
+            series_keys = [strategy_id]
         day = parsed_day.isoformat()
         value = decimal_text(_decimal(row.get("return"), "strategy return.return"))
-        grouped[series_key].append({"date": day, "return": value})
+        for series_key in series_keys:
+            grouped[series_key].append({"date": day, "return": value})
         providers[strategy_id].add(
             _text(row.get("provider_id"), "strategy return.provider_id")
         )
