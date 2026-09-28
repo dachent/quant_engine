@@ -1176,6 +1176,7 @@ def _account_strategy_performance(
     | None = None,
     *,
     calculation_cutoff_date: str | None = None,
+    raw_observation_coverage: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     admitted_epoch_keys = {
         key
@@ -1471,6 +1472,18 @@ def _account_strategy_performance(
                     "single-account epoch TWR differs from the account return path"
                 )
         rows.append(base)
+    for row in rows:
+        raw_day = (raw_observation_coverage or {}).get(str(row["account_id"]))
+        if raw_day is None or row.get("effective_end") is not None:
+            # The validator reads the raw-coverage field on current rows only.
+            continue
+        basis = row.get("observed_end") or row.get("return_path_observed_end")
+        if basis is None or raw_day > basis:
+            # R6 v2: the raw observation coverage can extend past the row's
+            # FX-converted/ledger-admitted return basis, whether that basis
+            # arrived through the epoch manifest performance payload or the
+            # account-live return path.
+            row["source_last_observation"] = raw_day
     return sorted(
         rows,
         key=lambda item: (
@@ -1839,6 +1852,8 @@ def _accounts(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     current_epoch_account_details: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    raw_observation_coverage: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
     synthetic_controls = strategy_product_controls is not None and all(
@@ -1894,6 +1909,11 @@ def _accounts(
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
             account_row["last_four"] = detail["last_four"] if detail else None
+        raw_day = (raw_observation_coverage or {}).get(account_id)
+        if raw_day is not None and (as_of is None or raw_day > as_of):
+            # R6 v2: the raw observation coverage can extend past the last
+            # FX-converted valuation (as_of_date, capital's basis).
+            account_row["source_last_observation"] = raw_day
         rows.append(account_row)
     return sorted(rows, key=lambda item: str(item["account_id"]))
 
@@ -4321,6 +4341,67 @@ def _selected_provider_ledger_catalog(
     return reference, provider_catalog, generation_id, observed_sha256
 
 
+def _provider_raw_observation_coverage(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
+) -> dict[str, str]:
+    """Map each account to its last raw NAV observation date.
+
+    R6 v2: a native NAV row inside the financial cutoff but beyond the
+    admitted FX interval end is excluded from the converted ledger facts and
+    retained as an ``OUTSIDE_ADMITTED_FX_BOUNDARY`` quality finding; its
+    ``original_source_date`` is the account's raw observation coverage, which
+    can extend past the last FX-converted valuation (capital's basis).  The
+    finding is provider-scoped, so the account perimeter comes from the same
+    hash-bound ledger's own nav observations.
+    """
+
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return {}
+    _reference, provider_catalog, _generation_id, _catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    findings = provider_catalog.get("quality_findings", [])
+    if not isinstance(findings, list):
+        raise ReportValidationError("provider-ledger quality_findings differs")
+    raw_end_by_provider: dict[str, str] = {}
+    for finding in _objects(findings, "provider-ledger quality_findings"):
+        if (
+            finding.get("status") != "OUTSIDE_ADMITTED_FX_BOUNDARY"
+            or finding.get("fact_type") != "nav_observations"
+        ):
+            continue
+        provider_id = _text(finding.get("provider_id"), "quality provider_id")
+        day = _text(finding.get("original_source_date"), "quality original_source_date")
+        if (
+            provider_id not in raw_end_by_provider
+            or day > raw_end_by_provider[provider_id]
+        ):
+            raw_end_by_provider[provider_id] = day
+    if not raw_end_by_provider:
+        return {}
+    accounts_by_provider: dict[str, set[str]] = defaultdict(set)
+    for record in _objects(
+        provider_catalog.get("nav_observations", []),
+        "provider-ledger nav_observations",
+    ):
+        accounts_by_provider[
+            _text(record.get("provider_id"), "provider-ledger nav.provider_id")
+        ].add(_text(record.get("account_id"), "provider-ledger nav.account_id"))
+    return {
+        account_id: raw_end_by_provider[provider_id]
+        for provider_id, raw_end in raw_end_by_provider.items()
+        for account_id in accounts_by_provider.get(provider_id, ())
+    }
+
+
 def _provider_ledger_exceptions(
     catalog: Mapping[str, Any],
     baseline_root: Path,
@@ -5374,6 +5455,9 @@ def build_report_data(
     strategy_product_controls, product_contract_provenance = _report_product_controls(
         catalog
     )
+    raw_observation_coverage = _provider_raw_observation_coverage(
+        catalog, baseline_root, provider_ledger_root
+    )
     current_product_catalog = _current_product_baseline_projection(
         catalog, strategy_product_controls
     )
@@ -5547,6 +5631,7 @@ def build_report_data(
         current_epoch_tuples,
         current_epoch_details,
         calculation_cutoff_date=calculation_cutoff_date,
+        raw_observation_coverage=raw_observation_coverage,
     )
     implementation_contract: dict[str, dict[str, Any]] | None = None
     implementation_contract_ref: dict[str, Any] | None = None
@@ -5905,7 +5990,10 @@ def build_report_data(
     )
     report: dict[str, Any] = {
         "account_summary": _accounts(
-            catalog, strategy_product_controls, current_epoch_account_details
+            catalog,
+            strategy_product_controls,
+            current_epoch_account_details,
+            raw_observation_coverage=raw_observation_coverage,
         ),
         "allocation_history": allocation_history,
         "as_of_date": catalog.get("as_of_date"),
