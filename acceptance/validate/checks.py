@@ -4091,31 +4091,67 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 metric_id == "date.source_last_observation"
                 and row.get("effective_end") is None
             ):
-                out.append(
-                    Observed(
-                        f"report:twr_mwr.observed_end[{label}]",
-                        row.get("observed_end"),
-                        None,
-                        None,
-                        None,
-                        REPORT,
-                        f"$.twr_mwr[{position}].observed_end",
-                    )
-                )
-        if metric_id == "date.source_last_observation":
-            for position, row in enumerate(rows(report, "account_summary")):
-                if row.get("account_id") == entity:
+                raw_coverage = row.get("source_last_observation")
+                if raw_coverage is not None:
+                    # R6 v2: raw observation coverage is exposed on a separate
+                    # field; the return window's observed_end stays the
+                    # converted valuation basis.
                     out.append(
                         Observed(
-                            "report:account_summary.as_of_date",
-                            row.get("as_of_date"),
+                            f"report:twr_mwr.source_last_observation[{label}]",
+                            raw_coverage,
                             None,
                             None,
                             None,
                             REPORT,
-                            f"$.account_summary[{position}].as_of_date",
+                            f"$.twr_mwr[{position}].source_last_observation",
                         )
                     )
+                else:
+                    out.append(
+                        Observed(
+                            f"report:twr_mwr.observed_end[{label}]",
+                            row.get("observed_end"),
+                            None,
+                            None,
+                            None,
+                            REPORT,
+                            f"$.twr_mwr[{position}].observed_end",
+                        )
+                    )
+        if metric_id == "date.source_last_observation":
+            for position, row in enumerate(rows(report, "account_summary")):
+                if row.get("account_id") == entity:
+                    raw_coverage = row.get("source_last_observation")
+                    if raw_coverage is not None:
+                        # R6 v2: raw observation coverage is exposed on a
+                        # separate field; capital's valuation date stays on
+                        # as_of_date (the last FX-converted/ledger-admitted
+                        # basis).
+                        out.append(
+                            Observed(
+                                "report:account_summary.source_last_observation",
+                                raw_coverage,
+                                None,
+                                None,
+                                None,
+                                REPORT,
+                                f"$.account_summary[{position}]"
+                                ".source_last_observation",
+                            )
+                        )
+                    else:
+                        out.append(
+                            Observed(
+                                "report:account_summary.as_of_date",
+                                row.get("as_of_date"),
+                                None,
+                                None,
+                                None,
+                                REPORT,
+                                f"$.account_summary[{position}].as_of_date",
+                            )
+                        )
         if (
             metric_id in ("flows.account.net", "flows.account.count")
             and len(epochs) > 1

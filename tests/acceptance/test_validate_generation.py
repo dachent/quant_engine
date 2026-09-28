@@ -14,6 +14,7 @@ import copy
 from dataclasses import dataclass, field
 from decimal import Decimal
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -1799,6 +1800,183 @@ def test_expected_unresolvable_metric_is_not_ready(tmp_path: Path) -> None:
     assert [(f.check_id, f.klass) for f in findings] == [
         ("expected.capital.account.cutoff", checks.NOT_READY)
     ]
+
+
+# R6 v2 seam (derive_b producer -> validator consumer): raw observation coverage
+# (2026-09-17) is exposed separately from capital's converted valuation date
+# (2026-09-03); the source-date check reads the raw-coverage field while the
+# capital-date check keeps reading account_summary.as_of_date.
+RAW_LAST_OBSERVATION = "2026-09-17"
+CONVERTED_AS_OF = "2026-09-03"
+
+
+def _load_derive_b():
+    spec = importlib.util.spec_from_file_location(
+        "derive_b", REPOSITORY_ROOT / "acceptance" / "derive_b" / "derive.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_fx_bound_producer_inputs(root: Path, derivation: Any) -> None:
+    """One tiny FX-bound Matrixport selection for the real derive_b producer."""
+    (root / "ledger.json").write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "crosswalk.json").write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [
+                    {
+                        "account_id": "account-m",
+                        "strategy_id": "strategy-m",
+                        "provider": "MATRIXPORT",
+                        "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                        "effective_start": "2026-09-01",
+                        "effective_end": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    matrixport = root / "matrixport"
+    matrixport.mkdir()
+    (matrixport / "nav.csv").write_text(
+        "day_timestamp_utc,nav\n"
+        "2026-09-03T00:00:00+00:00,1.0\n"
+        "2026-09-17T00:00:00+00:00,1.2\n",
+        encoding="utf-8-sig",
+    )
+    (matrixport / "deposits.csv").write_text(
+        "state,currency,amount,created_at_utc\n",
+        encoding="utf-8-sig",
+    )
+    (matrixport / "bills.csv").write_text(
+        "currency,direction,amount,timestamp_utc\n"
+        "USDT,2,100,2026-09-02T20:00:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    (root / "fx.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "Ticker": "USDT-USD",
+                        "Date": "2026-09-03T00:00:00",
+                        "Close": 0.99,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    derivation.LEDGER_PATH = Path("ledger.json")
+    derivation.CROSSWALK_PATH = Path("crosswalk.json")
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+
+
+def _fx_bound_producer_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    """The real derivation's rows for the FX-bound account (raw != converted)."""
+    derivation = _load_derive_b()
+    producer_root = tmp_path / "producer"
+    producer_root.mkdir()
+    _write_fx_bound_producer_inputs(producer_root, derivation)
+    produced = derivation.derive(producer_root)
+    rows = [
+        row
+        for row in produced["metrics"]
+        if row["metric_id"]
+        in ("capital.account.cutoff", "date.source_last_observation")
+        and row["entity"] == "account-m"
+    ]
+    assert {row["metric_id"]: row["as_of"] for row in rows} == {
+        "capital.account.cutoff": CONVERTED_AS_OF,
+        "date.source_last_observation": RAW_LAST_OBSERVATION,
+    }
+    return rows
+
+
+def _fx_bound_spec(*, raw_coverage_field: bool) -> Spec:
+    as_of = CONVERTED_AS_OF if raw_coverage_field else RAW_LAST_OBSERVATION
+    account_row: dict[str, Any] = {
+        "account_id": "account-m",
+        "as_of_date": as_of,
+        "latest_value_usd": "99.00",
+        "status": "AVAILABLE_LATEST_OBSERVATION",
+    }
+    twr_row: dict[str, Any] = {
+        # The synthetic row reuses the fixture's known strategy: the
+        # source-date and capital-date views key on the account, not the
+        # strategy.
+        **_twr_row("account-m", "alpha", "99", "99", []),
+        "observed_end": as_of,
+        "mwr_terminal_date": as_of,
+    }
+    if raw_coverage_field:
+        account_row["source_last_observation"] = RAW_LAST_OBSERVATION
+        twr_row["source_last_observation"] = RAW_LAST_OBSERVATION
+    return Spec(
+        report=[
+            _append(("account_summary",), account_row),
+            _append(("twr_mwr",), twr_row),
+        ],
+    )
+
+
+def _producer_findings(
+    tmp_path: Path, spec: Spec, rows: list[dict[str, Any]]
+) -> list[checks.Finding]:
+    return [
+        finding
+        for finding in run(build(tmp_path / "gen", spec), rows)
+        if finding.check_id.startswith("expected.")
+        and str(finding.entity).startswith("account-m|")
+    ]
+
+
+def test_source_date_check_reads_raw_coverage_when_dates_differ(
+    tmp_path: Path,
+) -> None:
+    """Both the source-date and capital-date expected checks pass when the raw
+    observation coverage (09-17) is exposed separately from capital's converted
+    valuation date (09-03)."""
+    rows = _fx_bound_producer_rows(tmp_path)
+    assert (
+        _producer_findings(tmp_path, _fx_bound_spec(raw_coverage_field=True), rows)
+        == []
+    )
+
+
+def test_capital_date_check_keeps_the_valuation_date_without_raw_coverage(
+    tmp_path: Path,
+) -> None:
+    """A surface that carries only the raw date on as_of_date cannot satisfy
+    capital's converted valuation date; the raw-coverage field is required."""
+    rows = _fx_bound_producer_rows(tmp_path)
+    findings = _producer_findings(
+        tmp_path, _fx_bound_spec(raw_coverage_field=False), rows
+    )
+    assert sorted((f.check_id, f.klass) for f in findings) == [
+        ("expected.capital.account.cutoff", checks.BLOCKER_REGRESSION),
+        ("expected.capital.account.cutoff", checks.BLOCKER_REGRESSION),
+    ]
+    assert all("dated differently" in finding.message for finding in findings)
 
 
 # A critical expected value must never be undecidable (orchestrator ruling, round 3):
