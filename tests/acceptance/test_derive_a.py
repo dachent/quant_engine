@@ -10,6 +10,7 @@ import ast
 import datetime as dt
 import hashlib
 import json
+import re
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -650,6 +651,10 @@ def test_end_to_end_synthetic_derivation(tmp_path: Path) -> None:
     assert (qb_capital["value"], qb_capital["as_of"]) == ("202.00", "2026-01-08")
     assert "R6 NOT EXPECTED VALUES: 1 provider-ledger valuation" in qb_capital["notes"]
     assert metrics[("date.source_last_observation", "acct-qb")]["value"] == "2026-01-08"
+    # Without --inputs the built-in v1 role paths are the per-row provenance.
+    assert qb_capital["inputs_used"] == sorted(
+        {derive.QB_VALUES, derive.QB_ACCOUNTS, derive.LEDGER}
+    )
     # Raw BUY 100 (BOD, dated 01-03) -> 202 / (100 + 100); the fee sale is an expense
     # and the ledger account deposit is ignored.
     assert metrics[("flows.account.count", "acct-qb")]["value"] == "1"
@@ -1143,6 +1148,50 @@ def test_inputs_manifest_resolves_every_role(tmp_path: Path) -> None:
     assert document["inputs_manifest"]["not_read"] == [
         "m/account-strategy-manifest.json"
     ]
+
+
+def test_inputs_manifest_binds_every_rows_provenance_to_selected_bytes(
+    tmp_path: Path,
+) -> None:
+    """Per-row source provenance (PR #492 review): with --inputs, every metric's
+    ``inputs_used`` must cite the selected manifest paths -- the same paths as
+    the top-level ``inputs`` records, so the expected-baseline's
+    ``authority_pointers`` bind values to the actual selected bytes -- never the
+    built-in v1 role paths, which carry no digest in the v2 inputs records."""
+
+    manifest = _manifest_tree(tmp_path)
+    document = _run_manifest(tmp_path, manifest)
+    digest_by_path: dict[str, str] = {
+        item["path"]: item["sha256"] for item in document["inputs"]
+    }
+    digest_by_path.update(
+        {item["path"]: item["sha256"] for item in document["contracts"]}
+    )
+    assert document["metrics"]
+    for row in document["metrics"]:
+        assert row["inputs_used"], (row["metric_id"], row["entity"])
+        for reference in row["inputs_used"]:
+            assert reference not in derive.INPUT_ORDER, (
+                row["metric_id"],
+                row["entity"],
+                reference,
+            )
+            assert reference in digest_by_path, (
+                row["metric_id"],
+                row["entity"],
+                reference,
+            )
+            assert re.fullmatch(r"[0-9a-f]{64}", digest_by_path[reference]), reference
+    # The FX provenance note cites the selected capture path and its digest too.
+    notes = _index(document)[("capital.account.cutoff", "acct-mp")]["notes"]
+    provenance = notes[notes.find("fx_provenance") :]
+    selected_fx = next(
+        item
+        for item in document["inputs"]
+        if item["path"].endswith("yfinance-history.json")
+    )
+    assert selected_fx["path"] in provenance
+    assert f"sha256 {selected_fx['sha256']}" in provenance
 
 
 def test_inputs_manifest_sha256_mismatch_fails_closed(tmp_path: Path) -> None:

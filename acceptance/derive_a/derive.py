@@ -854,7 +854,7 @@ def _fx_provenance(fx: FxSource, used: Sequence[dt.date]) -> str:
     after = [day for day in used if fx.admitted_through and day > fx.admitted_through]
     return (
         "fx_provenance: USDT->USD Yahoo daily Close from the contract-bound "
-        f"{fx.contract_generation[:8]} raw capture {FX_HISTORY} (sha256 {fx.sha256}; "
+        f"{fx.contract_generation[:8]} raw capture {fx.path} (sha256 {fx.sha256}; "
         "contract source_segments[portfolio-fx-rates].current_generation "
         f"{fx.contract_generation} observed through {fx.contract_observed_end}); "
         f"matrixport-account-generation splice_policy {fx.splice_rule}; admitted "
@@ -874,6 +874,7 @@ class FxSource:
     admitted_through: dt.date | None
     splice_rule: str
     dropped_after_boundary: int = 0
+    path: str = FX_HISTORY
 
 
 def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
@@ -908,6 +909,7 @@ def _fx_source(fx_file: InputFile, contract: bytes) -> FxSource:
         admitted_through=through,
         splice_rule=rule or "-",
         dropped_after_boundary=len(raw) - len(admitted),
+        path=fx_file.path,
     )
 
 
@@ -1243,6 +1245,19 @@ def _derive(
         sources = _account_sources(crosswalk, ledger, files, fx, cutoff)
         _derive_accounts(output, crosswalk, membership, sources, cutoff)
         _derive_strategies_and_portfolio(output, crosswalk, membership, sources, cutoff)
+    if manifest is not None:
+        # Per-row source provenance: every inputs_used reference names the actual
+        # selected bytes. The sources are built from the fixed v1 role paths; with
+        # --inputs those roles resolved through the manifest, so rebind each
+        # reference to files[role].path (top-level inputs records) before emitting.
+        selected = {role: files[role].path for role in INPUT_ORDER}
+        for metric in output.metrics:
+            metric["inputs_used"] = sorted(
+                {
+                    selected.get(reference, reference)
+                    for reference in metric["inputs_used"]
+                }
+            )
     output.metrics.sort(key=lambda m: (m["metric_id"], m["entity"], m["window"] or ""))
     output.not_derivable.sort(key=lambda m: (m["metric_id"], m["entity"]))
     document: dict[str, Any] = {
