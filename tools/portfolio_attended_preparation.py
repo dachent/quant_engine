@@ -13,6 +13,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+from types import ModuleType
 from typing import Any, Callable, Mapping, TypedDict, cast
 
 from quant_engine.core import run_storage
@@ -607,6 +609,60 @@ def _selected_dependence_handoff(
     }
 
 
+def _head_committed_file_bytes(relative_path: str) -> bytes:
+    """Return the bytes HEAD commits for one repository-relative file."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"HEAD:{relative_path}"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        ) from exc
+    if completed.returncode != 0:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        )
+    return completed.stdout
+
+
+def _require_executing_history_tool_matches_head(history: ModuleType) -> None:
+    """Refuse a rebuild that would execute bytes the release commit does not hold.
+
+    A staleness verdict licenses rebuilding from the current code while the
+    rebuilt manifest records ``release_commit`` as its repository identity.
+    The rebuild executes the history tool's on-disk bytes, so those bytes must
+    match HEAD's committed bytes: uncommitted or tampered tool bytes would be
+    executed while the clean HEAD SHA is recorded, and the operator must commit
+    or restore first.
+    """
+
+    tool_file = getattr(history, "__file__", None)
+    if not isinstance(tool_file, str) or not tool_file:
+        raise AttendedPreparationError(
+            "layered history tool identity is unavailable; refusing rebuild"
+        )
+    tool_path = Path(tool_file).resolve()
+    try:
+        relative_path = tool_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        raise AttendedPreparationError(
+            "layered history tool is outside the repository; refusing rebuild"
+        ) from None
+    committed = _head_committed_file_bytes(relative_path)
+    if (
+        hashlib.sha256(committed).digest()
+        != hashlib.sha256(tool_path.read_bytes()).digest()
+    ):
+        raise AttendedPreparationError(
+            "layered history tool has uncommitted changes; refusing rebuild"
+        )
+
+
 def _retained_history_requires_rebuild(
     history_root: Path,
     contract_path: Path,
@@ -614,10 +670,21 @@ def _retained_history_requires_rebuild(
 ) -> bool:
     """Distinguish stale code- or ledger-bound derived history from invalid evidence.
 
-    A retained generation is stale, and rebuilt, when the code that defines it
-    changed or when its return content no longer matches the provider ledger
-    after a semantics change (the layered history is one cycle behind by
-    design). Any other verification failure is invalid source evidence.
+    The verifier marks a TargetSeriesError as ``kind="staleness"`` only when a
+    well-formed retained generation is one cycle behind by design: the code
+    that defines it moved on (a recorded repository dependency differs, or
+    the history tool itself was edited after the build so its trusted
+    identity no longer matches), its current source admission proof binds a
+    previous ledger generation, or its account-live returns no longer match
+    the provider ledger after a semantics change. Each such generation is
+    rebuilt from the frozen selected bytes, and only after the executing
+    history tool's own bytes match HEAD's committed bytes: uncommitted tool
+    bytes fail closed instead of being executed under a clean recorded SHA.
+    Every other TargetSeriesError is an integrity failure of the retained
+    evidence itself (tampered artifact bytes, an invalid or non-canonical
+    manifest, a differing inventory, an unreadable generation), and raw
+    OSError escapes are unreadable evidence; both fail closed without
+    rebuilding.
     """
 
     import portfolio_target_series as history
@@ -628,12 +695,13 @@ def _retained_history_requires_rebuild(
                 history_root, contract_path, require_mode=mode, **authorities
             )
         except history.TargetSeriesError as exc:
-            message = str(exc)
-            if (
-                message.startswith("layered history repository dependency differs:")
-                or "differs from provider ledger" in message
-            ):
+            if exc.kind == "staleness":
+                _require_executing_history_tool_matches_head(history)
                 return True
+            raise AttendedPreparationError(
+                "retained layered history is invalid"
+            ) from exc
+        except OSError as exc:
             raise AttendedPreparationError(
                 "retained layered history is invalid"
             ) from exc
