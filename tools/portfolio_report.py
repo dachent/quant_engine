@@ -1395,7 +1395,6 @@ def _account_strategy_performance(
             current_assignments_by_strategy[
                 _text(assignment.get("strategy_id"), "assignment.strategy_id")
             ].append(assignment)
-    account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
     return_catalog = catalog
     if admission_governed:
         return_catalog = {
@@ -1477,7 +1476,7 @@ def _account_strategy_performance(
                 "return_path_assignment_id": assignment_id,
                 "return_path_generation_id": evidence.get("generation_id"),
             }
-            if not sole_component:
+            if live_path is None or not sole_component:
                 # A per-account return path is the account's OWN path; a
                 # shared strategy-level composite is never substituted for
                 # it.  A multi-account strategy publishes no member path
