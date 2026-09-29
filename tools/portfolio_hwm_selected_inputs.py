@@ -70,6 +70,15 @@ _FORBIDDEN_QUALITY_MARKERS: Final = (
     "parity-rate conflict",
     "parity_rate_conflict",
 )
+# The only unavailable-performance reason that keeps a funded (OK) epoch in the
+# HWM by value.  The return engine emits it when a sub-period opens at zero
+# capital without a same-day inflow embedded in the opening value (R3): the
+# zero-run bridge of a funded account, whose NAV series and flow coverage were
+# admitted and whose own-account ratio alone is undefined.  Every other reason
+# (a flow after the closing observation, a negative base, a non-positive
+# factor, no sub-period, an opening defect) reports incomplete or inconsistent
+# evidence, so it fails closed.
+_R3_ZERO_CAPITAL_REASONS: Final = frozenset({"ZERO_CAPITAL_RETURN_UNDEFINED"})
 
 Row = dict[str, Any]
 EpochKey = tuple[str, str, str, str | None]
@@ -95,7 +104,7 @@ class _SelectedHwmSourceRows:
     account_generation_id: str
     source_generation_id: str
     source_generation_sha256: str
-    excluded_nonperformance_rows: list[Row]
+    excluded_non_ok_rows: list[Row]
 
 
 class SelectedHwmInputError(ValueError):
@@ -602,20 +611,31 @@ def _available_usd_amount(value: object, field: str) -> Decimal:
     return _decimal(amount.get("value"), f"{field}.value")
 
 
-def _performance_available(row: Mapping[str, Any]) -> bool:
-    """HWM consumes performance data only; everything else is excluded.
+def _funded_member(row: Mapping[str, Any]) -> bool:
+    """HWM membership is funded membership: every OK epoch row is a member.
 
-    Any status other than OK — the producer emits BLOCKED_ADMISSION,
-    BLOCKED_MISSING_PREDECESSOR_CONTINUITY, BLOCKED_UNPROVABLE_OPENING_FLOWS,
-    BLOCKED_UNAVAILABLE_NAV_OBSERVATION, BLOCKED_CONTINUITY_AFTER_WITHDRAWAL —
-    or an OK row whose performance_status is not AVAILABLE (the zero-capital
-    rule) carries no returns and contributes no HWM data, exactly as the
-    ledger excludes it.
+    A row with any status other than OK -- the producer emits
+    BLOCKED_ADMISSION, BLOCKED_MISSING_PREDECESSOR_CONTINUITY,
+    BLOCKED_UNPROVABLE_OPENING_FLOWS, BLOCKED_UNAVAILABLE_NAV_OBSERVATION,
+    BLOCKED_CONTINUITY_AFTER_WITHDRAWAL -- is excluded with a disclosure.
+    An OK row whose own performance is unavailable under R3 (see
+    `_r3_zero_capital_member`) stays a member: its NAV and flows are part of
+    the strategy composite the ledger links over summed member values, and
+    HWM_DRAWDOWN compounds that same path, so it contributes by value at every
+    strategy interval.  `_source_rows` fails closed on any other unavailable
+    performance of an OK row.
     """
-    return row.get("status") == "OK" and row.get("performance_status") == "AVAILABLE"
+    return row.get("status") == "OK"
 
 
-def _nonperformance_disclosure(key: EpochKey, row: Mapping[str, Any]) -> Row:
+def _r3_zero_capital_member(row: Mapping[str, Any]) -> bool:
+    return (
+        row.get("performance_status") == "UNAVAILABLE"
+        and row.get("performance_reason") in _R3_ZERO_CAPITAL_REASONS
+    )
+
+
+def _excluded_row_disclosure(key: EpochKey, row: Mapping[str, Any]) -> Row:
     disclosure: Row = {
         "account_id": key[0],
         "strategy_id": key[1],
@@ -693,24 +713,30 @@ def _source_rows(
             "calculation, output, and crosswalk epoch sets differ"
         )
 
-    performance_by_key: dict[EpochKey, Row] = {}
+    funded_by_key: dict[EpochKey, Row] = {}
     excluded: list[Row] = []
     for key in sorted(output_by_key):
         row = output_by_key[key]
-        if _performance_available(row):
-            performance_by_key[key] = row
-        else:
-            excluded.append(_nonperformance_disclosure(key, row))
+        if not _funded_member(row):
+            excluded.append(_excluded_row_disclosure(key, row))
+            continue
+        if row.get("performance_status") != "AVAILABLE" and not (
+            _r3_zero_capital_member(row)
+        ):
+            raise SelectedHwmInputError(
+                "funded epoch performance is unavailable outside the R3 "
+                f"zero-capital rule: {key[1]} {row.get('performance_reason')}"
+            )
+        funded_by_key[key] = row
     empty_strategies = sorted(
-        {key[1] for key in crosswalk_by_key} - {key[1] for key in performance_by_key}
+        {key[1] for key in crosswalk_by_key} - {key[1] for key in funded_by_key}
     )
     if empty_strategies:
         raise SelectedHwmInputError(
-            "selected strategy has no performance-available account-manifest rows"
-            f" ({len(excluded)} non-performance rows excluded): "
-            + ", ".join(empty_strategies)
+            "selected strategy has no funded account-manifest rows"
+            f" ({len(excluded)} non-OK rows excluded): " + ", ".join(empty_strategies)
         )
-    return crosswalk_by_key, calculation_by_key, performance_by_key, excluded
+    return crosswalk_by_key, calculation_by_key, funded_by_key, excluded
 
 
 def _validate_contract_epoch_strategy_perimeter(
@@ -917,7 +943,11 @@ def _validated_account_sources(
                 "trace factor differs from the canonical 40-digit source NAV calculation"
             )
         links.append(link)
-    if not links:
+    # R3: a funded epoch whose own-account TWR is undefined across a zero-capital
+    # run carries no observation links.  Its NAV and flows, validated above,
+    # still enter the strategy composite by value at the intervals the other
+    # members define.  Any other epoch must carry its linked evidence.
+    if not links and not _r3_zero_capital_member(output):
         raise SelectedHwmInputError("selected epoch has no observation-linked returns")
     return links, nav_by_date, dict(flows_by_date), dict(flow_evidence_by_date)
 
@@ -968,11 +998,17 @@ def _derive_builder_rows(
     ] = defaultdict(dict)
     returns: list[Row] = []
     for strategy_id in sorted(intervals_by_strategy):
-        # Non-performance epochs were excluded at selection: they hold no funded
-        # membership and no returns, so the HWM arithmetic never sees them.
+        # Non-OK epochs were excluded at selection, so the HWM arithmetic never
+        # sees them.  Every OK epoch is a funded member, including an R3 epoch
+        # without observation links, which contributes NAV and flows by value.
         strategy_epochs = [
             key for key in crosswalk if key[1] == strategy_id and key in output
         ]
+        if not intervals_by_strategy[strategy_id]:
+            raise SelectedHwmInputError(
+                "selected strategy has no observation-linked source interval: "
+                + strategy_id
+            )
         effective_start = min(key[2] for key in strategy_epochs)
         membership_source = {
             "account_manifest_generation_id": account_generation_id,
@@ -1265,7 +1301,7 @@ def _selected_hwm_source_rows(
     _validate_provider_admission_binding(
         receipt_bytes, receipt, source_manifest, source_generation_sha256
     )
-    crosswalk, calculation, output, excluded_nonperformance = _source_rows(
+    crosswalk, calculation, output, excluded_non_ok = _source_rows(
         documents["authority/calculation-inputs.json"],
         documents["outputs/account-strategy-manifest.json"],
         documents["authority/account-assignment-crosswalk.json"],
@@ -1295,7 +1331,7 @@ def _selected_hwm_source_rows(
         account_generation_id=bundle.manifest.generation_id,
         source_generation_id=source_generation_id,
         source_generation_sha256=source_generation_sha256,
-        excluded_nonperformance_rows=excluded_nonperformance,
+        excluded_non_ok_rows=excluded_non_ok,
     )
 
 
