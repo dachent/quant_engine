@@ -79,6 +79,10 @@ _FORBIDDEN_QUALITY_MARKERS: Final = (
 # factor, no sub-period, an opening defect) reports incomplete or inconsistent
 # evidence, so it fails closed.
 _R3_ZERO_CAPITAL_REASONS: Final = frozenset({"ZERO_CAPITAL_RETURN_UNDEFINED"})
+# The admission statuses the account-strategy manifest emits on every row
+# (tools/account_strategy_manifest.py _ADMISSION_STATUSES).  HWM membership is
+# decided on this field, never on the row's `status`.
+_ADMISSION_STATUSES: Final = frozenset({"FUNDED", "BLOCKED"})
 
 Row = dict[str, Any]
 EpochKey = tuple[str, str, str, str | None]
@@ -104,7 +108,7 @@ class _SelectedHwmSourceRows:
     account_generation_id: str
     source_generation_id: str
     source_generation_sha256: str
-    excluded_non_ok_rows: list[Row]
+    excluded_unfunded_rows: list[Row]
 
 
 class SelectedHwmInputError(ValueError):
@@ -611,21 +615,60 @@ def _available_usd_amount(value: object, field: str) -> Decimal:
     return _decimal(amount.get("value"), f"{field}.value")
 
 
-def _funded_member(row: Mapping[str, Any]) -> bool:
-    """HWM membership is funded membership: every OK epoch row is a member.
+def _epoch_label(key: EpochKey) -> str:
+    return f"account_id={key[0]} strategy_id={key[1]} effective_start={key[2]}"
 
-    A row with any status other than OK -- the producer emits
-    BLOCKED_ADMISSION, BLOCKED_MISSING_PREDECESSOR_CONTINUITY,
-    BLOCKED_UNPROVABLE_OPENING_FLOWS, BLOCKED_UNAVAILABLE_NAV_OBSERVATION,
-    BLOCKED_CONTINUITY_AFTER_WITHDRAWAL -- is excluded with a disclosure.
-    An OK row whose own performance is unavailable under R3 (see
-    `_r3_zero_capital_member`) stays a member: its NAV and flows are part of
-    the strategy composite the ledger links over summed member values, and
-    HWM_DRAWDOWN compounds that same path, so it contributes by value at every
-    strategy interval.  `_source_rows` fails closed on any other unavailable
-    performance of an OK row.
+
+def _funded_member(key: EpochKey, row: Mapping[str, Any]) -> bool:
+    """Decide membership from the row's admission: funded (True) or not (False).
+
+    The perimeter is EFFECTIVE_FUNDED_MEMBERSHIP_ONLY with missing
+    infrastructure failing the required outcome, so it is keyed on
+    `admission_status` and never on `status`:
+
+    * BLOCKED admission with a non-OK status -- BLOCKED_ADMISSION, and
+      BLOCKED_MISSING_PREDECESSOR_CONTINUITY, which the producer emits before
+      its admission check -- was never funded.  It is excluded (the caller
+      discloses it).
+    * FUNDED admission with status OK is a member.  Its own performance is
+      AVAILABLE, or the R3 zero-capital pattern (see `_r3_zero_capital_member`),
+      which stays a member by value: its NAV and flows are part of the strategy
+      composite the ledger links over summed member values, and HWM_DRAWDOWN
+      compounds that same path.  `_source_rows` fails closed on any other
+      unavailable performance of an OK row.
+    * FUNDED admission with any other status fails closed.  The producer emits
+      BLOCKED_UNPROVABLE_OPENING_FLOWS, BLOCKED_UNAVAILABLE_NAV_OBSERVATION,
+      BLOCKED_UNDEFINED_RETURN, BLOCKED_RETURN_LINKAGE, NO_ADMITTED_NAV,
+      FLOWS_AFTER_CLOSING_NAV and BLOCKED_CONTINUITY_AFTER_WITHDRAWAL only for
+      a FUNDED admission: the row is a funded member whose evidence is
+      incomplete, and dropping it would silently remove its capital and flows
+      from the composite.
+    * A missing or unknown `admission_status`, or an OK row without a FUNDED
+      admission, is an integrity failure.
     """
-    return row.get("status") == "OK"
+    admission = row.get("admission_status")
+    status = row.get("status")
+    if not isinstance(admission, str) or admission not in _ADMISSION_STATUSES:
+        raise SelectedHwmInputError(
+            "selected account-manifest output row needs admission_status FUNDED "
+            f"or BLOCKED: {_epoch_label(key)} admission_status={admission!r} "
+            f"status={status}"
+        )
+    if admission == "BLOCKED":
+        if status == "OK":
+            raise SelectedHwmInputError(
+                "selected account-manifest output row is OK without a FUNDED "
+                f"admission: {_epoch_label(key)} admission_status={admission} "
+                f"status={status}"
+            )
+        return False
+    if status != "OK":
+        raise SelectedHwmInputError(
+            "funded account-manifest epoch is not OK, so it cannot leave the HWM "
+            f"silently: {_epoch_label(key)} status={status} "
+            f"blocking_reason={row.get('blocking_reason')}"
+        )
+    return True
 
 
 def _r3_zero_capital_member(row: Mapping[str, Any]) -> bool:
@@ -636,17 +679,21 @@ def _r3_zero_capital_member(row: Mapping[str, Any]) -> bool:
 
 
 def _excluded_row_disclosure(key: EpochKey, row: Mapping[str, Any]) -> Row:
+    """Disclose one excluded (never funded) row; a count alone is not enough."""
     disclosure: Row = {
         "account_id": key[0],
         "strategy_id": key[1],
         "effective_start": key[2],
         "effective_end": key[3],
+        "admission_status": row.get("admission_status"),
         "status": row.get("status"),
-        "performance_status": row.get("performance_status"),
     }
-    reason = row.get("blocking_reason") or row.get("performance_reason")
-    if isinstance(reason, str) and reason:
-        disclosure["reason"] = reason
+    # The row's own reason, under its own name: a blocked row carries a
+    # blocking_reason; a row that has none discloses its performance_reason.
+    if row.get("blocking_reason") is None and row.get("performance_reason") is not None:
+        disclosure["performance_reason"] = row["performance_reason"]
+    else:
+        disclosure["blocking_reason"] = row.get("blocking_reason")
     return disclosure
 
 
@@ -717,7 +764,7 @@ def _source_rows(
     excluded: list[Row] = []
     for key in sorted(output_by_key):
         row = output_by_key[key]
-        if not _funded_member(row):
+        if not _funded_member(key, row):
             excluded.append(_excluded_row_disclosure(key, row))
             continue
         if row.get("performance_status") != "AVAILABLE" and not (
@@ -734,7 +781,7 @@ def _source_rows(
     if empty_strategies:
         raise SelectedHwmInputError(
             "selected strategy has no funded account-manifest rows"
-            f" ({len(excluded)} non-OK rows excluded): " + ", ".join(empty_strategies)
+            f" ({len(excluded)} unfunded rows excluded): " + ", ".join(empty_strategies)
         )
     return crosswalk_by_key, calculation_by_key, funded_by_key, excluded
 
@@ -959,6 +1006,46 @@ def _fraction_decimal(value: Fraction) -> str:
         return str(Decimal(value.numerator) / Decimal(value.denominator))
 
 
+def _require_complete_flow_coverage(
+    strategy_id: str,
+    strategy_epochs: Sequence[EpochKey],
+    strategy_intervals: Sequence[tuple[str, str]],
+    flows_by_epoch: Mapping[EpochKey, Mapping[str, Decimal]],
+) -> None:
+    """Every flow of a funded contributor must lie in an interval it contributes to.
+
+    The composite adds a member's flows only inside the strategy intervals the
+    member contributes to, so a classified or capital-anchor flow recognized
+    outside all of them -- after the last interval, or in a gap between
+    intervals -- would be dropped from the emitted returns and capital with no
+    trace.  Neither the row's performance label (an AVAILABLE trace validates
+    flows only inside its own links) nor the R3 allow-list vouches for it, so
+    this runs for every funded member before any return or capital is produced.
+
+    An interval's flows begin strictly after its start, so a flow recognized on
+    or before the start of the member's first contributing interval is already
+    inside the member's NAV there; it belongs to no return and is exempt.
+    """
+    for key in sorted(strategy_epochs):
+        contributing = [
+            (start, end)
+            for start, end in strategy_intervals
+            if key[2] <= start and (key[3] is None or end <= key[3])
+        ]
+        first_start = contributing[0][0] if contributing else None
+        for recognition_day in sorted(flows_by_epoch[key]):
+            if first_start is not None and recognition_day <= first_start:
+                continue
+            if any(start < recognition_day <= end for start, end in contributing):
+                continue
+            raise SelectedHwmInputError(
+                "classified flow is outside every emitted strategy interval: "
+                f"account_id={key[0]} strategy_id={strategy_id} "
+                f"recognition_date={recognition_day} "
+                f"amount={flows_by_epoch[key][recognition_day]}"
+            )
+
+
 def _derive_builder_rows(
     crosswalk: Mapping[EpochKey, Row],
     calculation: Mapping[EpochKey, Row],
@@ -998,9 +1085,10 @@ def _derive_builder_rows(
     ] = defaultdict(dict)
     returns: list[Row] = []
     for strategy_id in sorted(intervals_by_strategy):
-        # Non-OK epochs were excluded at selection, so the HWM arithmetic never
-        # sees them.  Every OK epoch is a funded member, including an R3 epoch
-        # without observation links, which contributes NAV and flows by value.
+        # Unfunded epochs were excluded at selection, so the HWM arithmetic never
+        # sees them, and a funded epoch that is not OK failed closed there.  Every
+        # remaining epoch is a funded OK member, including an R3 epoch without
+        # observation links, which contributes NAV and flows by value.
         strategy_epochs = [
             key for key in crosswalk if key[1] == strategy_id and key in output
         ]
@@ -1041,6 +1129,9 @@ def _derive_builder_rows(
             if prior_end is None or end_text < prior_end:
                 earliest_end_by_start[start_text] = end_text
         strategy_intervals = sorted(earliest_end_by_start.items())
+        _require_complete_flow_coverage(
+            strategy_id, strategy_epochs, strategy_intervals, flows_by_epoch
+        )
         previous_end: str | None = None
         for start_text, end_text in strategy_intervals:
             if previous_end is not None and start_text < previous_end:
@@ -1301,7 +1392,7 @@ def _selected_hwm_source_rows(
     _validate_provider_admission_binding(
         receipt_bytes, receipt, source_manifest, source_generation_sha256
     )
-    crosswalk, calculation, output, excluded_non_ok = _source_rows(
+    crosswalk, calculation, output, excluded_unfunded = _source_rows(
         documents["authority/calculation-inputs.json"],
         documents["outputs/account-strategy-manifest.json"],
         documents["authority/account-assignment-crosswalk.json"],
@@ -1331,7 +1422,7 @@ def _selected_hwm_source_rows(
         account_generation_id=bundle.manifest.generation_id,
         source_generation_id=source_generation_id,
         source_generation_sha256=source_generation_sha256,
-        excluded_non_ok_rows=excluded_non_ok,
+        excluded_unfunded_rows=excluded_unfunded,
     )
 
 
