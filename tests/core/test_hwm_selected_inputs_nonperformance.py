@@ -1,19 +1,23 @@
-"""The HWM selected-inputs gate keys its perimeter on funded membership.
+"""The HWM selected-inputs gate keys its perimeter on funded admission.
 
-Under the landed R3/I1 semantics the account-strategy manifest carries rows
-with no performance data of their own: BLOCKED_ADMISSION rows from the
-census/admission gate (never funded), and OK rows whose performance_status is
-UNAVAILABLE.  HWM compounds the same flow-neutral path the TWR links over the
-summed values of every funded member (contract HWM_DRAWDOWN), so:
+The perimeter is EFFECTIVE_FUNDED_MEMBERSHIP_ONLY (contract hwm.membership,
+missing infrastructure FAIL_REQUIRED_OUTCOME).  It is decided on the manifest
+row's ``admission_status``, never on its ``status``:
 
-* a row with any status other than OK is excluded with a disclosure;
-* an OK row whose own TWR is undefined across a zero-capital run (the R3
-  reason ZERO_CAPITAL_RETURN_UNDEFINED, the 702c pattern) stays a member and
-  contributes its NAV and flows by value at every strategy interval;
-* an OK row whose performance is unavailable for any other reason (for
-  example a flow after its closing observation) fails closed;
-* a strategy with no funded rows, or with no observation-linked interval,
-  still fails closed.
+* ``admission_status`` BLOCKED, with any non-OK status, is not funded: the row is
+  excluded and disclosed with its account, strategy, epoch, admission status,
+  status and reason (BLOCKED_ADMISSION, and BLOCKED_MISSING_PREDECESSOR_CONTINUITY
+  which the producer emits before its admission check);
+* FUNDED with status OK is a member.  Its own performance is AVAILABLE, or it is
+  the R3 zero-capital pattern (ZERO_CAPITAL_RETURN_UNDEFINED, the 702c bridge),
+  which stays a member by value; every other reason fails closed;
+* FUNDED with any other status fails closed and names the epoch, the status and
+  the blocking reason, so a funded member never leaves the HWM silently;
+* a missing or unknown ``admission_status``, or OK without FUNDED, fails closed;
+* every flow of a funded contributor must fall inside an emitted strategy
+  interval, whatever the row's performance label says;
+* a strategy with no funded rows, or with no observation-linked interval, fails
+  closed.
 
 Every expected number below is derived by hand from the fixture values with
 the composite formula (sum of ending values - sum of beginning values - sum of
@@ -40,7 +44,7 @@ def selected_hwm() -> Any:
 
 
 def _documents() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Thirteen selected product epochs over two strategies, all performing."""
+    """Thirteen selected product epochs over two strategies, all funded and OK."""
     crosswalk_rows: list[dict[str, Any]] = []
     calculation_rows: list[dict[str, Any]] = []
     output_rows: list[dict[str, Any]] = []
@@ -64,6 +68,7 @@ def _documents() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
             {
                 **epoch,
                 "provider": "synthetic",
+                "admission_status": "FUNDED",
                 "status": "OK",
                 "performance_status": "AVAILABLE",
                 "performance_reason": None,
@@ -77,28 +82,191 @@ def _documents() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     )
 
 
-def _block(row: dict[str, Any], status: str, reason: str) -> None:
+def _block(
+    row: dict[str, Any],
+    status: str,
+    reason: str | None,
+    *,
+    admission_status: str = "BLOCKED",
+) -> None:
+    """Rewrite an OK row as the producer emits a non-OK one (no performance)."""
+    row["admission_status"] = admission_status
     row["status"] = status
-    row["blocking_reason"] = reason
+    if reason is not None:
+        row["blocking_reason"] = reason
     del row["performance_status"], row["performance_reason"]
     del row["observation_trace"]
 
 
-def test_blocked_admission_row_is_excluded_with_disclosure(selected_hwm: Any) -> None:
+# The statuses the producer (tools/account_strategy_manifest.py
+# _assemble_manifest_impl / analyze_epoch) emits only for a FUNDED admission,
+# each with the blocking reason it emits.  The first seven are the decision
+# seat's list (ruling A1, P1).  FLOWS_AFTER_CLOSING_NAV is the eighth: the
+# manifest schema enumerates it and analyze_epoch emits it without a
+# blocking_reason; rule 3 covers every status other than OK, so it is included.
+FUNDED_NON_OK = (
+    ("BLOCKED_UNPROVABLE_OPENING_FLOWS", "FLOW_COMPLETENESS_NOT_PROVEN"),
+    ("BLOCKED_UNAVAILABLE_NAV_OBSERVATION", "UNAVAILABLE_NAV_OBSERVATION_IN_EPOCH"),
+    ("BLOCKED_UNDEFINED_RETURN", "NONPOSITIVE_NAV_RETURN_BASE"),
+    ("BLOCKED_RETURN_LINKAGE", "OPENING_ANCHOR_RECOGNITION_NOT_FIRST_NAV"),
+    ("NO_ADMITTED_NAV", "FEWER_THAN_THREE_AVAILABLE_NAV_OBSERVATIONS"),
+    (
+        "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL",
+        "POLICY_CLAIMS_CONTINUITY_BUT_EPOCH_HAS_WITHDRAWALS",
+    ),
+    (
+        "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
+        "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
+    ),
+    ("FLOWS_AFTER_CLOSING_NAV", None),
+)
+
+
+@pytest.mark.parametrize(("status", "reason"), FUNDED_NON_OK)
+def test_funded_epoch_with_a_non_ok_status_fails_closed(
+    selected_hwm: Any, status: str, reason: str | None
+) -> None:
+    """P1: a funded member must never leave the HWM silently."""
+    calculation, output, crosswalk = _documents()
+    _block(output["rows"][0], status, reason, admission_status="FUNDED")
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError) as raised:
+        selected_hwm._source_rows(calculation, output, crosswalk)
+
+    message = str(raised.value)
+    for field in (
+        "account_id=synthetic-account-00",
+        "strategy_id=alpha",
+        "effective_start=2026-01-05",
+        f"status={status}",
+        f"blocking_reason={reason}",
+    ):
+        assert field in message
+
+
+def test_blocked_admission_row_is_excluded_with_its_exact_disclosure(
+    selected_hwm: Any,
+) -> None:
+    """P2: BLOCKED admission + BLOCKED_ADMISSION is excluded, seven fields."""
     calculation, output, crosswalk = _documents()
     _block(output["rows"][0], "BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED")
 
     _, _, selected, excluded = selected_hwm._source_rows(calculation, output, crosswalk)
 
     assert len(selected) == 12
+    assert ("synthetic-account-00", "alpha", "2026-01-05", None) not in selected
     assert all(row["status"] == "OK" for row in selected.values())
-    assert len(excluded) == 1
-    disclosure = excluded[0]
-    assert disclosure["account_id"] == "synthetic-account-00"
-    assert disclosure["strategy_id"] == "alpha"
-    assert disclosure["status"] == "BLOCKED_ADMISSION"
-    assert disclosure["performance_status"] is None
-    assert disclosure["reason"] == "EPOCH_NOT_EXPLICITLY_FUNDED"
+    assert excluded == [
+        {
+            "account_id": "synthetic-account-00",
+            "strategy_id": "alpha",
+            "effective_start": "2026-01-05",
+            "effective_end": None,
+            "admission_status": "BLOCKED",
+            "status": "BLOCKED_ADMISSION",
+            "blocking_reason": "EPOCH_NOT_EXPLICITLY_FUNDED",
+        }
+    ]
+
+
+def test_blocked_missing_predecessor_continuity_row_is_excluded_not_raised(
+    selected_hwm: Any,
+) -> None:
+    """P3: the producer emits it before the admission check, so it may be BLOCKED."""
+    calculation, output, crosswalk = _documents()
+    _block(
+        output["rows"][0],
+        "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
+        "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
+    )
+
+    _, _, selected, excluded = selected_hwm._source_rows(calculation, output, crosswalk)
+
+    assert len(selected) == 12
+    assert excluded == [
+        {
+            "account_id": "synthetic-account-00",
+            "strategy_id": "alpha",
+            "effective_start": "2026-01-05",
+            "effective_end": None,
+            "admission_status": "BLOCKED",
+            "status": "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
+            "blocking_reason": "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
+        }
+    ]
+
+
+def test_excluded_row_without_a_blocking_reason_discloses_its_performance_reason(
+    selected_hwm: Any,
+) -> None:
+    calculation, output, crosswalk = _documents()
+    _block(output["rows"][0], "BLOCKED_ADMISSION", None)
+    output["rows"][0]["performance_reason"] = "SOME_PERFORMANCE_REASON"
+
+    _, _, _, excluded = selected_hwm._source_rows(calculation, output, crosswalk)
+
+    assert excluded == [
+        {
+            "account_id": "synthetic-account-00",
+            "strategy_id": "alpha",
+            "effective_start": "2026-01-05",
+            "effective_end": None,
+            "admission_status": "BLOCKED",
+            "status": "BLOCKED_ADMISSION",
+            "performance_reason": "SOME_PERFORMANCE_REASON",
+        }
+    ]
+
+
+def test_ok_row_with_a_blocked_admission_fails_closed(selected_hwm: Any) -> None:
+    """P4: OK is funded evidence, so OK without FUNDED admission is corrupt."""
+    calculation, output, crosswalk = _documents()
+    output["rows"][0]["admission_status"] = "BLOCKED"
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError) as raised:
+        selected_hwm._source_rows(calculation, output, crosswalk)
+
+    message = str(raised.value)
+    assert "account_id=synthetic-account-00" in message
+    assert "admission_status=BLOCKED" in message
+    assert "status=OK" in message
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [("OK", None), ("BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED")],
+)
+def test_row_missing_its_admission_status_fails_closed(
+    selected_hwm: Any, status: str, reason: str | None
+) -> None:
+    """P4: a missing admission status is never read as BLOCKED or FUNDED."""
+    calculation, output, crosswalk = _documents()
+    row = output["rows"][0]
+    if status != "OK":
+        _block(row, status, reason)
+    del row["admission_status"]
+
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError, match="admission_status=None"
+    ) as raised:
+        selected_hwm._source_rows(calculation, output, crosswalk)
+
+    assert "account_id=synthetic-account-00" in str(raised.value)
+
+
+@pytest.mark.parametrize("admission", ["PENDING", "funded", "", None, ["FUNDED"]])
+def test_row_with_an_unknown_admission_status_fails_closed(
+    selected_hwm: Any, admission: object
+) -> None:
+    calculation, output, crosswalk = _documents()
+    output["rows"][0]["admission_status"] = admission
+
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError, match="FUNDED or BLOCKED"
+    ) as raised:
+        selected_hwm._source_rows(calculation, output, crosswalk)
+
+    assert "account_id=synthetic-account-00" in str(raised.value)
 
 
 def test_r3_zero_capital_row_stays_a_funded_member(selected_hwm: Any) -> None:
@@ -163,8 +331,8 @@ def test_strategy_with_zero_funded_rows_still_raises(selected_hwm: Any) -> None:
     _block(first, "BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED")
     _block(
         second,
-        "BLOCKED_UNAVAILABLE_NAV_OBSERVATION",
-        "UNAVAILABLE_NAV_OBSERVATION_IN_EPOCH",
+        "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
+        "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
     )
 
     with pytest.raises(
@@ -180,7 +348,7 @@ def _one_strategy_mixed_maps(
     dict[tuple[str, str, str, str | None], dict[str, Any]],
     dict[tuple[str, str, str, str | None], dict[str, Any]],
 ]:
-    """One strategy whose second account epoch was excluded as non-OK."""
+    """One strategy whose second account epoch was excluded as unfunded."""
     strategy_id = "synthetic-strategy"
     days = ["2026-07-13", "2026-07-14", "2026-07-15"]
     performance_key = ("account-performing", strategy_id, days[0], None)
@@ -339,8 +507,14 @@ def _tt_like_world(
     live_values: list[tuple[str, str]],
     member_values: list[tuple[str, str]],
     member_flows: list[tuple[str, str]],
-    member_reason: str,
+    member_reason: str | None,
+    live_links: list[dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The funded member is AVAILABLE with links when `member_reason` is None.
+
+    Otherwise it is an OK row whose own performance is UNAVAILABLE for that
+    reason, with an empty trace, as the manifest emits it.
+    """
     epochs: list[dict[str, Any]] = []
 
     def epoch(
@@ -367,10 +541,15 @@ def _tt_like_world(
         LIVE_KEY,
         live_values,
         {
+            "admission_status": "FUNDED",
             "status": "OK",
             "performance_status": "AVAILABLE",
             "performance_reason": None,
-            "observation_trace": {"links": _flow_free_links(live_values)},
+            "observation_trace": {
+                "links": (
+                    _flow_free_links(live_values) if live_links is None else live_links
+                )
+            },
         },
     )
     # Assignment-only: it carries NAVs that would move the composite if the
@@ -379,28 +558,36 @@ def _tt_like_world(
         BLOCKED_KEY,
         [(day, "1000") for day in (D0, D1, D2, D3, D4)],
         {
+            "admission_status": "BLOCKED",
             "status": "BLOCKED_ADMISSION",
             "blocking_reason": "CENSUS_ASSIGNMENT_ONLY_NOT_FUNDED_MEMBERSHIP",
         },
     )
-    # The manifest emits an unavailable row with an empty observation trace.
-    epoch(
-        MEMBER_KEY,
-        member_values,
-        {
+    if member_reason is None:
+        member_output: dict[str, Any] = {
+            "admission_status": "FUNDED",
+            "status": "OK",
+            "performance_status": "AVAILABLE",
+            "performance_reason": None,
+            "observation_trace": {"links": _flow_free_links(member_values)},
+        }
+    else:
+        # The manifest emits an unavailable row with an empty observation trace.
+        member_output = {
+            "admission_status": "FUNDED",
             "status": "OK",
             "performance_status": "UNAVAILABLE",
             "performance_reason": member_reason,
             "observation_trace": {"links": []},
-        },
-        tuple(member_flows),
-    )
+        }
+    epoch(MEMBER_KEY, member_values, member_output, tuple(member_flows))
     for index in range(10):
         other_values = [(D0, str(1000 + index)), (D1, str(1010 + index))]
         epoch(
             (f"account-other-{index:02d}", "other", D0, None),
             other_values,
             {
+                "admission_status": "FUNDED",
                 "status": "OK",
                 "performance_status": "AVAILABLE",
                 "performance_reason": None,
@@ -529,15 +716,17 @@ def test_blocked_tt_like_row_is_excluded_with_its_disclosure(
     )
 
     assert BLOCKED_KEY not in selected
-    assert {
-        "account_id": BLOCKED_KEY[0],
-        "strategy_id": TT_LIKE,
-        "effective_start": D0,
-        "effective_end": None,
-        "status": "BLOCKED_ADMISSION",
-        "performance_status": None,
-        "reason": "CENSUS_ASSIGNMENT_ONLY_NOT_FUNDED_MEMBERSHIP",
-    } in excluded
+    assert excluded == [
+        {
+            "account_id": BLOCKED_KEY[0],
+            "strategy_id": TT_LIKE,
+            "effective_start": D0,
+            "effective_end": None,
+            "admission_status": "BLOCKED",
+            "status": "BLOCKED_ADMISSION",
+            "blocking_reason": "CENSUS_ASSIGNMENT_ONLY_NOT_FUNDED_MEMBERSHIP",
+        }
+    ]
 
 
 def test_funded_member_with_a_flow_after_its_closing_observation_fails_closed(
@@ -561,6 +750,114 @@ def test_funded_member_with_a_flow_after_its_closing_observation_fails_closed(
         selected_hwm.SelectedHwmInputError, match="outside the R3 zero-capital rule"
     ):
         _selected_builder_rows(selected_hwm, documents)
+
+
+def test_available_member_with_a_flow_after_its_last_interval_fails_closed(
+    selected_hwm: Any,
+) -> None:
+    """A performance label is not flow coverage.
+
+    The funded member is labelled AVAILABLE and its links through D3 are valid,
+    but its +10 classified flow is recognized on D4, after every emitted
+    strategy interval (they end at D3).  The composite would silently omit it,
+    so the selection fails closed whatever the label says.
+    """
+    documents = _tt_like_world(
+        live_values=[(D0, "100"), (D1, "105"), (D2, "110"), (D3, "120")],
+        member_values=[(D0, "50"), (D1, "52"), (D2, "54"), (D3, "56")],
+        member_flows=[(D4, "10")],
+        member_reason=None,
+    )
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError) as raised:
+        _selected_builder_rows(selected_hwm, documents)
+
+    message = str(raised.value)
+    assert "outside every emitted strategy interval" in message
+    assert "account_id=account-funded-member" in message
+    assert f"strategy_id={TT_LIKE}" in message
+    assert f"recognition_date={D4}" in message
+
+
+def test_r3_member_with_a_flow_after_its_last_interval_fails_closed(
+    selected_hwm: Any,
+) -> None:
+    """The R3 allow-list does not waive flow coverage either.
+
+    The zero-capital member is a by-value member, and its interior flows (-52 on
+    D1, +40 on D3) are covered; its +10 deposit on D4 is after every emitted
+    interval (they end at D3) and would be silently omitted.
+    """
+    documents = _tt_like_world(
+        live_values=[(D0, "100"), (D1, "105"), (D2, "110"), (D3, "120")],
+        member_values=[(D0, "50"), (D1, "0"), (D2, "0"), (D3, "41")],
+        member_flows=[(D1, "-52"), (D3, "40"), (D4, "10")],
+        member_reason="ZERO_CAPITAL_RETURN_UNDEFINED",
+    )
+
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError, match="outside every emitted strategy"
+    ) as raised:
+        _selected_builder_rows(selected_hwm, documents)
+
+    assert f"recognition_date={D4}" in str(raised.value)
+
+
+def test_flow_inside_a_gap_between_emitted_intervals_fails_closed(
+    selected_hwm: Any,
+) -> None:
+    """The emitted intervals must contain every flow, not only the last one.
+
+    The live member's trace has no D1->D2 link, so no emitted interval contains
+    D2's zero-capital member flow (recognized after D1, on or before D2); D2 is
+    also the start of the next interval, whose flows begin strictly after it.
+    """
+    live_values = [(D0, "100"), (D1, "105"), (D2, "110"), (D3, "120")]
+    live_links = [
+        link
+        for link in _flow_free_links(live_values)
+        if (link["start_date"], link["end_date"]) != (D1, D2)
+    ]
+    documents = _tt_like_world(
+        live_values=live_values,
+        member_values=[(D0, "50"), (D1, "0"), (D2, "41"), (D3, "44")],
+        member_flows=[(D1, "-52"), (D2, "40")],
+        member_reason="ZERO_CAPITAL_RETURN_UNDEFINED",
+        live_links=live_links,
+    )
+
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError, match="outside every emitted strategy"
+    ) as raised:
+        _selected_builder_rows(selected_hwm, documents)
+
+    assert f"recognition_date={D2}" in str(raised.value)
+
+
+def test_flow_recognized_on_the_opening_day_is_inside_the_opening_value(
+    selected_hwm: Any,
+) -> None:
+    """Coverage must not reject a flow the opening NAV already contains.
+
+    The member's +5 deposit is recognized on D0, the start of its first interval,
+    so NAV(D0) contains it and no interval's flow (strictly after its start)
+    does.  Composite D0->D1 (105 + 52 - 100 - 50) / 150 = 7/150 and D1->D2
+    (110 + 54 - 105 - 52) / 157 = 7/157.
+    """
+    documents = _tt_like_world(
+        live_values=[(D0, "100"), (D1, "105"), (D2, "110")],
+        member_values=[(D0, "50"), (D1, "52"), (D2, "54")],
+        member_flows=[(D0, "5")],
+        member_reason=None,
+    )
+
+    _, _, returns, _ = _selected_builder_rows(selected_hwm, documents)
+
+    assert [
+        (row["interval_start"], row["interval_end"], Decimal(row["net_return"]))
+        for row in returns
+        if row["strategy_id"] == TT_LIKE
+    ] == [(D0, D1, _ratio(7, 150)), (D1, D2, _ratio(7, 157))]
 
 
 def _member_maps(
