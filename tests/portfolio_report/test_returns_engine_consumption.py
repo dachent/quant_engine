@@ -19,6 +19,7 @@ import hashlib
 import importlib.util
 from datetime import date
 from decimal import Decimal, localcontext
+import json
 from pathlib import Path
 import sys
 from typing import Any
@@ -1283,3 +1284,216 @@ def test_multi_account_member_paths_stay_absent_with_epoch_hpr_spans() -> None:
             "return_path_authority",
         ):
             assert field not in row
+
+
+def _full_report_fixture() -> Any:
+    """The full report test module, for its synthetic baseline publisher."""
+
+    spec = importlib.util.spec_from_file_location(
+        "portfolio_report_full_fixture",
+        REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load the full report fixture")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_public_builder_threads_member_trace_links_into_the_seam_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired (fail-before): the real report path reaches both member gates.
+
+    The builder's current-epoch reconstruction dropped ``own_path_links``
+    from the verified manifest details, so the public ``build_report_data``
+    path reached neither gate: the corrupted 7%/5% member payloads published
+    and every multi-account member row carried a null own path.  The
+    reconstruction now threads the member traces through, so the real path
+    fails closed on the corrupted payload instead of publishing it.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+    )
+
+    def member_epoch(ending: str) -> Any:
+        return link_epoch(
+            {date(2026, 1, 1): Decimal("100"), date(2026, 1, 2): Decimal(ending)},
+            [],
+            OpeningPoint(
+                date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"
+            ),
+        )
+
+    true_epochs = {"account-a": member_epoch("104"), "account-b": member_epoch("102")}
+    composited = composite(
+        (
+            *member_returns("account-a", true_epochs["account-a"]),
+            *member_returns("account-b", true_epochs["account-b"]),
+        )
+    )
+    catalog = _shared_strategy_catalog(composited)
+    catalog["strategy_returns"][0]["return"] = "0.03"
+    for evidence in catalog["strategy_provider_evidence"]:
+        evidence["account"]["provider_id"] = "synthetic"
+        for scope in evidence["account"]["account_scopes"]:
+            scope.update(observed_start="2026-01-01", observed_end="2026-01-02")
+    catalog = json.loads(json.dumps(catalog).replace("strategy-shared", "strategy-1"))
+    full = _full_report_fixture()
+    baseline_root = full._published_baseline(
+        tmp_path, {**full._baseline_catalog(), **catalog}
+    )
+    epoch_details = _shared_member_epoch_details(
+        {"account-a": "0.07", "account-b": "0.05"},
+        {
+            "account-a": _manifest_trace_links(true_epochs["account-a"]),
+            "account-b": _manifest_trace_links(true_epochs["account-b"]),
+        },
+    )
+    epoch_details = {
+        (key[0], "strategy-1", key[2], key[3]): detail
+        for key, detail in epoch_details.items()
+    }
+    crosswalk = {
+        "calculation_cutoff_date": "2026-01-03",
+        "rows": [
+            {
+                "account_id": key[0],
+                "strategy_id": key[1],
+                "effective_start": key[2],
+                "effective_end": key[3],
+                "account_label": "SYNTHETIC member",
+                "last_four": "4321",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            }
+            for key in epoch_details
+        ],
+    }
+    monkeypatch.setattr(
+        full.reporter,
+        "_validate_epoch_manifest_input",
+        lambda *_args, **_kwargs: (
+            {},
+            {"generation_id": "a" * 64},
+            b"{}",
+            b"{}",
+            json.dumps(crosswalk).encode("utf-8"),
+            epoch_details,
+        ),
+    )
+
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="multi-account member epoch TWR differs from the member return path",
+    ):
+        full.reporter.build_report_data(
+            baseline_root,
+            epoch_manifest_path=tmp_path / "synthetic-manifest.json",
+            epoch_manifest_source_path=tmp_path / "synthetic-source.json",
+            epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
+            epoch_manifest_generation_root=REPOSITORY_ROOT,
+        )
+
+
+def test_blocked_member_never_disables_the_composite_reconciliation_gate() -> None:
+    """Paired (fail-before): a blocked member must never turn the gates off.
+
+    Two funded members carry self-consistent inflated traces and TWRs (7% and
+    5% against the strategy's true 3% composite), and a third member epoch of
+    the same strategy is BLOCKED without a trace.  The fail-open early return
+    let the blocked member skip the composite reconciliation for the funded
+    members and publish the inflated paths; the missing member trace now
+    fails closed instead of silently disabling the gates.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+    )
+
+    def member_epoch(ending: str) -> Any:
+        return link_epoch(
+            {date(2026, 1, 1): Decimal("100"), date(2026, 1, 2): Decimal(ending)},
+            [],
+            OpeningPoint(
+                date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"
+            ),
+        )
+
+    true_composited = composite(
+        (
+            *member_returns("account-a", member_epoch("104")),
+            *member_returns("account-b", member_epoch("102")),
+        )
+    )
+    catalog = _shared_strategy_catalog(true_composited)
+    catalog["assignments"].append(_owned_assignment("account-c", "strategy-shared"))
+    inflated = {"account-a": member_epoch("107"), "account-b": member_epoch("105")}
+    epoch_details = _shared_member_epoch_details(
+        {
+            "account-a": decimal_text(inflated["account-a"].twr),
+            "account-b": decimal_text(inflated["account-b"].twr),
+        },
+        {
+            "account-a": _manifest_trace_links(inflated["account-a"]),
+            "account-b": _manifest_trace_links(inflated["account-b"]),
+        },
+    )
+    epoch_details[("account-c", "strategy-shared", "2026-01-01", None)] = {
+        "account_label": "Blocked member",
+        "last_four": "4321",
+        "epoch_admission_status": "BLOCKED",
+        "epoch_output_status": "BLOCKED_ADMISSION",
+        "epoch_blocking_reason": "SYNTHETIC_BLOCKED_COVERAGE",
+        "own_path_links": [],
+        "performance_payload": None,
+    }
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="multi-account member own trace path is missing",
+    ):
+        reporter._account_strategy_performance(
+            catalog, None, set(epoch_details), epoch_details
+        )
+
+
+def test_single_account_trace_never_replaces_the_canonical_path_gate() -> None:
+    """Paired (fail-before): the trace ADDS the gate; it never replaces it.
+
+    A sole member's own trace and manifest TWR both claim 20% while the
+    canonical account-live series still compounds 10%: the member IS the
+    strategy series, so the single-account canonical comparison must hold
+    alongside the trace gate.  The round-2 wiring selected the trace instead
+    of the canonical path and published the 20%.
+    """
+
+    from quant_engine.portfolio_ledger.returns import OpeningPoint, link_epoch
+
+    epoch = link_epoch(
+        {date(2026, 1, 1): Decimal("100"), date(2026, 1, 2): Decimal("120")},
+        [],
+        OpeningPoint(date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"),
+    )
+    epoch_details = _owned_epoch_details("0.2")
+    epoch_details[("account-owned", "strategy-owned", "2026-01-01", None)][
+        "own_path_links"
+    ] = _manifest_trace_links(epoch)
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="single-account epoch TWR differs from the account return path",
+    ):
+        reporter._account_strategy_performance(
+            _owned_path_catalog(),
+            None,
+            set(epoch_details),
+            epoch_details,
+        )

@@ -1270,10 +1270,11 @@ def _reconcile_multi_account_strategy_composite(
     trace links through the one return engine -- ``composite`` over the
     beginning-capital-weighted member sub-period returns, compounded via
     ``splice_spans`` -- and requires it to equal the canonical strategy-level
-    path within 1e-12.  A governed member epoch without a verified trace makes
-    the full composite uncomputable, so the reconciliation is skipped rather
-    than reconciled against a partial composite.  Engine ``ReturnsError`` (an
-    unvalued member boundary, a repeated date) fails closed here.
+    path within 1e-12.  A member epoch without a verified trace -- including a
+    blocked member -- makes the full composite uncomputable, so the
+    reconciliation fails closed instead of being silently disabled for the
+    strategy's other members.  Engine ``ReturnsError`` (an unvalued member
+    boundary, a repeated date) fails closed here.
     """
 
     inputs: list[MemberReturn] = []
@@ -1287,7 +1288,10 @@ def _reconcile_multi_account_strategy_composite(
             continue
         links = detail.get("own_path_links")
         if not isinstance(links, list) or not links:
-            return
+            raise ReportValidationError(
+                "multi-account member own trace path is missing "
+                f"for {strategy_id} ({account_id})"
+            )
         for link in _objects(links, "observation_trace.links"):
             inputs.append(
                 MemberReturn(
@@ -1619,11 +1623,12 @@ def _account_strategy_performance(
             # producer persists -- never a strategy-level composite
             # substitution.  Two exact fail-closed gates hold at 1e-12, with
             # no tolerance band: the member's epoch TWR must equal its own
-            # compounded trace path (single- and multi-account alike; without
-            # a trace the sole-component account-live path is the member's
-            # own series), and a multi-account strategy's member paths must
-            # reconcile to the canonical strategy-level path through the one
-            # return engine's composite.
+            # compounded trace path (single- and multi-account alike; a sole
+            # member's canonical account-live path is its own series, and the
+            # trace gate adds to that comparison rather than replacing it),
+            # and a multi-account strategy's member paths must reconcile to
+            # the canonical strategy-level path through the one return
+            # engine's composite.
             own_trace = (
                 _member_own_trace_path(detail.get("own_path_links"))
                 if detail is not None
@@ -1640,12 +1645,20 @@ def _account_strategy_performance(
             strategy_account_ids = {
                 key[0] for key in current_epoch_details if key[1] == strategy_id
             }
-            gate_path = own_trace
-            if gate_path is None and strategy_account_ids == {account_id}:
-                # A sole member without a trace: the strategy-level
-                # account-live path is the member's own series.
-                gate_path = account_live_paths.get((account_id, strategy_id))
-            if gate_path is not None and epoch_twr is not None:
+            gate_paths: list[dict[str, Any]] = []
+            if own_trace is not None:
+                gate_paths.append(own_trace)
+            if strategy_account_ids == {account_id}:
+                # A sole member IS the strategy series, so the canonical
+                # account-live path is the member's own series with or
+                # without a trace: the trace gate adds to the single-account
+                # canonical comparison, it never replaces it.
+                sole_component_path = account_live_paths.get((account_id, strategy_id))
+                if sole_component_path is not None:
+                    gate_paths.append(sole_component_path)
+            for gate_path in gate_paths:
+                if epoch_twr is None:
+                    continue
                 twr_gap = abs(
                     _decimal(epoch_twr, "epoch manifest TWR")
                     - _decimal(
@@ -5647,6 +5660,17 @@ def build_report_data(
                         row["effective_end"],
                     )
                 ]["epoch_blocking_reason"],
+                # The member's own observation-trace links, threaded through
+                # so the real report path reaches both member gates; the
+                # published payload below stays free of the private trace.
+                "own_path_links": verified_epoch_details[
+                    (
+                        row["account_id"],
+                        row["strategy_id"],
+                        row["effective_start"],
+                        row["effective_end"],
+                    )
+                ]["own_path_links"],
                 "performance_payload": verified_epoch_details[
                     (
                         row["account_id"],
