@@ -988,8 +988,10 @@ def raw_provider_data(
     carries per-account disclosure notes (for example FX-unconverted raw dates).
     When raw_last_dates is given, it is populated with each successfully loaded
     account's last raw provider observation date at or before the cutoff
-    (Quantbase pricehistory dates, Matrixport raw nav_daily dates) regardless of
-    FX conversion, for the date.source_last_observation metric.
+    (Quantbase pricehistory dates, Matrixport raw nav_daily dates) regardless
+    of FX conversion, for the date.source_last_observation metric; a raw
+    capture whose every observation is FX-unconverted still records its last
+    raw date while its USD metrics fail closed.
     """
     paths = paths or default_input_paths()
     price_history_path = paths["quantbase_price_history"]
@@ -1143,19 +1145,20 @@ def raw_provider_data(
                         fx_unconverted,
                         raw_nav_dates,
                     )
-                    if not values:
+                    if not values and not raw_nav_dates:
                         raise ValueError(
                             "R6 raw capture "
                             + matrixport_nav_path.as_posix()
                             + " yields no observations"
                         )
-                    cash_flows, count = matrixport_raw_flows(
-                        deposit_rows,
-                        values,
-                        fx_rates,
-                        membership_starts.get(account_id),
-                        deposits_skipped,
-                    )
+                    if values:
+                        cash_flows, count = matrixport_raw_flows(
+                            deposit_rows,
+                            values,
+                            fx_rates,
+                            membership_starts.get(account_id),
+                            deposits_skipped,
+                        )
             except (OSError, ValueError, KeyError) as error:
                 failures[account_id] = {
                     "metrics": ACCOUNT_METRIC_IDS,
@@ -1163,43 +1166,89 @@ def raw_provider_data(
                     f"unparsable: {error}",
                 }
             else:
-                observations[account_id] = values
-                if raw_last_dates is not None and raw_nav_dates:
-                    raw_last_dates[account_id] = max(raw_nav_dates)
-                flows[account_id] = FlowData(
-                    cash_flows=cash_flows,
-                    twr_end_flows=cash_flows,
-                    twr_beginning_flows={},
-                    count=count,
-                )
-                note_segments = []
-                if fx_unconverted:
-                    note_segments.append(
-                        f"R6 v2: {len(fx_unconverted)} raw Matrixport NAV date(s) "
-                        f"from {min(fx_unconverted).isoformat()} to "
-                        f"{max(fx_unconverted).isoformat()} follow the admitted FX "
-                        f"boundary {FX_LAST_ADMITTED_DATE.isoformat()} and are "
-                        "FX-unconverted; no converted value is emitted for them, "
-                        "and date.source_last_observation reports the last raw "
-                        "NAV date while USD capital as_of stays at the last "
-                        "FX-converted date."
+                if values:
+                    observations[account_id] = values
+                    if raw_last_dates is not None and raw_nav_dates:
+                        raw_last_dates[account_id] = max(raw_nav_dates)
+                    flows[account_id] = FlowData(
+                        cash_flows=cash_flows,
+                        twr_end_flows=cash_flows,
+                        twr_beginning_flows={},
+                        count=count,
                     )
-                if deposits_skipped:
-                    skipped = ", ".join(
-                        f"{occurred_on.isoformat()} {money(amount)}"
-                        for occurred_on, amount in sorted(deposits_skipped)
+                    note_segments = []
+                    if fx_unconverted:
+                        note_segments.append(
+                            f"R6 v2: {len(fx_unconverted)} raw Matrixport NAV date(s) "
+                            f"from {min(fx_unconverted).isoformat()} to "
+                            f"{max(fx_unconverted).isoformat()} follow the admitted FX "
+                            f"boundary {FX_LAST_ADMITTED_DATE.isoformat()} and are "
+                            "FX-unconverted; no converted value is emitted for them, "
+                            "and date.source_last_observation reports the last raw "
+                            "NAV date while USD capital as_of stays at the last "
+                            "FX-converted date."
+                        )
+                    if deposits_skipped:
+                        skipped = ", ".join(
+                            f"{occurred_on.isoformat()} {money(amount)}"
+                            for occurred_on, amount in sorted(deposits_skipped)
+                        )
+                        note_segments.append(
+                            f"R6 v2: {len(deposits_skipped)} confirmed Matrixport "
+                            "deposit(s) past the last FX-converted raw observation "
+                            "have no admitted conversion target and are excluded "
+                            "from flows; deposits_skipped (raw wallet amounts): "
+                            f"{skipped}; flows.account.net/count remain the "
+                            "admitted-converted values."
+                        )
+                    if note_segments:
+                        notes[account_id] = " ".join(note_segments)
+                    used.extend(matrixport_paths)
+                elif raw_nav_dates:
+                    # R6 v2: every raw NAV observation is FX-unconverted (or holds
+                    # no units), so no USD value exists; the raw coverage and its
+                    # provenance are retained independently of conversion while the
+                    # USD metrics stay not-derivable.
+                    if raw_last_dates is not None:
+                        raw_last_dates[account_id] = max(raw_nav_dates)
+                    if fx_unconverted:
+                        reason = (
+                            "R6 raw Matrixport capture has no FX-converted "
+                            "observation at or before the admitted FX boundary "
+                            + FX_LAST_ADMITTED_DATE.isoformat()
+                        )
+                    else:
+                        reason = (
+                            "R6 raw Matrixport capture has no unit-holding "
+                            "observation at or before the cutoff"
+                        )
+                    failures[account_id] = {
+                        "metrics": (
+                            "capital.account.cutoff",
+                            "flows.account.net",
+                            "flows.account.count",
+                            "twr.account",
+                            "mwr.account",
+                        ),
+                        "reason": reason,
+                    }
+                    notes[account_id] = (
+                        f"R6 v2: {len(raw_nav_dates)} raw Matrixport NAV date(s) "
+                        f"from {min(raw_nav_dates).isoformat()} to "
+                        f"{max(raw_nav_dates).isoformat()} "
+                        + (
+                            f"follow the admitted FX boundary "
+                            f"{FX_LAST_ADMITTED_DATE.isoformat()} and are "
+                            "FX-unconverted"
+                            if fx_unconverted
+                            else "hold no units"
+                        )
+                        + "; no converted value is emitted for them, and "
+                        "date.source_last_observation reports the last raw "
+                        "NAV date while USD capital, flows and returns stay "
+                        "not-derivable."
                     )
-                    note_segments.append(
-                        f"R6 v2: {len(deposits_skipped)} confirmed Matrixport "
-                        "deposit(s) past the last FX-converted raw observation "
-                        "have no admitted conversion target and are excluded "
-                        "from flows; deposits_skipped (raw wallet amounts): "
-                        f"{skipped}; flows.account.net/count remain the "
-                        "admitted-converted values."
-                    )
-                if note_segments:
-                    notes[account_id] = " ".join(note_segments)
-                used.extend(matrixport_paths)
+                    used.extend(matrixport_paths)
     return observations, flows, used, failures, notes
 
 
@@ -1406,6 +1455,21 @@ def derive(
                     str(failure["reason"]),
                     "ITD" if metric_id.startswith(("flows", "twr", "mwr")) else None,
                 )
+            if account_id in raw_last_dates:
+                # R6 v2: raw NAV coverage is retained independently of USD
+                # conversion; emit the verified raw date even when every
+                # converted metric stays not-derivable.
+                metrics.append(
+                    metric(
+                        "date.source_last_observation",
+                        account_id,
+                        raw_last_dates[account_id].isoformat(),
+                        "date",
+                        used_inputs,
+                        raw_last_dates[account_id].isoformat(),
+                        notes=account_notes,
+                    )
+                )
             continue
         if account_id in observation_conflicts:
             for metric_id in (
@@ -1486,8 +1550,11 @@ def derive(
             flow_data = raw_flow_data[account_id]
             flow_problem = None
         else:
+            # The aggregation interval is aligned with the emitted as_of
+            # (the last valuation date): a flow recognized after it belongs
+            # to a later cutoff period and must never be dated at end_date.
             cash_flows, flow_count, flow_problem = classified_external_flows(
-                ledger["flows"], account_id, account_observations[0][0], CUTOFF
+                ledger["flows"], account_id, account_observations[0][0], end_date
             )
             flow_data = FlowData(
                 cash_flows=cash_flows,

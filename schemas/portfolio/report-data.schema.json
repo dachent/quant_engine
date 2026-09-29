@@ -494,6 +494,7 @@
         "nav_observations": {"type": ["integer", "null"], "minimum": 0},
         "observed_end": {"type": ["string", "null"], "format": "date"},
         "observed_start": {"type": ["string", "null"], "format": "date"},
+        "source_last_observation": {"type": "string", "format": "date"},
         "pool_id": {"type": ["string", "null"]},
         "pool_mapping_status": {"type": ["string", "null"]},
         "strategy_mapping_disposition": {"type": ["string", "null"]},
