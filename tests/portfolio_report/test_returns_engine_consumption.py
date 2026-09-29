@@ -1405,10 +1405,12 @@ def test_blocked_member_never_disables_the_composite_reconciliation_gate() -> No
 
     Two funded members carry self-consistent inflated traces and TWRs (7% and
     5% against the strategy's true 3% composite), and a third member epoch of
-    the same strategy is BLOCKED without a trace.  The fail-open early return
-    let the blocked member skip the composite reconciliation for the funded
-    members and publish the inflated paths; the missing member trace now
-    fails closed instead of silently disabling the gates.
+    the same strategy is BLOCKED without a trace -- a routine governed
+    admission outcome, not corrupt data.  The fail-open early return let the
+    blocked member skip the composite reconciliation for the funded members
+    and publish the inflated paths; the blocked member is now excluded from
+    the reconcile input set, and the funded members' self-consistent
+    inflation still fails closed against the canonical strategy composite.
     """
 
     from quant_engine.portfolio_ledger.returns import (
@@ -1458,7 +1460,155 @@ def test_blocked_member_never_disables_the_composite_reconciliation_gate() -> No
 
     with pytest.raises(
         reporter.ReportValidationError,
-        match="multi-account member own trace path is missing",
+        match="multi-account member own paths do not reconcile "
+        "to the strategy composite",
+    ):
+        reporter._account_strategy_performance(
+            catalog, None, set(epoch_details), epoch_details
+        )
+
+
+def test_blocked_member_is_excluded_from_the_reconcile_set_and_disclosed() -> None:
+    """Paired: a blocked member neither raises nor silently disappears.
+
+    Two funded members carry their true traces (4% and 2%, reconciling to the
+    strategy's composite) and a third member epoch of the same strategy is
+    BLOCKED without a trace -- the governed outcome of incomplete coverage /
+    an owner-approved unavailable observation.  The publication succeeds: the
+    funded members publish their own paths, the composite reconciliation runs
+    over the admitted set, and the blocked member's row discloses its
+    exclusion with the BLOCKED_ADMISSION statuses and its typed reason.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+    )
+
+    def member_epoch(ending: str) -> Any:
+        return link_epoch(
+            {date(2026, 1, 1): Decimal("100"), date(2026, 1, 2): Decimal(ending)},
+            [],
+            OpeningPoint(
+                date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"
+            ),
+        )
+
+    epochs = {"account-a": member_epoch("104"), "account-b": member_epoch("102")}
+    composited = composite(
+        (
+            *member_returns("account-a", epochs["account-a"]),
+            *member_returns("account-b", epochs["account-b"]),
+        )
+    )
+    catalog = _shared_strategy_catalog(composited)
+    catalog["assignments"].append(_owned_assignment("account-c", "strategy-shared"))
+    epoch_details = _shared_member_epoch_details(
+        {
+            "account-a": decimal_text(epochs["account-a"].twr),
+            "account-b": decimal_text(epochs["account-b"].twr),
+        },
+        {
+            "account-a": _manifest_trace_links(epochs["account-a"]),
+            "account-b": _manifest_trace_links(epochs["account-b"]),
+        },
+    )
+    epoch_details[("account-c", "strategy-shared", "2026-01-01", None)] = {
+        "account_label": "Blocked member",
+        "last_four": "4321",
+        "epoch_admission_status": "BLOCKED",
+        "epoch_output_status": "BLOCKED_ADMISSION",
+        "epoch_blocking_reason": "SYNTHETIC_BLOCKED_COVERAGE",
+        "own_path_links": [],
+        "performance_payload": None,
+    }
+
+    rows = reporter._account_strategy_performance(
+        catalog, None, set(epoch_details), epoch_details
+    )
+    rendered = {row["account_id"]: row for row in rows}
+
+    for account_id, epoch in epochs.items():
+        row = rendered[account_id]
+        assert row["twr"] == decimal_text(epoch.twr)
+        assert row["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+        assert row["return_path_cumulative_return"] == decimal_text(epoch.twr)
+    blocked = rendered["account-c"]
+    assert blocked["epoch_admission_status"] == "BLOCKED"
+    assert blocked["epoch_blocking_reason"] == "SYNTHETIC_BLOCKED_COVERAGE"
+    assert blocked["twr"] is None
+    assert blocked["twr_status"] == "BLOCKED_ADMISSION"
+    assert blocked["return_path_status"] == "BLOCKED_ADMISSION"
+    assert blocked["return_path_cumulative_return"] is None
+
+
+def test_funded_member_without_a_trace_fails_closed_with_a_blocked_sibling() -> None:
+    """Paired: the funded-member trace gate stays fail-closed.
+
+    One funded member carries its true trace, the second funded member's
+    trace is missing, and a third member epoch is BLOCKED.  Excluding the
+    blocked member from the reconcile set never excuses an admitted member:
+    the funded member without a verified trace fails closed.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+    )
+
+    def member_epoch(ending: str) -> Any:
+        return link_epoch(
+            {date(2026, 1, 1): Decimal("100"), date(2026, 1, 2): Decimal(ending)},
+            [],
+            OpeningPoint(
+                date(2026, 1, 1), Decimal("100"), "LAST_OBSERVATION_BEFORE_START"
+            ),
+        )
+
+    epochs = {"account-a": member_epoch("104"), "account-b": member_epoch("102")}
+    composited = composite(
+        (
+            *member_returns("account-a", epochs["account-a"]),
+            *member_returns("account-b", epochs["account-b"]),
+        )
+    )
+    catalog = _shared_strategy_catalog(composited)
+    catalog["assignments"].append(_owned_assignment("account-c", "strategy-shared"))
+    epoch_details = _shared_member_epoch_details(
+        {"account-a": decimal_text(epochs["account-a"].twr)},
+        {"account-a": _manifest_trace_links(epochs["account-a"])},
+    )
+    # The blocked entry precedes the traceless funded member, so the r3 code
+    # raises on the blocked member before ever reaching account-b.
+    epoch_details[("account-c", "strategy-shared", "2026-01-01", None)] = {
+        "account_label": "Blocked member",
+        "last_four": "4321",
+        "epoch_admission_status": "BLOCKED",
+        "epoch_output_status": "BLOCKED_ADMISSION",
+        "epoch_blocking_reason": "SYNTHETIC_BLOCKED_COVERAGE",
+        "own_path_links": [],
+        "performance_payload": None,
+    }
+    epoch_details.update(
+        _shared_member_epoch_details(
+            {"account-b": decimal_text(epochs["account-b"].twr)},
+        )
+    )
+    assert (
+        epoch_details[("account-b", "strategy-shared", "2026-01-01", None)][
+            "own_path_links"
+        ]
+        is None
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"multi-account member own trace path is missing "
+        r"for strategy-shared \(account-b\)",
     ):
         reporter._account_strategy_performance(
             catalog, None, set(epoch_details), epoch_details

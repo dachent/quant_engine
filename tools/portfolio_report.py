@@ -1266,15 +1266,22 @@ def _reconcile_multi_account_strategy_composite(
 ) -> None:
     """Require governed member trace paths to reconcile to the strategy path.
 
-    Recomputes the strategy composite from every governed member epoch's own
-    trace links through the one return engine -- ``composite`` over the
-    beginning-capital-weighted member sub-period returns, compounded via
-    ``splice_spans`` -- and requires it to equal the canonical strategy-level
-    path within 1e-12.  A member epoch without a verified trace -- including a
-    blocked member -- makes the full composite uncomputable, so the
+    Recomputes the strategy composite from every ADMITTED (FUNDED) member
+    epoch's own trace links through the one return engine -- ``composite``
+    over the beginning-capital-weighted member sub-period returns, compounded
+    via ``splice_spans`` -- and requires it to equal the canonical
+    strategy-level path within 1e-12.  A funded member epoch without a
+    verified trace makes the admitted composite uncomputable, so the
     reconciliation fails closed instead of being silently disabled for the
-    strategy's other members.  Engine ``ReturnsError`` (an unvalued member
-    boundary, a repeated date) fails closed here.
+    strategy's other members.  A BLOCKED-admission member epoch is a governed
+    outcome (incomplete coverage, an owner-approved unavailable observation):
+    the producer retains no numeric metric or observation trace for it by
+    contract, so it is excluded from the reconcile input set, the canonical
+    comparison runs over the admitted set, and the exclusion is disclosed --
+    never silent -- on the member's own report row through the
+    BLOCKED_ADMISSION statuses and its typed blocking reason.  Engine
+    ``ReturnsError`` (an unvalued member boundary, a repeated date) fails
+    closed here.
     """
 
     inputs: list[MemberReturn] = []
@@ -1285,6 +1292,13 @@ def _reconcile_multi_account_strategy_composite(
         _end,
     ), detail in current_epoch_details.items():
         if member_strategy_id != strategy_id:
+            continue
+        if detail.get("epoch_admission_status") == "BLOCKED":
+            # Governed blocked admission: the producer retains no trace for
+            # this epoch by contract, so it leaves the reconcile input set;
+            # the member's own row discloses the exclusion (BLOCKED_ADMISSION
+            # statuses and the typed blocking reason).  A missing trace on an
+            # admitted (FUNDED) member still fails closed below.
             continue
         links = detail.get("own_path_links")
         if not isinstance(links, list) or not links:
@@ -1626,9 +1640,9 @@ def _account_strategy_performance(
             # compounded trace path (single- and multi-account alike; a sole
             # member's canonical account-live path is its own series, and the
             # trace gate adds to that comparison rather than replacing it),
-            # and a multi-account strategy's member paths must reconcile to
-            # the canonical strategy-level path through the one return
-            # engine's composite.
+            # and a multi-account strategy's ADMITTED member paths must
+            # reconcile to the canonical strategy-level path through the one
+            # return engine's composite.
             own_trace = (
                 _member_own_trace_path(detail.get("own_path_links"))
                 if detail is not None
@@ -1643,7 +1657,10 @@ def _account_strategy_performance(
                 else None
             )
             strategy_account_ids = {
-                key[0] for key in current_epoch_details if key[1] == strategy_id
+                key[0]
+                for key, member_detail in current_epoch_details.items()
+                if key[1] == strategy_id
+                and member_detail.get("epoch_admission_status") == "FUNDED"
             }
             gate_paths: list[dict[str, Any]] = []
             if own_trace is not None:
