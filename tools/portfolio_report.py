@@ -62,8 +62,10 @@ from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
 from quant_engine.portfolio_ledger.returns import (
+    MemberReturn,
     ReturnsError,
     ReturnSpan,
+    composite,
     splice_spans,
 )
 from portfolio_private_stage import validate_private_stage_target
@@ -1168,14 +1170,158 @@ def _inside(day: date, start: date | None, end: date | None) -> bool:
     return (start is None or day >= start) and (end is None or day <= end)
 
 
-# A member of a multi-account strategy compounds the weighted composite rows
-# the member composes, so the member's own NAV-linked epoch TWR legitimately
-# deviates from that compounded path (weighted blend, membership boundaries,
-# fee dispersion) -- the merged synthetic vertical oracle renders deviations
-# up to ~1.3%.  The composite gate is therefore a sanity bound on that
-# deviation, not the single-account gate's exact equality: a divergent member
-# TWR fails closed here instead of silently publishing.
-_MULTI_ACCOUNT_MEMBER_TWR_TOLERANCE = Decimal("0.05")
+def _live_strategy_components(
+    catalog: Mapping[str, Any],
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
+    *,
+    calculation_cutoff_date: str | None = None,
+) -> dict[str, tuple[bool, set[str]]]:
+    """Component accounts of each strategy's in-scope ACCOUNT_LIVE rows.
+
+    The flag reports whether every in-scope row carries a component list; a
+    strategy with unlisted membership can never prove a sole component, so no
+    member path may be published from its shared series.
+    """
+
+    cutoff = (
+        None
+        if calculation_cutoff_date is None
+        else _date(calculation_cutoff_date, "calculation cutoff date")
+    )
+    components: dict[str, set[str]] = defaultdict(set)
+    complete: dict[str, bool] = defaultdict(lambda: True)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "strategy return.strategy_id")
+        if not _is_current_product_strategy(strategy_id, strategy_product_controls):
+            continue
+        if (
+            cutoff is not None
+            and _date(row.get("date"), "strategy return.date") > cutoff
+        ):
+            continue
+        row_components = row.get("component_account_ids")
+        if not isinstance(row_components, list) or not row_components:
+            complete[strategy_id] = False
+            continue
+        components[strategy_id].update(
+            _text(item, "strategy return.component_account_ids")
+            for item in row_components
+        )
+    return {
+        strategy_id: (complete[strategy_id], components[strategy_id])
+        for strategy_id in components
+    }
+
+
+def _member_own_trace_path(
+    links: object,
+) -> dict[str, Any] | None:
+    """Compound one member epoch's verified observation-trace links.
+
+    The manifest producer persists each account epoch's own linked path in
+    ``observation_trace.links``; each link's ``factor - 1`` is the member's
+    own sub-period return, compounded through the one return engine
+    (``splice_spans``, receipt-less, precision 34).  The result carries the
+    published ``return_path_*`` numeric fields and never leaves this
+    module's private detail plumbing.
+    """
+
+    if not isinstance(links, list) or not links:
+        return None
+    series: list[dict[str, str]] = []
+    daily: list[tuple[date, Decimal]] = []
+    for link in _objects(links, "observation_trace.links"):
+        end_day = _date(link.get("end_date"), "trace link.end_date")
+        period_return = _decimal(link.get("factor"), "trace link.factor") - Decimal(1)
+        series.append(
+            {"date": end_day.isoformat(), "return": decimal_text(period_return)}
+        )
+        daily.append((end_day, period_return))
+    try:
+        with localcontext() as context:
+            context.prec = 34
+            compounded = splice_spans(daily)
+    except ReturnsError as exc:
+        raise ReportValidationError(f"member own trace path is invalid: {exc}") from exc
+    return {
+        "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
+        "return_path_cumulative_return": decimal_text(compounded.cumulative_return),
+        "return_path_evidence_layer": "ACCOUNT_LIVE",
+        "return_path_observations": len(series),
+        "return_path_observed_end": series[-1]["date"],
+        "return_path_observed_start": series[0]["date"],
+        "return_path_series_sha256": hashlib.sha256(
+            _canonical_json_array_bytes(series)
+        ).hexdigest(),
+        "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
+    }
+
+
+def _reconcile_multi_account_strategy_composite(
+    strategy_id: str,
+    current_epoch_details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    strategy_live: Mapping[str, dict[str, Any]],
+) -> None:
+    """Require governed member trace paths to reconcile to the strategy path.
+
+    Recomputes the strategy composite from every governed member epoch's own
+    trace links through the one return engine -- ``composite`` over the
+    beginning-capital-weighted member sub-period returns, compounded via
+    ``splice_spans`` -- and requires it to equal the canonical strategy-level
+    path within 1e-12.  A governed member epoch without a verified trace makes
+    the full composite uncomputable, so the reconciliation is skipped rather
+    than reconciled against a partial composite.  Engine ``ReturnsError`` (an
+    unvalued member boundary, a repeated date) fails closed here.
+    """
+
+    inputs: list[MemberReturn] = []
+    for (
+        account_id,
+        member_strategy_id,
+        _start,
+        _end,
+    ), detail in current_epoch_details.items():
+        if member_strategy_id != strategy_id:
+            continue
+        links = detail.get("own_path_links")
+        if not isinstance(links, list) or not links:
+            return
+        for link in _objects(links, "observation_trace.links"):
+            inputs.append(
+                MemberReturn(
+                    account_id,
+                    _date(link.get("end_date"), "trace link.end_date"),
+                    _decimal(link.get("base_nav"), "trace link.base_nav")
+                    + _decimal(link.get("beginning_flow"), "trace link.beginning_flow"),
+                    _decimal(link.get("factor"), "trace link.factor") - Decimal(1),
+                    _date(link.get("start_date"), "trace link.start_date"),
+                )
+            )
+    canonical = strategy_live.get(strategy_id)
+    if canonical is None or len({item.member_id for item in inputs}) < 2:
+        return
+    try:
+        with localcontext() as context:
+            context.prec = 34
+            composited = composite(inputs)
+            compounded = splice_spans(
+                [(item.end_date, item.period_return) for item in composited]
+            )
+    except ReturnsError as exc:
+        raise ReportValidationError(
+            f"multi-account member own paths do not reconcile "
+            f"to the strategy composite for {strategy_id}: {exc}"
+        ) from exc
+    if abs(
+        compounded.cumulative_return
+        - _decimal(canonical["cumulative_return"], "strategy composite path")
+    ) > Decimal("1e-12"):
+        raise ReportValidationError(
+            "multi-account member own paths do not reconcile "
+            f"to the strategy composite for {strategy_id}"
+        )
 
 
 def _account_strategy_performance(
@@ -1244,11 +1390,17 @@ def _account_strategy_performance(
                 if row.get("strategy_id") in admitted_strategy_ids
             ],
         }
-    account_owned_live = _account_live_return_series(
+    account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
+    scoped_member_bindings: dict[tuple[str, str], dict[str, Any]] = {}
+    strategy_live = _account_live_return_series(
         return_catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
-        account_owned=True,
+    )
+    live_components = _live_strategy_components(
+        return_catalog,
+        strategy_product_controls,
+        calculation_cutoff_date=calculation_cutoff_date,
     )
     for evidence in _objects(
         catalog.get("strategy_provider_evidence", []),
@@ -1298,24 +1450,34 @@ def _account_strategy_performance(
                         )
                     ]
         for account_id, binding, assignment_id in scoped_accounts:
-            own_path = account_owned_live.get((account_id, strategy_id))
-            if own_path is None:
-                # A per-account return path is the account's OWN path; a
-                # strategy-level composite is never substituted for it.
-                continue
-            account_live_paths[(account_id, strategy_id)] = {
+            live_path = strategy_live.get(strategy_id)
+            sole_component = live_path is not None and live_components.get(
+                strategy_id, (False, set())
+            ) == (True, {account_id})
+            scoped_member_bindings[(account_id, strategy_id)] = {
                 "return_path_account_binding": binding,
                 "return_path_assignment_id": assignment_id,
-                "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
-                "return_path_cumulative_return": own_path["cumulative_return"],
-                "return_path_evidence_layer": "ACCOUNT_LIVE",
                 "return_path_generation_id": evidence.get("generation_id"),
-                "return_path_observations": own_path["return_observations"],
-                "return_path_observed_end": own_path["observed_end"],
-                "return_path_observed_start": own_path["observed_start"],
-                "return_path_series_sha256": own_path["return_series_sha256"],
+            }
+            if not sole_component:
+                # A per-account return path is the account's OWN path; a
+                # shared strategy-level composite is never substituted for
+                # it.  A multi-account strategy publishes no member path
+                # from the ACCOUNT_LIVE rows: without a verified
+                # per-member series the honest publication is none.
+                continue
+            account_live_paths[(account_id, strategy_id)] = {
+                **scoped_member_bindings[(account_id, strategy_id)],
+                "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
+                "return_path_cumulative_return": live_path["cumulative_return"],
+                "return_path_evidence_layer": "ACCOUNT_LIVE",
+                "return_path_observations": live_path["return_observations"],
+                "return_path_observed_end": live_path["observed_end"],
+                "return_path_observed_start": live_path["observed_start"],
+                "return_path_series_sha256": live_path["return_series_sha256"],
                 "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
             }
+    reconciled_strategy_ids: set[str] = set()
     for assignment in assignments:
         account_id = _text(assignment.get("account_id"), "assignment.account_id")
         mapping_status = _text(
@@ -1447,18 +1609,28 @@ def _account_strategy_performance(
             rows.append(base)
             continue
         base.update(account_live_paths.get((account_id, strategy_id), {}))
+        if admission_governed:
+            base.update(scoped_member_bindings.get((account_id, strategy_id), {}))
         if current_epoch_details is not None:
             # The epoch TWR is the manifest engine's own result; it is never
             # re-derived here from raw NAV and flow records (P1 is retired).
-            # For every single-account strategy the manifest epoch TWR must
-            # equal the account's own compounded return path -- the daily
-            # account-live series with the epoch HPR gap spans spliced in --
-            # within 1e-12, else the two engine views disagree.  A member of a
-            # multi-account strategy is gated against its own compounded path
-            # of the composite rows the member composes, with the composite
-            # sanity bound: a divergent member TWR fails closed here, never
-            # silently publishes.
-            own_path = account_owned_live.get((account_id, strategy_id))
+            # A governed member publishes its OWN return path, compounded from
+            # the member's per-account observation-trace links the manifest
+            # producer persists -- never a strategy-level composite
+            # substitution.  Two exact fail-closed gates hold at 1e-12, with
+            # no tolerance band: the member's epoch TWR must equal its own
+            # compounded trace path (single- and multi-account alike; without
+            # a trace the sole-component account-live path is the member's
+            # own series), and a multi-account strategy's member paths must
+            # reconcile to the canonical strategy-level path through the one
+            # return engine's composite.
+            own_trace = (
+                _member_own_trace_path(detail.get("own_path_links"))
+                if detail is not None
+                else None
+            )
+            if own_trace is not None:
+                base.update(own_trace)
             payload = detail.get("performance_payload") if detail is not None else None
             epoch_twr = (
                 payload.get("twr")
@@ -1468,26 +1640,37 @@ def _account_strategy_performance(
             strategy_account_ids = {
                 key[0] for key in current_epoch_details if key[1] == strategy_id
             }
-            if own_path is not None and epoch_twr is not None:
+            gate_path = own_trace
+            if gate_path is None and strategy_account_ids == {account_id}:
+                # A sole member without a trace: the strategy-level
+                # account-live path is the member's own series.
+                gate_path = account_live_paths.get((account_id, strategy_id))
+            if gate_path is not None and epoch_twr is not None:
                 twr_gap = abs(
                     _decimal(epoch_twr, "epoch manifest TWR")
                     - _decimal(
-                        own_path["cumulative_return"],
-                        "account own return path",
+                        gate_path["return_path_cumulative_return"],
+                        "member own return path",
                     )
                 )
-                if strategy_account_ids == {account_id} and twr_gap > Decimal("1e-12"):
-                    raise ReportValidationError(
-                        "single-account epoch TWR differs from the account return path"
-                    )
-                if (
-                    len(strategy_account_ids) > 1
-                    and twr_gap > _MULTI_ACCOUNT_MEMBER_TWR_TOLERANCE
-                ):
+                if twr_gap > Decimal("1e-12"):
+                    if strategy_account_ids == {account_id}:
+                        raise ReportValidationError(
+                            "single-account epoch TWR differs "
+                            "from the account return path"
+                        )
                     raise ReportValidationError(
                         "multi-account member epoch TWR differs "
                         "from the member return path"
                     )
+            if (
+                len(strategy_account_ids) > 1
+                and strategy_id not in reconciled_strategy_ids
+            ):
+                reconciled_strategy_ids.add(strategy_id)
+                _reconcile_multi_account_strategy_composite(
+                    strategy_id, current_epoch_details, strategy_live
+                )
         rows.append(base)
     return sorted(
         rows,
@@ -2081,26 +2264,21 @@ def _account_live_return_series(
     strategy_product_controls: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     calculation_cutoff_date: str | None = None,
-    account_owned: bool = False,
-) -> dict[str | tuple[str, str], dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Hash and summarize each canonical account-live return path.
 
-    A strategy-level path groups every ACCOUNT_LIVE row of one strategy; an
-    account-owned path (``account_owned``) groups every row the account
-    composes -- including rows shared with other members, so the member's
-    COMPLETE own path is delivered -- so a per-account return path is never a
-    strategy-level composite substitution.  Both compound through the one
-    return engine (``splice_spans``); the epoch HPR gap spans are spliced in
-    that single place.  The epoch receipt's hash/count bindings hold for the
-    strategy series, so they are enforced on strategy-level paths only, and an
-    account-owned path splices the receipt's gap spans only when that account
-    is the receipt's sole component -- a multi-account member composes only
-    a subset of the bound strategy series.
+    A strategy-level path groups every ACCOUNT_LIVE row of one strategy and
+    compounds through the one return engine (``splice_spans``); the epoch HPR
+    gap spans are spliced in that single place, and the epoch receipt's
+    hash/count bindings hold for the strategy series.  This is the canonical
+    strategy composite path; a member account's OWN path is its manifest
+    observation-trace path (or, ungoverned, this same series when the account
+    is its strategy's sole component) -- a multi-account member's own path is
+    never derived here.
     """
 
-    grouped: dict[str | tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     providers: dict[str, set[str]] = defaultdict(set)
-    strategy_components: dict[str, set[str]] = defaultdict(set)
     cutoff = (
         None
         if calculation_cutoff_date is None
@@ -2115,29 +2293,9 @@ def _account_live_return_series(
         parsed_day = _date(row.get("date"), "strategy return.date")
         if cutoff is not None and parsed_day > cutoff:
             continue
-        row_components = row.get("component_account_ids")
-        if isinstance(row_components, list):
-            strategy_components[strategy_id].update(
-                _text(item, "strategy return.component_account_ids")
-                for item in row_components
-            )
-        if account_owned:
-            components = row.get("component_account_ids")
-            if not isinstance(components, list) or not components:
-                continue
-            series_keys: list[str | tuple[str, str]] = [
-                (
-                    _text(component, "strategy return.component_account_ids"),
-                    strategy_id,
-                )
-                for component in components
-            ]
-        else:
-            series_keys = [strategy_id]
         day = parsed_day.isoformat()
         value = decimal_text(_decimal(row.get("return"), "strategy return.return"))
-        for series_key in series_keys:
-            grouped[series_key].append({"date": day, "return": value})
+        grouped[strategy_id].append({"date": day, "return": value})
         providers[strategy_id].add(
             _text(row.get("provider_id"), "strategy return.provider_id")
         )
@@ -2145,11 +2303,10 @@ def _account_live_return_series(
     epoch_receipts = _epoch_hpr_receipts(
         catalog, calculation_cutoff_date=calculation_cutoff_date
     )
-    if not account_owned and set(epoch_receipts) - set(grouped):
+    if set(epoch_receipts) - set(grouped):
         raise ReportValidationError("epoch HPR receipt has no daily path")
-    result: dict[str | tuple[str, str], dict[str, Any]] = {}
-    for series_key, rows in grouped.items():
-        strategy_id = series_key if isinstance(series_key, str) else series_key[1]
+    result: dict[str, dict[str, Any]] = {}
+    for strategy_id, rows in grouped.items():
         rows.sort(key=lambda item: item["date"])
         dates = [item["date"] for item in rows]
         if len(dates) != len(set(dates)):
@@ -2157,14 +2314,6 @@ def _account_live_return_series(
                 f"account-live strategy returns repeat a date for {strategy_id}"
             )
         epoch_receipt = epoch_receipts.get(strategy_id)
-        if account_owned and strategy_components.get(strategy_id, set()) != {
-            series_key[0]
-        }:
-            # The epoch receipt binds the strategy-level series.  A member of
-            # a multi-account strategy composes only a subset of that series,
-            # so the receipt's gap spans must not be spliced into the
-            # member's own path.
-            epoch_receipt = None
         with localcontext() as context:
             # Matrixport's retained source arithmetic is a 28-significant-
             # digit Decimal path.  Replaying its HPR receipt at a wider local
@@ -2173,51 +2322,42 @@ def _account_live_return_series(
             spans_by_start: dict[str, list[dict[str, Any]]] = defaultdict(list)
             if epoch_receipt is not None:
                 out_of_window = bool(epoch_receipt.get("_out_of_window"))
-                if (
-                    not account_owned
-                    and not out_of_window
-                    and (
-                        epoch_receipt["daily_return_observations"] != len(rows)
-                        or epoch_receipt["observed_start"] != dates[0]
-                        or epoch_receipt["observed_end"] != dates[-1]
-                        or epoch_receipt["daily_return_series_sha256"]
-                        != hashlib.sha256(_canonical_json_array_bytes(rows)).hexdigest()
-                    )
+                if not out_of_window and (
+                    epoch_receipt["daily_return_observations"] != len(rows)
+                    or epoch_receipt["observed_start"] != dates[0]
+                    or epoch_receipt["observed_end"] != dates[-1]
+                    or epoch_receipt["daily_return_series_sha256"]
+                    != hashlib.sha256(_canonical_json_array_bytes(rows)).hexdigest()
                 ):
                     raise ReportValidationError("epoch HPR daily path differs")
-                if not account_owned:
-                    daily_wealth = Decimal("1")
-                    for item in rows:
-                        daily_wealth *= Decimal(1) + _decimal(
-                            item["return"], "canonical strategy return"
-                        )
-                    if not out_of_window and decimal_text(
-                        daily_wealth - Decimal(1)
-                    ) != decimal_text(
-                        _decimal(
-                            epoch_receipt["daily_cumulative_return"],
-                            "epoch HPR daily return",
-                        )
-                    ):
-                        raise ReportValidationError("epoch HPR daily return differs")
+                daily_wealth = Decimal("1")
+                for item in rows:
+                    daily_wealth *= Decimal(1) + _decimal(
+                        item["return"], "canonical strategy return"
+                    )
+                if not out_of_window and decimal_text(
+                    daily_wealth - Decimal(1)
+                ) != decimal_text(
+                    _decimal(
+                        epoch_receipt["daily_cumulative_return"],
+                        "epoch HPR daily return",
+                    )
+                ):
+                    raise ReportValidationError("epoch HPR daily return differs")
                 for span in _objects(
                     epoch_receipt["span_return_receipts"], "epoch HPR spans"
                 ):
                     if out_of_window and str(span["span_end_date"]) > dates[-1]:
                         continue
                     spans_by_start[str(span["span_start_date"])].append(span)
-                if (
-                    not account_owned
-                    and not out_of_window
-                    and any(
-                        start not in dates
-                        or any(
-                            start < observed <= str(span["span_end_date"])
-                            for observed in dates
-                        )
-                        for start, spans in spans_by_start.items()
-                        for span in spans
+                if not out_of_window and any(
+                    start not in dates
+                    or any(
+                        start < observed <= str(span["span_end_date"])
+                        for observed in dates
                     )
+                    for start, spans in spans_by_start.items()
+                    for span in spans
                 ):
                     raise ReportValidationError("epoch HPR span does not replace a gap")
             try:
@@ -2246,7 +2386,6 @@ def _account_live_return_series(
             cumulative_return = compounded.cumulative_return
             if (
                 epoch_receipt is not None
-                and not account_owned
                 and not epoch_receipt.get("_out_of_window")
                 and decimal_text(cumulative_return)
                 != decimal_text(
@@ -2262,7 +2401,7 @@ def _account_live_return_series(
             if compounded.path_dependent_metrics_available
             else None
         )
-        result[series_key] = {
+        result[strategy_id] = {
             "cumulative_return": decimal_text(cumulative_return),
             "daily_cumulative_return": (
                 decimal_text(compounded.daily_cumulative_return)
@@ -2304,7 +2443,7 @@ def _account_live_return_series(
             ).hexdigest(),
             "epoch_holding_period_link_observations": (
                 epoch_receipts[strategy_id]["epoch_holding_period_link_observations"]
-                if not account_owned and strategy_id in epoch_receipts
+                if strategy_id in epoch_receipts
                 else compounded.link_count
             ),
         }
@@ -9047,6 +9186,17 @@ def _verified_epoch_authority_details(
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
+            # The member's own observation-trace links, carried as a PRIVATE
+            # sibling of the published payload: the performance payload is
+            # updated onto the published row, so the trace must never enter
+            # it.  The report compounds these links into the member's own
+            # return path; the manifest schema requires the trace whenever
+            # performance is present.
+            "own_path_links": (
+                manifest_row["observation_trace"]["links"]
+                if "performance_status" in manifest_row
+                else None
+            ),
             "performance_payload": (
                 {
                     **(
