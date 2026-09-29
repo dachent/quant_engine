@@ -5980,6 +5980,101 @@ def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
         reporter.build_report_data(baseline_root)
 
 
+def _raw_coverage_ledger(
+    tmp_path: Path, finding_days: tuple[str, ...]
+) -> tuple[dict[str, Any], Path, Path]:
+    """A hash-bound provider ledger carrying an FX-boundary finding per day."""
+
+    ledger_catalog = {
+        "nav_observations": [
+            {
+                "account_id": account_id,
+                "as_of_date": "2026-01-03",
+                "provider_id": "matrixport",
+            }
+            for account_id in ("account-a", "account-b")
+        ],
+        "quality_findings": [
+            {
+                "fact_type": "nav_observations",
+                "fx_boundary": "2026-01-03",
+                "original_record_id": f"matrixport-holdings-{day}",
+                "original_source_date": day,
+                "provider_id": "matrixport",
+                "record_id": f"matrixport:matrixport-holdings-{day}",
+                "source_artifact_id": "csv/daily_holdings.csv",
+                "source_record_id": f"matrixport-holdings-{day}",
+                "source_row_sha256": "0" * 64,
+                "status": "OUTSIDE_ADMITTED_FX_BOUNDARY",
+            }
+            for day in finding_days
+        ],
+        "reconciliation_checks": [],
+    }
+    ledger_bytes = canonical_json_bytes(ledger_catalog)
+    ledger_root = tmp_path / "provider-ledger"
+    ledger_dir = ledger_root / "generations" / ("9" * 64)
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "provider-ledger.json").write_bytes(ledger_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    return catalog, baseline_root, ledger_root
+
+
+def test_raw_observation_coverage_selects_within_the_calculation_cutoff(
+    tmp_path: Path,
+) -> None:
+    """The resolved calculation cutoff bounds raw-coverage selection.
+
+    A retained FX-boundary finding newer than the selected cutoff must not
+    extend the report's raw observation date: coverage selects the latest
+    genuine raw observation on or before the cutoff -- 2026-01-14 when the
+    findings carry 01-14 and 01-18 -- not the unrestricted maximum clamped
+    to the cutoff, and without a cutoff the latest finding is retained.
+    """
+
+    catalog, baseline_root, ledger_root = _raw_coverage_ledger(
+        tmp_path, ("2026-01-17", "2026-01-18")
+    )
+    assert reporter._provider_raw_observation_coverage(
+        catalog, baseline_root, ledger_root
+    ) == {"account-a": "2026-01-18", "account-b": "2026-01-18"}
+    coverage = reporter._provider_raw_observation_coverage(
+        catalog,
+        baseline_root,
+        ledger_root,
+        calculation_cutoff_date="2026-01-17",
+    )
+    assert coverage == {"account-a": "2026-01-17", "account-b": "2026-01-17"}
+    projected = reporter._calculation_catalog_through(catalog, "2026-01-17")
+    account = next(
+        row
+        for row in reporter._accounts(projected, raw_observation_coverage=coverage)
+        if row["account_id"] == "account-a"
+    )
+    assert account["as_of_date"] == "2026-01-03"
+    assert account["source_last_observation"] == "2026-01-17"
+    gap_catalog, gap_baseline_root, gap_ledger_root = _raw_coverage_ledger(
+        tmp_path / "gap", ("2026-01-14", "2026-01-18")
+    )
+    assert reporter._provider_raw_observation_coverage(
+        gap_catalog,
+        gap_baseline_root,
+        gap_ledger_root,
+        calculation_cutoff_date="2026-01-17",
+    ) == {"account-a": "2026-01-14", "account-b": "2026-01-14"}
+
+
 # ── hwm_inputs numerical composite (HWM-001) ─────────────────────────────
 
 _HWM_DAYS = ("2026-01-01", "2026-01-02", "2026-01-03")

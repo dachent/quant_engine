@@ -996,9 +996,21 @@ def _matrixport_daily_fx_totals(
                 # An inactive zero-share row holds nothing to convert, so the
                 # FX boundary does not disposition it.
                 continue
+            native = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            if native is None:
+                # A row without a native value holds no observation to
+                # convert, and none to retain past the FX boundary.
+                incomplete_days.add(day)
+                continue
             if day > fx_end:
                 # The contract admits USD conversion only through its FX
                 # interval end: no USD value exists for a later active row.
+                # The finding is the raw-observation coverage evidence
+                # downstream reports key on, so it is retained only for a
+                # row that carries a native value: its date always
+                # corresponds to an observation that actually exists.
                 unconverted.append((day, str(row.get("currency") or "")))
                 _excluded_source_row(
                     cutoff_findings,
@@ -1010,12 +1022,6 @@ def _matrixport_daily_fx_totals(
                     fx_end,
                     status="OUTSIDE_ADMITTED_FX_BOUNDARY",
                 )
-                continue
-            native = _observed_decimal(
-                row.get("native_value"), "matrixport native holding value"
-            )
-            if native is None:
-                incomplete_days.add(day)
                 continue
             currency = _text(row.get("currency"), "matrixport holding currency")
             if currency == "USD":
