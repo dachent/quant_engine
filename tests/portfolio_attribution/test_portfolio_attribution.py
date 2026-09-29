@@ -43,10 +43,21 @@ def _baseline(
     retained_source_as_of_date: date | None = None,
     account_live_returns: dict[date, str] | None = None,
     strategy_returns: object = _NO_OVERRIDE,
+    provider_admissions: list[dict[str, Any]] | None = None,
+    strategy_version_refs: dict[str, str] | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
+    version_refs = strategy_version_refs or {}
     strategies = [
-        {"name": f"Strategy {index}", "strategy_id": f"strategy-{index}"}
+        {
+            "name": f"Strategy {index}",
+            "strategy_id": f"strategy-{index}",
+            **(
+                {"version_ref": version_refs[f"strategy-{index}"]}
+                if f"strategy-{index}" in version_refs
+                else {}
+            ),
+        }
         for index in range(1, 10)
     ]
     if account_live_returns is None:
@@ -93,6 +104,11 @@ def _baseline(
             computed_strategy_returns
             if strategy_returns is _NO_OVERRIDE
             else strategy_returns
+        ),
+        **(
+            {}
+            if provider_admissions is None
+            else {"provider_admissions": provider_admissions}
         ),
     }
     content = canonical_json_bytes(catalog)
@@ -422,6 +438,239 @@ def test_account_live_series_accepts_repeated_identical_rows_and_boundary_return
     catalog, _, _ = attribution.build_catalog(baseline, spec)
 
     assert catalog["comparisons"][0]["metrics"]["observations"] == 2
+
+
+# The EchoTrade shape of the pinned attribution spec (sha256 230f2674...): an
+# EVIDENCED benchmark and one AVAILABLE benchmark comparison whose
+# account_series_id names a retained ACCOUNT_LIVE series, an UNAVAILABLE
+# provider comparison, no ACCOUNT_LIVE row in baseline strategy_returns, and a
+# single REFERENCE_ONLY strategy_returns admission in provider_admissions.
+_HISTORY_STRATEGY = "strategy-2"
+_HISTORY_SERIES = "account:strategy-2"
+_HISTORY_VERSION = "accepted-live-path:" + "2" * 64
+
+
+def _admission(
+    disposition: str = "REFERENCE_ONLY", strategy_id: str = _HISTORY_STRATEGY
+) -> dict[str, Any]:
+    return {
+        "account_id": "synthetic-history-account",
+        "account_reconciliation_sha256": "0" * 64,
+        "disposition": disposition,
+        "effective_end": "2026-01-03",
+        "effective_start": "2026-01-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "strategy_returns",
+        "pool_id": None,
+        "provider_id": "synthetic",
+        "strategy_id": strategy_id,
+    }
+
+
+def _history_only_baseline(
+    tmp_path: Path,
+    *,
+    admissions: list[dict[str, Any]] | None = None,
+    version_refs: dict[str, str] | None = None,
+) -> Path:
+    return _baseline(
+        tmp_path,
+        provider_admissions=[_admission()] if admissions is None else admissions,
+        strategy_version_refs=(
+            {_HISTORY_STRATEGY: _HISTORY_VERSION}
+            if version_refs is None
+            else version_refs
+        ),
+    )
+
+
+def _with_history_only_strategy(
+    spec_path: Path,
+    returns: Path,
+    *,
+    account_series_id: str = _HISTORY_SERIES,
+    evidence_layer: str = "ACCOUNT_LIVE",
+    version_ref: str = _HISTORY_VERSION,
+) -> None:
+    """Give strategy-2 the EchoTrade rows of the pinned spec, re-pinning the CSV."""
+
+    with returns.open("a", encoding="utf-8") as handle:
+        for day, value in (
+            ("2026-01-01", "0.002"),
+            ("2026-01-02", "0.004"),
+            ("2026-01-03", "-0.003"),
+        ):
+            handle.write(
+                f"{_HISTORY_SERIES},{day},{value},{evidence_layer},"
+                f"{version_ref},history-source\n"
+            )
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["benchmark_assignments"][1].update(
+        benchmark_id="benchmark",
+        rationale="Synthetic effective-dated benchmark of a retired strategy.",
+        status="EVIDENCED",
+        version_ref="benchmark:v1",
+    )
+    spec["benchmark_comparisons"][1].update(
+        account_series_id=account_series_id,
+        disposition="Synthetic exact-date comparison of retained account history.",
+        observed_end="2026-01-03",
+        observed_start="2026-01-01",
+        reference_series_id="benchmark",
+        status="DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+        version_compatibility_status="PROVEN_COMPATIBLE",
+    )
+    spec["return_source"]["expected_sha256"] = hashlib.sha256(
+        returns.read_bytes()
+    ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+def test_history_only_strategy_benchmark_comparison_reads_its_retained_history(
+    tmp_path: Path,
+) -> None:
+    """RP1: a retired strategy's evidenced comparison no longer aborts the build.
+
+    Before the fix the account side came only from baseline ACCOUNT_LIVE rows,
+    so the EchoTrade-shaped row raised "comparison series is missing" and no
+    attribution generation could be built on the pinned spec. Its account side
+    is now its retained history, disclosed in the row, through the same
+    full-window metrics as a live series.
+    """
+
+    baseline = _history_only_baseline(tmp_path)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    history = catalog["benchmark_comparisons"][1]
+    assert history["strategy_id"] == _HISTORY_STRATEGY
+    assert history["account_series_source"] == (
+        "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
+    )
+    # 1.002 * 1.004 * 0.997 - 1 over the whole window; the benchmark has only
+    # 2026-01-02 and 2026-01-03 (1.005 * 0.995 - 1 = -0.000025).
+    assert history["metrics"]["account_cumulative_return"] == "0.002989976"
+    assert history["metrics"]["reference_cumulative_return"] == "-0.000025"
+    assert history["metrics"]["cumulative_gap"] == "0.003014976"
+    assert history["metrics"]["observations"] == 2
+    assert catalog["benchmark_comparisons"][0]["account_series_source"] == (
+        "BASELINE_ACCOUNT_LIVE"
+    )
+    assert catalog["comparisons"][0]["account_series_source"] == (
+        "BASELINE_ACCOUNT_LIVE"
+    )
+    assert catalog["comparisons"][1]["account_series_source"] is None
+    assert catalog["comparisons"][1]["metrics"] is None
+
+
+def test_strategy_with_live_rows_never_reads_its_retained_account_series(
+    tmp_path: Path,
+) -> None:
+    """No mixing: a strategy with any live row never reads the retained file.
+
+    strategy-1 also carries everything the retained-history path accepts (a
+    REFERENCE_ONLY admission and the retained "account" series' exact version),
+    yet its account side stays the live series (1.03 * 0.99 - 1 = 0.0197), not
+    the retained one (1.01 * 0.98 - 1 = -0.0102).
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={date(2026, 1, 2): "0.03", date(2026, 1, 3): "-0.01"},
+        provider_admissions=[_admission(strategy_id="strategy-1")],
+        strategy_version_refs={"strategy-1": "v1"},
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    for row in (catalog["comparisons"][0], catalog["benchmark_comparisons"][0]):
+        assert row["account_series_source"] == "BASELINE_ACCOUNT_LIVE"
+        assert row["metrics"]["account_cumulative_return"] == "0.0197"
+
+
+def test_live_rows_outside_the_window_fail_closed_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={date(2025, 12, 30): "0.01", date(2025, 12, 31): "0.02"},
+        provider_admissions=[_admission(strategy_id="strategy-1")],
+        strategy_version_refs={"strategy-1": "v1"},
+    )
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="two exact common dates"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_history_only_strategy_without_its_retained_series_fails_closed(
+    tmp_path: Path,
+) -> None:
+    baseline = _history_only_baseline(tmp_path)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns, account_series_id="account:absent")
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="comparison series is missing"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+@pytest.mark.parametrize(
+    "admissions",
+    [
+        [],
+        [_admission("AUTHORITATIVE")],
+        [_admission("REFERENCE_ONLY"), _admission("AUTHORITATIVE")],
+    ],
+    ids=["no-admission", "authoritative", "mixed"],
+)
+def test_missing_live_series_without_history_only_admission_fails_closed(
+    tmp_path: Path, admissions: list[dict[str, Any]]
+) -> None:
+    """A strategy admitted as live whose rows are missing never falls back."""
+
+    baseline = _history_only_baseline(tmp_path, admissions=admissions)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="comparison series is missing"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+@pytest.mark.parametrize(
+    ("evidence_layer", "series_version", "registered_versions", "message"),
+    [
+        ("SHADOW_OOS", _HISTORY_VERSION, None, "identity differs"),
+        ("ACCOUNT_LIVE", "accepted-live-path:" + "3" * 64, None, "identity differs"),
+        ("ACCOUNT_LIVE", _HISTORY_VERSION, {}, "comparison series is missing"),
+    ],
+    ids=["not-account-live", "other-version", "no-registered-version"],
+)
+def test_retained_account_history_identity_fails_closed(
+    tmp_path: Path,
+    evidence_layer: str,
+    series_version: str,
+    registered_versions: dict[str, str] | None,
+    message: str,
+) -> None:
+    """The retained series must be the ACCOUNT_LIVE path the baseline registers."""
+
+    baseline = _history_only_baseline(tmp_path, version_refs=registered_versions)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(
+        spec, returns, evidence_layer=evidence_layer, version_ref=series_version
+    )
+
+    with pytest.raises(attribution.AttributionValidationError, match=message):
+        attribution.build_catalog(baseline, spec)
 
 
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:
