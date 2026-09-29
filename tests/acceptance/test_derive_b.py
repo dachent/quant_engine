@@ -2072,3 +2072,148 @@ def test_manifest_future_schema_version_fails_closed(tmp_path: Path):
 
     with pytest.raises(derivation.ManifestError, match="unsupported schema"):
         derivation.load_inputs_manifest(manifest_path)
+
+
+def test_derive_never_dates_a_flow_after_the_last_valuation_at_that_valuation(
+    tmp_path: Path,
+):
+    """A ledger flow strictly between the last valuation and the cutoff must not
+    be totaled into flows dated at that earlier valuation."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [
+                nav("account-a", "2026-09-01", "1000"),
+                nav("account-a", "2026-09-03", "1000"),
+            ],
+            "flows": [
+                flow(
+                    "credit-on-end",
+                    "account-a",
+                    "100",
+                    "EXTERNAL_CONTRIBUTION",
+                    occurred_on="2026-09-03",
+                ),
+                flow(
+                    "credit-after-end",
+                    "account-a",
+                    "100",
+                    "EXTERNAL_CONTRIBUTION",
+                    occurred_on="2026-09-05",
+                ),
+            ],
+            "capital_anchors": [],
+        },
+        [included_row("account-a", "strategy-a")],
+    )
+
+    output = derivation.derive(tmp_path)
+    flows_net = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "flows.account.net" and row["entity"] == "account-a"
+    )
+    flows_count = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "flows.account.count" and row["entity"] == "account-a"
+    )
+
+    assert flows_net["value"] == "100.00"
+    assert flows_net["as_of"] == "2026-09-03"
+    assert flows_count["value"] == "1"
+    assert flows_count["as_of"] == "2026-09-03"
+
+
+def write_matrixport_fx_bound_capture(
+    tmp_path: Path,
+    derivation,
+    *,
+    nav_rows: str,
+    deposits_rows: str,
+    bills_rows: str,
+    fx_rows: list[dict[str, object]],
+) -> None:
+    """Write a Matrixport raw capture whose FX closes stop at the boundary."""
+    derivation.MATRIXPORT_NAV_PATH = Path("matrixport/nav.csv")
+    derivation.MATRIXPORT_DEPOSITS_PATH = Path("matrixport/deposits.csv")
+    derivation.MATRIXPORT_BILLS_PATH = Path("matrixport/bills.csv")
+    derivation.FX_PATH = Path("fx.json")
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).parent.mkdir(parents=True)
+    (tmp_path / derivation.MATRIXPORT_NAV_PATH).write_text(
+        "day_timestamp_utc,nav\n" + nav_rows,
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_DEPOSITS_PATH).write_text(
+        "state,currency,amount,created_at_utc\n" + deposits_rows,
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.MATRIXPORT_BILLS_PATH).write_text(
+        "currency,direction,amount,timestamp_utc\n" + bills_rows,
+        encoding="utf-8-sig",
+    )
+    (tmp_path / derivation.FX_PATH).write_text(
+        json.dumps({"rows": fx_rows}),
+        encoding="utf-8",
+    )
+
+
+def test_derive_keeps_raw_last_date_when_all_nav_rows_are_fx_unconverted(
+    tmp_path: Path,
+):
+    """R6 v2 fix: raw observation coverage is retained even when every valid NAV
+    observation follows the FX boundary and no USD conversion exists."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {"nav_observations": [], "flows": [], "capital_anchors": []},
+        [
+            {
+                **included_row("account-m", "strategy-m"),
+                "provider": "MATRIXPORT",
+                "effective_start": "2026-09-01",
+            }
+        ],
+    )
+    write_matrixport_fx_bound_capture(
+        tmp_path,
+        derivation,
+        nav_rows=("2026-09-04T00:00:00+00:00,1.0\n2026-09-17T00:00:00+00:00,1.2\n"),
+        deposits_rows="",
+        bills_rows="USDT,2,100,2026-09-03T20:00:00+00:00\n",
+        fx_rows=[{"Ticker": "USDT-USD", "Date": "2026-09-03T00:00:00", "Close": 0.99}],
+    )
+
+    output = derivation.derive(tmp_path)
+    last_observation = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "date.source_last_observation"
+        and row["entity"] == "account-m"
+    )
+
+    assert last_observation["value"] == "2026-09-17"
+    assert last_observation["as_of"] == "2026-09-17"
+    assert "FX-unconverted" in last_observation["notes"]
+    assert "2026-09-17" in last_observation["notes"]
+    assert {
+        row["metric_id"]
+        for row in output["not_derivable"]
+        if row["entity"] == "account-m"
+    } == {
+        "capital.account.cutoff",
+        "flows.account.net",
+        "flows.account.count",
+        "twr.account",
+        "mwr.account",
+    }
+    reasons = {
+        row["reason"] for row in output["not_derivable"] if row["entity"] == "account-m"
+    }
+    assert all("FX-converted" in reason for reason in reasons)
+    assert derivation.MATRIXPORT_NAV_PATH.as_posix() in {
+        item["path"] for item in output["inputs"]
+    }
