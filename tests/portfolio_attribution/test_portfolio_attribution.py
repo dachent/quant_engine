@@ -4,7 +4,9 @@ from datetime import date
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
+import statistics
 import sys
 from typing import Any
 
@@ -671,6 +673,180 @@ def test_retained_account_history_identity_fails_closed(
 
     with pytest.raises(attribution.AttributionValidationError, match=message):
         attribution.build_catalog(baseline, spec)
+
+
+# T6-F2: a reference coarser than daily. Each Friday return of the "weekly"
+# reference covers (previous Friday, Friday], so the account's daily returns
+# inside that period are compounded before the exact-date pairing. Strategy-1
+# also keeps the two default rows that its daily benchmark comparison reads.
+_WEEKLY_ACCOUNT_RETURNS = {
+    date(2026, 1, 2): "0.01",
+    date(2026, 1, 3): "-0.02",
+    date(2026, 1, 8): "0.40",  # before the first period
+    date(2026, 1, 9): "0.50",  # on the previous reference date: not in (prev, day]
+    date(2026, 1, 12): "0.10",  # before observed_start, yet in the first period
+    date(2026, 1, 16): "0.10",
+    date(2026, 1, 19): "0.10",
+    date(2026, 1, 23): "-0.10",
+    date(2026, 1, 26): "0.20",
+    date(2026, 1, 30): "-0.10",
+    date(2026, 2, 2): "0.30",  # after the last reference date
+}
+_WEEKLY_REFERENCE_RETURNS = {
+    "2026-01-16": "0.20",
+    "2026-01-23": "-0.10",
+    "2026-01-30": "0.10",
+}
+
+
+def _with_weekly_reference(
+    spec_path: Path,
+    returns: Path,
+    reference_returns: dict[str, str],
+    *,
+    periods_per_year: int = 52,
+    observed_end: str = "2026-01-30",
+) -> None:
+    """Point strategy-1's provider comparison at a weekly reference series."""
+
+    with returns.open("a", encoding="utf-8") as handle:
+        for day, value in reference_returns.items():
+            handle.write(f"weekly,{day},{value},PROVIDER_LIVE,v1,weekly-source\n")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["comparisons"][0].update(
+        expected_legacy_cumulative_gap="0.105732",
+        observed_end=observed_end,
+        observed_start="2026-01-16",
+        periods_per_year=periods_per_year,
+        reference_series_id="weekly",
+    )
+    spec["return_source"]["expected_sha256"] = hashlib.sha256(
+        returns.read_bytes()
+    ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "previous_reference_date",
+    [True, False],
+    ids=["previous-date-outside-window", "first-date-of-series"],
+)
+def test_weekly_reference_pairs_the_account_compounded_over_each_period(
+    tmp_path: Path, previous_reference_date: bool
+) -> None:
+    """T6-F2: a weekly reference return meets the account's weekly compound.
+
+    Before the fix the account's one-day return on each Friday (0.10, -0.10,
+    -0.10) was paired with the weekly reference return (0.20, -0.10, 0.10): two
+    horizons in one active return. Now the account's own returns inside each
+    (previous Friday, Friday] period are compounded first: 1.1 * 1.1 - 1 = 0.21,
+    1.1 * 0.9 - 1 = -0.01 and 1.2 * 0.9 - 1 = 0.08. The first period reaches back
+    before observed_start. It opens at the previous reference date, 2026-01-09
+    (outside the window), or, when the series starts at 2026-01-16, it is as long
+    as the second period. Rows on or before the opening date and rows after the
+    last reference date belong to no period.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    reference = dict(_WEEKLY_REFERENCE_RETURNS)
+    if previous_reference_date:
+        reference = {"2026-01-09": "0.05", **reference}
+    _with_weekly_reference(spec, returns, reference)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    comparison = catalog["comparisons"][0]
+    metrics = comparison["metrics"]
+    assert metrics["observations"] == 3
+    assert metrics["observed_start"] == "2026-01-16"
+    assert metrics["observed_end"] == "2026-01-30"
+    # 1.21 * 0.99 * 1.08 - 1 for the account, 1.2 * 0.9 * 1.1 - 1 for the reference.
+    assert metrics["account_cumulative_return"] == "0.293732"
+    assert metrics["reference_cumulative_return"] == "0.188"
+    assert metrics["cumulative_gap"] == "0.105732"
+    # (0.21 - 0.20, -0.01 + 0.10, 0.08 - 0.10) at 52 periods a year.
+    active = [0.01, 0.09, -0.02]
+    assert float(metrics["active_return_annualized"]) == pytest.approx(
+        statistics.fmean(active) * 52
+    )
+    assert float(metrics["tracking_error_annualized"]) == pytest.approx(
+        statistics.stdev(active) * math.sqrt(52)
+    )
+    assert comparison["legacy_baseline_disposition"] == "INDEPENDENTLY_REPRODUCED"
+    assert comparison["legacy_baseline_delta"] == "0"
+    # The strategy's daily benchmark comparison keeps exact-date pairing.
+    assert catalog["benchmark_comparisons"][0]["metrics"]["observations"] == 2
+
+
+@pytest.mark.parametrize("periods_per_year", [252, 365])
+def test_daily_periods_per_year_keeps_exact_date_pairing(
+    tmp_path: Path, periods_per_year: int
+) -> None:
+    """T6-F2 changes only a comparison that declares a cadence coarser than daily.
+
+    The same rows declared at 252 or more periods a year are paired on exact
+    dates as before: the account's return on each reference date meets the
+    reference return, and the account compounds every row of the window.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec, returns, _WEEKLY_REFERENCE_RETURNS, periods_per_year=periods_per_year
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    # Rows in [2026-01-16, 2026-01-30]: 1.1 * 1.1 * 0.9 * 1.2 * 0.9 - 1.
+    assert metrics["account_cumulative_return"] == "0.17612"
+    # (0.10 - 0.20, -0.10 + 0.10, -0.10 - 0.10) on the three reference dates.
+    active = [-0.10, 0.0, -0.20]
+    assert float(metrics["active_return_annualized"]) == pytest.approx(
+        statistics.fmean(active) * periods_per_year
+    )
+
+
+def test_reference_period_without_account_returns_is_not_paired(
+    tmp_path: Path,
+) -> None:
+    """A reference date whose period holds no account return yields no pair.
+
+    Nothing is invented for 2026-01-30, whose period (01-23, 01-30] has no
+    account row: three observations remain and the account compounds only what
+    it has (0.21, -0.01 and, for 2026-02-06, 1.05 * 1.05 - 1 = 0.1025).
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={
+            date(2026, 1, 2): "0.01",
+            date(2026, 1, 3): "-0.02",
+            date(2026, 1, 12): "0.10",
+            date(2026, 1, 16): "0.10",
+            date(2026, 1, 19): "0.10",
+            date(2026, 1, 23): "-0.10",
+            date(2026, 2, 5): "0.05",
+            date(2026, 2, 6): "0.05",
+        },
+    )
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec,
+        returns,
+        {**_WEEKLY_REFERENCE_RETURNS, "2026-02-06": "0.04"},
+        observed_end="2026-02-06",
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    assert metrics["observed_end"] == "2026-02-06"
+    # 1.21 * 0.99 * 1.1025 - 1
+    assert metrics["account_cumulative_return"] == "0.32068475"
 
 
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:
