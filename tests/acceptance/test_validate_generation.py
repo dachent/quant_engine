@@ -2573,6 +2573,688 @@ def test_epoch_before_the_window_is_excluded(
     assert sorted(_expected_only(findings)) == sorted(fired)
 
 
+# C1 section 5-5 / FV-2 preflight row 8 (CB-V8): the contract forbids spans in the
+# daily strategy_returns series and requires them in the epoch TWR. A declared
+# missing NAV date is bridged by a two-day epoch HPR span receipt that the report
+# publishes at strategy_history_contract.epoch_hpr_receipts. Alpha's daily rows:
+# 2025-09-11 +25%, 2026-03-01 0, [NAV 2026-03-02 missing: span (03-01, 03-03] -12%],
+# 2026-03-04 0, 2026-09-17 0. The epoch TWR is 1.25 x 0.88 - 1 = 0.1 (the base
+# fixture's economics: opening 1000, terminal 1100); the daily-only compound is 0.25.
+EPOCH_LABEL = "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
+DAILY_LABEL = "DAILY_GEOMETRIC_TWR"
+SPAN_START = "2026-03-01"
+SPAN_MISSING = "2026-03-02"
+SPAN_END = "2026-03-03"
+SPAN_NEXT = "2026-03-04"
+SPAN_RETURN = "-0.12"
+SPAN_DAILY = ((PATH_START, "0.25"), (SPAN_START, "0"), (SPAN_NEXT, "0"), (CUTOFF, "0"))
+
+
+def _span_receipt() -> dict[str, Any]:
+    """An ACCOUNT_LIVE epoch HPR receipt row as the report publishes it."""
+
+    daily = [{"date": day, "return": value} for day, value in SPAN_DAILY]
+    return {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "receipt": {
+            "admission_cutoff": CUTOFF,
+            "daily_cumulative_return": "0.25",
+            "daily_return_observations": len(daily),
+            "daily_return_series_schema": "ordered-date-return/1",
+            "daily_return_series_sha256": _sha(_dump(daily)),
+            "epoch_cumulative_return": "0.1",
+            "epoch_holding_period_link_observations": len(daily) + 1,
+            "observed_end": CUTOFF,
+            "observed_start": PATH_START,
+            "source_gap_policy_sha256": "0" * 64,
+            "span_return_receipts": [
+                {
+                    "end_endpoint_sha256": "1" * 64,
+                    "missing_source_date": SPAN_MISSING,
+                    "return": SPAN_RETURN,
+                    "span_days": 2,
+                    "span_end_date": SPAN_END,
+                    "span_start_date": SPAN_START,
+                    "start_endpoint_sha256": "2" * 64,
+                    "subscription_events_in_span": 0,
+                }
+            ],
+        },
+        "source_generation_id": "3" * 64,
+        "source_id": "matrixport-account-generation",
+        "strategy_id": "alpha",
+    }
+
+
+def _span_payload(report: dict[str, Any]) -> None:
+    """Publish alpha as T3 does for an admitted epoch HPR span receipt.
+
+    Spliced (epoch basis): the summary headline, the provider-evidence account
+    value (both labelled), the account's TWR and own return path. Daily-only by
+    design: strategy_returns (capital chain included), the dependence
+    performance and the benchmark comparison.
+    """
+
+    capital = Decimal("1000")
+    alpha = []
+    for day, value in SPAN_DAILY:
+        alpha.append(
+            {
+                "strategy_id": "alpha",
+                "date": day,
+                "return": value,
+                "beginning_capital": str(capital),
+                "evidence_layer": "ACCOUNT_LIVE",
+            }
+        )
+        capital *= Decimal(1) + Decimal(value)
+        if day == SPAN_START:
+            capital *= Decimal(1) + Decimal(SPAN_RETURN)
+    report["strategy_returns"] = alpha + [
+        row for row in report["strategy_returns"] if row["strategy_id"] != "alpha"
+    ]
+    summary = report["strategy_summary"][0]
+    summary["account_live_cumulative_return"] = "0.1"
+    summary["account_live_cumulative_return_label"] = EPOCH_LABEL
+    summary["benchmark_account_cumulative_return"] = "0.25"
+    account = report["strategy_provider_evidence"][0]["account"]
+    account["cumulative_return"] = "0.1"
+    account["cumulative_return_label"] = EPOCH_LABEL
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        performance = report["dependence_analysis"]["mode_summaries"][mode]
+        performance["performance"]["Alpha"]["cumulative_return"] = "0.25"
+    metrics = report["strategy_attribution"]["benchmark_comparisons"][0]["metrics"]
+    metrics["account_cumulative_return"] = "0.25"
+    report["strategy_history_contract"] = {
+        "as_of_date": CUTOFF,
+        "schema": "portfolio-current-dependence-source/1",
+        "epoch_hpr_receipts": [_span_receipt()],
+    }
+
+
+def _span_receipt_field(**changes: Any) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        contract = report["strategy_history_contract"]
+        contract["epoch_hpr_receipts"][0]["receipt"].update(changes)
+
+    return mutate
+
+
+def _span_field(**changes: Any) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0]
+        receipt["receipt"]["span_return_receipts"][0].update(changes)
+
+    return mutate
+
+
+def _alpha_row(day: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def find(report: dict[str, Any]) -> dict[str, Any]:
+        return next(
+            row
+            for row in report["strategy_returns"]
+            if row["strategy_id"] == "alpha" and row["date"] == day
+        )
+
+    return find
+
+
+def _drop_alpha_row(day: str) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        report["strategy_returns"].remove(_alpha_row(day)(report))
+
+    return mutate
+
+
+def _drop_span_start_capital(report: dict[str, Any]) -> None:
+    del _alpha_row(SPAN_START)(report)["beginning_capital"]
+
+
+def _drop_span_receipts(report: dict[str, Any]) -> None:
+    report["strategy_history_contract"]["epoch_hpr_receipts"] = []
+
+
+def _duplicate_span_receipt(report: dict[str, Any]) -> None:
+    receipts = report["strategy_history_contract"]["epoch_hpr_receipts"]
+    receipts.append(copy.deepcopy(receipts[0]))
+
+
+def _forge_span(report: dict[str, Any]) -> None:
+    """A receipt span of -20% where the capital chain says -12%, with every
+    published epoch value made consistent with the forged receipt."""
+
+    _span_field(**{"return": "-0.2"})(report)
+    _span_receipt_field(epoch_cumulative_return="0")(report)
+    report["strategy_summary"][0]["account_live_cumulative_return"] = "0"
+    report["strategy_provider_evidence"][0]["account"]["cumulative_return"] = "0"
+
+
+SPAN_ROW_INSIDE = {
+    "strategy_id": "alpha",
+    "date": SPAN_MISSING,
+    "return": "0",
+    "beginning_capital": "1250.00",
+    "evidence_layer": "ACCOUNT_LIVE",
+}
+
+SPAN_CASES: dict[str, tuple[str, str, list[Mutator]]] = {
+    # V8 negative control: a headline that is not the receipt splice still fires.
+    "headline_differs_from_splice": (
+        "returns.strategy_return_views_agree",
+        checks.BLOCKER_INVARIANT,
+        [_set(("strategy_summary", 0, "account_live_cumulative_return"), "0.3")],
+    ),
+    "span_return_differs_from_capital_chain": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_forge_span],
+    ),
+    "spans_but_daily_label": (
+        "returns.strategy_return_views_agree",
+        checks.BLOCKER_INVARIANT,
+        [
+            _set(("strategy_summary", 0, "account_live_cumulative_return"), "0.25"),
+            _set(
+                ("strategy_summary", 0, "account_live_cumulative_return_label"),
+                DAILY_LABEL,
+            ),
+            _set(
+                ("strategy_provider_evidence", 0, "account", "cumulative_return"),
+                "0.25",
+            ),
+            _set(
+                ("strategy_provider_evidence", 0, "account", "cumulative_return_label"),
+                DAILY_LABEL,
+            ),
+        ],
+    ),
+    # An undeclared gap stays a finding: an epoch-labelled headline with no span
+    # receipt is compared with the unspliced compound (the FV-1 payload's shape).
+    "undeclared_gap_without_receipt": (
+        "returns.strategy_return_views_agree",
+        checks.BLOCKER_INVARIANT,
+        [_drop_span_receipts],
+    ),
+    "receipt_daily_total_differs_from_rows": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_span_receipt_field(daily_cumulative_return="0.3")],
+    ),
+    "receipt_identity_broken": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_span_receipt_field(epoch_cumulative_return="0.2")],
+    ),
+    "span_days_not_two": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_span_field(span_days=3)],
+    ),
+    "subscription_event_in_span": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_span_field(subscription_events_in_span=1)],
+    ),
+    "span_return_not_above_minus_one": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_span_field(**{"return": "-1"})],
+    ),
+    "span_start_not_an_observed_row": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [
+            _span_field(
+                span_start_date="2026-02-27",
+                missing_source_date="2026-02-28",
+                span_end_date=SPAN_START,
+            )
+        ],
+    ),
+    "daily_row_inside_span": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_append(("strategy_returns",), SPAN_ROW_INSIDE)],
+    ),
+    "span_does_not_close_the_gap": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        [_drop_alpha_row(SPAN_NEXT)],
+    ),
+    "capital_chain_unavailable": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_AUTHORITY,
+        [_drop_span_start_capital],
+    ),
+    "duplicate_receipt": (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_AUTHORITY,
+        [_duplicate_span_receipt],
+    ),
+}
+
+
+def test_epoch_span_receipt_payload_has_no_findings(tmp_path: Path) -> None:
+    """Good: a receipt-consistent span payload is clean.
+
+    Fails before the splice: the validator compounded only the daily rows (0.25)
+    and raised a false B2 blocker against the spliced headline (0.1).
+    """
+
+    findings = run(build(tmp_path, Spec(report=[_span_payload])))
+    assert [f.check_id for f in findings] == ["expected.not_supplied"]
+
+
+@pytest.mark.parametrize("case", sorted(SPAN_CASES))
+def test_bad_span_fixture_fires_and_good_does_not(tmp_path: Path, case: str) -> None:
+    check_id, klass, mutators = SPAN_CASES[case]
+    good = run(build(tmp_path / "good", Spec(report=[_span_payload])))
+    assert not [f for f in good if f.check_id == check_id]
+    bad = run(build(tmp_path / "bad", Spec(report=[_span_payload, *mutators])))
+    fired = [f for f in bad if f.check_id == check_id and f.klass == klass]
+    assert fired, [(f.check_id, f.klass, f.entity) for f in bad]
+
+
+def test_forged_span_is_never_spliced(tmp_path: Path) -> None:
+    """A receipt the capital chain contradicts cannot launder the headline: the
+    span is flagged and the recompute declines instead of agreeing with it."""
+
+    row = _window_row(
+        "twr.strategy", "alpha", "0", window_start=START, as_of="2026-06-30"
+    )
+    findings = run(build(tmp_path, Spec(report=[_span_payload, _forge_span])), [row])
+    assert sorted(
+        (f.check_id, f.klass)
+        for f in findings
+        if f.check_id
+        in ("returns.epoch_hpr_receipts_verified", "expected.twr.strategy")
+    ) == [("returns.epoch_hpr_receipts_verified", checks.BLOCKER_INVARIANT)]
+    assert ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY) in [
+        (f.check_id, f.klass) for f in findings
+    ]
+
+
+def test_benchmark_and_dependence_views_stay_daily_only(tmp_path: Path) -> None:
+    """The benchmark account return and the dependence performance are daily-only
+    by design; splicing them (a global compound_window splice) is a false blocker,
+    while a benchmark that shows the spliced return is still caught."""
+
+    clean = run(build(tmp_path / "good", Spec(report=[_span_payload])))
+    assert not [
+        f
+        for f in clean
+        if f.check_id
+        in ("returns.benchmark_account_return", "returns.strategy_return_views_agree")
+    ]
+    spliced_benchmark = [
+        _set(
+            (
+                "strategy_attribution",
+                "benchmark_comparisons",
+                0,
+                "metrics",
+                "account_cumulative_return",
+            ),
+            "0.1",
+        ),
+        _set(("strategy_summary", 0, "benchmark_account_cumulative_return"), "0.1"),
+    ]
+    bad = run(build(tmp_path / "bad", Spec(report=[_span_payload, *spliced_benchmark])))
+    assert ("returns.benchmark_account_return", checks.BLOCKER_INVARIANT) in [
+        (f.check_id, f.klass) for f in bad
+    ]
+
+
+@pytest.mark.parametrize(
+    ("row", "fired"),
+    [
+        # V8 R-B: the view runs past the authoritative as_of (a genuine C5 finding);
+        # the recompute over (START, EARLY] splices the span: 0.1, not 0.25.
+        (
+            _window_row(
+                "twr.strategy", "alpha", "0.1", window_start=START, as_of=EARLY
+            ),
+            [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)],
+        ),
+        # the straddling account epoch is cut at EARLY with the span spliced
+        (
+            _window_row("twr.account", "A1", "0.1", as_of=EARLY),
+            [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)],
+        ),
+        # B = S: the whole span lies inside (S, CUTOFF]
+        (
+            _window_row("twr.strategy", "alpha", SPAN_RETURN, window_start=SPAN_START),
+            [],
+        ),
+        (_window_row("twr.account", "A1", SPAN_RETURN, window_start=SPAN_START), []),
+        (
+            _window_row("twr.strategy", "alpha", "0", window_start=SPAN_START),
+            [("expected.twr.strategy", checks.BLOCKER_REGRESSION)],
+        ),
+        # B = E: the span ends at the boundary and stays out
+        (_window_row("twr.strategy", "alpha", "0", window_start=SPAN_END), []),
+        # boundary: an edge strictly inside the span declines (NOT_READY, never a
+        # regression): there is no observed NAV to cut at
+        (
+            _window_row(
+                "twr.strategy", "alpha", SPAN_RETURN, window_start=SPAN_MISSING
+            ),
+            [("expected.twr.strategy", checks.NOT_READY)],
+        ),
+        (
+            _window_row("twr.account", "A1", SPAN_RETURN, window_start=SPAN_MISSING),
+            [("expected.twr.account", checks.NOT_READY)],
+        ),
+        (
+            _window_row(
+                "twr.strategy", "alpha", "0.1", window_start=START, as_of=SPAN_MISSING
+            ),
+            [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)],
+        ),
+    ],
+)
+def test_recompute_splices_verified_spans_and_declines_inside_one(
+    tmp_path: Path, row: dict[str, Any], fired: list[tuple[str, str]]
+) -> None:
+    findings = run(build(tmp_path, Spec(report=[_span_payload])), [row])
+    assert sorted(_expected_only(findings)) == sorted(fired)
+
+
+def test_splice_window_is_exact_at_span_edges_and_declines_inside(
+    tmp_path: Path,
+) -> None:
+    """(B, E] with B the day before the window's first date: a span (S, E'] is
+    spliced when S >= B and E' <= E, left out when it lies outside, and the
+    comparator declines when B or E falls strictly inside it."""
+
+    generation = load_generation(build(tmp_path, Spec(report=[_span_payload])))
+    context = checks.Context(
+        gen=generation, cutoff=date(2026, 9, 17), cutoff_source="test"
+    )
+
+    def splice(start: str | None, end: str) -> checks.Splice:
+        return checks.splice_window(
+            context,
+            "alpha",
+            date.fromisoformat(start) if start else None,
+            date.fromisoformat(end),
+        )
+
+    whole = splice(None, CUTOFF)
+    assert (whole.value, whole.rows, whole.spans) == (Decimal("0.1"), 4, 1)
+    assert checks.compound_window(context, "alpha", None, date(2026, 9, 17)) == (
+        Decimal("0.25"),
+        4,
+    )
+    at_start = splice(SPAN_MISSING, CUTOFF)  # B = S
+    assert (at_start.value, at_start.spans) == (Decimal(SPAN_RETURN), 1)
+    after = splice(SPAN_NEXT, CUTOFF)  # B = E
+    assert (after.value, after.spans) == (Decimal(0), 0)
+    through_end = splice(None, SPAN_END)  # window ends at E
+    assert (through_end.value, through_end.spans) == (Decimal("0.1"), 1)
+    before = splice(None, SPAN_START)  # window ends at S
+    assert (before.value, before.spans) == (Decimal("0.25"), 0)
+    for start, end in ((SPAN_END, CUTOFF), (None, SPAN_MISSING)):
+        declined = splice(start, end)
+        assert declined.value is None and declined.declined, (start, end)
+        assert "inside span" in declined.declined
+
+
+# Producer seam (modelled on test_source_date_check_reads_raw_coverage_when_dates_
+# differ): the receipt comes from the real Matrixport producer
+# (portfolio_target_series._matrixport_returns over one declared missing NAV date),
+# is admitted and spliced by the real report builder, and the report's own
+# published rows are what the validator reads. No surface field is hand-built.
+PRODUCER_NAV = (
+    ("2026-01-01", "1.00"),
+    ("2026-01-02", "1.01"),
+    ("2026-01-03", "1.03"),
+    ("2026-01-05", "0.97"),
+    ("2026-01-06", "0.99"),
+)
+PRODUCER_MISSING = "2026-01-04"
+PRODUCER_SHARES = "100"
+
+
+def _matrixport_span_receipt(root: Path) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """The real Matrixport producer's daily returns and epoch HPR receipt."""
+
+    target = importlib.import_module("portfolio_target_series")
+    root.mkdir(parents=True)
+    (root / "nav.csv").write_bytes(
+        (
+            "timestamp_utc,product_id,nav\n"
+            + "".join(f"{day}T00:00:00+00:00,P1,{nav}\n" for day, nav in PRODUCER_NAV)
+        ).encode()
+    )
+    (root / "holdings.csv").write_bytes(
+        f"product_id,shares\nP1,{PRODUCER_SHARES}\n".encode()
+    )
+    (root / "subscriptions.csv").write_bytes(
+        b"product_id,status,subscription_share,subscription_time_utc,"
+        b"confirm_nav_time_utc\n"
+        b"P1,300,100,2025-12-31T10:00:00+00:00,2026-01-01T00:00:00+00:00\n"
+    )
+    navs = dict(PRODUCER_NAV)
+    (root / "daily.csv").write_bytes(
+        (
+            "utc_date,product_id,share,nav,nav_available\n"
+            + "".join(
+                f"{day},P1,{PRODUCER_SHARES},{navs.get(day, '')},"
+                f"{'true' if day in navs else 'false'}\n"
+                for day in ("2026-01-01", "2026-01-03", PRODUCER_MISSING, "2026-01-05")
+            )
+        ).encode()
+    )
+    returns, coverage = target._matrixport_returns(
+        root / "nav.csv",
+        root / "holdings.csv",
+        root / "subscriptions.csv",
+        root / "daily.csv",
+        "P1",
+        "Synthetic Strategy 1",
+        frozenset({date.fromisoformat(PRODUCER_MISSING)}),
+    )
+    return returns, coverage["epoch_hpr_receipt"]
+
+
+def _producer_span_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """The real report builder's published rows for one span-receipt strategy.
+
+    Mirrors the producer's own test_report_uses_only_verified_epoch_hpr_
+    projection_for_endpoint_wealth: the verified history contract carries the
+    receipt and build_report_data admits and splices it. The daily rows carry the
+    provider ledger's no-flow link capital (holding shares x the previous observed
+    NAV), which is the capital chain the validator re-verifies the span against.
+    """
+
+    returns, receipt = _matrixport_span_receipt(tmp_path / "matrixport")
+    navs = {date.fromisoformat(day): Decimal(nav) for day, nav in PRODUCER_NAV}
+    fixture = _load_report_producer_fixture()
+    catalog = copy.deepcopy(fixture._baseline_catalog())
+    catalog["strategy_returns"] = [
+        {
+            "beginning_capital": str(
+                Decimal(PRODUCER_SHARES)
+                * navs[
+                    max(day for day in navs if day < date.fromisoformat(row["date"]))
+                ]
+            ),
+            "component_account_ids": ["account-m"],
+            "date": row["date"],
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": row["return"],
+            "strategy_id": "strategy-1",
+        }
+        for row in returns
+    ]
+    catalog["strategy_provider_evidence"] = [
+        {
+            "account": {
+                "cumulative_return": receipt["daily_cumulative_return"],
+                "current_drawdown": "0",
+                "maximum_drawdown": "0",
+                "observed_end": receipt["observed_end"],
+                "observed_start": receipt["observed_start"],
+                "provider_id": "matrixport",
+                "return_observations": receipt["daily_return_observations"],
+            },
+            "evidence_layer": "ACCOUNT_LIVE",
+            "strategy_id": "strategy-1",
+        }
+    ]
+    contract = {
+        "age_evidence": {
+            "calculation_age_days": 0,
+            "complete_through": "2026-01-03",
+            "evaluated_on": "2026-01-03",
+            "limiting_inputs": [],
+            "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+            "warning_after_days": 2,
+        },
+        "as_of_date": "2026-01-03",
+        "bundle_id": "d" * 64,
+        "evaluated_on": "2026-01-03",
+        "epoch_hpr_receipts": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "receipt": receipt,
+                "source_generation_id": "d" * 64,
+                "source_id": "matrixport-account-generation",
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "evidence_mode_policy": {},
+        "returns_sha256": "b" * 64,
+        "returns_size_bytes": 100,
+        "schema": "portfolio-current-dependence-source/1",
+        "series_count": 9,
+        "sha256": "c" * 64,
+        "size_bytes": 100,
+    }
+    monkeypatch.setattr(
+        fixture.reporter, "_history_contract", lambda *_a, **_k: ({}, contract)
+    )
+    report, _content, _path = fixture.reporter.build_report_data(
+        fixture._published_baseline(tmp_path / "report-baseline", catalog),
+        history_contract_path=tmp_path / "dependence-source.json",
+        correlation_root=fixture._published_dependence(tmp_path / "report-dependence"),
+    )
+    return {
+        "summary": next(
+            row
+            for row in report["strategy_summary"]
+            if row["strategy_id"] == "strategy-1"
+        ),
+        "evidence": next(
+            row
+            for row in report["strategy_provider_evidence"]
+            if row["strategy_id"] == "strategy-1"
+        ),
+        "returns": [
+            row
+            for row in report["strategy_returns"]
+            if row["strategy_id"] == "strategy-1"
+        ],
+        "contract": report["strategy_history_contract"],
+    }
+
+
+def _with_producer_surfaces(surfaces: dict[str, Any]) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        report["strategy_summary"].append(copy.deepcopy(surfaces["summary"]))
+        report["strategy_provider_evidence"].append(copy.deepcopy(surfaces["evidence"]))
+        report["strategy_returns"] += copy.deepcopy(surfaces["returns"])
+        report["strategy_history_contract"] = copy.deepcopy(surfaces["contract"])
+
+    return mutate
+
+
+def _producer_span_findings(
+    tmp_path: Path, surfaces: dict[str, Any], *mutators: Mutator
+) -> list[checks.Finding]:
+    """Span and expected findings for the producer's strategy (and any failure)."""
+
+    as_of = "2026-01-05"
+    raw_twr = dict(PRODUCER_NAV)[as_of]  # NAV ratio from the opening NAV of 1.00
+    row = _window_row(
+        "twr.strategy",
+        "strategy-1",
+        str(Decimal(raw_twr) - Decimal(1)),
+        window_start="2026-01-01",
+        as_of=as_of,
+    )
+    findings = run(
+        build(tmp_path, Spec(report=[_with_producer_surfaces(surfaces), *mutators])),
+        [row],
+    )
+    return [
+        finding
+        for finding in findings
+        if finding.check_id == "validator.check_error"
+        or (
+            finding.check_id
+            in (
+                "returns.strategy_return_views_agree",
+                "returns.epoch_hpr_receipts_verified",
+            )
+            and finding.entity.startswith("strategy-1")
+        )
+        or (
+            finding.check_id.startswith("expected.") and "strategy-1|" in finding.entity
+        )
+    ]
+
+
+def test_span_splice_reads_the_real_producer_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real producer's receipt, spliced by the real report builder, is what the
+    validator's independent splice reproduces: no span finding, and the recompute
+    over (2026-01-01, 2026-01-05] equals the raw NAV ratio (only the genuine
+    view-past-as_of finding remains)."""
+
+    surfaces = _producer_span_surfaces(tmp_path / "producer", monkeypatch)
+    summary = surfaces["summary"]
+    assert summary["account_live_cumulative_return_label"] == EPOCH_LABEL
+    assert summary["account_live_path_metrics_status"] == "UNAVAILABLE"
+    assert surfaces["evidence"]["account"]["cumulative_return_label"] == EPOCH_LABEL
+    daily_only = Decimal(1)
+    for row in surfaces["returns"]:
+        daily_only *= Decimal(1) + Decimal(row["return"])
+    headline = Decimal(summary["account_live_cumulative_return"])
+    assert abs(headline - (daily_only - 1)) > Decimal("0.01")  # the span matters
+    assert [
+        (f.check_id, f.klass)
+        for f in _producer_span_findings(tmp_path / "good", surfaces)
+    ] == [("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY)]
+    # Negative controls on the same surfaces: the filter is not vacuous.
+    tampered = _producer_span_findings(
+        tmp_path / "headline",
+        surfaces,
+        _set(
+            ("strategy_summary", 2, "account_live_cumulative_return"),
+            str(headline + Decimal("0.01")),
+        ),
+    )
+    assert ("returns.strategy_return_views_agree", checks.BLOCKER_INVARIANT) in [
+        (f.check_id, f.klass) for f in tampered
+    ]
+
+    def forge(report: dict[str, Any]) -> None:
+        receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0]
+        span = receipt["receipt"]["span_return_receipts"][0]
+        span["return"] = str(Decimal(span["return"]) + Decimal("0.01"))
+
+    forged = _producer_span_findings(tmp_path / "forged", surfaces, forge)
+    assert ("returns.epoch_hpr_receipts_verified", checks.BLOCKER_INVARIANT) in [
+        (f.check_id, f.klass) for f in forged
+    ]
+
+
 def test_check_error_fails_closed(tmp_path: Path) -> None:
     def broken(ctx: checks.Context) -> list[checks.Finding]:
         raise KeyError("drifted")
