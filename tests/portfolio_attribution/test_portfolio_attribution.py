@@ -4,7 +4,9 @@ from datetime import date
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
+import statistics
 import sys
 from typing import Any
 
@@ -43,10 +45,21 @@ def _baseline(
     retained_source_as_of_date: date | None = None,
     account_live_returns: dict[date, str] | None = None,
     strategy_returns: object = _NO_OVERRIDE,
+    provider_admissions: list[dict[str, Any]] | None = None,
+    strategy_version_refs: dict[str, str] | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
+    version_refs = strategy_version_refs or {}
     strategies = [
-        {"name": f"Strategy {index}", "strategy_id": f"strategy-{index}"}
+        {
+            "name": f"Strategy {index}",
+            "strategy_id": f"strategy-{index}",
+            **(
+                {"version_ref": version_refs[f"strategy-{index}"]}
+                if f"strategy-{index}" in version_refs
+                else {}
+            ),
+        }
         for index in range(1, 10)
     ]
     if account_live_returns is None:
@@ -93,6 +106,11 @@ def _baseline(
             computed_strategy_returns
             if strategy_returns is _NO_OVERRIDE
             else strategy_returns
+        ),
+        **(
+            {}
+            if provider_admissions is None
+            else {"provider_admissions": provider_admissions}
         ),
     }
     content = canonical_json_bytes(catalog)
@@ -422,6 +440,438 @@ def test_account_live_series_accepts_repeated_identical_rows_and_boundary_return
     catalog, _, _ = attribution.build_catalog(baseline, spec)
 
     assert catalog["comparisons"][0]["metrics"]["observations"] == 2
+
+
+# The EchoTrade shape of the pinned attribution spec (sha256 230f2674...): an
+# EVIDENCED benchmark and one AVAILABLE benchmark comparison whose
+# account_series_id names a retained ACCOUNT_LIVE series, an UNAVAILABLE
+# provider comparison, no ACCOUNT_LIVE row in baseline strategy_returns, and a
+# single REFERENCE_ONLY strategy_returns admission in provider_admissions.
+_HISTORY_STRATEGY = "strategy-2"
+_HISTORY_SERIES = "account:strategy-2"
+_HISTORY_VERSION = "accepted-live-path:" + "2" * 64
+
+
+def _admission(
+    disposition: str = "REFERENCE_ONLY", strategy_id: str = _HISTORY_STRATEGY
+) -> dict[str, Any]:
+    return {
+        "account_id": "synthetic-history-account",
+        "account_reconciliation_sha256": "0" * 64,
+        "disposition": disposition,
+        "effective_end": "2026-01-03",
+        "effective_start": "2026-01-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "strategy_returns",
+        "pool_id": None,
+        "provider_id": "synthetic",
+        "strategy_id": strategy_id,
+    }
+
+
+def _history_only_baseline(
+    tmp_path: Path,
+    *,
+    admissions: list[dict[str, Any]] | None = None,
+    version_refs: dict[str, str] | None = None,
+) -> Path:
+    return _baseline(
+        tmp_path,
+        provider_admissions=[_admission()] if admissions is None else admissions,
+        strategy_version_refs=(
+            {_HISTORY_STRATEGY: _HISTORY_VERSION}
+            if version_refs is None
+            else version_refs
+        ),
+    )
+
+
+def _with_history_only_strategy(
+    spec_path: Path,
+    returns: Path,
+    *,
+    account_series_id: str = _HISTORY_SERIES,
+    evidence_layer: str = "ACCOUNT_LIVE",
+    version_ref: str = _HISTORY_VERSION,
+) -> None:
+    """Give strategy-2 the EchoTrade rows of the pinned spec, re-pinning the CSV."""
+
+    with returns.open("a", encoding="utf-8") as handle:
+        for day, value in (
+            ("2026-01-01", "0.002"),
+            ("2026-01-02", "0.004"),
+            ("2026-01-03", "-0.003"),
+        ):
+            handle.write(
+                f"{_HISTORY_SERIES},{day},{value},{evidence_layer},"
+                f"{version_ref},history-source\n"
+            )
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["benchmark_assignments"][1].update(
+        benchmark_id="benchmark",
+        rationale="Synthetic effective-dated benchmark of a retired strategy.",
+        status="EVIDENCED",
+        version_ref="benchmark:v1",
+    )
+    spec["benchmark_comparisons"][1].update(
+        account_series_id=account_series_id,
+        disposition="Synthetic exact-date comparison of retained account history.",
+        observed_end="2026-01-03",
+        observed_start="2026-01-01",
+        reference_series_id="benchmark",
+        status="DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+        version_compatibility_status="PROVEN_COMPATIBLE",
+    )
+    spec["return_source"]["expected_sha256"] = hashlib.sha256(
+        returns.read_bytes()
+    ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+def test_history_only_strategy_benchmark_comparison_reads_its_retained_history(
+    tmp_path: Path,
+) -> None:
+    """RP1: a retired strategy's evidenced comparison no longer aborts the build.
+
+    Before the fix the account side came only from baseline ACCOUNT_LIVE rows,
+    so the EchoTrade-shaped row raised "comparison series is missing" and no
+    attribution generation could be built on the pinned spec. Its account side
+    is now its retained history, disclosed in the row, through the same
+    full-window metrics as a live series.
+    """
+
+    baseline = _history_only_baseline(tmp_path)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    history = catalog["benchmark_comparisons"][1]
+    assert history["strategy_id"] == _HISTORY_STRATEGY
+    assert history["account_series_source"] == (
+        "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
+    )
+    # 1.002 * 1.004 * 0.997 - 1 over the whole window; the benchmark has only
+    # 2026-01-02 and 2026-01-03 (1.005 * 0.995 - 1 = -0.000025).
+    assert history["metrics"]["account_cumulative_return"] == "0.002989976"
+    assert history["metrics"]["reference_cumulative_return"] == "-0.000025"
+    assert history["metrics"]["cumulative_gap"] == "0.003014976"
+    assert history["metrics"]["observations"] == 2
+    assert catalog["benchmark_comparisons"][0]["account_series_source"] == (
+        "BASELINE_ACCOUNT_LIVE"
+    )
+    assert catalog["comparisons"][0]["account_series_source"] == (
+        "BASELINE_ACCOUNT_LIVE"
+    )
+    assert catalog["comparisons"][1]["account_series_source"] is None
+    assert catalog["comparisons"][1]["metrics"] is None
+
+
+def test_strategy_with_live_rows_never_reads_its_retained_account_series(
+    tmp_path: Path,
+) -> None:
+    """No mixing: a strategy with any live row never reads the retained file.
+
+    strategy-1 also carries everything the retained-history path accepts (a
+    REFERENCE_ONLY admission and the retained "account" series' exact version),
+    yet its account side stays the live series (1.03 * 0.99 - 1 = 0.0197), not
+    the retained one (1.01 * 0.98 - 1 = -0.0102).
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={date(2026, 1, 2): "0.03", date(2026, 1, 3): "-0.01"},
+        provider_admissions=[_admission(strategy_id="strategy-1")],
+        strategy_version_refs={"strategy-1": "v1"},
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    for row in (catalog["comparisons"][0], catalog["benchmark_comparisons"][0]):
+        assert row["account_series_source"] == "BASELINE_ACCOUNT_LIVE"
+        assert row["metrics"]["account_cumulative_return"] == "0.0197"
+
+
+def test_live_rows_outside_the_window_fail_closed_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={date(2025, 12, 30): "0.01", date(2025, 12, 31): "0.02"},
+        provider_admissions=[_admission(strategy_id="strategy-1")],
+        strategy_version_refs={"strategy-1": "v1"},
+    )
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="two exact common dates"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_history_only_strategy_without_its_retained_series_fails_closed(
+    tmp_path: Path,
+) -> None:
+    baseline = _history_only_baseline(tmp_path)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns, account_series_id="account:absent")
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="comparison series is missing"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+@pytest.mark.parametrize(
+    "admissions",
+    [
+        [],
+        [_admission("AUTHORITATIVE")],
+        [_admission("REFERENCE_ONLY"), _admission("AUTHORITATIVE")],
+    ],
+    ids=["no-admission", "authoritative", "mixed"],
+)
+def test_missing_live_series_without_history_only_admission_fails_closed(
+    tmp_path: Path, admissions: list[dict[str, Any]]
+) -> None:
+    """A strategy admitted as live whose rows are missing never falls back."""
+
+    baseline = _history_only_baseline(tmp_path, admissions=admissions)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(spec, returns)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="comparison series is missing"
+    ):
+        attribution.build_catalog(baseline, spec)
+
+
+@pytest.mark.parametrize(
+    ("evidence_layer", "series_version", "registered_versions", "message"),
+    [
+        ("SHADOW_OOS", _HISTORY_VERSION, None, "identity differs"),
+        ("ACCOUNT_LIVE", "accepted-live-path:" + "3" * 64, None, "identity differs"),
+        ("ACCOUNT_LIVE", _HISTORY_VERSION, {}, "comparison series is missing"),
+    ],
+    ids=["not-account-live", "other-version", "no-registered-version"],
+)
+def test_retained_account_history_identity_fails_closed(
+    tmp_path: Path,
+    evidence_layer: str,
+    series_version: str,
+    registered_versions: dict[str, str] | None,
+    message: str,
+) -> None:
+    """The retained series must be the ACCOUNT_LIVE path the baseline registers."""
+
+    baseline = _history_only_baseline(tmp_path, version_refs=registered_versions)
+    spec, returns = _inputs(tmp_path)
+    _with_history_only_strategy(
+        spec, returns, evidence_layer=evidence_layer, version_ref=series_version
+    )
+
+    with pytest.raises(attribution.AttributionValidationError, match=message):
+        attribution.build_catalog(baseline, spec)
+
+
+# T6-F2: a reference coarser than daily. Each Friday return of the "weekly"
+# reference covers (previous Friday, Friday], so the account's daily returns
+# inside that period are compounded before the exact-date pairing. Strategy-1
+# also keeps the two default rows that its daily benchmark comparison reads.
+_WEEKLY_ACCOUNT_RETURNS = {
+    date(2026, 1, 2): "0.01",
+    date(2026, 1, 3): "-0.02",
+    date(2026, 1, 8): "0.40",  # before the first period
+    date(2026, 1, 9): "0.50",  # on the previous reference date: not in (prev, day]
+    date(2026, 1, 12): "0.10",  # before observed_start, yet in the first period
+    date(2026, 1, 16): "0.10",
+    date(2026, 1, 19): "0.10",
+    date(2026, 1, 23): "-0.10",
+    date(2026, 1, 26): "0.20",
+    date(2026, 1, 30): "-0.10",
+    date(2026, 2, 2): "0.30",  # after the last reference date
+}
+_WEEKLY_REFERENCE_RETURNS = {
+    "2026-01-16": "0.20",
+    "2026-01-23": "-0.10",
+    "2026-01-30": "0.10",
+}
+
+
+def _with_weekly_reference(
+    spec_path: Path,
+    returns: Path,
+    reference_returns: dict[str, str],
+    *,
+    periods_per_year: int = 52,
+    observed_end: str = "2026-01-30",
+) -> None:
+    """Point strategy-1's provider comparison at a weekly reference series."""
+
+    with returns.open("a", encoding="utf-8") as handle:
+        for day, value in reference_returns.items():
+            handle.write(f"weekly,{day},{value},PROVIDER_LIVE,v1,weekly-source\n")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["comparisons"][0].update(
+        expected_legacy_cumulative_gap="0.105732",
+        observed_end=observed_end,
+        observed_start="2026-01-16",
+        periods_per_year=periods_per_year,
+        reference_series_id="weekly",
+    )
+    spec["return_source"]["expected_sha256"] = hashlib.sha256(
+        returns.read_bytes()
+    ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "previous_reference_date",
+    [True, False],
+    ids=["previous-date-outside-window", "first-date-of-series"],
+)
+def test_weekly_reference_pairs_the_account_compounded_over_each_period(
+    tmp_path: Path, previous_reference_date: bool
+) -> None:
+    """T6-F2: a weekly reference return meets the account's weekly compound.
+
+    Before the fix the account's one-day return on each Friday (0.10, -0.10,
+    -0.10) was paired with the weekly reference return (0.20, -0.10, 0.10): two
+    horizons in one active return. Now the account's own returns inside each
+    (previous Friday, Friday] period are compounded first: 1.1 * 1.1 - 1 = 0.21,
+    1.1 * 0.9 - 1 = -0.01 and 1.2 * 0.9 - 1 = 0.08. The first period reaches back
+    before observed_start. It opens at the previous reference date, 2026-01-09
+    (outside the window), or, when the series starts at 2026-01-16, it is as long
+    as the second period. Rows on or before the opening date and rows after the
+    last reference date belong to no period.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    reference = dict(_WEEKLY_REFERENCE_RETURNS)
+    if previous_reference_date:
+        reference = {"2026-01-09": "0.05", **reference}
+    _with_weekly_reference(spec, returns, reference)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    comparison = catalog["comparisons"][0]
+    metrics = comparison["metrics"]
+    assert metrics["observations"] == 3
+    assert metrics["observed_start"] == "2026-01-16"
+    assert metrics["observed_end"] == "2026-01-30"
+    # 1.21 * 0.99 * 1.08 - 1 for the account, 1.2 * 0.9 * 1.1 - 1 for the reference.
+    assert metrics["account_cumulative_return"] == "0.293732"
+    assert metrics["reference_cumulative_return"] == "0.188"
+    assert metrics["cumulative_gap"] == "0.105732"
+    # (0.21 - 0.20, -0.01 + 0.10, 0.08 - 0.10) at 52 periods a year.
+    active = [0.01, 0.09, -0.02]
+    assert float(metrics["active_return_annualized"]) == pytest.approx(
+        statistics.fmean(active) * 52
+    )
+    assert float(metrics["tracking_error_annualized"]) == pytest.approx(
+        statistics.stdev(active) * math.sqrt(52)
+    )
+    assert comparison["legacy_baseline_disposition"] == "INDEPENDENTLY_REPRODUCED"
+    assert comparison["legacy_baseline_delta"] == "0"
+    # The strategy's daily benchmark comparison keeps exact-date pairing.
+    assert catalog["benchmark_comparisons"][0]["metrics"]["observations"] == 2
+
+
+@pytest.mark.parametrize("periods_per_year", [252, 365])
+def test_daily_periods_per_year_keeps_exact_date_pairing(
+    tmp_path: Path, periods_per_year: int
+) -> None:
+    """T6-F2 changes only a comparison that declares a cadence coarser than daily.
+
+    The same rows declared at 252 or more periods a year are paired on exact
+    dates as before: the account's return on each reference date meets the
+    reference return, and the account compounds every row of the window.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec, returns, _WEEKLY_REFERENCE_RETURNS, periods_per_year=periods_per_year
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    # Rows in [2026-01-16, 2026-01-30]: 1.1 * 1.1 * 0.9 * 1.2 * 0.9 - 1.
+    assert metrics["account_cumulative_return"] == "0.17612"
+    # (0.10 - 0.20, -0.10 + 0.10, -0.10 - 0.10) on the three reference dates.
+    active = [-0.10, 0.0, -0.20]
+    assert float(metrics["active_return_annualized"]) == pytest.approx(
+        statistics.fmean(active) * periods_per_year
+    )
+
+
+def test_reference_period_without_account_returns_is_not_paired(
+    tmp_path: Path,
+) -> None:
+    """A reference date whose period holds no account return yields no pair.
+
+    Nothing is invented for 2026-01-30, whose period (01-23, 01-30] has no
+    account row: three observations remain and the account compounds only what
+    it has (0.21, -0.01 and, for 2026-02-06, 1.05 * 1.05 - 1 = 0.1025).
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={
+            date(2026, 1, 2): "0.01",
+            date(2026, 1, 3): "-0.02",
+            date(2026, 1, 12): "0.10",
+            date(2026, 1, 16): "0.10",
+            date(2026, 1, 19): "0.10",
+            date(2026, 1, 23): "-0.10",
+            date(2026, 2, 5): "0.05",
+            date(2026, 2, 6): "0.05",
+        },
+    )
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec,
+        returns,
+        {**_WEEKLY_REFERENCE_RETURNS, "2026-02-06": "0.04"},
+        observed_end="2026-02-06",
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    assert metrics["observed_end"] == "2026-02-06"
+    # 1.21 * 0.99 * 1.1025 - 1
+    assert metrics["account_cumulative_return"] == "0.32068475"
+
+
+def test_weekly_period_opens_at_the_previous_reference_date_outside_the_window(
+    tmp_path: Path,
+) -> None:
+    """The opening date is the previous date of the whole series, not a guess.
+
+    The reference has a week end on Thursday 2026-01-08 (outside the window), so
+    the first period is (01-08, 01-16] and holds the 2026-01-09 row too:
+    1.5 * 1.1 * 1.1 - 1 = 0.815. Assuming a period as long as the next one would
+    open at 01-09 and give 0.21 instead.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec, returns, {"2026-01-08": "0.05", **_WEEKLY_REFERENCE_RETURNS}
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    # 1.815 * 0.99 * 1.08 - 1
+    assert metrics["account_cumulative_return"] == "0.940598"
 
 
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:

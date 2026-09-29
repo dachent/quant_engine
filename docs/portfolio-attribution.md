@@ -14,6 +14,13 @@ reports cumulative gap, annualized active return and tracking error,
 information ratio, beta, correlation, upside/downside capture, and relative
 drawdown. Fewer than two common dates fails closed.
 
+The account side is the baseline's own ACCOUNT_LIVE return series compounded over
+the whole comparison window, not only the common dates (against a reference
+coarser than daily, `periods_per_year` below 252, first compounded over each
+reference period), or, for a strategy the baseline holds as `REFERENCE_ONLY`
+history with no live rows, its identity-bound retained series; each comparison
+row records which in `account_series_source`.
+
 Version-unresolved comparisons are explicitly descriptive and cannot become
 decision authority. A missing provider/model path stays `UNAVAILABLE`. Every
 strategy has an effective-dated benchmark assignment or an explicit

@@ -33,7 +33,7 @@ from quant_engine.portfolio_ledger import ReturnsError, splice_spans
 
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.1.1"
+BUILDER_VERSION: Final = "1.2.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
 AVAILABLE_STATUSES: Final = {
@@ -41,6 +41,12 @@ AVAILABLE_STATUSES: Final = {
     "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
 }
 AVAILABLE_STATUS: Final = "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
+# A comparison declaring fewer periods a year than this has a reference coarser
+# than daily (weekly, monthly): its account side is compounded per reference period.
+DAILY_PERIODS_PER_YEAR: Final = 252
+# Where the account side of an available comparison was read from.
+ACCOUNT_SOURCE_BASELINE_LIVE: Final = "BASELINE_ACCOUNT_LIVE"
+ACCOUNT_SOURCE_RETAINED_HISTORY: Final = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
 
 
 class AttributionValidationError(ValueError):
@@ -180,8 +186,13 @@ def _baseline(
     )
 
 
-def _rows(path: Path) -> dict[str, dict[date, Decimal]]:
+def _rows(
+    path: Path,
+) -> tuple[dict[str, dict[date, Decimal]], dict[str, tuple[str, str, str]]]:
+    """Series values and each series' (evidence_layer, version_ref, source)."""
+
     result: dict[str, dict[date, Decimal]] = {}
+    identities: dict[str, tuple[str, str, str]] = {}
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -194,7 +205,6 @@ def _rows(path: Path) -> dict[str, dict[date, Decimal]]:
                 "source_artifact_id",
             ]:
                 raise AttributionValidationError("return source columns differ")
-            identities: dict[str, tuple[str, str, str]] = {}
             for row in reader:
                 series_id = _text(row.get("series_id"), "return.series_id")
                 day = date.fromisoformat(_text(row.get("date"), "return.date"))
@@ -219,7 +229,7 @@ def _rows(path: Path) -> dict[str, dict[date, Decimal]]:
         if isinstance(exc, AttributionValidationError):
             raise
         raise AttributionValidationError("return source is unreadable") from exc
-    return result
+    return result, identities
 
 
 def _account_live_series(
@@ -255,6 +265,107 @@ def _account_live_series(
                 "baseline strategy_returns has conflicting dates"
             )
         series[day] = value
+    return result
+
+
+def _reference_only_account_history(
+    baseline: Mapping[str, Any],
+) -> dict[str, str]:
+    """Strategies whose account-live returns the baseline keeps as history only.
+
+    Maps strategy_id to the version_ref its registry record names, for each
+    strategy whose baseline ``provider_admissions`` rows for the
+    ``strategy_returns`` ACCOUNT_LIVE fact exist and are all REFERENCE_ONLY.
+    The baseline then deliberately carries no live series for it (a retired,
+    history-only strategy such as EchoTrade), unlike an AUTHORITATIVE
+    admission whose rows are missing, which must fail closed.
+    """
+
+    admissions = baseline.get("provider_admissions")
+    dispositions: dict[str, set[object]] = {}
+    for row in admissions if isinstance(admissions, list) else []:
+        if (
+            isinstance(row, dict)
+            and row.get("fact_type") == "strategy_returns"
+            and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            and isinstance(row.get("strategy_id"), str)
+        ):
+            dispositions.setdefault(row["strategy_id"], set()).add(
+                row.get("disposition")
+            )
+    result: dict[str, str] = {}
+    for item in baseline.get("strategies", []):
+        if not isinstance(item, dict):
+            continue
+        strategy_id = item.get("strategy_id")
+        version_ref = item.get("version_ref")
+        if (
+            isinstance(strategy_id, str)
+            and dispositions.get(strategy_id) == {"REFERENCE_ONLY"}
+            and isinstance(version_ref, str)
+            and version_ref
+        ):
+            result[strategy_id] = version_ref
+    return result
+
+
+def _retained_account_history(
+    strategy_id: str,
+    account_series_id: str,
+    reference_only_history: Mapping[str, str],
+    retained_series: Mapping[str, Mapping[date, Decimal]],
+    retained_identities: Mapping[str, tuple[str, str, str]],
+) -> Mapping[date, Decimal]:
+    """The account side of a strategy the baseline keeps as history only.
+
+    Read only when the baseline has no ACCOUNT_LIVE ``strategy_returns`` row
+    for the strategy. The strategy must be history-only (every account-live
+    admission REFERENCE_ONLY) and the retained series named by
+    ``account_series_id`` must be the ACCOUNT_LIVE path of exactly the version
+    the baseline registers for it. Anything else fails closed, so a strategy
+    that lost its admitted live rows never falls back to the retained file.
+    """
+
+    version_ref = reference_only_history.get(strategy_id)
+    if version_ref is None or account_series_id not in retained_series:
+        raise AttributionValidationError("comparison series is missing")
+    evidence_layer, series_version_ref, _ = retained_identities[account_series_id]
+    if evidence_layer != "ACCOUNT_LIVE" or series_version_ref != version_ref:
+        raise AttributionValidationError("retained account history identity differs")
+    return retained_series[account_series_id]
+
+
+def _compound_to_reference_periods(
+    account: Mapping[date, Decimal],
+    reference: Mapping[date, Decimal],
+    window: Mapping[date, Decimal],
+) -> dict[date, Decimal]:
+    """The account's returns compounded over each coarse reference period.
+
+    A reference return dated ``day`` covers the period from the previous date of
+    the whole reference series (not only of the comparison window) up to and
+    including ``day``. Pairing it with the account's one-day return on ``day``
+    would compare two horizons, so the account's own returns inside that period
+    are compounded into one return dated ``day``. The first date of the series has
+    no previous date; its period is taken to be as long as the next one. A period
+    without an account return yields no pair, and account returns outside every
+    period of the window are not used.
+    """
+
+    dates = sorted(reference)
+    opens = dict(zip(dates[1:], dates))
+    if len(dates) > 1:
+        opens[dates[0]] = dates[0] - (dates[1] - dates[0])
+    account_dates = sorted(account)
+    result: dict[date, Decimal] = {}
+    for day in sorted(window):
+        if day not in opens:  # a one-date series has no period to compound over
+            continue
+        inside = [
+            (item, account[item]) for item in account_dates if opens[day] < item <= day
+        ]
+        if inside:
+            result[day] = splice_spans(inside).cumulative_return
     return result
 
 
@@ -352,25 +463,41 @@ def _accepted_comparison(
     strategy_id: str,
     account_live_series: Mapping[str, Mapping[date, Decimal]],
     reference_series: Mapping[str, Mapping[date, Decimal]],
+    reference_only_history: Mapping[str, str],
+    series_identities: Mapping[str, tuple[str, str, str]],
 ) -> dict[str, Any]:
     accepted = dict(comparison)
     status = accepted.get("status")
     metrics = None
     legacy_delta = None
     legacy_disposition = "NOT_APPLICABLE"
+    account_source = None
     if status in AVAILABLE_STATUSES:
-        # account_series_id is retained provenance (which account/provider feeds
-        # this strategy's admitted series); the account values themselves come
-        # from the baseline's own ACCOUNT_LIVE series keyed by strategy_id, not
-        # from a lookup by this id (B3: the account side must read the live
-        # series, never a separately retained return-source row).
-        _text(accepted.get("account_series_id"), "comparison.account_series_id")
+        # The account values come from the baseline's own ACCOUNT_LIVE series
+        # keyed by strategy_id (B3: never a separately retained return-source
+        # row while a live series exists); account_series_id is provenance.
+        # Only a strategy with no live row at all, which the baseline admits
+        # as history only, reads its retained series by account_series_id,
+        # and the row discloses that in account_series_source.
+        account_id = _text(
+            accepted.get("account_series_id"), "comparison.account_series_id"
+        )
         reference_id = _text(
             accepted.get("reference_series_id"), "comparison.reference_series_id"
         )
-        account_full_series = account_live_series.get(strategy_id)
-        if not account_full_series or reference_id not in reference_series:
+        if reference_id not in reference_series:
             raise AttributionValidationError("comparison series is missing")
+        account_full_series = account_live_series.get(strategy_id)
+        account_source = ACCOUNT_SOURCE_BASELINE_LIVE
+        if not account_full_series:
+            account_full_series = _retained_account_history(
+                strategy_id,
+                account_id,
+                reference_only_history,
+                reference_series,
+                series_identities,
+            )
+            account_source = ACCOUNT_SOURCE_RETAINED_HISTORY
         start = (
             None
             if accepted.get("observed_start") is None
@@ -389,20 +516,27 @@ def _accepted_comparison(
             start is not None and end is not None and end < start
         ):
             raise AttributionValidationError("comparison interval is invalid")
-        account_window = {
-            day: value
-            for day, value in account_full_series.items()
-            if (start is None or day >= start) and (end is None or day <= end)
-        }
         reference_window = {
             day: value
             for day, value in reference_series[reference_id].items()
             if (start is None or day >= start) and (end is None or day <= end)
         }
+        periods_per_year = int(accepted.get("periods_per_year", 0))
+        if periods_per_year < DAILY_PERIODS_PER_YEAR:
+            # A reference coarser than daily reports one return per period, so the
+            # account's daily returns are compounded over the same periods before
+            # the exact-date pairing (T6-F2); daily comparisons are unchanged.
+            account_window = _compound_to_reference_periods(
+                account_full_series, reference_series[reference_id], reference_window
+            )
+        else:
+            account_window = {
+                day: value
+                for day, value in account_full_series.items()
+                if (start is None or day >= start) and (end is None or day <= end)
+            }
         metrics = _comparison_metrics(
-            account_window,
-            reference_window,
-            int(accepted.get("periods_per_year", 0)),
+            account_window, reference_window, periods_per_year
         )
         expected_gap = accepted.get("expected_legacy_cumulative_gap")
         if expected_gap is not None:
@@ -427,6 +561,7 @@ def _accepted_comparison(
         raise AttributionValidationError("comparison status differs")
     return {
         **accepted,
+        "account_series_source": account_source,
         "legacy_baseline_delta": legacy_delta,
         "legacy_baseline_disposition": legacy_disposition,
         "metrics": metrics,
@@ -483,8 +618,9 @@ def build_catalog(
         raise AttributionValidationError(
             "source manifest as-of date is invalid"
         ) from exc
-    series = _rows(source_path)
+    series, series_identities = _rows(source_path)
     account_live_series = _account_live_series(baseline)
+    reference_only_history = _reference_only_account_history(baseline)
     benchmark_rows = spec.get("benchmark_assignments")
     benchmark_comparison_rows = spec.get("benchmark_comparisons")
     comparison_rows = spec.get("comparisons")
@@ -580,12 +716,22 @@ def build_catalog(
             )
         accepted_benchmark_comparisons.append(
             _accepted_comparison(
-                benchmark_comparison, strategy_id, account_live_series, series
+                benchmark_comparison,
+                strategy_id,
+                account_live_series,
+                series,
+                reference_only_history,
+                series_identities,
             )
         )
         accepted_comparisons.append(
             _accepted_comparison(
-                comparison_by_id[strategy_id], strategy_id, account_live_series, series
+                comparison_by_id[strategy_id],
+                strategy_id,
+                account_live_series,
+                series,
+                reference_only_history,
+                series_identities,
             )
         )
         allocation = allocations[strategy_id]
