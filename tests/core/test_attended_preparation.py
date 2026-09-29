@@ -13,7 +13,7 @@ from pathlib import Path
 import json
 import subprocess
 import sys
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 
@@ -38,6 +38,8 @@ if HISTORY_TEST_SPEC is None or HISTORY_TEST_SPEC.loader is None:
 history_tests = importlib.util.module_from_spec(HISTORY_TEST_SPEC)
 sys.modules[HISTORY_TEST_SPEC.name] = history_tests
 HISTORY_TEST_SPEC.loader.exec_module(history_tests)
+
+HISTORY_TOOL_RELATIVE_PATH = "tools/portfolio_target_series.py"
 
 
 @pytest.mark.parametrize("resume", [False, True])
@@ -630,6 +632,64 @@ def _retained_layered_history(
     return fixture, generation
 
 
+def _generation_recording_code_identity(
+    generation: Path,
+    output_root: Path,
+    *,
+    repository_sha: str,
+    tool_sha256: str,
+) -> Path:
+    """Rewrite a retained generation to record another commit and tool hash.
+
+    The rewritten manifest stays canonical and self-consistent: the two
+    recorded code-identity fields change, every other byte is kept, and the
+    generation identity is recomputed. The verifier's own classification of
+    the recorded identity is therefore the only thing that decides the
+    verdict.
+    """
+
+    artifacts = {
+        path.name: path.read_bytes()
+        for path in generation.iterdir()
+        if path.name != "generation.json"
+    }
+    manifest = json.loads((generation / "generation.json").read_bytes())
+    manifest["repository_sha"] = repository_sha
+    manifest["tool_sha256"] = tool_sha256
+    return cast(
+        Path,
+        history_tests.write_layered_history_generation(
+            output_root, artifacts, history_tests._reidentify_manifest(manifest)
+        ),
+    )
+
+
+def _spy_on_git_show_lookups(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record every ``git show`` invocation while delegating to the real run."""
+
+    real_run = subprocess.run
+    lookups: list[list[str]] = []
+
+    def spying_run(args: Any, *rest: Any, **kwargs: Any) -> Any:
+        if "show" in args:
+            lookups.append([str(part) for part in args])
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spying_run)
+    return lookups
+
+
+def _looked_up_tool_revisions(lookups: list[list[str]]) -> list[str]:
+    """The ``<revision>:<tool path>`` operand of every recorded tool lookup."""
+
+    return [
+        part
+        for lookup in lookups
+        for part in lookup
+        if part.endswith(f":{HISTORY_TOOL_RELATIVE_PATH}")
+    ]
+
+
 def test_stale_repository_dependency_kind_rebuilds_retained_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -713,7 +773,9 @@ def test_stale_tool_identity_kind_rebuilds_retained_history(
     one, exactly what editing this very tool produces after the build.
     The committed-tool lookup below pins the recorded commit to exactly
     the building tool's own bytes — the legitimate-revision case — so
-    the verdict stays deterministic even on a dirty working tree.
+    the verdict stays deterministic even on a dirty working tree. That
+    seam hides the real git resolution of the recorded commit, which the
+    recorded-ancestor tests further below exercise with no seam pinned.
     """
 
     import portfolio_target_series as history
@@ -843,7 +905,13 @@ def test_fabricated_tool_identity_fails_closed_against_the_real_commit(
     provably holds tool bytes whose hash differs from the forged
     ``tool_sha256``. The rebuild decision must fail closed as an
     integrity violation, and the recorded commit must actually have been
-    consulted -- a verdict reached without the lookup binds nothing.
+    consulted -- a verdict reached without the lookup binds nothing. The
+    lookup is pinned to the manifest's recorded repository SHA itself,
+    read back from the retained generation on disk, so a lookup against
+    the literal ``HEAD`` or against a wrong tool path fails here. The
+    recorded SHA is HEAD in this checkout, so distinguishing a recorded
+    non-HEAD commit from HEAD is the job of the recorded-ancestor tests
+    below, which run the same resolution against a real earlier commit.
     """
 
     import portfolio_target_series as history
@@ -887,6 +955,12 @@ def test_fabricated_tool_identity_fails_closed_against_the_real_commit(
     assert isinstance(decision.value.__cause__, history.TargetSeriesError)
     assert decision.value.__cause__.kind == "integrity"
     assert tool_lookups, "the recorded commit was never consulted"
+    recorded_repository_sha = json.loads(
+        (forged_generation / "generation.json").read_bytes()
+    )["repository_sha"]
+    assert _looked_up_tool_revisions(tool_lookups) == [
+        f"{recorded_repository_sha}:{HISTORY_TOOL_RELATIVE_PATH}"
+    ]
 
 
 def test_trusted_tool_identity_never_consults_the_recorded_commit(
@@ -1009,6 +1083,200 @@ def test_unprovable_committed_tool_identity_fails_closed(
             fixture["contract_path"],
             cast("preparation._HistoryAuthorities", {}),
         )
+
+
+class _CommittedToolRevisions(NamedTuple):
+    """Two real committed history-tool revisions and the module executing the later."""
+
+    module: Any
+    ancestor_sha: str
+    ancestor_tool_sha256: str
+    head_sha: str
+    head_tool_sha256: str
+
+
+def _commit_history_tool_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _CommittedToolRevisions:
+    """Commit two real revisions of the history tool in a throwaway repository.
+
+    The tool resolves a recorded commit against the repository its own file
+    lives in, so proving a non-HEAD recorded commit end to end needs a real
+    repository whose history holds this tool at two different revisions. The
+    throwaway repository below commits an earlier tool revision and then the
+    executing tool's own bytes on top of it, so HEAD differs from the
+    recorded ancestor. A byte-identical copy of the executing tool is
+    imported from that repository's ``tools`` directory and installed as the
+    normally imported ``portfolio_target_series`` module, and the repository
+    becomes the attended-preparation root. Nothing in the committed-tool
+    resolution is replaced: the trusted-identity read, the recorded-commit
+    ``git show``, the hash comparison, the classification, and the HEAD
+    comparison all run for real against real commits.
+    """
+
+    import portfolio_target_series as executing_history
+
+    for key in tuple(os.environ):
+        if key.upper().startswith("GIT_"):
+            monkeypatch.delenv(key, raising=False)
+
+    root = (tmp_path / "tool-revision-repository").resolve()
+    tool_path = root / Path(HISTORY_TOOL_RELATIVE_PATH)
+    tool_path.parent.mkdir(parents=True)
+
+    def git(*arguments: str) -> bytes:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+        return completed.stdout
+
+    git("init", "--quiet")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Tool Revision Test")
+    git("config", "commit.gpgsign", "false")
+    git("config", "core.autocrlf", "false")
+
+    executing_bytes = Path(executing_history.__file__).read_bytes()
+    revisions: list[tuple[str, str]] = []
+    for content in (
+        b'"""Earlier committed revision of the layered-history tool."""\n',
+        executing_bytes,
+    ):
+        tool_path.write_bytes(content)
+        git("add", HISTORY_TOOL_RELATIVE_PATH)
+        git("commit", "--quiet", "--no-verify", "-m", "history tool revision")
+        commit_sha = git("rev-parse", "HEAD").decode("ascii").strip()
+        committed = git(
+            "cat-file", "blob", f"{commit_sha}:{HISTORY_TOOL_RELATIVE_PATH}"
+        )
+        assert committed == content, "the commit must hold exactly the bytes written"
+        revisions.append((commit_sha, hashlib.sha256(committed).hexdigest()))
+    (ancestor_sha, ancestor_tool_sha256), (head_sha, head_tool_sha256) = revisions
+    assert ancestor_sha != head_sha
+    assert ancestor_tool_sha256 != head_tool_sha256
+
+    spec = importlib.util.spec_from_file_location("portfolio_target_series", tool_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load the committed history tool revision")
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "portfolio_target_series", module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(preparation, "ROOT", root)
+    return _CommittedToolRevisions(
+        module=module,
+        ancestor_sha=ancestor_sha,
+        ancestor_tool_sha256=ancestor_tool_sha256,
+        head_sha=head_sha,
+        head_tool_sha256=head_tool_sha256,
+    )
+
+
+def test_legitimate_tool_revision_rebuilds_through_real_git_against_a_recorded_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded ancestor that truly holds the recorded tool bytes is staleness.
+
+    The retained manifest records a real earlier commit and the true SHA-256
+    of the tool bytes that commit holds, while the executing tool is a later
+    commit with different bytes -- exactly what editing the tool after the
+    build produces. No tool-identity seam is pinned: the verifier resolves
+    the recorded commit with a real
+    ``git show <recorded-sha>:tools/portfolio_target_series.py`` against a
+    real repository, the hash it reads matches the recorded identity, the
+    verdict is repairable ``staleness``, and the rebuild decision returns
+    True after the real HEAD comparison. The only installed seam is the
+    documented synthetic contract parse of the fixture module that builds
+    the retained generation; the module under test is not patched. The
+    lookup spy delegates to the real ``subprocess.run`` and pins the
+    looked-up commit to the recorded ancestor, never HEAD, so an always-HEAD
+    or wrong-path resolution -- which fails closed as integrity and silently
+    disables the legitimate-revision rebuild -- fails here.
+    """
+
+    revisions = _commit_history_tool_revisions(tmp_path, monkeypatch)
+    history = revisions.module
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+    ancestor_generation = _generation_recording_code_identity(
+        generation,
+        tmp_path / "ancestor-history",
+        repository_sha=revisions.ancestor_sha,
+        tool_sha256=revisions.ancestor_tool_sha256,
+    )
+    lookups = _spy_on_git_show_lookups(monkeypatch)
+
+    with pytest.raises(
+        history.TargetSeriesError,
+        match="layered history code identity is not trusted",
+    ) as raised:
+        history.verify_layered_history_generation(
+            ancestor_generation, fixture["contract_path"], require_mode="LIVE_ONLY"
+        )
+    assert raised.value.kind == "staleness"
+    assert _looked_up_tool_revisions(lookups) == [
+        f"{revisions.ancestor_sha}:{HISTORY_TOOL_RELATIVE_PATH}"
+    ]
+    # The executing tool is the repository's HEAD, a different commit whose
+    # tool bytes hash differently from the recorded identity.
+    assert history._trusted_layered_history_code_identity() == (
+        revisions.head_sha,
+        revisions.head_tool_sha256,
+    )
+    assert revisions.head_tool_sha256 != revisions.ancestor_tool_sha256
+    assert (
+        preparation._retained_history_requires_rebuild(
+            ancestor_generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+        is True
+    )
+
+
+def test_forged_tool_identity_at_a_recorded_ancestor_fails_closed_through_real_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forged tool hash under a real recorded ancestor is integrity, not staleness.
+
+    Same real repository and recorded ancestor as the legitimate-revision
+    test, but the recorded ``tool_sha256`` matches no bytes that commit
+    holds. The real ``git show`` against the recorded ancestor proves the
+    mismatch, so the rebuild decision fails closed as an integrity
+    violation. The spy pins the only lookup to the recorded ancestor: HEAD is
+    never substituted for it, and the executing tool tree is never probed
+    for a rebuild that was never licensed.
+    """
+
+    revisions = _commit_history_tool_revisions(tmp_path, monkeypatch)
+    history = revisions.module
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    fixture, generation = _retained_layered_history(tmp_path)
+    forged_generation = _generation_recording_code_identity(
+        generation,
+        tmp_path / "forged-ancestor-history",
+        repository_sha=revisions.ancestor_sha,
+        tool_sha256="0" * 64,
+    )
+    lookups = _spy_on_git_show_lookups(monkeypatch)
+
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ) as decision:
+        preparation._retained_history_requires_rebuild(
+            forged_generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+    assert isinstance(decision.value.__cause__, history.TargetSeriesError)
+    assert decision.value.__cause__.kind == "integrity"
+    assert _looked_up_tool_revisions(lookups) == [
+        f"{revisions.ancestor_sha}:{HISTORY_TOOL_RELATIVE_PATH}"
+    ]
 
 
 def _admitted_retained_history(
