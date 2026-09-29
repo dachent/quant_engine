@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 from copy import deepcopy
 import csv
 from dataclasses import replace
@@ -12,6 +13,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import types
 
 import pytest
 
@@ -30,76 +32,201 @@ from quant_engine.core.pipeline import (
 from test_portfolio_mvp2_vertical import assert_decomposition_vertical, fixture
 
 
-# Every attribute the 172-outcome test world patches, with the reason.  The
-# test asserts that the attributes it actually patched are exactly these, so a
-# new patch cannot enter the chain undeclared.
-PATCH_INVENTORY = {
-    "_verify_release_validation": (
-        "tests/core/conftest.py neuters it for mechanics tests; this test "
-        "restores the real verifier, so the whole chain runs with it live"
+# The narrowed load_contract skips validate_contract.  This is a declared
+# residual of the synthetic world, not a proof that validate_contract passes:
+# it is recorded on both load_contract entries below.  validate_contract is
+# non-transforming (it raises or returns dict(contract),
+# tools/portfolio_financial_mvp_contract.py:6516-6612; load_contract is
+# schema_errors plus validate_contract, :6615-6655), so skipping it changes no
+# value loaded in this chain.  The three rejections the real, unpatched loader
+# gives this synthetic world, captured by running it against the final bound
+# contract, are properties of the world and not of the code under test.
+_LOAD_CONTRACT_RESIDUAL = (
+    "narrowed synthetic authority: the real schema_errors on the accepted "
+    "contract bytes, then canonical outcome, census, strategy-perimeter and "
+    "registry-hash equivalence.  It SKIPS validate_contract, which the real "
+    "load_contract runs after the schema check.  validate_contract is "
+    "non-transforming (it raises or returns dict(contract), "
+    "tools/portfolio_financial_mvp_contract.py:6516-6612), so skipping it "
+    "changes no value loaded in this chain.  The real unpatched loader rejects "
+    "this synthetic world three ways, all properties of the world and not of "
+    "the code under test: (1) with the plan registry and the epoch-manifest "
+    "bundle: FinancialMvpContractError: current-product strategy order/identity "
+    "differs from the registry; (2) with the repository registry and the "
+    "bundle: FinancialMvpContractError: source strategy-backtests mixed version "
+    "status requires a nonempty proper subset of subject refs; (3) without the "
+    "bundle, the world's contract being schema v7: FinancialMvpContractError: "
+    "contract schema v7 requires a verified epoch-manifest bundle.  Fix the "
+    "synthetic world builder, then delete this entry"
+)
+
+# Every substitution the 172-outcome test world makes through MonkeyPatch, keyed
+# by the canonical record (patched target, attribute) and declared with the
+# number of setattr calls made on it and the reason.  The target is the import
+# name of the patched module: the fixtures load several module instances of one
+# file under different names, and each instance is its own target.  A count is
+# an int, or an inclusive (minimum, maximum) where the fixture's own dynamic
+# scan makes it depend on the session's import history.  The test compares
+# these records with the ones its MonkeyPatch actually holds, so an undeclared
+# substitution -- a new attribute, the same attribute on another target, or one
+# more call on a declared record -- turns it red; the negative controls below
+# prove it.
+PATCH_INVENTORY: dict[tuple[str, str], tuple[int | tuple[int, int], str]] = {
+    ("importlib.util", "spec_from_file_location"): (
+        1,
+        "wrapper (mvp2_consumers_fixture._install_dynamic_dependence_loader) that "
+        "alters only the report's freshly loaded dependence module, which then "
+        "resolves the narrowed contract module; process-wide until teardown",
     ),
-    "_history_contract": (
-        "structure-only history-contract parser on the layered-history producer "
-        "and the planner/current-plan verifier, whose real reader runs "
-        "validate_contract; once install_synthetic_financial_authority runs, "
-        "the verifier's parser first runs the narrowed load_contract"
+    ("portfolio_control_panel", "DEPENDENCE_POLICY"): (
+        1,
+        "panel reads the world's dependence policy",
     ),
-    "_layered_history_module": (
+    ("portfolio_control_panel", "FINANCIAL_MVP_CONTRACT"): (
+        1,
+        "panel binds the world's product contract",
+    ),
+    ("portfolio_control_panel", "SOURCE_CONTRACT"): (
+        1,
+        "panel binds a synthetic frozen legacy-appendix contract",
+    ),
+    ("portfolio_control_panel", "_PORTABLE_HWM_POLICY"): (
+        1,
+        "panel reads the world's HWM policy",
+    ),
+    ("portfolio_control_panel", "_PORTABLE_HWM_PRODUCT_CONTRACT"): (
+        1,
+        "panel binds the world's product contract",
+    ),
+    ("portfolio_current_decomposition_plan", "_layered_history_module"): (
+        2,
         "pin the planner and current-plan verifier to the one layered-history "
-        "module instance that carries the synthetic seams"
+        "module instance that carries the synthetic seams (set by "
+        "build_decomposition_vertical, then again by "
+        "install_synthetic_financial_authority)",
     ),
-    "_history_fixture": (
-        "plan_tests._fixture builds the layered history from this world's "
-        "prepared fixture instead of a fresh one"
+    ("portfolio_current_dependence", "_financial_module"): (
+        1,
+        "current dependence resolves the same narrowed contract module",
     ),
-    "_current_source_admission_authority": (
-        "synthetic admission receipt: this world has no real provider capture "
-        "perimeter; the real receipt binding has its own tests"
+    ("portfolio_financial_mvp_contract", "load_contract"): (
+        2,
+        _LOAD_CONTRACT_RESIDUAL
+        + ".  Two calls: the fixture's sys.modules scan (this module holds the "
+        "original) and its explicit patch",
     ),
-    "_portfolio123_version_equivalence": (
-        "synthetic P123 version-equivalence stand-in for the same reason"
-    ),
-    "load_contract": (
-        "narrowed synthetic authority: real schema validation, then canonical "
-        "outcome, census, strategy-perimeter and registry-hash equivalence; it "
-        "skips validate_contract, which rejects this synthetic world (registry "
-        "strategy order; MIXED strategy-backtests version refs)"
-    ),
-    "_financial_module": (
-        "current dependence (and the panel's copy) resolves the same narrowed "
-        "contract module"
-    ),
-    "HWM_GOVERNED_POLICY": "materializer reads the world's HWM policy",
-    "ACCOUNT_STRATEGY_CLASSIFICATION_POLICY": (
-        "materializer reads the world's flow-classification policy"
-    ),
-    "_GOVERNED_MEMBERSHIP_CENSUS": (
+    ("portfolio_hwm_selected_inputs", "_GOVERNED_MEMBERSHIP_CENSUS"): (
+        1,
         "HWM replay binds the world's declared census; the repository census "
-        "cannot bound a synthetic account source set"
+        "cannot bound a synthetic account source set",
     ),
-    "DEPENDENCE_POLICY": "report and panel read the world's dependence policy",
-    "_PORTABLE_HWM_POLICY": "report and panel read the world's HWM policy",
-    "_PORTABLE_HWM_PRODUCT_CONTRACT": (
-        "report and panel bind the world's product contract"
+    ("portfolio_invested_capital", "load_contract"): (
+        (1, 2),
+        _LOAD_CONTRACT_RESIDUAL
+        + ".  One call (the explicit patch) or two: the fixture's sys.modules "
+        "scan also patches this module when it still holds the original "
+        "function, which depends on whether portfolio_financial_mvp_contract "
+        "was swapped for a fresh instance at collection",
     ),
-    "CURRENT_EPOCH_CROSSWALK_AS_OF_DATE": "report binds the world's crosswalk as-of",
-    "CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE": (
-        "report binds the world's crosswalk calculation cutoff"
+    ("portfolio_layered_history_fixture_for_current_plan", "_history_fixture"): (
+        1,
+        "plan_tests._fixture builds the layered history from this world's "
+        "prepared fixture instead of a fresh one",
     ),
-    "FINANCIAL_MVP_CONTRACT": "panel binds the world's product contract",
-    "_HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT": (
-        "report binds the world's product contract as HWM policy authority"
+    ("portfolio_pipeline_materialize", "ACCOUNT_STRATEGY_CLASSIFICATION_POLICY"): (
+        1,
+        "materializer reads the world's flow-classification policy",
     ),
-    "FLOW_CLASSIFICATION_POLICY_CONTRACT": (
-        "report binds the world's flow-classification policy"
+    ("portfolio_pipeline_materialize", "HWM_GOVERNED_POLICY"): (
+        1,
+        "materializer reads the world's HWM policy",
     ),
-    "spec_from_file_location": (
-        "importlib.util wrapper that alters only the report's freshly loaded "
-        "dependence module, which then resolves the narrowed contract module"
+    ("portfolio_report", "CURRENT_EPOCH_CROSSWALK_AS_OF_DATE"): (
+        1,
+        "report binds the world's crosswalk as-of",
     ),
-    "SOURCE_CONTRACT": "panel binds a synthetic frozen legacy-appendix contract",
+    ("portfolio_report", "CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE"): (
+        1,
+        "report binds the world's crosswalk calculation cutoff",
+    ),
+    ("portfolio_report", "DEPENDENCE_POLICY"): (
+        1,
+        "report reads the world's dependence policy",
+    ),
+    ("portfolio_report", "FLOW_CLASSIFICATION_POLICY_CONTRACT"): (
+        1,
+        "report binds the world's flow-classification policy",
+    ),
+    ("portfolio_report", "_HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT"): (
+        1,
+        "report binds the world's product contract as HWM policy authority",
+    ),
+    ("portfolio_report", "_PORTABLE_HWM_POLICY"): (
+        1,
+        "report reads the world's HWM policy",
+    ),
+    ("portfolio_report", "_PORTABLE_HWM_PRODUCT_CONTRACT"): (
+        1,
+        "report binds the world's product contract",
+    ),
+    (
+        "portfolio_target_series_for_current_decomposition_plan",
+        "_current_source_admission_authority",
+    ): (
+        2,
+        "synthetic admission receipt on the planner's verifier module instance: "
+        "this world has no real provider capture perimeter, and the real "
+        "receipt binding has its own tests (set by build_decomposition_vertical, "
+        "then again by install_synthetic_financial_authority)",
+    ),
+    ("portfolio_target_series_for_current_decomposition_plan", "_history_contract"): (
+        2,
+        "structure-only history-contract parser on the planner's verifier module "
+        "instance, whose real reader runs validate_contract; the second install "
+        "(install_synthetic_financial_authority) first runs the narrowed "
+        "load_contract",
+    ),
+    (
+        "portfolio_target_series_for_current_decomposition_plan",
+        "_portfolio123_version_equivalence",
+    ): (
+        2,
+        "synthetic P123 version-equivalence stand-in on the planner's verifier "
+        "module instance, for the same reason",
+    ),
+    (
+        "portfolio_target_series_layered_history",
+        "_current_source_admission_authority",
+    ): (
+        2,
+        "synthetic admission receipt on the layered-history producer module "
+        "instance (set by build_shared_history_source, then again by "
+        "build_decomposition_vertical)",
+    ),
+    ("portfolio_target_series_layered_history", "_history_contract"): (
+        2,
+        "structure-only history-contract parser on the layered-history producer "
+        "module instance, whose real reader runs validate_contract (installed by "
+        "build_shared_history_source, then again by build_decomposition_vertical)",
+    ),
+    ("portfolio_target_series_layered_history", "_portfolio123_version_equivalence"): (
+        2,
+        "synthetic P123 version-equivalence stand-in on the layered-history "
+        "producer module instance, for the same reason",
+    ),
+    ("quant_engine.core.release", "_verify_release_validation"): (
+        2,
+        "tests/core/conftest.py neuters it for mechanics tests, then this test "
+        "restores the real verifier, so the whole chain runs with it live",
+    ),
+    ("tools.portfolio_current_dependence", "_financial_module"): (
+        1,
+        "the panel's package-qualified copy of the current-dependence module "
+        "resolves the same narrowed contract module",
+    ),
 }
-# Substitutions that are not attribute patches (listed for review):
+# Substitutions that are not MonkeyPatch operations, so the assertion cannot see
+# them (listed for review only):
 # - mvp2_consumers_fixture._install_dynamic_dependence_loader assigns
 #   `_financial_module` on the report's freshly executed dependence module;
 # - fixture loaders register test-helper modules in sys.modules, and
@@ -131,6 +258,50 @@ SPAN_IDENTITY = (
     "span_days",
     "subscription_events_in_span",
 )
+
+
+def _patch_target_name(target: object) -> str:
+    """Canonical name of a patched target: a module's import name, else its type."""
+    if isinstance(target, types.ModuleType):
+        return target.__name__
+    owner = target if isinstance(target, type) else type(target)
+    return f"{owner.__module__}.{owner.__qualname__}"
+
+
+def _declared_count_bounds(count: int | tuple[int, int]) -> tuple[int, int]:
+    return (count, count) if isinstance(count, int) else count
+
+
+def patch_inventory_problems(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Differences between what a MonkeyPatch substituted and PATCH_INVENTORY.
+
+    A record is (patched target, attribute) and its multiplicity is the number
+    of setattr calls made on it.  The declared table must equal the real set: an
+    undeclared record, a declared record never made, and a multiplicity outside
+    the declared bounds are reported, and so is any other MonkeyPatch operation
+    (setitem, chdir, sys.path), which the inventory does not declare.
+    """
+    actual = collections.Counter(
+        (_patch_target_name(target), name)
+        for target, name, _prior in monkeypatch._setattr
+    )
+    problems = []
+    for record in sorted(set(actual) | set(PATCH_INVENTORY)):
+        declared = PATCH_INVENTORY[record][0] if record in PATCH_INVENTORY else 0
+        low, high = _declared_count_bounds(declared)
+        if not low <= actual[record] <= high:
+            expected = str(low) if low == high else f"{low}..{high}"
+            problems.append(
+                f"{record[0]}.{record[1]}: declared {expected}, "
+                f"patched {actual[record]}"
+            )
+    if monkeypatch._setitem:
+        problems.append(f"undeclared setitem operations: {len(monkeypatch._setitem)}")
+    if monkeypatch._cwd is not None:
+        problems.append("undeclared chdir")
+    if monkeypatch._savesyspath is not None:
+        problems.append("undeclared sys.path change")
+    return problems
 
 
 def _matrixport_gap_policy(contract: dict) -> dict:
@@ -339,11 +510,16 @@ def assemble_product_spec(
 def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
     tmp_path, monkeypatch, real_verify_release_validation
 ):
-    """Green by validation: every patch is declared in PATCH_INVENTORY.
+    """Green by validation, with one declared residual: the narrowed loader.
 
-    The final bound contract passes the real checked-in schema, carries the
-    selected world's declared Matrixport outage (never the empty policy), and
-    a gap without a policy fails both the schema and the narrowed loader.
+    Every substitution the chain makes is declared in PATCH_INVENTORY and
+    compared, as (target, attribute) records with their multiplicity, with the
+    substitutions actually made.  The final bound contract passes the real
+    checked-in schema, carries the selected world's declared Matrixport outage
+    (never the empty policy), and a gap without a policy fails both the schema
+    and the narrowed loader.  The narrowed loader skips validate_contract; the
+    PATCH_INVENTORY entries for load_contract state why that is a residual of
+    the synthetic world and not a proof that validate_contract passes.
     """
     import portfolio_financial_mvp_contract as loaded_financial
     import quant_engine.core.release as release_module
@@ -511,9 +687,99 @@ def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
             json.loads(decomposition.contract_path.read_bytes()),
             plan=json.loads(decomposition.inputs["plan_path"].read_bytes()),
         )
-    # Release validation stayed live, and every attribute the chain patched is
+    # Release validation stayed live, and every substitution the chain made is
     # declared with its reason.  MonkeyPatch keeps (target, name, prior value)
     # for each setattr until teardown.
     assert release_module._verify_release_validation is real_verify_release_validation
-    patched = {name for _target, name, _prior in monkeypatch._setattr}
-    assert patched == set(PATCH_INVENTORY), sorted(patched ^ set(PATCH_INVENTORY))
+    assert patch_inventory_problems(monkeypatch) == []
+
+
+def _replay_inventory(
+    monkeypatch: pytest.MonkeyPatch, *, skip: tuple[str, str] | None = None
+) -> dict[str, types.ModuleType]:
+    """Make exactly the declared substitutions on stand-in modules."""
+    targets: dict[str, types.ModuleType] = {}
+    for (target, attribute), (count, _reason) in PATCH_INVENTORY.items():
+        module = targets.setdefault(target, types.ModuleType(target))
+        setattr(module, attribute, object())
+        if (target, attribute) == skip:
+            continue
+        for _ in range(_declared_count_bounds(count)[1]):
+            monkeypatch.setattr(module, attribute, object())
+    return targets
+
+
+def test_patch_inventory_accepts_exactly_the_declared_substitutions() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _replay_inventory(monkeypatch)
+        assert patch_inventory_problems(monkeypatch) == []
+
+
+def test_patch_inventory_accepts_either_bound_of_a_declared_range() -> None:
+    record = ("portfolio_invested_capital", "load_contract")
+    low, high = _declared_count_bounds(PATCH_INVENTORY[record][0])
+    assert (low, high) == (1, 2)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        targets = _replay_inventory(monkeypatch, skip=record)
+        for _ in range(low):
+            monkeypatch.setattr(targets[record[0]], record[1], object())
+        assert patch_inventory_problems(monkeypatch) == []
+
+
+def test_patch_inventory_rejects_an_extra_call_on_a_declared_record() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        targets = _replay_inventory(monkeypatch)
+        monkeypatch.setattr(targets["portfolio_report"], "DEPENDENCE_POLICY", object())
+        assert patch_inventory_problems(monkeypatch) == [
+            "portfolio_report.DEPENDENCE_POLICY: declared 1, patched 2"
+        ]
+
+
+def test_patch_inventory_rejects_an_extra_load_contract_replacement() -> None:
+    """The dynamic load_contract substitutions are individually declared."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        targets = _replay_inventory(monkeypatch)
+        monkeypatch.setattr(
+            targets["portfolio_financial_mvp_contract"], "load_contract", object()
+        )
+        assert patch_inventory_problems(monkeypatch) == [
+            "portfolio_financial_mvp_contract.load_contract: declared 2, patched 3"
+        ]
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        targets = _replay_inventory(monkeypatch)
+        monkeypatch.setattr(
+            targets["portfolio_invested_capital"], "load_contract", object()
+        )
+        assert patch_inventory_problems(monkeypatch) == [
+            "portfolio_invested_capital.load_contract: declared 1..2, patched 3"
+        ]
+
+
+def test_patch_inventory_rejects_a_declared_name_on_an_undeclared_target() -> None:
+    other = types.ModuleType("portfolio_some_other_module")
+    other.load_contract = object()  # type: ignore[attr-defined]
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _replay_inventory(monkeypatch)
+        monkeypatch.setattr(other, "load_contract", object())
+        assert patch_inventory_problems(monkeypatch) == [
+            "portfolio_some_other_module.load_contract: declared 0, patched 1"
+        ]
+
+
+def test_patch_inventory_rejects_a_declared_substitution_that_was_not_made() -> None:
+    record = ("portfolio_hwm_selected_inputs", "_GOVERNED_MEMBERSHIP_CENSUS")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _replay_inventory(monkeypatch, skip=record)
+        assert patch_inventory_problems(monkeypatch) == [
+            "portfolio_hwm_selected_inputs._GOVERNED_MEMBERSHIP_CENSUS: "
+            "declared 1, patched 0"
+        ]
+
+
+def test_patch_inventory_rejects_other_monkeypatch_operations() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _replay_inventory(monkeypatch)
+        monkeypatch.setitem({}, "key", "value")
+        assert patch_inventory_problems(monkeypatch) == [
+            "undeclared setitem operations: 1"
+        ]
