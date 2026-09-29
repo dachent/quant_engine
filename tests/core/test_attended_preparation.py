@@ -832,6 +832,63 @@ def test_fabricated_tool_identity_fails_closed_as_integrity(
         )
 
 
+def test_fabricated_tool_identity_fails_closed_against_the_real_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forged tool identity is refused against the recorded commit itself.
+
+    Unlike the seam-pinned variant above, this test keeps the real
+    committed-tool resolution live: the retained manifest records the
+    checkout's own HEAD as its repository SHA, so the recorded commit
+    provably holds tool bytes whose hash differs from the forged
+    ``tool_sha256``. The rebuild decision must fail closed as an
+    integrity violation, and the recorded commit must actually have been
+    consulted -- a verdict reached without the lookup binds nothing.
+    """
+
+    import portfolio_target_series as history
+
+    _install_gated_synthetic_history_parse(monkeypatch, history)
+    fixture, generation = _retained_layered_history(tmp_path)
+
+    artifacts = {
+        name: (generation / name).read_bytes()
+        for name in history.LAYERED_HISTORY_OUTPUT_NAMES
+    }
+    forged = json.loads((generation / "generation.json").read_bytes())
+    forged["tool_sha256"] = "0" * 64
+    forged_generation = history_tests.write_layered_history_generation(
+        tmp_path / "forged-history",
+        artifacts,
+        history_tests._reidentify_manifest(forged),
+    )
+
+    real_run = subprocess.run
+    tool_lookups: list[list[str]] = []
+
+    def spying_run(args: Any, *rest: Any, **kwargs: Any) -> Any:
+        if "show" in args and any(
+            "portfolio_target_series.py" in str(part) for part in args
+        ):
+            tool_lookups.append([str(part) for part in args])
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(history.subprocess, "run", spying_run)
+
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ) as decision:
+        preparation._retained_history_requires_rebuild(
+            forged_generation,
+            fixture["contract_path"],
+            cast("preparation._HistoryAuthorities", {}),
+        )
+    assert isinstance(decision.value.__cause__, history.TargetSeriesError)
+    assert decision.value.__cause__.kind == "integrity"
+    assert tool_lookups, "the recorded commit was never consulted"
+
+
 def test_trusted_tool_identity_never_consults_the_recorded_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
