@@ -849,6 +849,31 @@ def test_reference_period_without_account_returns_is_not_paired(
     assert metrics["account_cumulative_return"] == "0.32068475"
 
 
+def test_weekly_period_opens_at_the_previous_reference_date_outside_the_window(
+    tmp_path: Path,
+) -> None:
+    """The opening date is the previous date of the whole series, not a guess.
+
+    The reference has a week end on Thursday 2026-01-08 (outside the window), so
+    the first period is (01-08, 01-16] and holds the 2026-01-09 row too:
+    1.5 * 1.1 * 1.1 - 1 = 0.815. Assuming a period as long as the next one would
+    open at 01-09 and give 0.21 instead.
+    """
+
+    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_weekly_reference(
+        spec, returns, {"2026-01-08": "0.05", **_WEEKLY_REFERENCE_RETURNS}
+    )
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    metrics = catalog["comparisons"][0]["metrics"]
+    assert metrics["observations"] == 3
+    # 1.815 * 0.99 * 1.08 - 1
+    assert metrics["account_cumulative_return"] == "0.940598"
+
+
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:
     baseline = _baseline(tmp_path)
     spec_path, returns = _inputs(tmp_path)
