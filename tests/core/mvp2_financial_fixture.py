@@ -7,7 +7,7 @@ decomposition producers.  It does not replace any of their verification seams.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 import hashlib
 import importlib.util
@@ -338,12 +338,18 @@ def build_capital_vertical(
 
 def bind_native_history_sources(
     history_fixture: dict[str, Any], ledger: dict[str, Any]
-) -> None:
-    """Write native Quantbase/Matrixport rows from the exact selected account NAVs."""
+) -> list[dict[str, Any]]:
+    """Write native Quantbase/Matrixport rows from the exact selected account NAVs.
+
+    Returns the Matrixport epoch HPR receipt the layered-history producer
+    derives from these native rows, in the report catalog's
+    ``epoch_hpr_receipts`` shape.
+    """
     from decimal import Decimal
 
     history = plan_tests.history_tests
     contract = json.loads(history_fixture["contract_path"].read_bytes())
+    epoch_hpr_receipts: list[dict[str, Any]] = []
     for provider, strategy_id in (
         ("quantbase", "volatis-strategy"),
         ("matrixport", "robuxio-crypto"),
@@ -417,6 +423,25 @@ def bind_native_history_sources(
             daily_path = history_fixture["matrixport_daily_holdings_path"]
             activity_path = history_fixture["matrixport_subscription_path"]
             product = history_fixture["matrixport_product_id"]
+            source = next(
+                row
+                for row in contract["source_segments"]
+                if row["source_id"] == "matrixport-account-generation"
+            )
+            # The first _install_hybrid_source alignment declared the
+            # owner-accepted #287 provider outage on this segment, and the
+            # selected contract snapshotted that populated policy.  Reproduce
+            # the same declared gap in these native rows -- the NAV endpoint
+            # returns no data for the date while daily holdings retain it as
+            # unavailable -- so the prepared policy, manifest exclusions, and
+            # artifacts stay consistent and bind_final_hwm_contract copies
+            # schema-valid prepared bytes INTO the selected paths.
+            declared_missing = source["declared_gap_policy"][
+                "declared_missing_source_dates"
+            ]
+            assert len(declared_missing) == 1, declared_missing
+            missing_day = declared_missing[0]
+            gap_day = date.fromisoformat(missing_day)
             # Two declared flat provider NAVs predate this synthetic purchase.
             # They establish provider history without extending account ownership.
             provider_navs = [
@@ -438,6 +463,7 @@ def bind_native_history_sources(
                         "timestamp_utc": row["as_of_date"] + "T00:00:00Z",
                     }
                     for row in provider_navs
+                    if row["as_of_date"] != missing_day
                 ],
             )
             history._write_csv(
@@ -448,8 +474,14 @@ def bind_native_history_sources(
                         "product_id": product,
                         "utc_date": row["as_of_date"],
                         "share": "10",
-                        "nav": str(Decimal(row["nav"]["value"]) / 10),
-                        "nav_available": "true",
+                        "nav": (
+                            ""
+                            if row["as_of_date"] == missing_day
+                            else str(Decimal(row["nav"]["value"]) / 10)
+                        ),
+                        "nav_available": (
+                            "false" if row["as_of_date"] == missing_day else "true"
+                        ),
                     }
                     for row in navs
                 ],
@@ -482,31 +514,25 @@ def bind_native_history_sources(
                 history._artifact(activity_path, "csv/subscription_details.csv"),
             ]
             adapter = "quant-engine-matrixport"
-            source = next(
-                row
-                for row in contract["source_segments"]
-                if row["source_id"] == "matrixport-account-generation"
-            )
-            # bind_final_hwm_contract copies this prepared contract INTO the
-            # selected paths, so these prepared bytes are the final authority:
-            # the segment must already carry the policy mapping here. This
-            # world has no declared gap, and the layered-history producer
-            # requires the matrixport policy mapping to be present.
             source["declared_gap_policy"] = history._matrixport_gap_policy(
+                missing_day,
                 nav_path=nav_path,
                 holdings_path=history_fixture["matrixport_holdings_path"],
                 subscription_path=activity_path,
                 daily_holdings_path=daily_path,
                 product_id=product,
             )
-            projected, _ = history.target_series._matrixport_returns(
+            # Passing the declared policy makes the producer prove it against
+            # these artifacts and bind its epoch HPR receipt to that policy.
+            projected, matrix_coverage = history.target_series._matrixport_returns(
                 nav_path,
                 history_fixture["matrixport_holdings_path"],
                 activity_path,
                 daily_path,
                 product,
                 REQUIRED_STRATEGIES[strategy_id],
-                frozenset(),
+                frozenset({gap_day}),
+                source["declared_gap_policy"],
             )
             correction_ids = ("robuxio-account-live-after-funding",)
             provider_returns = history.target_series._matrixport_provider_returns(
@@ -529,20 +555,62 @@ def bind_native_history_sources(
             if row["strategy_id"] == strategy_id
         }
         actual = {row["date"]: Decimal(row["return"]) for row in projected}
-        assert actual.keys() == expected.keys(), (
-            provider,
-            actual.keys() ^ expected.keys(),
-        )
+        if provider == "matrixport":
+            # The declared outage omits the gap-date and first post-gap daily
+            # returns from both the native projection and the accepted ledger
+            # (filtered in build_shared_history_source.project).  Bind the
+            # two-day owner holding-period receipt to the exact artifact NAV
+            # endpoint ratio.
+            omitted_day = (gap_day + timedelta(days=1)).isoformat()
+            unavailable = {missing_day, omitted_day}
+            assert unavailable.isdisjoint(actual)
+            assert unavailable.isdisjoint(expected)
+            assert actual.keys() == expected.keys(), (
+                provider,
+                actual.keys() ^ expected.keys(),
+            )
+            receipts = source["declared_gap_policy"]["span_return_receipts"]
+            assert len(receipts) == 1
+            nav_by_day = {
+                row["as_of_date"]: Decimal(row["nav"]["value"]) for row in provider_navs
+            }
+            span_start_day = (gap_day - timedelta(days=1)).isoformat()
+            assert receipts[0]["missing_source_date"] == missing_day
+            assert receipts[0]["span_start_date"] == span_start_day
+            assert receipts[0]["span_end_date"] == omitted_day
+            assert receipts[0]["span_days"] == 2
+            span = nav_by_day[omitted_day] / nav_by_day[span_start_day] - 1
+            assert abs(Decimal(receipts[0]["return"]) - span) < Decimal("1e-25")
+        else:
+            assert actual.keys() == expected.keys(), (
+                provider,
+                actual.keys() ^ expected.keys(),
+            )
         assert all(
             abs(actual[day] - expected[day]) < Decimal("1e-25") for day in actual
         )
         manifest_path = history_fixture[f"{provider}_manifest_path"]
+        coverage_extra = (
+            {"declared_exclusions": history._matrixport_exclusions(missing_day)}
+            if provider == "matrixport"
+            else None
+        )
         generation = history._core_generation_manifest(
-            manifest_path, adapter, ledger["as_of_date"], artifacts
+            manifest_path, adapter, ledger["as_of_date"], artifacts, coverage_extra
         )
         history._pointer(
             history_fixture[f"{provider}_pointer_path"], generation, manifest_path
         )
+        if provider == "matrixport":
+            epoch_hpr_receipts.append(
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "receipt": matrix_coverage["epoch_hpr_receipt"],
+                    "source_generation_id": generation,
+                    "source_id": "matrixport-account-generation",
+                    "strategy_id": strategy_id,
+                }
+            )
         history._update_source_generation(
             contract,
             f"{provider}-account-generation",
@@ -578,6 +646,7 @@ def bind_native_history_sources(
             if anchor["provider_id"] == provider:
                 anchor["generation_id"] = generation
     _write_json(history_fixture["contract_path"], contract)
+    return epoch_hpr_receipts
 
 
 def build_shared_history_source(
@@ -601,6 +670,35 @@ def build_shared_history_source(
 
     def project(baseline: dict[str, Any], ledger: dict[str, Any]) -> None:
         project_account_source(baseline, ledger)
+        # The accepted ledger must carry the catalog result the real builder
+        # enforces for the declared #287 matrixport outage: no daily return on
+        # an unavailable date enters strategy_returns.  Keep the gap day's NAV
+        # observation -- bind_native_history_sources needs it for the retained
+        # unavailable holdings row -- but filter the returns before evidence,
+        # hashing, and downstream consumers bind them.
+        matrixport_gap_policy = next(
+            row["declared_gap_policy"]
+            for row in json.loads(prepared["contract_path"].read_bytes())[
+                "source_segments"
+            ]
+            if row["source_id"] == "matrixport-account-generation"
+        )
+        unavailable_return_dates = frozenset(
+            matrixport_gap_policy["unavailable_return_dates"]
+        )
+        assert len(unavailable_return_dates) == 2, unavailable_return_dates
+        unfiltered_count = len(ledger["strategy_returns"])
+        ledger["strategy_returns"] = [
+            row
+            for row in ledger["strategy_returns"]
+            if row["strategy_id"] != "robuxio-crypto"
+            or row["date"] not in unavailable_return_dates
+        ]
+        removed_count = unfiltered_count - len(ledger["strategy_returns"])
+        assert removed_count == len(unavailable_return_dates), (
+            removed_count,
+            unavailable_return_dates,
+        )
         ledger["strategy_evidence"] = deepcopy(metadata)
         for row in ledger["strategy_evidence"]:
             returns = [
@@ -617,8 +715,19 @@ def build_shared_history_source(
             row["sources"]["account_returns"]["sha256"] = hashlib.sha256(
                 _canonical(returns)
             ).hexdigest()
-        bind_native_history_sources(prepared, ledger)
-        baseline_helper.mutate_baseline(baseline, ledger)
+        epoch_hpr_receipts = bind_native_history_sources(prepared, ledger)
+        # The report consumer compounds a single-account path over the daily
+        # returns with the epoch HPR gap spans spliced in; build_candidate
+        # supplies those receipts from the history contract
+        # (portfolio_report.py "epoch_hpr_receipts" catalog merge).
+        # mutate_baseline's report oracle calls _account_strategy_performance
+        # on the bare catalog, so it receives the producer's receipt for that
+        # call only; the serialized baseline catalog never carries it.
+        baseline["epoch_hpr_receipts"] = epoch_hpr_receipts
+        try:
+            baseline_helper.mutate_baseline(baseline, ledger)
+        finally:
+            del baseline["epoch_hpr_receipts"]
 
     paths = hwm._fixture(
         root / "selected",
@@ -726,6 +835,7 @@ def build_shared_history_source(
     history._restore_retained_echo_correction(contract)
     _bind_selected_ai_version(prepared, contract)
     _write_json(prepared["contract_path"], contract)
+    _install_source_period_authority(prepared)
     _write_json(
         root / "shared-source-paths.json",
         {
@@ -736,8 +846,91 @@ def build_shared_history_source(
             "selected": {key: str(value) for key, value in paths.items()},
         },
     )
+    # Bind the contract's materialized segment identities under the same full
+    # source-period authority the decomposition vertical's layered build uses.
+    # Under a current admission the producer keeps the admitted provider-ledger
+    # Volatis rows; without one it selects the native Quantbase recomputation
+    # (_quantbase_account_live_from_ledger, Decimal-equal by its own check).
+    # The segment identity hashes the return text, so identities bound in the
+    # other mode never match the generation.
+    _install_synthetic_source_period_seams(
+        monkeypatch, prepared, (history.target_series,)
+    )
     history._refresh_materialized_segment_identities(prepared)
     return prepared, paths
+
+
+def _install_synthetic_source_period_seams(
+    monkeypatch: Any, fixture: dict[str, Any], modules: tuple[Any, ...]
+) -> None:
+    """Bind the synthetic admission and P123 version-equivalence stand-ins.
+
+    The admission stand-in follows the layered-history tests' precedent
+    (tests/portfolio_analytics/test_portfolio_layered_history.py, which stubs
+    _current_source_admission_authority with _synthetic_current_admission); no
+    test precedent stubs _portfolio123_version_equivalence.  Both seams bind
+    real provider capture perimeters that have their own real-data tests and
+    that this synthetic world does not have.  Both stand-ins evaluate lazily,
+    because later steps rewrite the contract (registry binding) before a
+    layered build, and the admission proof must bind the bytes each call sees.
+    """
+    history = plan_tests.history_tests
+
+    def synthetic_admission(**kwargs: Any) -> dict[str, Any]:
+        return history._synthetic_current_admission(fixture)
+
+    def synthetic_equivalence(**kwargs: Any) -> dict[str, Any]:
+        contract = json.loads(fixture["contract_path"].read_bytes())
+        return {
+            "authority": "synthetic-p123-version-equivalence",
+            "accepted_strategy_version": next(
+                strategy["strategy_version"]["version_ref"]
+                for strategy in contract["strategies"]
+                if strategy["strategy_id"] == "p123-ai-factor"
+            ),
+            "strategy_id": "p123-ai-factor",
+        }
+
+    for module in modules:
+        monkeypatch.setattr(
+            module, "_current_source_admission_authority", synthetic_admission
+        )
+        monkeypatch.setattr(
+            module, "_portfolio123_version_equivalence", synthetic_equivalence
+        )
+
+
+def _install_source_period_authority(fixture: dict[str, Any]) -> None:
+    """Declare this world's synthetic source-period authority inputs.
+
+    The prepared contract declares the owner-accepted #287 matrixport outage.
+    The decomposition planner plans a declared source gap only under full
+    source-period authority, so the world carries the admission receipt,
+    admitted input contract, and Portfolio123 version-evidence locators that
+    the layered-history producer and verifier bind.  The receipt and evidence
+    contents are synthetic stand-ins: `_install_synthetic_source_period_seams`
+    binds the admission authority and the captured-source version-equivalence
+    perimeter, because this world deliberately has no real provider capture
+    perimeter to reverify.
+    """
+
+    root = fixture["contract_path"].parent
+    fixture["provider_admission_receipt_path"] = _write_json(
+        root / "admit-or-declare-receipt.json",
+        {
+            "authority": "synthetic-current-admission",
+            "schema_version": 1,
+        },
+    )
+    fixture["financial_input_contract_path"] = fixture["contract_path"]
+    fixture["portfolio123_version_evidence_path"] = _write_json(
+        root / "portfolio123-version-evidence.json",
+        {
+            "authority": "synthetic-p123-version-equivalence",
+            "schema_version": 1,
+            "strategy_id": "p123-ai-factor",
+        },
+    )
 
 
 def _bind_selected_ai_version(
@@ -885,12 +1078,17 @@ def build_hwm_vertical(root: Path, paths: dict[str, Path]) -> dict[str, Path]:
 
 
 def install_synthetic_financial_authority(
-    monkeypatch: Any, contract_paths: list[Path]
+    monkeypatch: Any,
+    contract_paths: list[Path],
+    *,
+    source_period_fixture: dict[str, Any] | None = None,
 ) -> Any:
     """Configure only fixture source identities; retain canonical financial rules.
 
     Production admission is deliberately outside this numerical integration proof.
     Every financial producer and numeric replay verifier remains the real method.
+    With ``source_period_fixture`` the final numerical verifier also binds the
+    synthetic source-period seams the layered history was built under.
     """
     import portfolio_financial_mvp_contract as financial
     import portfolio_invested_capital as capital
@@ -913,6 +1111,21 @@ def install_synthetic_financial_authority(
         contract = plan_tests.history_tests._synthetic_history_contract(
             Path(contract_path)
         )[0]
+        # The synthetic-authority swap must not bypass contract QC: run the
+        # real checked-in schema validation on the accepted bytes, exactly as
+        # the unpatched load_contract does, before any consumer sees them.
+        schema = json.loads(
+            (
+                REPOSITORY_ROOT
+                / "schemas/portfolio/financial-mvp-source-contract.schema.json"
+            ).read_bytes()
+        )
+        errors = financial.schema_errors(schema, contract, schema)
+        if errors:
+            raise financial.FinancialMvpContractError(
+                "financial MVP contract schema validation failed: "
+                + "; ".join(errors[:10])
+            )
         assert contract["financial_outcomes"] == canonical["financial_outcomes"]
         # Only provider-generation source identities vary in the synthetic census.
         # Every membership, epoch, strategy and provider-lane rule stays canonical.
@@ -967,6 +1180,10 @@ def install_synthetic_financial_authority(
         return plan_tests.history_tests._synthetic_history_contract(path)
 
     monkeypatch.setattr(verifier, "_history_contract", history_contract)
+    if source_period_fixture is not None:
+        _install_synthetic_source_period_seams(
+            monkeypatch, source_period_fixture, (verifier,)
+        )
     monkeypatch.setattr(current_plan, "_layered_history_module", lambda: verifier)
     return load_contract
 
@@ -1675,6 +1892,9 @@ class DecompositionVertical:
     decomposition_generations: dict[tuple[str, str, str], Path]
     lenses_root: Path
     inputs: dict[str, Any]
+    # The layered-history reader authorities the plan bundles were built with,
+    # keyed by the planner argument name; empty without source-period authority.
+    history_authorities: dict[str, Path] = field(default_factory=dict)
 
 
 def build_decomposition_vertical(
@@ -1702,6 +1922,12 @@ def build_decomposition_vertical(
         return _install_hybrid_source(original_history_fixture(path))
 
     monkeypatch.setattr(history, "_history_fixture", hybrid_history_fixture)
+    if prepared_history_fixture is not None:
+        # The producer and the planner's verifier are two module instances of
+        # the same file; both bind the same synthetic source-period seams.
+        _install_synthetic_source_period_seams(
+            monkeypatch, prepared_history_fixture, (history.target_series, verifier)
+        )
     inputs = plan_tests._fixture(root / "inputs", plan_mutator=_complete_plan)
     # This vertical expands the two-series planner fixture to all seven series.
     # Its synthetic factor calendar uses the same declared 252-anchor year.
@@ -1763,6 +1989,49 @@ def build_decomposition_vertical(
     plan_bundles: dict[str, Path] = {}
     generations: dict[tuple[str, str, str], Path] = {}
     kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    if prepared_history_fixture is not None:
+        # The planner binds each declared provider source gap to the provider
+        # generation manifest SHA-256 carried as a providers/<id>/generation.json
+        # artifact on the provider-ledger manifest.  The real provider-ledger
+        # tool emits that reference; the staged synthetic snapshot omits it.
+        # Give the planner a manifest carrying the true matrixport generation
+        # reference so the declared 2026-04-25 outage disclosure binds the
+        # actual generation it names.
+        matrixport_manifest_path = prepared_history_fixture["matrixport_manifest_path"]
+        planner_manifest = json.loads(
+            prepared_history_fixture["provider_ledger_manifest_path"].read_bytes()
+        )
+        planner_manifest["artifacts"] = [
+            *planner_manifest["artifacts"],
+            {
+                "artifact_id": "providers/matrixport/generation.json",
+                "as_of_date": planner_manifest["as_of_date"],
+                "schema": {"name": "generation-manifest", "version": "1"},
+                "sha256": hashlib.sha256(
+                    matrixport_manifest_path.read_bytes()
+                ).hexdigest(),
+                "size_bytes": matrixport_manifest_path.stat().st_size,
+            },
+        ]
+        kwargs["provider_ledger_manifest_path"] = _write_json(
+            root / "inputs" / "provider-ledger-gap-authority-manifest.json",
+            planner_manifest,
+        )
+        # Full source-period authority: the planner forwards these to the
+        # layered-history verifier, which binds them through the synthetic
+        # seams installed above.
+        kwargs["provider_admission_receipt_path"] = prepared_history_fixture[
+            "provider_admission_receipt_path"
+        ]
+        kwargs["financial_input_contract_path"] = prepared_history_fixture[
+            "financial_input_contract_path"
+        ]
+        kwargs["provider_ledger_catalog_path"] = prepared_history_fixture[
+            "provider_ledger_catalog_path"
+        ]
+        kwargs["portfolio123_version_evidence_path"] = prepared_history_fixture[
+            "portfolio123_version_evidence_path"
+        ]
     for mode_index, mode in enumerate(EVIDENCE_MODES):
         written = plan_tests.planner.write_bundle(
             output_root=root / "p" / str(mode_index),
@@ -1779,6 +2048,16 @@ def build_decomposition_vertical(
         decomposition_generations=generations,
         lenses_root=root / "d",
         inputs=inputs,
+        history_authorities={
+            key: kwargs[key]
+            for key in (
+                "provider_admission_receipt_path",
+                "provider_ledger_manifest_path",
+                "provider_ledger_catalog_path",
+                "portfolio123_version_evidence_path",
+            )
+            if prepared_history_fixture is not None
+        },
     )
     if before_models is not None:
         before_models(vertical)
