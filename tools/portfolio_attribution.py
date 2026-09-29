@@ -33,7 +33,7 @@ from quant_engine.portfolio_ledger import ReturnsError, splice_spans
 
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.2.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
 AVAILABLE_STATUSES: Final = {
@@ -41,6 +41,9 @@ AVAILABLE_STATUSES: Final = {
     "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
 }
 AVAILABLE_STATUS: Final = "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
+# A comparison declaring fewer periods a year than this has a reference coarser
+# than daily (weekly, monthly): its account side is compounded per reference period.
+DAILY_PERIODS_PER_YEAR: Final = 252
 # Where the account side of an available comparison was read from.
 ACCOUNT_SOURCE_BASELINE_LIVE: Final = "BASELINE_ACCOUNT_LIVE"
 ACCOUNT_SOURCE_RETAINED_HISTORY: Final = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
@@ -332,6 +335,40 @@ def _retained_account_history(
     return retained_series[account_series_id]
 
 
+def _compound_to_reference_periods(
+    account: Mapping[date, Decimal],
+    reference: Mapping[date, Decimal],
+    window: Mapping[date, Decimal],
+) -> dict[date, Decimal]:
+    """The account's returns compounded over each coarse reference period.
+
+    A reference return dated ``day`` covers the period from the previous date of
+    the whole reference series (not only of the comparison window) up to and
+    including ``day``. Pairing it with the account's one-day return on ``day``
+    would compare two horizons, so the account's own returns inside that period
+    are compounded into one return dated ``day``. The first date of the series has
+    no previous date; its period is taken to be as long as the next one. A period
+    without an account return yields no pair, and account returns outside every
+    period of the window are not used.
+    """
+
+    dates = sorted(reference)
+    opens = dict(zip(dates[1:], dates))
+    if len(dates) > 1:
+        opens[dates[0]] = dates[0] - (dates[1] - dates[0])
+    account_dates = sorted(account)
+    result: dict[date, Decimal] = {}
+    for day in sorted(window):
+        if day not in opens:  # a one-date series has no period to compound over
+            continue
+        inside = [
+            (item, account[item]) for item in account_dates if opens[day] < item <= day
+        ]
+        if inside:
+            result[day] = splice_spans(inside).cumulative_return
+    return result
+
+
 def _cumulative(values: Sequence[Decimal]) -> Decimal:
     wealth = Decimal(1)
     with localcontext() as context:
@@ -479,20 +516,27 @@ def _accepted_comparison(
             start is not None and end is not None and end < start
         ):
             raise AttributionValidationError("comparison interval is invalid")
-        account_window = {
-            day: value
-            for day, value in account_full_series.items()
-            if (start is None or day >= start) and (end is None or day <= end)
-        }
         reference_window = {
             day: value
             for day, value in reference_series[reference_id].items()
             if (start is None or day >= start) and (end is None or day <= end)
         }
+        periods_per_year = int(accepted.get("periods_per_year", 0))
+        if periods_per_year < DAILY_PERIODS_PER_YEAR:
+            # A reference coarser than daily reports one return per period, so the
+            # account's daily returns are compounded over the same periods before
+            # the exact-date pairing (T6-F2); daily comparisons are unchanged.
+            account_window = _compound_to_reference_periods(
+                account_full_series, reference_series[reference_id], reference_window
+            )
+        else:
+            account_window = {
+                day: value
+                for day, value in account_full_series.items()
+                if (start is None or day >= start) and (end is None or day <= end)
+            }
         metrics = _comparison_metrics(
-            account_window,
-            reference_window,
-            int(accepted.get("periods_per_year", 0)),
+            account_window, reference_window, periods_per_year
         )
         expected_gap = accepted.get("expected_legacy_cumulative_gap")
         if expected_gap is not None:
