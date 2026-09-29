@@ -20,7 +20,7 @@ A check that cannot evaluate raises; the runner turns that into a blocking
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import math
@@ -51,6 +51,10 @@ BLOCKERS = frozenset({BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION})
 
 USD_TOLERANCE = Decimal("0.01")
 RETURN_TOLERANCE = Decimal("1e-8")
+# C1 section 5-5: the published label of an epoch TWR that splices hash-bound HPR
+# gap spans, and the only span length the epoch HPR receipt admits.
+EPOCH_RETURN_LABEL = "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
+EPOCH_SPAN_DAYS = 2
 WINDOW_START_SLACK_DAYS = 5
 ONE_YEAR_DAYS = 365
 
@@ -398,6 +402,13 @@ def compound_window(
     end: date | None,
     layer: str = "ACCOUNT_LIVE",
 ) -> tuple[Decimal | None, int]:
+    """The plain geometric compound of the daily rows dated in ``[start, end]``.
+
+    Daily-only by design: it never splices an epoch HPR gap span. The benchmark
+    account return and the dependence performance are daily-only views, so the
+    epoch-basis comparisons use ``splice_window`` instead (C1 section 5-5).
+    """
+
     selected = [
         value
         for day, value, evidence in returns_by_strategy(ctx).get(strategy_id, [])
@@ -408,6 +419,527 @@ def compound_window(
     if not selected:
         return None, 0
     return compound(selected), len(selected)
+
+
+# ------------------------------------------ epoch HPR span receipts (C1 section 5-5)
+#
+# The contract forbids spans in the daily ``strategy_returns`` series and requires them
+# in the epoch TWR: a declared missing source date is bridged by a two-day, no-flow
+# holding-period span published in ``strategy_history_contract.epoch_hpr_receipts``.
+# The validator re-implements the splice (it may not import the production return
+# engine) and never trusts a receipt: each span is re-verified against the report's
+# own daily rows and capital chain, and a span that fails is never spliced.
+
+
+@dataclass(frozen=True)
+class LiveRow:
+    day: date
+    value: Decimal
+    capital: Decimal | None
+
+
+@dataclass(frozen=True)
+class ReceiptSpan:
+    """A declared gap span ``(start, end]``; only a verified span is ever spliced."""
+
+    start: date
+    end: date
+    value: Decimal | None
+    verified: bool
+
+
+@dataclass(frozen=True)
+class EpochReceipt:
+    strategy_id: str
+    position: int
+    declares_spans: bool
+    spans: tuple[ReceiptSpan, ...]
+
+
+@dataclass(frozen=True)
+class Splice:
+    """Daily rows in a window times the verified spans ``(S, E]`` inside it.
+
+    ``value`` is ``None`` when the window has no daily row or when the comparator
+    declines (``declined`` says why): an edge strictly inside a span, or an
+    unverified span inside the window, has no exact value.
+    """
+
+    value: Decimal | None
+    rows: int
+    spans: int
+    declined: str | None = None
+
+
+_RECEIPTS_PATH = "$.strategy_history_contract.epoch_hpr_receipts"
+_SPAN_EXPECTATION = (
+    "a two-day, no-flow span (S, E] that starts on an observed daily row, replaces "
+    "exactly the missing rows, and whose return equals the report's capital chain "
+    "bc(first row after E) / (bc(S) x (1 + r_S)) - 1 (tolerance 1e-8)"
+)
+
+
+def live_rows(ctx: Context) -> dict[str, list[LiveRow]]:
+    """Each strategy's ACCOUNT_LIVE daily rows in date order, with their capital."""
+
+    cached = ctx._cache.get("live_rows")
+    if isinstance(cached, dict):
+        return cached
+    series: dict[str, list[LiveRow]] = {}
+    for row in rows(ctx.report, "strategy_returns"):
+        day = to_date(row.get("date"))
+        value = to_decimal(row.get("return"))
+        if row.get("evidence_layer") != "ACCOUNT_LIVE" or day is None or value is None:
+            continue
+        series.setdefault(str(row.get("strategy_id")), []).append(
+            LiveRow(day, value, to_decimal(row.get("beginning_capital")))
+        )
+    for values in series.values():
+        values.sort(key=lambda item: item.day)
+    ctx._cache["live_rows"] = series
+    return series
+
+
+def _receipt_finding(
+    klass: str,
+    entity: str,
+    observed: Any,
+    expected: Any,
+    json_path: str,
+    message: str,
+) -> Finding:
+    return _finding(
+        "returns.epoch_hpr_receipts_verified",
+        klass,
+        entity,
+        observed,
+        expected,
+        REPORT,
+        json_path,
+        ("B2",),
+        message,
+    )
+
+
+def _span_problems(
+    raw: Mapping[str, Any],
+    start: date,
+    end: date,
+    value: Decimal | None,
+    series: Sequence[LiveRow],
+    previous_end: date | None,
+) -> tuple[list[str], list[str], Decimal | None]:
+    """Contradictions and missing evidence for one span, and its capital-chain return.
+
+    The admission shape is the production one (two days, the missing source date
+    inside, no subscription event, return above -1, S observed, no row in (S, E]),
+    re-checked here, plus the capital chain: with no flow in the span the capital
+    at the close of E (the beginning capital of the row dated E + 1) over the
+    capital at the close of S (``bc(S) x (1 + r_S)``) is the span return.
+    """
+
+    contradictions: list[str] = []
+    missing: list[str] = []
+    span_days = raw.get("span_days")
+    if span_days != EPOCH_SPAN_DAYS or (end - start).days != span_days:
+        contradictions.append(
+            f"span_days {span_days!r} is not {EPOCH_SPAN_DAYS} = E - S "
+            f"({(end - start).days})"
+        )
+    missing_day = to_date(raw.get("missing_source_date"))
+    if missing_day is None or not start < missing_day < end:
+        contradictions.append(
+            "missing_source_date does not fall strictly inside (S, E)"
+        )
+    events = raw.get("subscription_events_in_span")
+    if isinstance(events, bool) or events != 0:
+        contradictions.append(f"subscription_events_in_span is {events!r}, not 0")
+    if value is None or value <= -1:
+        contradictions.append("the span return is not a decimal above -1")
+    if previous_end is not None and start <= previous_end:
+        contradictions.append(f"the span overlaps a span ending {previous_end}")
+    at_start = [row for row in series if row.day == start]
+    if len(at_start) != 1:
+        contradictions.append(f"S {start} is not exactly one observed daily row")
+    inside = [row.day.isoformat() for row in series if start < row.day <= end]
+    if inside:
+        contradictions.append(f"daily rows lie inside the span: {', '.join(inside)}")
+    after = next((row for row in series if row.day > end), None)
+    chained: Decimal | None = None
+    if after is None or after.day != end + timedelta(days=1):
+        contradictions.append(
+            "the first daily row after E is "
+            + ("absent" if after is None else f"dated {after.day}")
+            + f", not {end + timedelta(days=1)}: the span does not close the gap"
+        )
+    elif len(at_start) == 1 and sum(row.day == after.day for row in series) == 1:
+        begin = at_start[0]
+        if (
+            begin.capital is None
+            or after.capital is None
+            or begin.capital <= 0
+            or after.capital <= 0
+            or begin.value <= -1
+        ):
+            missing.append(
+                "the capital chain (beginning_capital of the rows dated S and E + 1) "
+                "is unavailable, so the span return cannot be verified"
+            )
+        else:
+            chained = after.capital / (begin.capital * (Decimal(1) + begin.value))
+            chained -= Decimal(1)
+            if value is not None and abs(value - chained) > RETURN_TOLERANCE:
+                contradictions.append(
+                    f"the span return differs from the capital chain {chained} by "
+                    f"{value - chained}"
+                )
+    else:
+        contradictions.append("duplicate daily rows make the capital chain ambiguous")
+    return contradictions, missing, chained
+
+
+def _verify_receipt(
+    ctx: Context, strategy: str, position: int, outer: Mapping[str, Any]
+) -> tuple[EpochReceipt, list[Finding]]:
+    """Re-derive one strategy's epoch HPR receipt from the report's own rows."""
+
+    pointer = f"{_RECEIPTS_PATH}[{position}].receipt"
+    findings: list[Finding] = []
+    receipt = outer.get("receipt")
+    raw_spans = (
+        receipt.get("span_return_receipts") if isinstance(receipt, Mapping) else None
+    )
+    if not isinstance(receipt, Mapping) or not isinstance(raw_spans, list):
+        findings.append(
+            _receipt_finding(
+                BLOCKER_AUTHORITY,
+                strategy,
+                sorted(receipt) if isinstance(receipt, Mapping) else receipt,
+                "a receipt object with a span_return_receipts list",
+                pointer,
+                "the epoch HPR receipt is malformed; none of its spans is spliced",
+            )
+        )
+        return EpochReceipt(strategy, position, False, ()), findings
+    series = live_rows(ctx).get(strategy, [])
+    rows_end = series[-1].day if series else None
+    receipt_start = to_date(receipt.get("observed_start"))
+    receipt_end = to_date(receipt.get("observed_end"))
+    # A receipt may describe evidence past the published daily rows (a ragged
+    # perimeter past the calculation cutoff); spans starting at or after the last
+    # published row are then never spliced, and its totals are not recomputable.
+    ragged = receipt_end is not None and rows_end is not None and receipt_end > rows_end
+    if not series:
+        findings.append(
+            _receipt_finding(
+                BLOCKER_AUTHORITY,
+                strategy,
+                {"strategy_returns_account_live_rows": 0},
+                "the receipt's daily ACCOUNT_LIVE rows in strategy_returns",
+                pointer,
+                "an epoch HPR receipt names a strategy without daily rows",
+            )
+        )
+    spans: list[ReceiptSpan] = []
+    previous_end: date | None = None
+    ordered: list[tuple[date, date, int, Mapping[str, Any]]] = []
+    for index, raw in enumerate(raw_spans):
+        span_path = f"{pointer}.span_return_receipts[{index}]"
+        start = (
+            to_date(raw.get("span_start_date")) if isinstance(raw, Mapping) else None
+        )
+        end = to_date(raw.get("span_end_date")) if isinstance(raw, Mapping) else None
+        if not isinstance(raw, Mapping) or start is None or end is None or end <= start:
+            findings.append(
+                _receipt_finding(
+                    BLOCKER_INVARIANT,
+                    strategy,
+                    raw,
+                    _SPAN_EXPECTATION,
+                    span_path,
+                    "the span is not a dated interval (S, E] with S before E",
+                )
+            )
+            continue
+        ordered.append((start, end, index, raw))
+    for start, end, index, raw in sorted(ordered, key=lambda item: item[:3]):
+        value = to_decimal(raw.get("return"))
+        if ragged and rows_end is not None and start >= rows_end:
+            spans.append(ReceiptSpan(start, end, value, False))
+            continue
+        contradictions, missing, chained = _span_problems(
+            raw, start, end, value, series, previous_end
+        )
+        previous_end = end if previous_end is None else max(previous_end, end)
+        spans.append(ReceiptSpan(start, end, value, not contradictions and not missing))
+        if contradictions or missing:
+            findings.append(
+                _receipt_finding(
+                    BLOCKER_INVARIANT if contradictions else BLOCKER_AUTHORITY,
+                    f"{strategy}|{start.isoformat()}..{end.isoformat()}",
+                    {
+                        "span_start_date": raw.get("span_start_date"),
+                        "span_end_date": raw.get("span_end_date"),
+                        "missing_source_date": raw.get("missing_source_date"),
+                        "span_days": raw.get("span_days"),
+                        "subscription_events_in_span": raw.get(
+                            "subscription_events_in_span"
+                        ),
+                        "return": raw.get("return"),
+                        "capital_chain_return": chained,
+                    },
+                    _SPAN_EXPECTATION,
+                    f"{pointer}.span_return_receipts[{index}]",
+                    "; ".join(contradictions + missing),
+                )
+            )
+    findings.extend(
+        _receipt_totals(
+            strategy, pointer, receipt, raw_spans, spans, series, ragged, receipt_start
+        )
+    )
+    return EpochReceipt(strategy, position, bool(raw_spans), tuple(spans)), findings
+
+
+def _receipt_totals(
+    strategy: str,
+    pointer: str,
+    receipt: Mapping[str, Any],
+    raw_spans: Sequence[Any],
+    spans: Sequence[ReceiptSpan],
+    series: Sequence[LiveRow],
+    ragged: bool,
+    receipt_start: date | None,
+) -> list[Finding]:
+    """The receipt's totals re-derive from the report's rows and the receipt's spans.
+
+    The receipt identity ``(1 + daily) x prod(1 + span) = 1 + epoch`` is the only
+    tie between the daily-basis and epoch-basis views; ``daily_cumulative_return``
+    and ``epoch_cumulative_return`` are recomputed from the published daily rows of
+    the receipt window and its spans, unless the receipt runs past those rows.
+    """
+
+    daily_claim = to_decimal(receipt.get("daily_cumulative_return"))
+    epoch_claim = to_decimal(receipt.get("epoch_cumulative_return"))
+    count_claim = receipt.get("daily_return_observations")
+    links_claim = receipt.get("epoch_holding_period_link_observations")
+    receipt_end = to_date(receipt.get("observed_end"))
+    contradictions: list[str] = []
+    missing: list[str] = []
+    expected: dict[str, Any] = {}
+    if daily_claim is None or epoch_claim is None:
+        missing.append("the receipt lacks a decimal daily or epoch cumulative return")
+    values = [span.value for span in spans]
+    if (
+        daily_claim is not None
+        and epoch_claim is not None
+        and len(values) == len(raw_spans)
+        and all(value is not None for value in values)
+    ):
+        linked = Decimal(1) + daily_claim
+        for value in values:
+            assert value is not None
+            linked *= Decimal(1) + value
+        expected["receipt_identity"] = "(1 + daily) x prod(1 + span) = 1 + epoch"
+        if abs(linked - (Decimal(1) + epoch_claim)) > RETURN_TOLERANCE:
+            contradictions.append(
+                "(1 + daily_cumulative_return) x prod(1 + span return) differs from "
+                f"1 + epoch_cumulative_return by {linked - Decimal(1) - epoch_claim}"
+            )
+    if (
+        isinstance(count_claim, int)
+        and not isinstance(count_claim, bool)
+        and links_claim != count_claim + len(raw_spans)
+    ):
+        contradictions.append(
+            f"epoch_holding_period_link_observations {links_claim!r} is not "
+            f"daily_return_observations + spans ({count_claim + len(raw_spans)})"
+        )
+    if series and receipt_start is not None and receipt_end is not None and not ragged:
+        window = [row for row in series if receipt_start <= row.day <= receipt_end]
+        daily = compound(row.value for row in window)
+        epoch = Decimal(1) + daily
+        boundary = receipt_start - timedelta(days=1)
+        for span in spans:
+            if (
+                span.value is not None
+                and span.start >= boundary
+                and span.end <= receipt_end
+            ):
+                epoch *= Decimal(1) + span.value
+        epoch -= Decimal(1)
+        expected.update(
+            {
+                "daily_cumulative_return": daily,
+                "epoch_cumulative_return": epoch,
+                "daily_return_observations": len(window),
+            }
+        )
+        if daily_claim is not None and abs(daily_claim - daily) > RETURN_TOLERANCE:
+            contradictions.append(
+                f"daily_cumulative_return differs from the compound of the report's "
+                f"{len(window)} daily rows {daily} by {daily_claim - daily}"
+            )
+        if epoch_claim is not None and abs(epoch_claim - epoch) > RETURN_TOLERANCE:
+            contradictions.append(
+                f"epoch_cumulative_return differs from the report's daily rows spliced "
+                f"with the receipt spans {epoch} by {epoch_claim - epoch}"
+            )
+        if count_claim != len(window):
+            contradictions.append(
+                f"daily_return_observations {count_claim!r} is not the report's "
+                f"{len(window)} daily rows in the receipt window"
+            )
+    elif receipt_start is None or receipt_end is None:
+        missing.append("the receipt lacks an observed_start/observed_end window")
+    if not contradictions and not missing:
+        return []
+    return [
+        _receipt_finding(
+            BLOCKER_INVARIANT if contradictions else BLOCKER_AUTHORITY,
+            strategy,
+            {
+                "daily_cumulative_return": receipt.get("daily_cumulative_return"),
+                "epoch_cumulative_return": receipt.get("epoch_cumulative_return"),
+                "daily_return_observations": count_claim,
+                "epoch_holding_period_link_observations": links_claim,
+                "observed_start": receipt.get("observed_start"),
+                "observed_end": receipt.get("observed_end"),
+                "spans": len(raw_spans),
+            },
+            expected
+            or "receipt totals re-derived from the report's own rows and spans",
+            pointer,
+            "; ".join(contradictions + missing),
+        )
+    ]
+
+
+def _epoch_receipt_index(ctx: Context) -> tuple[dict[str, EpochReceipt], list[Finding]]:
+    cached = ctx._cache.get("epoch_receipts")
+    if isinstance(cached, tuple):
+        return cached
+    receipts: dict[str, EpochReceipt] = {}
+    findings: list[Finding] = []
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    contract = node(ctx.report, "strategy_history_contract")
+    for position, outer in enumerate(rows(contract, "epoch_hpr_receipts")):
+        if outer.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy = outer.get("strategy_id")
+        if not isinstance(strategy, str) or not strategy:
+            findings.append(
+                _receipt_finding(
+                    BLOCKER_AUTHORITY,
+                    "strategy_history_contract.epoch_hpr_receipts",
+                    strategy,
+                    "a strategy_id",
+                    f"{_RECEIPTS_PATH}[{position}].strategy_id",
+                    "an epoch HPR receipt names no strategy",
+                )
+            )
+            continue
+        grouped.setdefault(strategy, []).append((position, outer))
+    for strategy, entries in grouped.items():
+        verified = []
+        for position, outer in entries:
+            receipt, problems = _verify_receipt(ctx, strategy, position, outer)
+            verified.append(receipt)
+            findings.extend(problems)
+        if len(entries) == 1:
+            receipts[strategy] = verified[0]
+            continue
+        findings.append(
+            _receipt_finding(
+                BLOCKER_AUTHORITY,
+                strategy,
+                [f"{_RECEIPTS_PATH}[{position}]" for position, _ in entries],
+                "one ACCOUNT_LIVE epoch HPR receipt per strategy",
+                f"{_RECEIPTS_PATH}[{entries[1][0]}]",
+                "the strategy has more than one epoch HPR receipt; none of their "
+                "spans is spliced",
+            )
+        )
+        receipts[strategy] = EpochReceipt(
+            strategy,
+            entries[0][0],
+            any(receipt.declares_spans for receipt in verified),
+            tuple(
+                replace(span, verified=False)
+                for receipt in verified
+                for span in receipt.spans
+            ),
+        )
+    ctx._cache["epoch_receipts"] = (receipts, findings)
+    return receipts, findings
+
+
+def epoch_receipts(ctx: Context) -> dict[str, EpochReceipt]:
+    return _epoch_receipt_index(ctx)[0]
+
+
+def splice_window(
+    ctx: Context,
+    strategy_id: str,
+    start: date | None,
+    end: date | None,
+    layer: str = "ACCOUNT_LIVE",
+) -> Splice:
+    """The epoch-basis compound over ``(B, end]``, ``B`` the day before ``start``.
+
+    Wealth is the product of ``1 + r`` over the daily rows dated in ``[start,
+    end]`` times ``1 + span`` over each verified receipt span ``(S, E]`` inside
+    ``(B, end]`` (``S >= B`` and ``E <= end``; spec R1). ``B`` defaults to the day
+    before the first daily row in the window and an open ``end`` to its last daily
+    row. A window edge strictly inside a span (``S < B < E`` or ``S < end < E``) or
+    an unverified span inside the window declines (value ``None``): there is no
+    observed NAV to cut at, and a receipt the report cannot verify is never spliced.
+    Receipts are ACCOUNT_LIVE only.
+    """
+
+    selected = [
+        (day, value)
+        for day, value, evidence in returns_by_strategy(ctx).get(strategy_id, [])
+        if evidence == layer
+        and (start is None or day >= start)
+        and (end is None or day <= end)
+    ]
+    if not selected:
+        return Splice(None, 0, 0)
+    first = start if start is not None else selected[0][0]
+    boundary = first - timedelta(days=1) if first > date.min else first
+    last = end if end is not None else selected[-1][0]
+    receipt = epoch_receipts(ctx).get(strategy_id) if layer == "ACCOUNT_LIVE" else None
+    total = Decimal(1)
+    for _, value in selected:
+        total *= Decimal(1) + value
+    spliced = 0
+    for span in receipt.spans if receipt is not None else ():
+        if span.start < boundary < span.end:
+            return Splice(
+                None,
+                len(selected),
+                0,
+                f"window start {boundary} lies inside span ({span.start}, {span.end}]",
+            )
+        if span.start < last < span.end:
+            return Splice(
+                None,
+                len(selected),
+                0,
+                f"window end {last} lies inside span ({span.start}, {span.end}]",
+            )
+        if span.start >= boundary and span.end <= last:
+            if not span.verified or span.value is None:
+                return Splice(
+                    None,
+                    len(selected),
+                    0,
+                    f"span ({span.start}, {span.end}] inside the window is unverified",
+                )
+            total *= Decimal(1) + span.value
+            spliced += 1
+    return Splice(total - Decimal(1), len(selected), spliced)
 
 
 @dataclass(frozen=True)
@@ -2151,8 +2683,71 @@ def check_twr_views(ctx: Context) -> Iterator[Finding]:
         )
 
 
+@dataclass(frozen=True)
+class _ReturnView:
+    name: str
+    value: Any
+    window: tuple[date | None, date | None]
+    json_path: str
+    epoch: bool
+
+
+def _return_group(
+    strategy: str,
+    window: tuple[date | None, date | None],
+    views: Sequence[_ReturnView],
+    json_path: str | None,
+    expected: str,
+    message: str,
+) -> Iterator[Finding]:
+    comparable = {
+        view.name: to_decimal(view.value)
+        for view in views
+        if windows_equivalent(window, view.window)
+    }
+    present = [value for value in comparable.values() if value is not None]
+    if len(present) < 2 or spread(present) <= RETURN_TOLERANCE:
+        return
+    if json_path is None:
+        # Point at a published view of the group; the computed one only if alone.
+        json_path = next(
+            view.json_path
+            for view in sorted(
+                views, key=lambda view: view.name.startswith("computed:")
+            )
+            if windows_equivalent(window, view.window)
+            and to_decimal(view.value) is not None
+        )
+    yield _finding(
+        "returns.strategy_return_views_agree",
+        BLOCKER_INVARIANT,
+        strategy,
+        comparable,
+        expected,
+        REPORT,
+        json_path,
+        ("B2",),
+        f"{message} {spread(present)}",
+    )
+
+
 def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
-    """B2: strategy cumulative returns shown for one window must agree."""
+    """B2: strategy cumulative returns shown for one window must agree.
+
+    Two path bases, compared separately (C1 section 5-5). A strategy whose
+    ACCOUNT_LIVE epoch declares HPR gap spans in
+    ``strategy_history_contract.epoch_hpr_receipts``, or that publishes a value
+    labelled ``EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS``, has an epoch basis
+    (epoch-labelled summary headline and provider-evidence account value, and the
+    validator's own splice of the daily rows with the verified receipt spans) and a
+    daily basis (daily-labelled or unlabelled values, the plain daily compound and
+    the daily-only dependence performance). The bases are never compared with each
+    other: they meet only through the receipt, whose identity ``(1 + daily) x
+    prod(1 + span) = 1 + epoch`` and totals ``check_epoch_hpr_receipts`` re-derives
+    from the report's own rows. A strategy with span receipts whose headline is not
+    epoch-labelled is itself a finding. Without receipts or an epoch label every
+    view is one daily group, exactly as before.
+    """
 
     names = strategy_names(ctx)
     performance = node(
@@ -2162,67 +2757,148 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
         str(row.get("strategy_id")): (position, row)
         for position, row in enumerate(rows(ctx.report, "strategy_provider_evidence"))
     }
+    receipts = epoch_receipts(ctx)
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         strategy = str(row.get("strategy_id"))
         window = (
             to_date(row.get("account_live_observed_start")),
             to_date(row.get("account_live_observed_end")),
         )
-        views: dict[str, tuple[Any, tuple[date | None, date | None]]] = {
-            f"report.strategy_summary[{position}].account_live_cumulative_return": (
+        headline_path = f"$.strategy_summary[{position}].account_live_cumulative_return"
+        views = [
+            _ReturnView(
+                f"report.strategy_summary[{position}].account_live_cumulative_return",
                 row.get("account_live_cumulative_return"),
                 window,
+                headline_path,
+                row.get("account_live_cumulative_return_label") == EPOCH_RETURN_LABEL,
             )
-        }
+        ]
         layer = str(row.get("nav_evidence_layer") or "ACCOUNT_LIVE")
         computed, count = compound_window(ctx, strategy, window[0], window[1], layer)
+        compound_name = f"computed:compound(report.strategy_returns[{strategy}])"
         if count:
-            views[f"computed:compound(report.strategy_returns[{strategy}])"] = (
-                computed,
-                window,
+            views.append(
+                _ReturnView(
+                    compound_name, computed, window, "$.strategy_returns", False
+                )
             )
         perf = node(performance, names.get(strategy, strategy))
         if isinstance(perf, Mapping):
-            views[
-                f"report.dependence_analysis.mode_summaries.LIVE_ONLY.performance"
+            perf_path = (
+                f"dependence_analysis.mode_summaries.LIVE_ONLY.performance"
                 f"['{names.get(strategy, strategy)}'].cumulative_return"
-            ] = (
-                perf.get("cumulative_return"),
-                (
-                    to_date(perf.get("observed_start")),
-                    to_date(perf.get("observed_end")),
-                ),
+            )
+            views.append(
+                _ReturnView(
+                    f"report.{perf_path}",
+                    perf.get("cumulative_return"),
+                    (
+                        to_date(perf.get("observed_start")),
+                        to_date(perf.get("observed_end")),
+                    ),
+                    f"$.{perf_path}",
+                    False,
+                )
             )
         matched = evidence.get(strategy)
         if matched is not None and isinstance(matched[1].get("account"), Mapping):
             account = matched[1]["account"]
-            views[
-                f"report.strategy_provider_evidence[{matched[0]}].account.cumulative_return"
-            ] = (
-                account.get("cumulative_return"),
-                (
-                    to_date(account.get("observed_start")),
-                    to_date(account.get("observed_end")),
-                ),
+            views.append(
+                _ReturnView(
+                    f"report.strategy_provider_evidence[{matched[0]}].account"
+                    ".cumulative_return",
+                    account.get("cumulative_return"),
+                    (
+                        to_date(account.get("observed_start")),
+                        to_date(account.get("observed_end")),
+                    ),
+                    f"$.strategy_provider_evidence[{matched[0]}].account"
+                    ".cumulative_return",
+                    account.get("cumulative_return_label") == EPOCH_RETURN_LABEL,
+                )
             )
-        comparable = {
-            name: to_decimal(value)
-            for name, (value, view_window) in views.items()
-            if windows_equivalent(window, view_window)
-        }
-        present = [value for value in comparable.values() if value is not None]
-        if len(present) >= 2 and spread(present) > RETURN_TOLERANCE:
+        receipt = receipts.get(strategy) if layer == "ACCOUNT_LIVE" else None
+        declares_spans = receipt is not None and receipt.declares_spans
+        if not declares_spans and not any(view.epoch for view in views):
+            yield from _return_group(
+                strategy,
+                window,
+                views,
+                headline_path,
+                "one cumulative return per strategy and window (tolerance 1e-8)",
+                "strategy return views for one window disagree by",
+            )
+            continue
+        spliced = splice_window(ctx, strategy, window[0], window[1], layer)
+        if spliced.value is not None:
+            views.append(
+                _ReturnView(
+                    compound_name
+                    if not spliced.spans
+                    else f"computed:splice(report.strategy_returns[{strategy}], "
+                    f"{spliced.spans} verified epoch_hpr_receipts span(s))",
+                    spliced.value,
+                    window,
+                    "$.strategy_returns",
+                    True,
+                )
+            )
+        yield from _return_group(
+            strategy,
+            window,
+            [view for view in views if view.epoch],
+            None,
+            "one epoch-basis cumulative return per strategy and window: the "
+            "epoch-labelled views equal the daily rows spliced with the verified "
+            "epoch HPR receipt spans (tolerance 1e-8)",
+            "epoch-basis strategy return views for one window disagree"
+            + ("" if declares_spans else " (no epoch HPR span receipt is published)")
+            + " by",
+        )
+        yield from _return_group(
+            strategy,
+            window,
+            [view for view in views if not view.epoch],
+            None,
+            "one daily-basis cumulative return per strategy and window: the "
+            "daily-labelled or unlabelled views equal the daily rows compounded "
+            "without spans (tolerance 1e-8)",
+            "daily-basis strategy return views for one window disagree by",
+        )
+        label = row.get("account_live_cumulative_return_label")
+        headline = row.get("account_live_cumulative_return")
+        if declares_spans and headline is not None and label != EPOCH_RETURN_LABEL:
             yield _finding(
                 "returns.strategy_return_views_agree",
                 BLOCKER_INVARIANT,
                 strategy,
-                comparable,
-                "one cumulative return per strategy and window (tolerance 1e-8)",
+                {
+                    "account_live_cumulative_return": headline,
+                    "account_live_cumulative_return_label": label,
+                },
+                {"account_live_cumulative_return_label": EPOCH_RETURN_LABEL},
                 REPORT,
-                f"$.strategy_summary[{position}].account_live_cumulative_return",
+                f"$.strategy_summary[{position}].account_live_cumulative_return_label",
                 ("B2",),
-                f"strategy return views for one window disagree by {spread(present)}",
+                "the strategy declares epoch HPR gap spans but its headline is not "
+                "labelled the epoch TWR",
             )
+
+
+def check_epoch_hpr_receipts(ctx: Context) -> Iterator[Finding]:
+    """B2 / C1 section 5-5: never trust an epoch HPR receipt.
+
+    Each ACCOUNT_LIVE receipt in ``strategy_history_contract.epoch_hpr_receipts``
+    is re-derived from the report's own ``strategy_returns``: every span's
+    admission shape and its return against the capital chain, and the receipt's
+    daily and epoch totals, row count and identity. A contradiction is a
+    ``BLOCKER_INVARIANT``; a receipt the report gives no means to verify (malformed,
+    duplicated, no daily rows, no capital chain) is a ``BLOCKER_AUTHORITY``. A span
+    that fails is never spliced, so a forged receipt cannot launder a headline.
+    """
+
+    yield from _epoch_receipt_index(ctx)[1]
 
 
 def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
@@ -4362,7 +5038,9 @@ def recompute_metric(
     only returns and flows dated after ``B`` and on or before ``E`` enter. Epochs that
     end on or before ``B`` are excluded; an epoch straddling ``B`` or ``E`` is cut at the
     boundary from the daily series when the account alone carries its strategy, and
-    the recompute declines (returns ``[]``) when it cannot be cut exactly.
+    the recompute declines (returns ``[]``) when it cannot be cut exactly. A strategy
+    TWR and an epoch cut splice the verified epoch HPR gap spans inside ``(B, E]``
+    (``splice_window``) and decline when ``B`` or ``E`` lies strictly inside a span.
     """
 
     end = window[1]
@@ -4385,14 +5063,19 @@ def recompute_metric(
     boundary = explicit_start or (min(epoch_starts) if epoch_starts else None)
     if metric_id == "twr.strategy":
         after = boundary if boundary is not None else date.min
-        value, count = compound_window(ctx, entity, after + timedelta(days=1), end)
-        if not count:
+        spliced = splice_window(ctx, entity, after + timedelta(days=1), end)
+        if spliced.value is None:
             return []
         return [
             Observed(
-                f"recomputed:compound(report.strategy_returns[{entity}]) over "
-                f"({after}, {end}]",
-                value,
+                (
+                    f"recomputed:compound(report.strategy_returns[{entity}])"
+                    if not spliced.spans
+                    else f"recomputed:splice(report.strategy_returns[{entity}], "
+                    f"{spliced.spans} verified epoch_hpr_receipts span(s))"
+                )
+                + f" over ({after}, {end}]",
+                spliced.value,
                 boundary,
                 end,
                 None,
@@ -4420,18 +5103,23 @@ def recompute_metric(
             elif _single_account(ctx, row):
                 cut_from = max(boundary, epoch_start)
                 cut_to = min(end, epoch_end)
-                compounded, count = compound_window(
+                cut = splice_window(
                     ctx,
                     str(row.get("strategy_id")),
                     cut_from + timedelta(days=1),
                     cut_to,
                 )
-                if not count or compounded is None:
+                if cut.value is None:
                     return []
-                value = compounded
+                value = cut.value
                 parts.append(
-                    f"compound(strategy_returns[{row.get('strategy_id')}] over "
-                    f"({cut_from}, {cut_to}])"
+                    (
+                        f"compound(strategy_returns[{row.get('strategy_id')}]"
+                        if not cut.spans
+                        else f"splice(strategy_returns[{row.get('strategy_id')}], "
+                        f"{cut.spans} verified epoch_hpr_receipts span(s)"
+                    )
+                    + f" over ({cut_from}, {cut_to}])"
                 )
             else:
                 return []
@@ -4797,6 +5485,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("universe.inactive_accounts_in_current", check_inactive_accounts),
     ("returns.twr_views_agree", check_twr_views),
     ("returns.strategy_return_views_agree", check_strategy_return_views),
+    ("returns.epoch_hpr_receipts_verified", check_epoch_hpr_receipts),
     ("returns.benchmark_account_return", check_benchmark_account_return),
     ("returns.flow_lists_agree", check_flow_lists),
     ("returns.mwr_opening_matches_first_flow", check_mwr_opening),
