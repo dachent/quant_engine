@@ -1226,13 +1226,22 @@ def _member_own_trace_path(
     (``splice_spans``, receipt-less, precision 34).  The result carries the
     published ``return_path_*`` numeric fields and never leaves this
     module's private detail plumbing.
+
+    The published window runs from the FIRST link's start date -- the
+    observation the compounded return starts from -- to the last link's end
+    date, so a sole member's path window is the epoch window the acceptance
+    validator compares it against.  A link's end date is where its return is
+    observed, never where the window opens; the series (and its hash) still
+    bind the link end dates.
     """
 
     if not isinstance(links, list) or not links:
         return None
+    trace_links = _objects(links, "observation_trace.links")
+    window_start = _date(trace_links[0].get("start_date"), "trace link.start_date")
     series: list[dict[str, str]] = []
     daily: list[tuple[date, Decimal]] = []
-    for link in _objects(links, "observation_trace.links"):
+    for link in trace_links:
         end_day = _date(link.get("end_date"), "trace link.end_date")
         period_return = _decimal(link.get("factor"), "trace link.factor") - Decimal(1)
         series.append(
@@ -1251,7 +1260,7 @@ def _member_own_trace_path(
         "return_path_evidence_layer": "ACCOUNT_LIVE",
         "return_path_observations": len(series),
         "return_path_observed_end": series[-1]["date"],
-        "return_path_observed_start": series[0]["date"],
+        "return_path_observed_start": window_start.isoformat(),
         "return_path_series_sha256": hashlib.sha256(
             _canonical_json_array_bytes(series)
         ).hexdigest(),

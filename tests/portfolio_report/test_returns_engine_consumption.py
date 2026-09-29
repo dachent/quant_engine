@@ -15,6 +15,7 @@ strategy composite within 1e-12: both gates fail closed, with no band.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 from datetime import date
@@ -22,6 +23,7 @@ from decimal import Decimal, localcontext
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -880,7 +882,9 @@ def test_multi_account_member_paths_are_the_members_own_returns() -> None:
     links solo +1% then shared +4%; b links shared +2% then solo +2% -- publish
     their own 0.0504 and 0.0404, not the weighted composite rows.  The removed
     fan-out substituted the shared composite row for every member, so both
-    members published the same composite path.
+    members published the same composite path.  Each member's published window
+    opens at its first trace link's start date and closes at its last link's
+    end date.
     """
 
     from quant_engine.portfolio_ledger.returns import (
@@ -946,14 +950,23 @@ def test_multi_account_member_paths_are_the_members_own_returns() -> None:
                 ]
             )
         row = rendered[account_id]
+        # The window bounds come from the trace links the fixture supplied to
+        # the builder (an independent source), never from the published series:
+        # the path window opens at the FIRST link's start date and closes at
+        # the LAST link's end date.  The guard keeps the start assertion
+        # discriminating -- a first link whose start equals its end date could
+        # not tell the window start from the first link's end date.
+        member_key = (account_id, "strategy-shared", "2026-01-01", None)
+        trace_links = epoch_details[member_key]["own_path_links"]
+        assert trace_links[0]["start_date"] != trace_links[0]["end_date"]
         # No link is silently dropped between the member's verified trace and
         # the published path: observation count, compounded value, endpoints
         # and series hash bind exactly the member's own linked series.
         assert row["twr"] == decimal_text(epoch.twr)
         assert row["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
         assert row["return_path_observations"] == len(own_series)
-        assert row["return_path_observed_start"] == own_series[0]["date"]
-        assert row["return_path_observed_end"] == own_series[-1]["date"]
+        assert row["return_path_observed_start"] == trace_links[0]["start_date"]
+        assert row["return_path_observed_end"] == trace_links[-1]["end_date"]
         assert row["return_path_cumulative_return"] == decimal_text(
             own_compound.cumulative_return
         )
@@ -1647,3 +1660,253 @@ def test_single_account_trace_never_replaces_the_canonical_path_gate() -> None:
             set(epoch_details),
             epoch_details,
         )
+
+
+def _publish_single_link_sole_account_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Publish one sole-account epoch through the public report builder.
+
+    The member's whole observation trace is ONE link, July 1 -> July 30, +4%
+    (Astra's window probe).  The report is built by the real
+    ``build_report_data`` over a synthetic published baseline; only the
+    verified epoch manifest input is replaced by these synthetic epoch details.
+    Returns the published ``twr_mwr`` rows, the trace links the fixture
+    supplied (the independent source of the expected window) and the panel's
+    account-manifest rows the fixture derives from the same epoch.
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        OPENING_FIRST_POSITIVE_ON_OR_AFTER_START,
+        OpeningPoint,
+        link_epoch,
+    )
+
+    account_id, strategy_id, effective_start = "account-a", "strategy-1", "2026-07-01"
+    epoch = link_epoch(
+        {date(2026, 7, 1): Decimal("100"), date(2026, 7, 30): Decimal("104")},
+        [],
+        OpeningPoint(
+            date(2026, 7, 1), Decimal("100"), OPENING_FIRST_POSITIVE_ON_OR_AFTER_START
+        ),
+    )
+    trace_links = _manifest_trace_links(epoch)
+    twr = decimal_text(epoch.twr)
+    assert twr == "0.04"
+    catalog = {
+        "assignments": [
+            {
+                **_owned_assignment(account_id, strategy_id),
+                "effective_start": effective_start,
+            }
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [
+                        {
+                            "account_id": account_id,
+                            "observed_end": "2026-07-30",
+                            "observed_start": "2026-07-01",
+                        }
+                    ],
+                    "observed_start": "2026-07-01",
+                    "provider_id": "synthetic",
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": strategy_id,
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": [account_id],
+                "date": day,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": value,
+                "strategy_id": strategy_id,
+            }
+            for day, value in (("2026-07-01", "0"), ("2026-07-30", twr))
+        ],
+    }
+    epoch_details = {
+        (account_id, strategy_id, effective_start, None): {
+            "account_label": "Sole member",
+            "last_four": "4321",
+            "epoch_admission_status": "FUNDED",
+            "epoch_output_status": "OK",
+            "epoch_blocking_reason": None,
+            "own_path_links": trace_links,
+            "performance_payload": {
+                "flow_count": 0,
+                "flow_timing": None,
+                "nav_observations": 2,
+                "observed_end": "2026-07-30",
+                "observed_start": "2026-07-01",
+                "twr": twr,
+                "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+            },
+        }
+    }
+    crosswalk = {
+        "calculation_cutoff_date": "2026-09-17",
+        "rows": [
+            {
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+                "effective_start": effective_start,
+                "effective_end": None,
+                "account_label": "SYNTHETIC member",
+                "last_four": "4321",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            }
+        ],
+    }
+    full = _full_report_fixture()
+    baseline_root = full._published_baseline(
+        tmp_path, {**full._baseline_catalog(), **catalog}
+    )
+    monkeypatch.setattr(
+        full.reporter,
+        "_validate_epoch_manifest_input",
+        lambda *_args, **_kwargs: (
+            {},
+            {"generation_id": "a" * 64},
+            b"{}",
+            b"{}",
+            json.dumps(crosswalk).encode("utf-8"),
+            epoch_details,
+        ),
+    )
+
+    report, _content, _baseline_path = full.reporter.build_report_data(
+        baseline_root,
+        epoch_manifest_path=tmp_path / "synthetic-manifest.json",
+        epoch_manifest_source_path=tmp_path / "synthetic-source.json",
+        epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
+        epoch_manifest_generation_root=REPOSITORY_ROOT,
+    )
+
+    manifest_rows = [
+        {
+            "account_id": account_id,
+            "strategy_id": strategy_id,
+            "effective_start": effective_start,
+            "start": trace_links[0]["start_date"],
+            "end": trace_links[-1]["end_date"],
+            "observation_linked_return": twr,
+        }
+    ]
+    return report["twr_mwr"], trace_links, manifest_rows
+
+
+def _twr_view_findings(
+    rows: list[dict[str, Any]], manifest_rows: list[dict[str, Any]]
+) -> list[Any]:
+    """Run the acceptance oracle's TWR cross-view check over published output.
+
+    The acceptance package is consumed as-is and never edited.
+    ``check_twr_views`` reads the report's ``twr_mwr`` rows and the panel's
+    account manifest; the panel ``performance`` section carries the published
+    rows as the control panel projects them.
+    """
+
+    from acceptance.validate import checks
+
+    generation = SimpleNamespace(
+        report={"twr_mwr": rows},
+        panel={
+            "performance": copy.deepcopy(rows),
+            "account_manifest": {"rows": manifest_rows},
+        },
+    )
+    context = checks.Context(generation, date(2026, 9, 17), "synthetic-window-probe")
+    return list(checks.check_twr_views(context))
+
+
+def test_sole_account_single_link_trace_publishes_the_full_epoch_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired (fail-before): the path window opens at the first link's START.
+
+    A sole member whose whole observation trace is one link, July 1 -> July 30
+    (+4%), publishes the window July 1 -> July 30 -- the epoch's own window.
+    The removed code published the first link's END date as the window start,
+    collapsing the single-link epoch to the point July 30 -> July 30.  The
+    expected bounds come from the trace links the fixture supplied, never from
+    the published series; every other path field stays byte-identical (the
+    series hash still binds the link END dates).
+    """
+
+    rows, trace_links, _manifest_rows = _publish_single_link_sole_account_report(
+        tmp_path, monkeypatch
+    )
+
+    assert len(trace_links) == 1
+    # Guard: a single link whose start equals its end could not tell the
+    # window start from the first link's end date.
+    assert trace_links[0]["start_date"] != trace_links[0]["end_date"]
+    (row,) = rows
+    assert row["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    assert row["return_path_observed_start"] == trace_links[0]["start_date"]
+    assert row["return_path_observed_end"] == trace_links[-1]["end_date"]
+    assert (
+        row["return_path_observed_start"],
+        row["return_path_observed_end"],
+    ) == ("2026-07-01", "2026-07-30")
+    assert (
+        row["return_path_observed_start"],
+        row["return_path_observed_end"],
+    ) == (row["observed_start"], row["observed_end"])
+    assert row["return_path_observations"] == 1
+    assert row["return_path_cumulative_return"] == row["twr"] == "0.04"
+    assert (
+        row["return_path_series_sha256"]
+        == hashlib.sha256(
+            canonical_json_bytes([{"date": "2026-07-30", "return": "0.04"}])
+        ).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("corrupted", ["path_return", "epoch_return"])
+def test_window_probe_fires_check_twr_views_on_a_corrupted_single_link_return(
+    corrupted: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired (fail-before): Astra's window probe now fires the oracle check.
+
+    The published July 1 -> July 30 single-link 4% epoch agrees across every
+    TWR view.  Corrupting one return to 17% must yield a BLOCKER_INVARIANT
+    finding from ``check_twr_views``: either the path return against the
+    unchanged epoch TWR and manifest linked return, or the epoch TWR mirrored
+    into the manifest and the panel performance section against the unchanged
+    path.  The removed window (July 30 -> July 30) was dropped by the oracle's
+    ``windows_equivalent`` filter, so the path was never compared and both
+    corruptions produced zero findings.
+    """
+
+    from acceptance.validate import checks
+
+    rows, _trace_links, manifest_rows = _publish_single_link_sole_account_report(
+        tmp_path, monkeypatch
+    )
+    assert _twr_view_findings(rows, manifest_rows) == []
+
+    bad_rows = copy.deepcopy(rows)
+    bad_manifest_rows = copy.deepcopy(manifest_rows)
+    if corrupted == "path_return":
+        bad_rows[0]["return_path_cumulative_return"] = "0.17"
+    else:
+        bad_rows[0]["twr"] = "0.17"
+        bad_manifest_rows[0]["observation_linked_return"] = "0.17"
+
+    findings = _twr_view_findings(bad_rows, bad_manifest_rows)
+
+    assert findings
+    assert {finding.check_id for finding in findings} == {"returns.twr_views_agree"}
+    assert {finding.klass for finding in findings} == {checks.BLOCKER_INVARIANT}
+    path_view = findings[0].observed["report.twr_mwr[0].return_path_cumulative_return"]
+    assert path_view["window"] == [date(2026, 7, 1), date(2026, 7, 30)]
