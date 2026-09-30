@@ -2783,11 +2783,12 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
     validator's own splice of the daily rows with the verified receipt spans) and a
     daily basis (daily-labelled or unlabelled values, the plain daily compound and
     the daily-only dependence performance). The bases are never compared with each
-    other: they meet only through the receipt, whose identity ``(1 + daily) x
-    prod(1 + span) = 1 + epoch`` and totals ``check_epoch_hpr_receipts`` re-derives
-    from the report's own rows. A strategy with span receipts whose headline is not
-    epoch-labelled is itself a finding. Without receipts or an epoch label every
-    view is one daily group, exactly as before.
+    other, except over a summary window that holds no daily row (below): they meet
+    only through the receipt, whose identity ``(1 + daily) x prod(1 + span) = 1 +
+    epoch`` and totals ``check_epoch_hpr_receipts`` re-derives from the report's own
+    rows. A strategy with span receipts whose headline is not epoch-labelled is
+    itself a finding. Without receipts or an epoch label every view is one daily
+    group, exactly as before.
 
     A decline is never silent. When ``splice_window`` cannot give an epoch-basis
     value for the summary window (an edge strictly inside a span, or an unverified
@@ -2795,6 +2796,13 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
     with; that is one ``BLOCKER_INVARIANT`` per strategy, at the summary field whose
     edge is inside the span (the headline for an unverified span), unless the decline
     is only an unverified span that a BLOCKER-class receipt finding already reports.
+
+    A summary window that holds no daily row of its layer is the exception to the two
+    bases. No row anchors either of them (there is no splice, so nothing to decline),
+    and the epoch-labelled headline would be compared only with epoch-labelled views:
+    a forged headline beside a same-window dependence performance or daily-labelled
+    evidence value would pass. Every view of that window is one group, compared as for
+    a strategy without an epoch basis; the label rule above still applies.
     """
 
     names = strategy_names(ctx)
@@ -2925,28 +2933,50 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
                 ("B2",),
                 f"the epoch-basis views cannot be anchored to the rows: {spliced.declined}",
             )
-        yield from _return_group(
-            strategy,
-            window,
-            [view for view in views if view.epoch],
-            None,
-            "one epoch-basis cumulative return per strategy and window: the "
-            "epoch-labelled views equal the daily rows spliced with the verified "
-            "epoch HPR receipt spans (tolerance 1e-8)",
-            "epoch-basis strategy return views for one window disagree"
-            + ("" if declares_spans else " (no epoch HPR span receipt is published)")
-            + " by",
-        )
-        yield from _return_group(
-            strategy,
-            window,
-            [view for view in views if not view.epoch],
-            None,
-            "one daily-basis cumulative return per strategy and window: the "
-            "daily-labelled or unlabelled views equal the daily rows compounded "
-            "without spans (tolerance 1e-8)",
-            "daily-basis strategy return views for one window disagree by",
-        )
+        if not count:
+            # No daily row of this layer is dated in the summary window, so neither
+            # basis has a row to be anchored to: there is no splice to compare with
+            # and no decline to report, and the epoch-labelled views would only be
+            # compared with each other. A headline forged beside the same-window
+            # dependence performance or a daily-labelled evidence account would pass
+            # where a single group (as before the basis split) blocks it. Every view
+            # of the window is one group, exactly as for a strategy with no epoch
+            # basis; the label check below still applies.
+            yield from _return_group(
+                strategy,
+                window,
+                views,
+                headline_path,
+                "one cumulative return per strategy and window (tolerance 1e-8)",
+                "strategy return views for one window disagree by",
+            )
+        else:
+            yield from _return_group(
+                strategy,
+                window,
+                [view for view in views if view.epoch],
+                None,
+                "one epoch-basis cumulative return per strategy and window: the "
+                "epoch-labelled views equal the daily rows spliced with the verified "
+                "epoch HPR receipt spans (tolerance 1e-8)",
+                "epoch-basis strategy return views for one window disagree"
+                + (
+                    ""
+                    if declares_spans
+                    else " (no epoch HPR span receipt is published)"
+                )
+                + " by",
+            )
+            yield from _return_group(
+                strategy,
+                window,
+                [view for view in views if not view.epoch],
+                None,
+                "one daily-basis cumulative return per strategy and window: the "
+                "daily-labelled or unlabelled views equal the daily rows compounded "
+                "without spans (tolerance 1e-8)",
+                "daily-basis strategy return views for one window disagree by",
+            )
         label = row.get("account_live_cumulative_return_label")
         headline = row.get("account_live_cumulative_return")
         if declares_spans and headline is not None and label != EPOCH_RETURN_LABEL:
