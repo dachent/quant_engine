@@ -5,12 +5,16 @@
  "derivations": {
   "a": {
    "model": "claude-opus-5-5",
-   "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea",
+   "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a",
+   "reproduced_at_main": "549eb89f7c5591918e751ff263d2cfd84bd10c34",
+   "reproduced_utc": "2026-09-30T02:30:42Z",
    "path": "acceptance/v2/derive_a.json (scratch)"
   },
   "b": {
    "model": "independent-standalone-python",
-   "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac",
+   "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a",
+   "reproduced_at_main": "549eb89f7c5591918e751ff263d2cfd84bd10c34",
+   "reproduced_utc": "2026-09-30T02:30:47Z",
    "path": "acceptance/v2/derive_b.json (scratch)"
   }
  },
@@ -32,11 +36,11 @@
    ],
    "derivation_a": {
     "value": "0.19",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.19",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -56,11 +60,11 @@
    ],
    "derivation_a": {
     "value": "57200.88",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "57200.88",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -80,11 +84,11 @@
    ],
    "derivation_a": {
     "value": "48309.42",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "48309.42",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -112,11 +116,11 @@
    ],
    "derivation_a": {
     "value": "59092.28",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "59092.28",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -136,11 +140,11 @@
    ],
    "derivation_a": {
     "value": "51233.90",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "51233.90",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -160,11 +164,11 @@
    ],
    "derivation_a": {
     "value": "3.81",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "3.81",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -184,11 +188,11 @@
    ],
    "derivation_a": {
     "value": "10628.97",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "10628.97",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -208,11 +212,11 @@
    ],
    "derivation_a": {
     "value": "14520.86",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "14520.86",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -232,11 +236,11 @@
    ],
    "derivation_a": {
     "value": "74492.29",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "74492.29",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -256,11 +260,11 @@
    ],
    "derivation_a": {
     "value": "12054.51",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "12054.51",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -288,11 +292,11 @@
    ],
    "derivation_a": {
     "value": "52055.38",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "52055.38",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -312,11 +316,11 @@
    ],
    "derivation_a": {
     "value": "45464.69",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "45464.69",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -364,11 +368,11 @@
    ],
    "derivation_a": {
     "value": "425056.98",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "425056.98",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -396,11 +400,11 @@
    ],
    "derivation_a": {
     "value": "51233.90",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "51233.90",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -428,11 +432,11 @@
    ],
    "derivation_a": {
     "value": "57200.88",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "57200.88",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -460,11 +464,11 @@
    ],
    "derivation_a": {
     "value": "45464.69",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "45464.69",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -492,11 +496,11 @@
    ],
    "derivation_a": {
     "value": "58938.39",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "58938.39",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -532,11 +536,11 @@
    ],
    "derivation_a": {
     "value": "52055.38",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "52055.38",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -565,11 +569,11 @@
    ],
    "derivation_a": {
     "value": "101071.47",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "101071.47",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -605,11 +609,11 @@
    ],
    "derivation_a": {
     "value": "59092.28",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "59092.28",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -629,11 +633,11 @@
    ],
    "derivation_a": {
     "value": "2026-07-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-07-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -653,11 +657,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -677,11 +681,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -709,11 +713,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -733,11 +737,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -757,11 +761,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -781,11 +785,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -805,11 +809,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -829,11 +833,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -853,11 +857,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -885,11 +889,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -909,11 +913,11 @@
    ],
    "derivation_a": {
     "value": "2026-09-17",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "2026-09-17",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -941,11 +945,11 @@
    ],
    "derivation_a": {
     "value": "5",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "5",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -973,11 +977,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1009,11 +1013,11 @@
    ],
    "derivation_a": {
     "value": "11",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "11",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1041,11 +1045,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1073,11 +1077,11 @@
    ],
    "derivation_a": {
     "value": "4",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "4",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1105,11 +1109,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1137,11 +1141,11 @@
    ],
    "derivation_a": {
     "value": "1",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "1",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1169,11 +1173,11 @@
    ],
    "derivation_a": {
     "value": "4",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "4",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1201,11 +1205,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1249,11 +1253,11 @@
    ],
    "derivation_a": {
     "value": "0",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -1282,11 +1286,11 @@
    ],
    "derivation_a": {
     "value": "14",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "14",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1314,11 +1318,11 @@
    ],
    "derivation_a": {
     "value": "20748.40",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "20748.40",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1346,11 +1350,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1382,11 +1386,11 @@
    ],
    "derivation_a": {
     "value": "47120.06",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "47120.06",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1414,11 +1418,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1446,11 +1450,11 @@
    ],
    "derivation_a": {
     "value": "-72220.15",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "-72220.15",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1478,11 +1482,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1510,11 +1514,11 @@
    ],
    "derivation_a": {
     "value": "7500.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "7500.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1542,11 +1546,11 @@
    ],
    "derivation_a": {
     "value": "22050.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "22050.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1574,11 +1578,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1622,11 +1626,11 @@
    ],
    "derivation_a": {
     "value": "0.00",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.00",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -1655,11 +1659,11 @@
    ],
    "derivation_a": {
     "value": "34035.50",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "34035.50",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1687,11 +1691,11 @@
    ],
    "derivation_a": {
     "value": "0.043211694123",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0432116941",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1719,11 +1723,11 @@
    ],
    "derivation_a": {
     "value": "0.206784222500",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.2067842225",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1755,11 +1759,11 @@
    ],
    "derivation_a": {
     "value": "0.195657364162",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.1956573642",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1787,11 +1791,11 @@
    ],
    "derivation_a": {
     "value": "0.035090482505",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0350904825",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1819,11 +1823,11 @@
    ],
    "derivation_a": {
     "value": "0.050835289126",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0508352891",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1851,11 +1855,11 @@
    ],
    "derivation_a": {
     "value": "0.206349620449",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.2063496204",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1883,11 +1887,11 @@
    ],
    "derivation_a": {
     "value": "0.002020725087",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0020207251",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1915,11 +1919,11 @@
    ],
    "derivation_a": {
     "value": "0.016369796725",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0163697967",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1947,11 +1951,11 @@
    ],
    "derivation_a": {
     "value": "0.037575884790",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0375758848",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -1995,11 +1999,11 @@
    ],
    "derivation_a": {
     "value": "0.058366399911",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0583663999",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -2028,11 +2032,11 @@
    ],
    "derivation_a": {
     "value": "0.405739236967",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.4057392370",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2060,11 +2064,11 @@
    ],
    "derivation_a": {
     "value": "0.035090482505",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0350904825",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2092,11 +2096,11 @@
    ],
    "derivation_a": {
     "value": "0.043211694123",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0432116941",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2124,11 +2128,11 @@
    ],
    "derivation_a": {
     "value": "0.405739236967",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.4057392370",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2156,11 +2160,11 @@
    ],
    "derivation_a": {
     "value": "0.206705826527",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.2067058265",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2204,11 +2208,11 @@
    ],
    "derivation_a": {
     "value": "0.058366399911",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0583663999",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -2237,11 +2241,11 @@
    ],
    "derivation_a": {
     "value": "0.022676762040",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0226767620",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2281,11 +2285,11 @@
    ],
    "derivation_a": {
     "value": "0.195657364162",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.1956573642",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2313,11 +2317,11 @@
    ],
    "derivation_a": {
     "value": "0.024531782896",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0245317829",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2345,11 +2349,11 @@
    ],
    "derivation_a": {
     "value": "0.140913076778",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.1409130768",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2381,11 +2385,11 @@
    ],
    "derivation_a": {
     "value": "0.676508598689",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.6765085987",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2413,11 +2417,11 @@
    ],
    "derivation_a": {
     "value": "0.024678000000",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0246780000",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2445,11 +2449,11 @@
    ],
    "derivation_a": {
     "value": "0.140624882627",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.1406248826",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2477,11 +2481,11 @@
    ],
    "derivation_a": {
     "value": "0.008541704507",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0085417045",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2509,11 +2513,11 @@
    ],
    "derivation_a": {
     "value": "0.025740189555",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0257401896",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2541,11 +2545,11 @@
    ],
    "derivation_a": {
     "value": "0.030469983510",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0304699835",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2589,11 +2593,11 @@
    ],
    "derivation_a": {
     "value": "0.043017076433",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0430170764",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -2622,11 +2626,11 @@
    ],
    "derivation_a": {
     "value": "0.330273816246",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.3302738162",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2654,11 +2658,11 @@
    ],
    "derivation_a": {
     "value": "0.024678000000",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0246780000",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2686,11 +2690,11 @@
    ],
    "derivation_a": {
     "value": "0.024531782896",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0245317829",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2718,11 +2722,11 @@
    ],
    "derivation_a": {
     "value": "0.330273816246",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.3302738162",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2750,11 +2754,11 @@
    ],
    "derivation_a": {
     "value": "0.140861092980",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.1408610930",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2798,11 +2802,11 @@
    ],
    "derivation_a": {
     "value": "0.043017076433",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0430170764",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true,
    "note": "as_of is the admitted value-basis date (2026-09-03, the admitted-FX boundary) per the recorded ruling, while date.source_last_observation carries the raw observation date (2026-09-17); derivation_b's value-row as_of was fixed to match (acceptance/derive_b commit b5fffe8)."
@@ -2831,11 +2835,11 @@
    ],
    "derivation_a": {
     "value": "0.028441498710",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.0284414987",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2875,11 +2879,11 @@
    ],
    "derivation_a": {
     "value": "0.676508598689",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "0.6765085987",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2903,11 +2907,11 @@
    ],
    "derivation_a": {
     "value": "7",
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": "7",
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   },
@@ -2947,7 +2951,7 @@
      "tt-portfolio",
      "volatis-strategy"
     ],
-    "code_commit": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "derivation_b": {
     "value": [
@@ -2959,7 +2963,7 @@
      "tt-portfolio",
      "volatis-strategy"
     ],
-    "code_commit": "dac6e410046045ed6e5b37899eae039679d137ac"
+    "code_commit": "b7f9ec537506055a078d0d96058ea30f22d30f5a"
    },
    "critical": true
   }
