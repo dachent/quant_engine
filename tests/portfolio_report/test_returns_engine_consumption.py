@@ -2224,9 +2224,11 @@ def test_r3_zero_capital_member_reconciles_by_value_and_publishes_no_own_path() 
             rows[account_id]["return_path_status"]
             == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
         )
-        assert rows[account_id]["return_path_cumulative_return"] == decimal_text(
-            epoch.twr
-        )
+        # The path compounds the link factors at 34 digits; the epoch TWR was
+        # chained at 28, so equality is numerical, far inside the 1e-12 gate.
+        assert abs(
+            Decimal(rows[account_id]["return_path_cumulative_return"]) - epoch.twr
+        ) < Decimal("1e-20")
         assert rows[account_id]["return_path_observations"] == len(epoch.links)
     zero_run = rows["account-r"]
     assert zero_run["twr"] is None
