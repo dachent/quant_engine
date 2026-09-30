@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
@@ -60,6 +61,11 @@ from quant_engine.portfolio_ledger import (
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
+)
+from quant_engine.portfolio_ledger.value_basis_bounds import (
+    ValueBasisBoundError,
+    ValueBasisBounds,
+    derive_value_basis_bounds,
 )
 from quant_engine.portfolio_ledger.returns import (
     MemberReturn,
@@ -727,7 +733,18 @@ def _dependence_report(
     *,
     generation_dir: Path | None = None,
     calculation_cutoff_date: str | None = None,
+    bounded_complete_through: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str], Path]:
+    """Verify one correlation generation and project it into report data.
+
+    With a calculation cutoff, the analysis must end at that cutoff: the
+    correlation, the generation manifest and every series.  The one exception is
+    ``bounded_complete_through``, an earlier end that the caller has already
+    shown to be the FXB-1 value-basis bound of the composite (gate B accepted the
+    history contract at that end).  Then every layer must end exactly there, and
+    the projection publishes that true end instead of the cutoff.
+    """
+
     try:
         if generation_dir is None:
             if root is None:
@@ -798,11 +815,19 @@ def _dependence_report(
         if calculation_cutoff_date is None
         else _date(calculation_cutoff_date, "calculation cutoff date").isoformat()
     )
-    if cutoff is not None:
+    expected_end = cutoff
+    if bounded_complete_through is not None:
+        bounded_end = _date(
+            bounded_complete_through, "bounded dependence complete_through"
+        ).isoformat()
+        if cutoff is None or bounded_end >= cutoff:
+            raise ReportValidationError("dependence calculation cutoff differs")
+        expected_end = bounded_end
+    if expected_end is not None:
         if (
-            correlation.get("complete_through") != cutoff
+            correlation.get("complete_through") != expected_end
             or manifest.coverage.observed_end is None
-            or manifest.coverage.observed_end.isoformat() != cutoff
+            or manifest.coverage.observed_end.isoformat() != expected_end
         ):
             raise ReportValidationError("dependence calculation cutoff differs")
     modes = _object(correlation.get("dependence_modes"), "dependence modes")
@@ -841,14 +866,14 @@ def _dependence_report(
             series_ids = current_series
         elif current_series != series_ids:
             raise ReportValidationError("dependence mode series order differs")
-        if cutoff is not None:
+        if expected_end is not None:
             for field_name in ("series_composition", "performance"):
                 series_payload = _object(
                     payload.get(field_name), f"dependence mode {mode} {field_name}"
                 )
                 if set(series_payload) != set(current_series) or any(
                     not isinstance(series_payload.get(series_id), Mapping)
-                    or series_payload[series_id].get("observed_end") != cutoff
+                    or series_payload[series_id].get("observed_end") != expected_end
                     for series_id in current_series
                 ):
                     raise ReportValidationError("dependence mode/series cutoff differs")
@@ -988,9 +1013,133 @@ def _dependence_report(
         "source": source_identity,
         "status": "AVAILABLE",
     }
-    if cutoff is not None:
-        projection["complete_through"] = cutoff
+    if expected_end is not None:
+        projection["complete_through"] = expected_end
     return projection, rows, identity, correlation_path
+
+
+@dataclass(frozen=True)
+class _BoundedEnd:
+    """A published end before the cutoff, and the strategies that bound it (FXB-1)."""
+
+    end: str
+    bounded_by: tuple[str, ...]
+
+
+def _history_contract_bounded_end(
+    history_contract_ref: Mapping[str, Any],
+    calculation_cutoff_date: str,
+    value_basis_bounds: ValueBasisBounds | None,
+) -> _BoundedEnd | None:
+    """Gate B: the strategy history may end before the cutoff only as FXB-1 says.
+
+    The reference's ``as_of_date`` is the latest date every required series has.
+    It is the calculation cutoff (``None``: nothing to explain), or an earlier end
+    that the value-basis bounds explain: the age evidence reports that very end as
+    its ``complete_through`` and names the limiting inputs, each limiting input
+    ends there, and the strategy of each (the segment id's prefix before the
+    first ``:``) has a bounded value end equal to it.  No bound, an end after the
+    cutoff, an unbounded or unknown limiting strategy, a segment id without a
+    strategy and an end that differs from the bound all fail closed.
+    """
+
+    failure = ReportValidationError("strategy history calculation cutoff differs")
+    as_of = history_contract_ref.get("as_of_date")
+    if as_of == calculation_cutoff_date:
+        return None
+    if value_basis_bounds is None or not value_basis_bounds.strategies:
+        raise failure
+    try:
+        end = _date(as_of, "history contract as_of_date")
+        cutoff = _date(calculation_cutoff_date, "calculation cutoff date")
+    except ReportValidationError as exc:
+        raise failure from exc
+    if end >= cutoff or value_basis_bounds.calculation_cutoff != cutoff:
+        raise failure
+    age_evidence = history_contract_ref.get("age_evidence")
+    if (
+        not isinstance(age_evidence, Mapping)
+        or age_evidence.get("complete_through") != end.isoformat()
+    ):
+        raise failure
+    limiting_inputs = age_evidence.get("limiting_inputs")
+    if not isinstance(limiting_inputs, list) or not limiting_inputs:
+        raise failure
+    strategy_ids: set[str] = set()
+    for limiting in limiting_inputs:
+        if (
+            not isinstance(limiting, Mapping)
+            or limiting.get("observed_end") != end.isoformat()
+        ):
+            raise failure
+        segment_id = limiting.get("segment_id")
+        strategy_id, separator, _layer = (
+            segment_id.partition(":") if isinstance(segment_id, str) else ("", "", "")
+        )
+        declared = limiting.get("strategy_id")
+        if (
+            not separator
+            or not strategy_id
+            or (declared is not None and declared != strategy_id)
+            or value_basis_bounds.effective_end(strategy_id) != end
+        ):
+            raise failure
+        strategy_ids.add(strategy_id)
+    return _BoundedEnd(end.isoformat(), tuple(sorted(strategy_ids)))
+
+
+def _published_dependence_bound(report: Mapping[str, Any]) -> str | None:
+    """The dependence end a rebuilt report publishes when it is not its cutoff.
+
+    ``publish_report`` reads the dependence generation again after the report was
+    rebuilt (and gate B accepted its history contract), so it passes the history
+    contract's end on as the bound of that second read.
+    """
+
+    cutoff = report.get("calculation_cutoff_date")
+    history = report.get("strategy_history_contract")
+    if cutoff is None or not isinstance(history, Mapping):
+        return None
+    as_of = history.get("as_of_date")
+    if as_of is None or as_of == cutoff:
+        return None
+    return _text(as_of, "strategy history contract as_of_date")
+
+
+def _report_value_basis_bounds(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    calculation_cutoff_date: str | None,
+) -> ValueBasisBounds | None:
+    """Apply FXB-1 to the hash-bound provider ledger and the repository contract.
+
+    The bounds are derived once per report build.  They are active only when the
+    calculation cutoff is resolved and the baseline references a provider-ledger
+    generation; every other report keeps the strict end-at-the-cutoff gates.  A
+    ledger and a contract that do not support one consistent bound fail closed.
+    """
+
+    if calculation_cutoff_date is None:
+        return None
+    if not any(
+        item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+    ):
+        return None
+    _reference, provider_catalog, _generation_id, _catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    contract = _load_json(_PORTABLE_HWM_PRODUCT_CONTRACT, "financial MVP contract")
+    try:
+        return derive_value_basis_bounds(
+            provider_catalog,
+            contract,
+            _date(calculation_cutoff_date, "calculation cutoff date"),
+        )
+    except ValueBasisBoundError as exc:
+        raise ReportValidationError(f"value-basis bound differs: {exc}") from exc
 
 
 def _merge_attribution(
@@ -1360,6 +1509,7 @@ def _account_strategy_performance(
     *,
     calculation_cutoff_date: str | None = None,
     raw_observation_coverage: Mapping[str, str] | None = None,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> list[dict[str, Any]]:
     admitted_epoch_keys = {
         key
@@ -1423,6 +1573,7 @@ def _account_strategy_performance(
         return_catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
+        value_basis_bounds=value_basis_bounds,
     )
     live_components = _live_strategy_components(
         return_catalog,
@@ -2185,10 +2336,34 @@ def _is_governed_financial_mvp2_path(
     )
 
 
+def _receipt_end_is_value_basis_bound(
+    strategy_id: str,
+    observed_end: date,
+    admission_cutoff: date,
+    value_basis_bounds: ValueBasisBounds | None,
+) -> bool:
+    """Gate C: does FXB-1 explain a receipt that ends before its admission cutoff?
+
+    The producer stamps ``admission_cutoff`` with the source admission as-of (the
+    calculation cutoff) while ``observed_end`` is the last USD-converted daily
+    return.  When the strategy's admitted FX ends earlier, that last return ends
+    at the bound, never at the cutoff.  The end must equal this strategy's bound
+    exactly and precede the admission cutoff, which must be the bounds' cutoff.
+    """
+
+    return (
+        value_basis_bounds is not None
+        and admission_cutoff == value_basis_bounds.calculation_cutoff
+        and observed_end < admission_cutoff
+        and value_basis_bounds.effective_end(strategy_id) == observed_end
+    )
+
+
 def _epoch_hpr_receipts(
     catalog: Mapping[str, Any],
     *,
     calculation_cutoff_date: str | None,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Validate the separate Matrixport whole-epoch HPR receipt surface.
 
@@ -2196,6 +2371,9 @@ def _epoch_hpr_receipts(
     decomposition consume the daily-only series, while only endpoint
     cumulative wealth/TWR may use its exact no-flow multi-day links.  Path-
     dependent drawdown and HWM consumers may not.
+
+    A receipt ends at its admission cutoff, or (FXB-1) at the strategy's
+    value-basis bound before it; any other shortfall is an error.
     """
 
     raw_receipts = catalog.get("epoch_hpr_receipts")
@@ -2270,7 +2448,16 @@ def _epoch_hpr_receipts(
         if end < start:
             raise ReportValidationError("epoch HPR receipt interval differs")
         cutoff = receipt.get("admission_cutoff")
-        if cutoff is not None and _date(cutoff, "epoch HPR admission_cutoff") != end:
+        if (
+            cutoff is not None
+            and _date(cutoff, "epoch HPR admission_cutoff") != end
+            and not _receipt_end_is_value_basis_bound(
+                strategy_id,
+                end,
+                _date(cutoff, "epoch HPR admission_cutoff"),
+                value_basis_bounds,
+            )
+        ):
             raise ReportValidationError("epoch HPR receipt cutoff differs")
         out_of_window = False
         if calculation_cutoff_date is not None and cutoff != calculation_cutoff_date:
@@ -2322,6 +2509,7 @@ def _account_live_return_series(
     strategy_product_controls: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     calculation_cutoff_date: str | None = None,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Hash and summarize each canonical account-live return path.
 
@@ -2359,7 +2547,9 @@ def _account_live_return_series(
         )
 
     epoch_receipts = _epoch_hpr_receipts(
-        catalog, calculation_cutoff_date=calculation_cutoff_date
+        catalog,
+        calculation_cutoff_date=calculation_cutoff_date,
+        value_basis_bounds=value_basis_bounds,
     )
     if set(epoch_receipts) - set(grouped):
         raise ReportValidationError("epoch HPR receipt has no daily path")
@@ -2883,6 +3073,7 @@ def _strategy_provider_evidence(
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     *,
     calculation_cutoff_date: str | None = None,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> list[dict[str, Any]]:
     cutoff = (
         None
@@ -2893,6 +3084,7 @@ def _strategy_provider_evidence(
         catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
+        value_basis_bounds=value_basis_bounds,
     )
     # Resolve the effective-dated strategy version for each strategy from the
     # governed catalog so the panel can verify series identity downstream.
@@ -3657,6 +3849,8 @@ def _strategies(
     | None = None,
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     strategy_provider_evidence: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> list[dict[str, Any]]:
     raw_version_catalog = catalog.get("strategy_version_catalog")
     strategy_versions: dict[str, dict[str, Any]] = {}
@@ -3711,7 +3905,11 @@ def _strategies(
         for item in (
             strategy_provider_evidence
             if strategy_provider_evidence is not None
-            else _strategy_provider_evidence(catalog, strategy_product_controls)
+            else _strategy_provider_evidence(
+                catalog,
+                strategy_product_controls,
+                value_basis_bounds=value_basis_bounds,
+            )
         )
     }
     live_source = next(
@@ -5035,6 +5233,8 @@ _HWM_CONTRACT_REASON_MAP: Final = {
 def _hwm_numerical_from_envelope(
     catalog: Mapping[str, Any],
     policy_path: Path = HWM_POLICY,
+    *,
+    value_basis_bounds: ValueBasisBounds | None = None,
 ) -> dict[str, Any]:
     """Compute the numerical full-systematic HWM from the governed envelope.
 
@@ -5067,7 +5267,9 @@ def _hwm_numerical_from_envelope(
     if any(
         receipt["span_return_receipts"]
         for receipt in _epoch_hpr_receipts(
-            catalog, calculation_cutoff_date=None
+            catalog,
+            calculation_cutoff_date=None,
+            value_basis_bounds=value_basis_bounds,
         ).values()
     ):
         return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
@@ -5820,6 +6022,14 @@ def build_report_data(
         provider_ledger_root,
         calculation_cutoff_date=calculation_cutoff_date,
     )
+    # FXB-1: a strategy whose admitted FX ends before the cutoff has no USD value
+    # after that end, so its value basis, and every composite that needs it, ends
+    # there.  The bounds are derived once from the hash-bound ledger and the
+    # contract; the gates below accept an end before the cutoff only as they say.
+    value_basis_bounds = _report_value_basis_bounds(
+        catalog, baseline_root, provider_ledger_root, calculation_cutoff_date
+    )
+    history_bounded_end: _BoundedEnd | None = None
     strategy_names = {
         _text(item.get("name"), "strategy.name")
         for item in _objects(catalog.get("strategies"), "strategies")
@@ -5833,11 +6043,10 @@ def build_report_data(
             strategy_names=strategy_names,
             dependence_selected_inputs_path=dependence_selected_inputs_path,
         )
-        if (
-            calculation_cutoff_date is not None
-            and history_contract_ref.get("as_of_date") != calculation_cutoff_date
-        ):
-            raise ReportValidationError("strategy history calculation cutoff differs")
+        if calculation_cutoff_date is not None:
+            history_bounded_end = _history_contract_bounded_end(
+                history_contract_ref, calculation_cutoff_date, value_basis_bounds
+            )
         # The epoch HPR receipts stay in the published contract reference; the
         # return path is computed from the catalog AFTER they are attached, so
         # the spliced path and the published receipts describe one path.
@@ -5851,6 +6060,7 @@ def build_report_data(
         catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
+        value_basis_bounds=value_basis_bounds,
     )
     performance = _account_strategy_performance(
         catalog,
@@ -5859,6 +6069,7 @@ def build_report_data(
         current_epoch_details,
         calculation_cutoff_date=calculation_cutoff_date,
         raw_observation_coverage=raw_observation_coverage,
+        value_basis_bounds=value_basis_bounds,
     )
     implementation_contract: dict[str, dict[str, Any]] | None = None
     implementation_contract_ref: dict[str, Any] | None = None
@@ -5995,6 +6206,9 @@ def build_report_data(
             correlation_root,
             generation_dir=correlation_generation_dir,
             calculation_cutoff_date=calculation_cutoff_date,
+            bounded_complete_through=(
+                history_bounded_end.end if history_bounded_end is not None else None
+            ),
         )
         dependence_source = _object(
             dependence_analysis.get("source"), "dependence source identity"
@@ -6140,7 +6354,9 @@ def build_report_data(
             hwm_policy_sha256,
         )
     hwm_numerical = _hwm_numerical_from_envelope(
-        current_product_catalog, hwm_policy_path
+        current_product_catalog,
+        hwm_policy_path,
+        value_basis_bounds=value_basis_bounds,
     )
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
@@ -11429,6 +11645,7 @@ def publish_report(
             snapshot_correlation_root,
             generation_dir=snapshot_correlation_generation_dir,
             calculation_cutoff_date=report.get("calculation_cutoff_date"),
+            bounded_complete_through=_published_dependence_bound(report),
         )
         artifact_specs.append(
             (
