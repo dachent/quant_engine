@@ -1132,6 +1132,12 @@ def _report_value_basis_bounds(
     _reference, provider_catalog, _generation_id, _catalog_sha256 = (
         _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
     )
+    if "quality_findings" not in provider_catalog:
+        # The raw-observation coverage reads a catalog that records no quality
+        # findings as having none, and so does this derivation: nothing is
+        # unconverted, so nothing is bounded and every gate stays strict.  A present
+        # but malformed value is not absence; it still fails closed below.
+        provider_catalog = {**provider_catalog, "quality_findings": []}
     contract = _load_json(_PORTABLE_HWM_PRODUCT_CONTRACT, "financial MVP contract")
     try:
         return derive_value_basis_bounds(
