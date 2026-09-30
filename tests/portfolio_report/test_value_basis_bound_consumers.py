@@ -64,7 +64,16 @@ def full() -> Any:
         raise RuntimeError("unable to load the full report fixture")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # Executing the report test module registers its own copy of the report tool
+    # under the tool's module name; hand the registry back as it was found.
+    registered = sys.modules.get("portfolio_report")
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if registered is None:
+            sys.modules.pop("portfolio_report", None)
+        else:
+            sys.modules["portfolio_report"] = registered
     return module
 
 
