@@ -508,6 +508,176 @@ def composite(members: Iterable[MemberReturn]) -> tuple[CompositeReturn, ...]:
 
 
 @dataclass(frozen=True)
+class ValuePeriod:
+    """One member sub-period ``(start_date, end_date]`` as summable values.
+
+    ``beginning_capital`` is ``V_begin + F_bod`` and ``ending_value_ex_flow`` is
+    ``V_end - F_eod``: exactly the denominator and numerator of the link
+    engine's ``factor``.  A sub-period may start at zero capital, where the
+    member's own ratio is undefined but its values still add to the strategy's.
+    """
+
+    member_id: str
+    start_date: date
+    end_date: date
+    beginning_capital: Decimal
+    ending_value_ex_flow: Decimal
+
+
+def value_periods(
+    member_id: str,
+    observations: Mapping[date, Decimal],
+    legs: Sequence[FlowLeg],
+    opening: date,
+) -> tuple[ValuePeriod, ...]:
+    """Express one member's valued sub-periods after ``opening`` as values.
+
+    Legs are assigned exactly as ``link_epoch`` assigns them: a leg belongs to
+    the sub-period ending at the first observation on or after its NAV
+    recognition date, legs recognized on or before ``opening`` are embedded in
+    the opening value, an ``EXACT_TIMESTAMP`` leg joins the beginning capital
+    and a ``DATE_ONLY`` leg leaves the ending value.  The per-period numbers
+    are the link engine's own (same Decimal operations, caller's context), so
+    an epoch the engine links reproduces its ``beginning_capital`` and
+    ``ending_value - ending_flow`` bit for bit.
+
+    Unlike ``link_epoch`` this does not fail on zero capital (R3): a member
+    whose own return is undefined across a zero-capital run still has values
+    to sum.  It fails closed on an opening that is not an observation and on
+    a leg recognized after the last observation, whose money would be dropped.
+    No sub-period after the opening gives an empty result.
+    """
+
+    if not isinstance(member_id, str) or not member_id:
+        raise ReturnsError("member_id must be a non-empty string")
+    _checked_observations(observations)
+    opening_day = _require_date(opening, "opening date")
+    if opening_day not in observations:
+        raise ReturnsError("opening point is not an observation of this series")
+    if not all(isinstance(leg, FlowLeg) for leg in legs):
+        raise ReturnsError("legs must be FlowLeg values")
+    days = sorted(day for day in observations if day > opening_day)
+    closing = days[-1] if days else opening_day
+    if any(leg.nav_recognition_date > closing for leg in legs):
+        raise ReturnsError("flow is recognized after the last observation")
+    linked = tuple(
+        leg for leg in legs if opening_day < leg.nav_recognition_date <= closing
+    )
+    periods: list[ValuePeriod] = []
+    prior_day = opening_day
+    prior_value = observations[opening_day]
+    for day in days:
+        period_legs = [
+            leg for leg in linked if prior_day < leg.nav_recognition_date <= day
+        ]
+        beginning_legs = [leg for leg in period_legs if leg.timing == EXACT_TIMESTAMP]
+        beginning_flow = sum((leg.amount for leg in beginning_legs), Decimal(0))
+        ending_flow = sum(
+            (leg.amount for leg in period_legs if leg.timing == DATE_ONLY),
+            Decimal(0),
+        )
+        ending_value = observations[day]
+        base = prior_value + beginning_flow if beginning_legs else prior_value
+        periods.append(
+            ValuePeriod(member_id, prior_day, day, base, ending_value - ending_flow)
+        )
+        prior_day = day
+        prior_value = ending_value
+    return tuple(periods)
+
+
+def summed_value_composite(
+    periods: Iterable[ValuePeriod],
+) -> tuple[CompositeReturn, ...]:
+    """Link the summed member values on the union of the members' boundaries.
+
+    Per boundary date ``e`` the composite return is
+    ``sum(V_end - F_eod) / sum(V_begin + F_bod) - 1`` over the members'
+    sub-periods ending on ``e``: the summed-series link of the ledger, with
+    membership entry and exit as transfers.  With every member at positive
+    capital this equals the beginning-capital weighted ``composite``; it also
+    takes the income or loss of a member whose own sub-period starts at zero
+    capital, which a weighted mean cannot (that member's return is undefined).
+
+    With two or more members every sub-period must start at the previous
+    boundary of the union: values are never filled, so a member sub-period that
+    spans another member's boundary fails closed.  On a date whose summed
+    beginning capital is zero, a summed ending value of zero carries no return
+    and the date is omitted; any other ending value is value on zero capital
+    and fails closed, as does a composite factor that is not positive.  A lone
+    member's return is the plain ratio of its own values (the link engine's own
+    factor when built by ``value_periods``).  ``member_ids`` lists the members
+    holding capital or value on that date.  Members are summed in input order,
+    in the caller's decimal context.
+    """
+
+    by_day: dict[date, list[ValuePeriod]] = defaultdict(list)
+    seen: set[tuple[str, date]] = set()
+    accepted: list[ValuePeriod] = []
+    for period in periods:
+        if not isinstance(period, ValuePeriod):
+            raise ReturnsError("summed-value members must be ValuePeriod values")
+        if not isinstance(period.member_id, str) or not period.member_id:
+            raise ReturnsError("summed-value member_id must be a non-empty string")
+        start = _require_date(period.start_date, "member start_date")
+        end = _require_date(period.end_date, "member end_date")
+        if start >= end:
+            raise ReturnsError("summed-value member sub-period is empty")
+        capital = _require_decimal(period.beginning_capital, "member capital")
+        _require_decimal(period.ending_value_ex_flow, "member ending value")
+        key = (period.member_id, end)
+        if key in seen:
+            raise ReturnsError("summed-value member repeats a date")
+        seen.add(key)
+        if capital < 0:
+            raise ReturnsError("summed-value member capital is negative")
+        by_day[end].append(period)
+        accepted.append(period)
+    if len({period.member_id for period in accepted}) > 1:
+        boundaries = sorted(
+            {period.end_date for period in accepted}
+            | {period.start_date for period in accepted}
+        )
+        previous = dict(zip(boundaries[1:], boundaries))
+        for period in accepted:
+            if previous[period.end_date] != period.start_date:
+                raise ReturnsError(
+                    f"summed-value member {period.member_id} is not valued on every "
+                    f"boundary of ({period.start_date}, {period.end_date}]"
+                )
+    result: list[CompositeReturn] = []
+    for day in sorted(by_day):
+        items = by_day[day]
+        capital = items[0].beginning_capital
+        value = items[0].ending_value_ex_flow
+        for item in items[1:]:
+            capital += item.beginning_capital
+            value += item.ending_value_ex_flow
+        if capital == 0:
+            if value != 0:
+                raise ReturnsError("summed-value composite has value on zero capital")
+            continue
+        factor = value / capital
+        if factor <= 0:
+            raise ReturnsError("summed-value composite factor is not positive")
+        result.append(
+            CompositeReturn(
+                day,
+                capital,
+                factor - Decimal(1),
+                tuple(
+                    sorted(
+                        item.member_id
+                        for item in items
+                        if item.beginning_capital > 0 or item.ending_value_ex_flow != 0
+                    )
+                ),
+            )
+        )
+    return tuple(result)
+
+
+@dataclass(frozen=True)
 class ReturnSpan:
     """A holding-period return replacing a declared missing daily point."""
 
