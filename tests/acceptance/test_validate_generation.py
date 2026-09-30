@@ -4032,6 +4032,239 @@ def test_a_summary_window_without_daily_rows_is_not_a_splice_decline(
     assert _without_annualization(run(build(tmp_path, spec))) == []
 
 
+# R3-1 (W14, decision seat r2): 2026-03-05 to 2026-09-16 falls between two published
+# rows (2026-03-04 and 2026-09-17), so the report holds no daily row in that window.
+NO_ROW_WINDOW = {
+    "account_live_observed_start": "2026-03-05",
+    "account_live_observed_end": "2026-09-16",
+}
+NO_ROW_VIEW = {"observed_start": "2026-03-05", "observed_end": "2026-09-16"}
+HEADLINE_VIEW = "report.strategy_summary[0].account_live_cumulative_return"
+PERFORMANCE_VIEW = (
+    "report.dependence_analysis.mode_summaries.LIVE_ONLY.performance"
+    "['Alpha'].cumulative_return"
+)
+EVIDENCE_VIEW = "report.strategy_provider_evidence[0].account.cumulative_return"
+ONE_GROUP_EXPECTED = "one cumulative return per strategy and window (tolerance 1e-8)"
+ONE_GROUP_MESSAGE = "strategy return views for one window disagree by"
+
+
+def _alpha_performance(**changes: str) -> Mutator:
+    """Change alpha's LIVE_ONLY dependence performance: the window it reports and its
+    cumulative return (0.25, the daily compound, unless changed)."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        modes = report["dependence_analysis"]["mode_summaries"]
+        modes["LIVE_ONLY"]["performance"]["Alpha"].update(changes)
+
+    return mutate
+
+
+def _alpha_evidence(**changes: str) -> Mutator:
+    """Change alpha's provider-evidence account value: its window, value and label
+    (0.1, epoch-labelled, unless changed)."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["strategy_provider_evidence"][0]["account"].update(changes)
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    ("mutators", "views", "spread"),
+    [
+        # (a) Q2: the headline forged to 0.5 beside the same-window performance (0.25)
+        pytest.param(
+            [
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
+                _alpha_performance(**NO_ROW_VIEW),
+            ],
+            {HEADLINE_VIEW: Decimal("0.5"), PERFORMANCE_VIEW: Decimal("0.25")},
+            "0.25",
+            id="a_forged_headline_beside_the_performance",
+        ),
+        # (b) Q2b: the same headline beside a daily-labelled evidence value (0.25)
+        pytest.param(
+            [
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
+                _alpha_evidence(
+                    **NO_ROW_VIEW,
+                    cumulative_return="0.25",
+                    cumulative_return_label=DAILY_LABEL,
+                ),
+            ],
+            {HEADLINE_VIEW: Decimal("0.5"), EVIDENCE_VIEW: Decimal("0.25")},
+            "0.25",
+            id="b_forged_headline_beside_a_daily_labelled_evidence",
+        ),
+        # beyond the ruling: a headline the report leaves out is compared with nothing
+        # itself, the performance (0.25) and the epoch-labelled evidence (0.1) still
+        # disagree, and the finding still names the headline
+        pytest.param(
+            [
+                _set(("strategy_summary", 0, "account_live_cumulative_return"), None),
+                _alpha_summary(**NO_ROW_WINDOW),
+                _alpha_performance(**NO_ROW_VIEW),
+                _alpha_evidence(**NO_ROW_VIEW),
+            ],
+            {
+                HEADLINE_VIEW: None,
+                PERFORMANCE_VIEW: Decimal("0.25"),
+                EVIDENCE_VIEW: Decimal("0.1"),
+            },
+            "0.15",
+            id="x_missing_headline_pointer_still_names_the_headline",
+        ),
+        # beyond the ruling: the rule reads the window's rows, not the receipt: a
+        # strategy that publishes an epoch-labelled headline and no receipt (the shape
+        # of FV-1's Robuxio) ...
+        pytest.param(
+            [
+                _drop_span_receipts,
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
+                _alpha_performance(**NO_ROW_VIEW),
+            ],
+            {HEADLINE_VIEW: Decimal("0.5"), PERFORMANCE_VIEW: Decimal("0.25")},
+            "0.25",
+            id="y_no_receipt_is_published",
+        ),
+        # ... and the rule reads the rows of the summary row's own layer, not the
+        # ACCOUNT_LIVE ones: a PROVIDER_LIVE summary row with no provider-live row
+        pytest.param(
+            [
+                _provider_live_layer,
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
+                _alpha_performance(**NO_ROW_VIEW),
+            ],
+            {HEADLINE_VIEW: Decimal("0.5"), PERFORMANCE_VIEW: Decimal("0.25")},
+            "0.25",
+            id="z_provider_live_summary_row",
+        ),
+    ],
+)
+def test_a_summary_window_without_daily_rows_compares_its_views_as_one_group(
+    tmp_path: Path,
+    mutators: list[Mutator],
+    views: dict[str, Decimal | None],
+    spread: str,
+) -> None:
+    """R3-1 (a), (b): a summary window in which the report publishes no daily row
+    compares every view of that window as one group, as main does.
+
+    An epoch-basis strategy's views are two groups (epoch-labelled and daily) that
+    meet only through the rows: the splice of the daily rows with the verified spans.
+    A window with no published row of the layer anchors neither group, so the
+    epoch-labelled headline was compared only with other epoch-labelled views: a
+    headline forged to 0.5 beside the same-window dependence performance (a) or a
+    daily-labelled provider-evidence value (b), both 0.25, gave no finding at all where
+    main's validator blocked (spread 0.25). With no row to splice there is no basis
+    difference for a receipt to bridge, so the views of the window are one group:
+    exactly one BLOCKER_INVARIANT at the headline with main's expectation and message
+    and the views main compares. The cases after (b) are beyond the ruling and each
+    pins one way the rule could be narrowed: (x) a headline the report leaves out is
+    compared with nothing itself, the other two views still disagree, and the finding
+    names the headline (main's pointer), not whichever view comes first; (y) the rule
+    reads the window's rows, not a receipt: an epoch-labelled strategy that publishes
+    none is held to it as well; (z) it reads the rows of the summary row's own
+    evidence layer: a PROVIDER_LIVE row with no provider-live row in the window is too.
+    """
+
+    spec = Spec(report=[_span_payload, *mutators])
+    found = _without_annualization(run(build(tmp_path, spec)))
+    assert _located(found) == [(*VIEWS, HEADLINE)]
+    (finding,) = found
+    assert finding.message == f"{ONE_GROUP_MESSAGE} {spread}"
+    assert finding.expected == ONE_GROUP_EXPECTED
+    assert finding.observed == views
+
+
+@pytest.mark.parametrize(
+    ("mutators", "expected"),
+    [
+        # a headline alone in its window has nothing to be compared with, forged or
+        # not: main passes it as well
+        pytest.param(
+            [_alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5")],
+            [],
+            id="q1_lone_forged_headline",
+        ),
+        # (c) Q2h: the honest headline agrees with the same-window performance
+        pytest.param(
+            [
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.25"),
+                _alpha_performance(**NO_ROW_VIEW),
+            ],
+            [],
+            id="c_honest_headline_beside_the_performance",
+        ),
+        # (d) Q3: two epoch-labelled views of the window that disagree
+        pytest.param(
+            [
+                _alpha_summary(**NO_ROW_WINDOW, account_live_cumulative_return="0.5"),
+                _alpha_evidence(**NO_ROW_VIEW),
+            ],
+            [(*VIEWS, HEADLINE)],
+            id="d_forged_headline_beside_an_epoch_labelled_evidence",
+        ),
+        # (e) the label rule: spans are declared and the headline is not epoch-labelled,
+        # alone and beside a group finding (the group finding comes first)
+        pytest.param(
+            [
+                _alpha_summary(
+                    **NO_ROW_WINDOW, account_live_cumulative_return_label=DAILY_LABEL
+                )
+            ],
+            [(*VIEWS, f"{HEADLINE}_label")],
+            id="e_unlabelled_headline",
+        ),
+        pytest.param(
+            [
+                _alpha_summary(
+                    **NO_ROW_WINDOW,
+                    account_live_cumulative_return="0.5",
+                    account_live_cumulative_return_label=DAILY_LABEL,
+                ),
+                _alpha_performance(**NO_ROW_VIEW),
+            ],
+            [(*VIEWS, HEADLINE), (*VIEWS, f"{HEADLINE}_label")],
+            id="e_unlabelled_forged_headline_beside_the_performance",
+        ),
+        # beyond the ruling: the boundary from above. A window that holds one row is
+        # not a window without rows: this one (S to E) holds only the row dated S and
+        # the span (S, E], so its epoch total is the span (-0.12) and its daily compound
+        # 0. An honest epoch headline agrees with the spliced rows and is clean; one
+        # group would compare it with the daily compound and block it.
+        pytest.param(
+            [
+                _alpha_summary(
+                    account_live_observed_start=SPAN_START,
+                    account_live_observed_end=SPAN_END,
+                    account_live_cumulative_return=SPAN_RETURN,
+                )
+            ],
+            [],
+            id="f_one_row_window_keeps_the_basis_split",
+        ),
+    ],
+)
+def test_one_group_controls_for_a_summary_window_without_daily_rows(
+    tmp_path: Path, mutators: list[Mutator], expected: list[tuple[str, ...]]
+) -> None:
+    """R3-1 (c)-(e): the one group of a window without daily rows changes nothing else.
+
+    A headline alone in its window is compared with nothing and an honest one agrees
+    with the same-window performance (c). Two epoch-labelled views that disagree were
+    a blocker before and still are (d). The label rule is independent of the group: a
+    strategy that declares spans and publishes a headline that is not epoch-labelled
+    is one more BLOCKER_INVARIANT, alone or beside a group finding (e). The last case
+    holds the boundary from above: a window with one row keeps the basis split (f).
+    """
+
+    spec = Spec(report=[_span_payload, *mutators])
+    found = _without_annualization(run(build(tmp_path, spec)))
+    assert _located(found) == expected
+
+
 @pytest.mark.parametrize(
     "headline",
     [
