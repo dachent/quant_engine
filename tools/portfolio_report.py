@@ -8493,6 +8493,104 @@ def _validate_epoch_manifest_input(
     )
 
 
+_RECEIPT_FACT_GROUPS: Final = frozenset({"nav", "flows", "capital_anchors"})
+_RECEIPT_FACT_SUMMARY_KEYS: Final = frozenset({"row_count", "first_date", "last_date"})
+
+
+def _static_receipt_fact_summary(
+    summary: object, window_start: date, window_end: date
+) -> tuple[int, date | None, date | None] | None:
+    """Return one receipt fact summary when it is well formed, else ``None``.
+
+    Well formed: exactly ``row_count``/``first_date``/``last_date``; the count
+    is an integer (never a bool) of at least zero; both dates are null exactly
+    when the count is zero, otherwise canonical ISO dates with
+    ``window_start <= first_date <= last_date <= window_end``.
+    """
+
+    if not isinstance(summary, Mapping) or set(summary) != _RECEIPT_FACT_SUMMARY_KEYS:
+        return None
+    count = summary["row_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return None
+    first_raw, last_raw = summary["first_date"], summary["last_date"]
+    if count == 0:
+        return (0, None, None) if first_raw is None and last_raw is None else None
+    try:
+        first = _date(first_raw, "static receipt fact first_date")
+        last = _date(last_raw, "static receipt fact last_date")
+    except ReportValidationError:
+        return None
+    if not window_start <= first <= last <= window_end:
+        return None
+    return count, first, last
+
+
+def _blocked_static_receipt_facts_bind(
+    observed_facts: object,
+    calculation_row: Mapping[str, Any],
+    requested_start: str,
+    requested_end: str,
+) -> bool:
+    """Bind a BLOCKED epoch's static receipt facts without the stripped row.
+
+    The static receipt of an epoch the admission policy BLOCKED reports the
+    facts of the selected LEDGER window: the producer, the manifest and the
+    independent verifier bind ``observed_facts`` to it.  The hash-bound
+    calculation row of the same epoch is stripped by design
+    (``FUNDED_EPOCH_FACT_PROJECTION_V2``: a BLOCKED epoch keeps no flow, no
+    capital anchor and only the NAV rows its projection retains), so equality
+    with that row is the wrong test.  Two checks replace it:
+
+    * the receipt facts are well formed (``_static_receipt_fact_summary``) for
+      all of ``nav``, ``flows`` and ``capital_anchors``, bound to the
+      receipt's requested window; and
+    * the calculation row is a sub-projection of them: it holds no classified
+      flow and no capital anchor, no more NAV rows than the receipt reports,
+      and every one of its NAV dates lies in the receipt's own NAV dates.
+
+    A FUNDED epoch never reaches this function; its facts stay exactly equal
+    to its calculation row.
+    """
+
+    try:
+        window_start = _date(requested_start, "static receipt requested_start")
+        window_end = _date(requested_end, "static receipt requested_end")
+    except ReportValidationError:
+        return False
+    if not isinstance(observed_facts, Mapping) or set(observed_facts) != set(
+        _RECEIPT_FACT_GROUPS
+    ):
+        return False
+    summaries = {
+        group: _static_receipt_fact_summary(
+            observed_facts[group], window_start, window_end
+        )
+        for group in _RECEIPT_FACT_GROUPS
+    }
+    nav = summaries["nav"]
+    if nav is None or any(summary is None for summary in summaries.values()):
+        return False
+    if (
+        calculation_row.get("classified_flows") != []
+        or calculation_row.get("capital_anchors") != []
+    ):
+        return False
+    nav_rows = calculation_row.get("nav_observations")
+    if not isinstance(nav_rows, list) or len(nav_rows) > nav[0]:
+        return False
+    for nav_row in nav_rows:
+        if not isinstance(nav_row, Mapping) or nav[1] is None or nav[2] is None:
+            return False
+        try:
+            nav_day = _date(nav_row.get("as_of_date"), "static receipt NAV as_of_date")
+        except ReportValidationError:
+            return False
+        if not nav[1] <= nav_day <= nav[2]:
+            return False
+    return True
+
+
 def _verified_epoch_authority_details(
     manifest: Mapping[str, Any],
     verification: Mapping[str, Any],
@@ -8814,6 +8912,34 @@ def _verified_epoch_authority_details(
                             matching_crosswalk[0]["effective_end"],
                         )
                     ]
+                    # The epoch's admission decides how its receipt facts bind:
+                    # FUNDED facts equal the projection exactly, BLOCKED facts
+                    # are the ledger window (see
+                    # `_blocked_static_receipt_facts_bind`).  The key is the
+                    # same epoch tuple the calculation row is matched on.
+                    matching_admission = [
+                        row
+                        for row in subject_object(
+                            "authority/mapped-epoch-admission.json"
+                        )["admissions"]
+                        if (
+                            row["account_id"],
+                            row["strategy_id"],
+                            row["effective_start"],
+                            row["effective_end"],
+                        )
+                        == (
+                            receipt["account_id"],
+                            receipt["strategy_id"],
+                            receipt["requested_start"],
+                            matching_crosswalk[0]["effective_end"],
+                        )
+                    ]
+                    admission_status = (
+                        matching_admission[0]["status"]
+                        if len(matching_admission) == 1
+                        else None
+                    )
                     expected_end = matching_crosswalk[0]["effective_end"] or cutoff
                     issuer = receipt["issuer"]
 
@@ -8833,6 +8959,22 @@ def _verified_epoch_authority_details(
                             "first_date": dates[0] if dates else None,
                             "last_date": dates[-1] if dates else None,
                         }
+
+                    def receipt_facts_bind() -> bool:
+                        if admission_status == "FUNDED":
+                            return receipt.get("observed_facts") == {
+                                "nav": observed_facts("nav_observations"),
+                                "flows": observed_facts("classified_flows"),
+                                "capital_anchors": observed_facts("capital_anchors"),
+                            }
+                        if admission_status == "BLOCKED":
+                            return _blocked_static_receipt_facts_bind(
+                                receipt.get("observed_facts"),
+                                matching_calculation[0],
+                                receipt["requested_start"],
+                                receipt["requested_end"],
+                            )
+                        return False
 
                     expected_staged_inputs = {
                         "provider_ledger_generation_id": selected_identities[
@@ -8868,18 +9010,14 @@ def _verified_epoch_authority_details(
                 if (
                     len(matching_crosswalk) != 1
                     or len(matching_calculation) != 1
+                    or len(matching_admission) != 1
                     or receipt.get("requested_end") != expected_end
                     or receipt.get("calculation_cutoff_date") != cutoff
                     or issuer.get("adapter_name") != "static-snapshot-coverage"
                     or issuer.get("adapter_version") != "1"
                     or cast(str, receipt.get("coverage_as_of_date")) < cutoff
                     or staged_inputs != expected_staged_inputs
-                    or receipt.get("observed_facts")
-                    != {
-                        "nav": observed_facts("nav_observations"),
-                        "flows": observed_facts("classified_flows"),
-                        "capital_anchors": observed_facts("capital_anchors"),
-                    }
+                    or not receipt_facts_bind()
                     or entry.get("contract") != expected_contract
                 ):
                     raise ReportValidationError(failure)
