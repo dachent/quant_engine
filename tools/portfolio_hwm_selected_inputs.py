@@ -779,9 +779,27 @@ def _source_rows(
         {key[1] for key in crosswalk_by_key} - {key[1] for key in funded_by_key}
     )
     if empty_strategies:
+        # An empty strategy holds only excluded rows.  Itemize them per strategy,
+        # never as a count: an operator needs to see which rows emptied it.
+        itemized = []
+        for strategy_id in empty_strategies:
+            rows = sorted(
+                (row for row in excluded if row["strategy_id"] == strategy_id),
+                key=lambda row: (row["account_id"], row["effective_start"]),
+            )
+            itemized.append(
+                f"{strategy_id} excluded_rows="
+                + json.dumps(
+                    rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            )
         raise SelectedHwmInputError(
-            "selected strategy has no funded account-manifest rows"
-            f" ({len(excluded)} unfunded rows excluded): " + ", ".join(empty_strategies)
+            "selected strategy has no funded account-manifest rows: "
+            + "; ".join(itemized)
         )
     return crosswalk_by_key, calculation_by_key, funded_by_key, excluded
 
@@ -1021,10 +1039,22 @@ def _require_complete_flow_coverage(
     trace.  Neither the row's performance label (an AVAILABLE trace validates
     flows only inside its own links) nor the R3 allow-list vouches for it, so
     this runs for every funded member before any return or capital is produced.
+    A funded member that contributes to no emitted interval at all fails closed
+    too: the membership evidence lists it, yet it enters no capital or return.
 
     An interval's flows begin strictly after its start, so a flow recognized on
     or before the start of the member's first contributing interval is already
-    inside the member's NAV there; it belongs to no return and is exempt.
+    inside the member's NAV there; it belongs to no return and is exempt.  That
+    is the return engine's own rule (returns.py:257-259, `link_epoch`): each leg
+    belongs to the sub-period ending at the first observation on or after its
+    NAV recognition date, and a leg recognized on or before the opening is
+    embedded in the opening value.  The builder raises unless the NAV exists at
+    the start of every interval a member contributes to, so NAV(first_start) is
+    required of every contributor and every flow recognized on or before
+    first_start is inside the composite base.  Trust boundary: the HWM trusts
+    `nav_recognition_date` as the return engine defines it, so a recognition
+    date earlier than the first NAV that reflects the flow is an upstream source
+    defect that this seam cannot detect.
     """
     for key in sorted(strategy_epochs):
         contributing = [
@@ -1032,9 +1062,15 @@ def _require_complete_flow_coverage(
             for start, end in strategy_intervals
             if key[2] <= start and (key[3] is None or end <= key[3])
         ]
-        first_start = contributing[0][0] if contributing else None
+        if not contributing:
+            raise SelectedHwmInputError(
+                "funded member contributes to no emitted strategy interval: "
+                f"account_id={key[0]} strategy_id={strategy_id} "
+                f"effective_start={key[2]} effective_end={key[3]}"
+            )
+        first_start = contributing[0][0]
         for recognition_day in sorted(flows_by_epoch[key]):
-            if first_start is not None and recognition_day <= first_start:
+            if recognition_day <= first_start:
                 continue
             if any(start < recognition_day <= end for start, end in contributing):
                 continue
