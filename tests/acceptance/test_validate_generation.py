@@ -4014,6 +4014,24 @@ def test_a_window_edge_on_an_observed_row_or_a_span_end_is_still_compared(
         )
 
 
+def test_a_summary_window_without_daily_rows_is_not_a_splice_decline(
+    tmp_path: Path,
+) -> None:
+    """R2-1 needs ``rows > 0``: a summary window in which the report publishes no
+    daily row at all (2026-03-05 to 2026-09-16 falls between two published rows) has
+    nothing to splice or to anchor. That is no decline of the splice, and a finding
+    here would carry no reason (``Splice.declined`` is ``None`` for it): the rule
+    reports a window the published rows cannot anchor, not one they do not cover.
+    """
+
+    empty = _alpha_summary(
+        account_live_observed_start="2026-03-05",
+        account_live_observed_end="2026-09-16",
+    )
+    spec = Spec(report=[_span_payload, empty])
+    assert _without_annualization(run(build(tmp_path, spec))) == []
+
+
 @pytest.mark.parametrize(
     "headline",
     [
