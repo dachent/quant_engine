@@ -15,9 +15,15 @@ row's ``admission_status``, never on its ``status``:
   the blocking reason, so a funded member never leaves the HWM silently;
 * a missing or unknown ``admission_status``, or OK without FUNDED, fails closed;
 * every flow of a funded contributor must fall inside an emitted strategy
-  interval, whatever the row's performance label says;
+  interval, whatever the row's performance label says; a flow recognized on or
+  before the start of the member's first contributing interval is already inside
+  the member's NAV there, exactly as the return engine defines it;
+* a funded member that contributes to no emitted strategy interval fails closed,
+  so no funded member stays in the membership evidence while entering no capital
+  or return;
 * a strategy with no funded rows, or with no observation-linked interval, fails
-  closed.
+  closed; the no-funded-rows error itemizes the excluded rows that emptied each
+  strategy instead of counting them.
 
 Every expected number below is derived by hand from the fixture values with
 the composite formula (sum of ending values - sum of beginning values - sum of
@@ -26,6 +32,7 @@ flows) / sum of beginning values; none is read from the code under test.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from typing import Any
 
@@ -325,7 +332,25 @@ def test_ok_row_without_a_performance_status_fails_closed(selected_hwm: Any) -> 
         selected_hwm._source_rows(calculation, output, crosswalk)
 
 
+def _disclosure_json(
+    account_id: str, strategy_id: str, status: str, reason: str
+) -> str:
+    """One blocked row's seven-field disclosure as canonical JSON (sorted keys)."""
+    return (
+        f'{{"account_id":"{account_id}","admission_status":"BLOCKED",'
+        f'"blocking_reason":"{reason}","effective_end":null,'
+        '"effective_start":"2026-01-05",'
+        f'"status":"{status}","strategy_id":"{strategy_id}"}}'
+    )
+
+
 def test_strategy_with_zero_funded_rows_still_raises(selected_hwm: Any) -> None:
+    """The error itemizes the excluded rows that emptied the strategy.
+
+    A count does not say which rows removed it, so the message lists each of
+    them as its seven-field disclosure (canonical JSON, sorted by account and
+    epoch start) and gives no global count.
+    """
     calculation, output, crosswalk = _documents()
     first, second = output["rows"][:2]
     _block(first, "BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED")
@@ -337,8 +362,72 @@ def test_strategy_with_zero_funded_rows_still_raises(selected_hwm: Any) -> None:
 
     with pytest.raises(
         selected_hwm.SelectedHwmInputError, match="no funded account-manifest.*alpha"
-    ):
+    ) as raised:
         selected_hwm._source_rows(calculation, output, crosswalk)
+
+    message = str(raised.value)
+    excluded_rows = (
+        ("synthetic-account-00", "BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED"),
+        (
+            "synthetic-account-01",
+            "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
+            "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
+        ),
+    )
+    for account_id, status, reason in excluded_rows:
+        for value in (account_id, "2026-01-05", status, reason):
+            assert value in message
+    assert message == (
+        "selected strategy has no funded account-manifest rows: alpha excluded_rows=["
+        + ",".join(
+            _disclosure_json(account_id, "alpha", status, reason)
+            for account_id, status, reason in excluded_rows
+        )
+        + "]"
+    )
+    assert "unfunded rows excluded" not in message
+
+
+@pytest.mark.parametrize(
+    ("blocked", "listed"),
+    [
+        # alpha is empty; beta keeps ten funded rows, so beta's own excluded row
+        # (account 02) is not part of the error.
+        (range(0, 3), {"alpha": range(0, 2)}),
+        # Both strategies are empty: each lists only its own excluded rows.
+        (range(0, 13), {"alpha": range(0, 2), "beta": range(2, 13)}),
+    ],
+    ids=["only-alpha-empty", "both-empty"],
+)
+def test_zero_funded_error_lists_the_excluded_rows_of_each_empty_strategy(
+    selected_hwm: Any, blocked: range, listed: dict[str, range]
+) -> None:
+    calculation, output, crosswalk = _documents()
+    for index in blocked:
+        _block(
+            output["rows"][index], "BLOCKED_ADMISSION", "EPOCH_NOT_EXPLICITLY_FUNDED"
+        )
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError) as raised:
+        selected_hwm._source_rows(calculation, output, crosswalk)
+
+    assert str(raised.value) == (
+        "selected strategy has no funded account-manifest rows: "
+        + "; ".join(
+            f"{strategy_id} excluded_rows=["
+            + ",".join(
+                _disclosure_json(
+                    f"synthetic-account-{index:02d}",
+                    strategy_id,
+                    "BLOCKED_ADMISSION",
+                    "EPOCH_NOT_EXPLICITLY_FUNDED",
+                )
+                for index in indexes
+            )
+            + "]"
+            for strategy_id, indexes in listed.items()
+        )
+    )
 
 
 def _one_strategy_mixed_maps(
@@ -860,6 +949,85 @@ def test_flow_recognized_on_the_opening_day_is_inside_the_opening_value(
     ] == [(D0, D1, _ratio(7, 150)), (D1, D2, _ratio(7, 157))]
 
 
+def test_opening_day_flow_is_inside_the_opening_nav_as_the_return_engine_defines(
+    selected_hwm: Any,
+) -> None:
+    """P-R1: the exemption is the complement of the return engine's own rule.
+
+    The return engine puts a flow into the sub-period that ends at its NAV
+    recognition date and embeds a flow recognized on or before the opening in
+    the opening value (`link_epoch`).  So a flow recognized on day r is inside
+    NAV(d) for every observation d on or after r, and exempting the flows
+    recognized on or before a member's first contributing start prices nothing
+    as return that its NAV there does not already contain.
+
+    (a) The premise, on the return engine: a date-only +5 deposit recognized on
+    D0 into a member whose NAV(D0) is 45 is embedded in the opening value 45
+    when nothing was observed earlier, and is linked into the sub-period ending
+    on D0, whose ending value 45 already holds it, when D0-1 was observed at 40.
+
+    (b) The consequence, on the HWM: the member opens at 45, never at 50, so the
+    composite D0/D1/D2 is 100+45, 105+52, 110+54 = 145/157/164; the +5 belongs
+    to no interval, so D0->D1 is (157 - 145) / 145 = 12/145 and D1->D2 is
+    (164 - 157) / 157 = 7/157.  Adding the +5 to the opening (base 150) would
+    count it twice.
+    """
+    from quant_engine.portfolio_ledger import returns as return_engine
+
+    d0 = date.fromisoformat(D0)
+    deposit = return_engine.FlowLeg(
+        Decimal(5), "EXTERNAL_IN", d0, d0, return_engine.DATE_ONLY
+    )
+    observed = {
+        d0: Decimal(45),
+        date.fromisoformat(D1): Decimal(52),
+        date.fromisoformat(D2): Decimal(54),
+    }
+
+    # (a) Nothing observed before D0: D0 opens the epoch and embeds the deposit.
+    opening = return_engine.opening_point(observed, d0)
+    assert opening is not None
+    assert (opening.as_of, opening.value) == (d0, Decimal(45))
+    epoch = return_engine.link_epoch(observed, [deposit], opening)
+    assert epoch.embedded_legs == (deposit,)
+    assert epoch.linked_legs == ()
+    assert epoch.links[0].beginning_capital == Decimal(45)
+
+    # (a) D0-1 observed at 40: the deposit is linked into the sub-period ending
+    # on D0, whose ending value 45 already contains it.
+    day_before = d0 - timedelta(days=1)
+    observed_before = {day_before: Decimal(40), **observed}
+    opening = return_engine.opening_point(observed_before, d0)
+    assert opening is not None
+    assert (opening.as_of, opening.value) == (day_before, Decimal(40))
+    epoch = return_engine.link_epoch(observed_before, [deposit], opening)
+    assert epoch.embedded_legs == ()
+    assert epoch.linked_legs == (deposit,)
+    into_d0 = next(link for link in epoch.links if link.end_date == d0)
+    assert (into_d0.ending_value, into_d0.ending_flow) == (Decimal(45), Decimal(5))
+
+    # (b) The same member through the HWM.
+    documents = _tt_like_world(
+        live_values=[(D0, "100"), (D1, "105"), (D2, "110")],
+        member_values=[(D0, "45"), (D1, "52"), (D2, "54")],
+        member_flows=[(D0, "5")],
+        member_reason=None,
+    )
+
+    _, capital, returns, _ = _selected_builder_rows(selected_hwm, documents)
+
+    assert {
+        row["date"]: Decimal(row["closing_capital_usd"])
+        for row in capital
+        if row["strategy_id"] == TT_LIKE
+    } == {D0: Decimal(145), D1: Decimal(157), D2: Decimal(164)}
+    assert [
+        (row["interval_start"], row["interval_end"], Decimal(row["net_return"]))
+        for row in returns
+        if row["strategy_id"] == TT_LIKE
+    ] == [(D0, D1, _ratio(12, 145)), (D1, D2, _ratio(7, 157))]
+
+
 def _member_maps(
     documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -951,3 +1119,50 @@ def test_strategy_whose_funded_members_have_no_linked_interval_fails_closed(
         _selected_builder_rows(
             selected_hwm, (calculation_doc, output_doc, crosswalk_doc)
         )
+
+
+def _move_member_epoch_start(
+    documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    effective_start: str,
+) -> None:
+    """Move the funded member's epoch start in all three selected documents."""
+    calculation_doc, output_doc, crosswalk_doc = documents
+    for row in calculation_doc["rows"]:
+        if row["epoch"]["account_id"] == MEMBER_KEY[0]:
+            row["epoch"]["effective_start"] = effective_start
+    for document in (output_doc, crosswalk_doc):
+        for row in document["rows"]:
+            if row["account_id"] == MEMBER_KEY[0]:
+                row["effective_start"] = effective_start
+
+
+def test_funded_member_contributing_to_no_emitted_interval_fails_closed(
+    selected_hwm: Any,
+) -> None:
+    """A funded member that enters no capital or return must not stay a member.
+
+    The live member's links end at D1, so the only emitted strategy interval is
+    D0->D1.  The zero-capital member's epoch starts on D2, after it: the member
+    has no NAV at any interval boundary and no flows, so nothing a flow check
+    could reject, yet the membership evidence lists it while the composite
+    capital and returns never include it.
+    """
+    documents = _tt_like_world(
+        live_values=[(D0, "100"), (D1, "105")],
+        member_values=[(D2, "0"), (D3, "41")],
+        member_flows=[],
+        member_reason="ZERO_CAPITAL_RETURN_UNDEFINED",
+    )
+    _move_member_epoch_start(documents, D2)
+
+    with pytest.raises(
+        selected_hwm.SelectedHwmInputError,
+        match="funded member contributes to no emitted strategy interval",
+    ) as raised:
+        _selected_builder_rows(selected_hwm, documents)
+
+    message = str(raised.value)
+    assert f"account_id={MEMBER_KEY[0]}" in message
+    assert f"strategy_id={TT_LIKE}" in message
+    assert f"effective_start={D2}" in message
+    assert "effective_end=None" in message
