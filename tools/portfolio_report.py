@@ -62,11 +62,16 @@ from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
 from quant_engine.portfolio_ledger.returns import (
-    MemberReturn,
+    DATE_ONLY,
+    EXACT_TIMESTAMP,
+    ZERO_CAPITAL_RETURN_UNDEFINED,
+    FlowLeg,
     ReturnsError,
     ReturnSpan,
-    composite,
+    ValuePeriod,
     splice_spans,
+    summed_value_composite,
+    value_periods,
 )
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
@@ -1268,79 +1273,275 @@ def _member_own_trace_path(
     }
 
 
+# The only unavailable-performance reason under which a funded member epoch is
+# admitted without an observation trace: its own return is undefined across a
+# zero-capital run (R3).  Same allow-list as the HWM selected-input gate
+# (``_R3_ZERO_CAPITAL_REASONS``); every other reason reports incomplete or
+# inconsistent evidence and fails closed.
+_R3_ZERO_CAPITAL_REASONS: Final = frozenset({ZERO_CAPITAL_RETURN_UNDEFINED})
+
+
+def _r3_zero_capital_member(detail: Mapping[str, Any]) -> bool:
+    return (
+        detail.get("performance_status") == "UNAVAILABLE"
+        and detail.get("performance_reason") in _R3_ZERO_CAPITAL_REASONS
+    )
+
+
+def _usd_amount(value: object, label: str, index: int) -> Decimal:
+    amount = _object(value, f"{label} {index}")
+    if amount.get("currency") != "USD" or amount.get("status") != "AVAILABLE":
+        raise ReportValidationError(f"{label} lacks source-native USD (row {index})")
+    return _decimal(amount.get("value"), f"{label} {index}.value")
+
+
+def _r3_member_value_facts(
+    account_id: str, source: Mapping[str, Any]
+) -> tuple[dict[date, Decimal], list[FlowLeg]]:
+    """Read an R3 member's NAV series and flow legs from its calculation inputs.
+
+    The semantics are the HWM selected-input gate's
+    (``_validated_account_sources``): NAV observations are the USD AVAILABLE
+    ``nav_observations`` by ``as_of_date`` (a repeated date must agree);
+    classified flows must be CLASSIFIED USD amounts, signed at the NAV
+    recognition date (else the event date), and enter at the end of their
+    day; ``STRATEGY_CAPITAL_ALLOCATION`` capital anchors are exact-timestamp
+    legs at the beginning of their sub-period; ``OPENING_CAPITAL_ANCHOR`` rows
+    contribute no flow (the opening capital is the NAV); any other anchor type
+    raises.  Every row must belong to the member's account.  A zero amount
+    moves no value and is skipped.
+    """
+
+    observations: dict[date, Decimal] = {}
+    for index, row in enumerate(
+        _objects(source.get("nav_observations"), "NAV observations")
+    ):
+        if row.get("account_id") != account_id:
+            raise ReportValidationError(
+                "NAV observation account differs from the epoch"
+            )
+        day = _date(row.get("as_of_date"), f"NAV observation {index}.as_of_date")
+        value = _usd_amount(row.get("nav"), "NAV observation", index)
+        if day in observations and observations[day] != value:
+            raise ReportValidationError("NAV observations conflict on one date")
+        observations[day] = value
+    if not observations:
+        raise ReportValidationError("no daily NAV observations")
+    legs: list[FlowLeg] = []
+    for index, row in enumerate(
+        _objects(source.get("capital_anchors"), "capital anchors")
+    ):
+        if row.get("account_id") != account_id:
+            raise ReportValidationError("capital anchor account differs from the epoch")
+        capital_type = row.get("capital_type")
+        if capital_type == "OPENING_CAPITAL_ANCHOR":
+            continue
+        if capital_type != "STRATEGY_CAPITAL_ALLOCATION":
+            raise ReportValidationError("capital anchor type is unsupported")
+        amount = _usd_amount(row.get("amount"), "capital anchor", index)
+        event_day = _date(row.get("event_date"), f"capital anchor {index}.event_date")
+        recognition_day = _date(
+            row.get("nav_recognition_date"),
+            f"capital anchor {index}.nav_recognition_date",
+        )
+        if recognition_day < event_day:
+            raise ReportValidationError(
+                "capital anchor recognition precedes its economic event"
+            )
+        if amount != 0:
+            legs.append(
+                FlowLeg(
+                    amount=amount,
+                    flow_class="EXTERNAL_IN" if amount > 0 else "EXTERNAL_OUT",
+                    event_date=event_day,
+                    nav_recognition_date=recognition_day,
+                    timing=EXACT_TIMESTAMP,
+                )
+            )
+    identities: set[str] = set()
+    for index, row in enumerate(
+        _objects(source.get("classified_flows"), "classified flows")
+    ):
+        if row.get("account_id") != account_id:
+            raise ReportValidationError(
+                "classified flow account differs from the epoch"
+            )
+        amount = _usd_amount(row.get("amount"), "classified flow", index)
+        if row.get("classification_status") != "CLASSIFIED":
+            raise ReportValidationError("classified flow is not CLASSIFIED")
+        identity = _text(
+            row.get("event_id", row.get("source_record_id")),
+            f"classified flow {index}.identity",
+        )
+        if identity in identities:
+            raise ReportValidationError("classified flow identity is duplicated")
+        identities.add(identity)
+        event_day = _date(row.get("event_date"), f"classified flow {index}.event_date")
+        recognition_day = _date(
+            row.get("nav_recognition_date", row.get("event_date")),
+            f"classified flow {index}.nav_recognition_date",
+        )
+        if recognition_day < event_day:
+            raise ReportValidationError(
+                "classified flow recognition precedes its economic event"
+            )
+        disposition = row.get("disposition")
+        if disposition not in {"INTERNAL", "EXTERNAL"}:
+            raise ReportValidationError("classified flow disposition is unsupported")
+        if amount != 0:
+            legs.append(
+                FlowLeg(
+                    amount=amount,
+                    flow_class=f"{disposition}_{'IN' if amount > 0 else 'OUT'}",
+                    event_date=event_day,
+                    nav_recognition_date=recognition_day,
+                    timing=DATE_ONLY,
+                )
+            )
+    return observations, legs
+
+
+def _r3_member_value_periods(
+    strategy_id: str, account_id: str, detail: Mapping[str, Any]
+) -> tuple[ValuePeriod, ...]:
+    """Value periods of an R3 member, from its hash-bound calculation inputs.
+
+    The member has no observation trace (its own return is undefined across a
+    zero-capital run), but its NAV series and flows are admitted facts of the
+    verified epoch generation.  The periods are the consecutive NAV
+    observations after the member's performance opening date, valued through
+    the one return engine (``value_periods``), so a zero-capital sub-period
+    keeps its ending value instead of dropping out of the composite.  Anything
+    the engine or the facts refuse -- including an opening that is not one of
+    the member's observations and a flow after its last observation -- fails
+    closed.
+    """
+
+    source = detail.get("by_value_source")
+    if not isinstance(source, Mapping):
+        raise ReportValidationError(
+            "multi-account member by-value source is missing "
+            f"for {strategy_id} ({account_id})"
+        )
+    try:
+        observations, legs = _r3_member_value_facts(account_id, source)
+        opening = _date(
+            detail.get("performance_opening_date"), "performance_opening_date"
+        )
+        periods = value_periods(account_id, observations, legs, opening)
+        if not periods:
+            # The engine only reports ZERO_CAPITAL_RETURN_UNDEFINED for a
+            # sub-period that starts at zero capital, so an R3 member with no
+            # observation after its opening is inconsistent evidence.  Were it
+            # accepted with nothing to value, a two-member strategy would keep
+            # one member and the reconcile would skip the canonical comparison.
+            raise ReportValidationError("no valued sub-period after the opening")
+    except (ReportValidationError, ReturnsError) as exc:
+        raise ReportValidationError(
+            "multi-account member by-value source is invalid "
+            f"for {strategy_id} ({account_id}): {exc}"
+        ) from exc
+    return periods
+
+
 def _reconcile_multi_account_strategy_composite(
     strategy_id: str,
     current_epoch_details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     strategy_live: Mapping[str, dict[str, Any]],
 ) -> None:
-    """Require governed member trace paths to reconcile to the strategy path.
+    """Require the admitted members to reconcile to the strategy path.
 
-    Recomputes the strategy composite from every ADMITTED (FUNDED) member
-    epoch's own trace links through the one return engine -- ``composite``
-    over the beginning-capital-weighted member sub-period returns, compounded
-    via ``splice_spans`` -- and requires it to equal the canonical
-    strategy-level path within 1e-12.  A funded member epoch without a
+    The strategy composite is the SUMMED-VALUE composite of every ADMITTED
+    (FUNDED) member epoch: per boundary ``sum(V_end - F_eod) / sum(V_begin +
+    F_bod) - 1`` through the one return engine (``summed_value_composite``),
+    compounded via ``splice_spans``, which must equal the canonical
+    strategy-level path within 1e-12.  This is the construction the ledger and
+    the HWM already use; a beginning-capital weighted mean of member returns
+    cannot take the income of a member that starts a sub-period at zero
+    capital, where its own return is undefined.
+
+    A traced member enters from its verified observation-trace links
+    (``B = base_nav + beginning_flow``, ``N = B x factor``).  The only member
+    admitted without a trace is the R3 zero-capital member -- UNAVAILABLE for
+    ``ZERO_CAPITAL_RETURN_UNDEFINED`` and nothing else -- which enters by value
+    from its hash-bound calculation inputs.  Any other funded member without a
     verified trace makes the admitted composite uncomputable, so the
     reconciliation fails closed instead of being silently disabled for the
-    strategy's other members.  A BLOCKED-admission member epoch is a governed
-    outcome (incomplete coverage, an owner-approved unavailable observation):
-    the producer retains no numeric metric or observation trace for it by
-    contract, so it is excluded from the reconcile input set, the canonical
-    comparison runs over the admitted set, and the exclusion is disclosed --
-    never silent -- on the member's own report row through the
-    BLOCKED_ADMISSION statuses and its typed blocking reason.  Engine
-    ``ReturnsError`` (an unvalued member boundary, a repeated date) fails
-    closed here.
+    strategy's other members, and a member with a trace that reports its
+    performance UNAVAILABLE for any other reason is refused by name.  A
+    BLOCKED-admission member epoch is a governed outcome (incomplete coverage,
+    an owner-approved unavailable observation): the producer retains no
+    numeric metric or observation trace for it by contract, so it is excluded
+    from the reconcile input set, the canonical comparison runs over the
+    admitted set, and the exclusion is disclosed -- never silent -- on the
+    member's own report row through the BLOCKED_ADMISSION statuses and its
+    typed blocking reason.  Engine ``ReturnsError`` (an unvalued member
+    boundary, a repeated date, value on zero capital) fails closed here.
     """
 
-    inputs: list[MemberReturn] = []
-    for (
-        account_id,
-        member_strategy_id,
-        _start,
-        _end,
-    ), detail in current_epoch_details.items():
-        if member_strategy_id != strategy_id:
-            continue
-        if detail.get("epoch_admission_status") == "BLOCKED":
-            # Governed blocked admission: the producer retains no trace for
-            # this epoch by contract, so it leaves the reconcile input set;
-            # the member's own row discloses the exclusion (BLOCKED_ADMISSION
-            # statuses and the typed blocking reason).  A missing trace on an
-            # admitted (FUNDED) member still fails closed below.
-            continue
-        links = detail.get("own_path_links")
-        if not isinstance(links, list) or not links:
-            raise ReportValidationError(
-                "multi-account member own trace path is missing "
-                f"for {strategy_id} ({account_id})"
-            )
-        for link in _objects(links, "observation_trace.links"):
-            inputs.append(
-                MemberReturn(
-                    account_id,
-                    _date(link.get("end_date"), "trace link.end_date"),
-                    _decimal(link.get("base_nav"), "trace link.base_nav")
-                    + _decimal(link.get("beginning_flow"), "trace link.beginning_flow"),
-                    _decimal(link.get("factor"), "trace link.factor") - Decimal(1),
-                    _date(link.get("start_date"), "trace link.start_date"),
+    periods: list[ValuePeriod] = []
+    with localcontext() as context:
+        context.prec = 34
+        for (
+            account_id,
+            member_strategy_id,
+            _start,
+            _end,
+        ), detail in current_epoch_details.items():
+            if member_strategy_id != strategy_id:
+                continue
+            if detail.get("epoch_admission_status") == "BLOCKED":
+                # Governed blocked admission: the producer retains no trace
+                # for this epoch by contract, so it leaves the reconcile input
+                # set; the member's own row discloses the exclusion
+                # (BLOCKED_ADMISSION statuses and the typed blocking reason).
+                # A missing trace on an admitted (FUNDED) member still fails
+                # closed below.
+                continue
+            if _r3_zero_capital_member(detail):
+                periods.extend(
+                    _r3_member_value_periods(strategy_id, account_id, detail)
                 )
-            )
-    canonical = strategy_live.get(strategy_id)
-    if canonical is None or len({item.member_id for item in inputs}) < 2:
-        return
-    try:
-        with localcontext() as context:
-            context.prec = 34
-            composited = composite(inputs)
+                continue
+            links = detail.get("own_path_links")
+            if not isinstance(links, list) or not links:
+                raise ReportValidationError(
+                    "multi-account member own trace path is missing "
+                    f"for {strategy_id} ({account_id})"
+                )
+            if detail.get("performance_status") == "UNAVAILABLE":
+                raise ReportValidationError(
+                    "multi-account member performance is unavailable outside "
+                    f"the R3 allow-list for {strategy_id} ({account_id}): "
+                    f"{detail.get('performance_reason')}"
+                )
+            for link in _objects(links, "observation_trace.links"):
+                beginning_capital = _decimal(
+                    link.get("base_nav"), "trace link.base_nav"
+                ) + _decimal(link.get("beginning_flow"), "trace link.beginning_flow")
+                periods.append(
+                    ValuePeriod(
+                        account_id,
+                        _date(link.get("start_date"), "trace link.start_date"),
+                        _date(link.get("end_date"), "trace link.end_date"),
+                        beginning_capital,
+                        beginning_capital
+                        * _decimal(link.get("factor"), "trace link.factor"),
+                    )
+                )
+        canonical = strategy_live.get(strategy_id)
+        if canonical is None or len({item.member_id for item in periods}) < 2:
+            return
+        try:
+            composited = summed_value_composite(periods)
             compounded = splice_spans(
                 [(item.end_date, item.period_return) for item in composited]
             )
-    except ReturnsError as exc:
-        raise ReportValidationError(
-            f"multi-account member own paths do not reconcile "
-            f"to the strategy composite for {strategy_id}: {exc}"
-        ) from exc
+        except ReturnsError as exc:
+            raise ReportValidationError(
+                f"multi-account member own paths do not reconcile "
+                f"to the strategy composite for {strategy_id}: {exc}"
+            ) from exc
     if abs(
         compounded.cumulative_return
         - _decimal(canonical["cumulative_return"], "strategy composite path")
@@ -5622,6 +5823,46 @@ def _calculation_catalog_through(
     return projected
 
 
+def _crosswalk_epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str, str | None]:
+    return (
+        row["account_id"],
+        row["strategy_id"],
+        row["effective_start"],
+        row["effective_end"],
+    )
+
+
+def _current_epoch_detail(
+    row: Mapping[str, Any], verified: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The current-epoch detail the performance seam reads for one crosswalk row.
+
+    The private siblings of the published ``performance_payload`` are threaded
+    through here so the real report path reaches the member gates: the member's
+    observation-trace links (W1/W2 and the composite reconcile) and the R3
+    inputs -- the performance status and reason, the opening date and the
+    by-value calculation-input facts -- that admit a zero-capital member to the
+    reconcile without a trace.  None of them is ever published: the payload
+    below stays free of every private key.  The R3 inputs are read with
+    ``get``: a verified detail that carries none keeps its member traceless,
+    which the reconcile refuses.
+    """
+
+    return {
+        "account_label": row["account_label"],
+        "last_four": row["last_four"],
+        "epoch_admission_status": verified["epoch_admission_status"],
+        "epoch_output_status": verified["epoch_output_status"],
+        "epoch_blocking_reason": verified["epoch_blocking_reason"],
+        "own_path_links": verified["own_path_links"],
+        "performance_status": verified.get("performance_status"),
+        "performance_reason": verified.get("performance_reason"),
+        "performance_opening_date": verified.get("performance_opening_date"),
+        "by_value_source": verified.get("by_value_source"),
+        "performance_payload": verified["performance_payload"],
+    }
+
+
 def build_report_data(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
@@ -5744,58 +5985,9 @@ def build_report_data(
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
         }
         current_epoch_details = {
-            (
-                row["account_id"],
-                row["strategy_id"],
-                row["effective_start"],
-                row["effective_end"],
-            ): {
-                "account_label": row["account_label"],
-                "last_four": row["last_four"],
-                "epoch_admission_status": verified_epoch_details[
-                    (
-                        row["account_id"],
-                        row["strategy_id"],
-                        row["effective_start"],
-                        row["effective_end"],
-                    )
-                ]["epoch_admission_status"],
-                "epoch_output_status": verified_epoch_details[
-                    (
-                        row["account_id"],
-                        row["strategy_id"],
-                        row["effective_start"],
-                        row["effective_end"],
-                    )
-                ]["epoch_output_status"],
-                "epoch_blocking_reason": verified_epoch_details[
-                    (
-                        row["account_id"],
-                        row["strategy_id"],
-                        row["effective_start"],
-                        row["effective_end"],
-                    )
-                ]["epoch_blocking_reason"],
-                # The member's own observation-trace links, threaded through
-                # so the real report path reaches both member gates; the
-                # published payload below stays free of the private trace.
-                "own_path_links": verified_epoch_details[
-                    (
-                        row["account_id"],
-                        row["strategy_id"],
-                        row["effective_start"],
-                        row["effective_end"],
-                    )
-                ]["own_path_links"],
-                "performance_payload": verified_epoch_details[
-                    (
-                        row["account_id"],
-                        row["strategy_id"],
-                        row["effective_start"],
-                        row["effective_end"],
-                    )
-                ]["performance_payload"],
-            }
+            _crosswalk_epoch_key(row): _current_epoch_detail(
+                row, verified_epoch_details[_crosswalk_epoch_key(row)]
+            )
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
         }
@@ -8493,6 +8685,104 @@ def _validate_epoch_manifest_input(
     )
 
 
+_RECEIPT_FACT_GROUPS: Final = frozenset({"nav", "flows", "capital_anchors"})
+_RECEIPT_FACT_SUMMARY_KEYS: Final = frozenset({"row_count", "first_date", "last_date"})
+
+
+def _static_receipt_fact_summary(
+    summary: object, window_start: date, window_end: date
+) -> tuple[int, date | None, date | None] | None:
+    """Return one receipt fact summary when it is well formed, else ``None``.
+
+    Well formed: exactly ``row_count``/``first_date``/``last_date``; the count
+    is an integer (never a bool) of at least zero; both dates are null exactly
+    when the count is zero, otherwise canonical ISO dates with
+    ``window_start <= first_date <= last_date <= window_end``.
+    """
+
+    if not isinstance(summary, Mapping) or set(summary) != _RECEIPT_FACT_SUMMARY_KEYS:
+        return None
+    count = summary["row_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return None
+    first_raw, last_raw = summary["first_date"], summary["last_date"]
+    if count == 0:
+        return (0, None, None) if first_raw is None and last_raw is None else None
+    try:
+        first = _date(first_raw, "static receipt fact first_date")
+        last = _date(last_raw, "static receipt fact last_date")
+    except ReportValidationError:
+        return None
+    if not window_start <= first <= last <= window_end:
+        return None
+    return count, first, last
+
+
+def _blocked_static_receipt_facts_bind(
+    observed_facts: object,
+    calculation_row: Mapping[str, Any],
+    requested_start: str,
+    requested_end: str,
+) -> bool:
+    """Bind a BLOCKED epoch's static receipt facts without the stripped row.
+
+    The static receipt of an epoch the admission policy BLOCKED reports the
+    facts of the selected LEDGER window: the producer, the manifest and the
+    independent verifier bind ``observed_facts`` to it.  The hash-bound
+    calculation row of the same epoch is stripped by design
+    (``FUNDED_EPOCH_FACT_PROJECTION_V2``: a BLOCKED epoch keeps no flow, no
+    capital anchor and only the NAV rows its projection retains), so equality
+    with that row is the wrong test.  Two checks replace it:
+
+    * the receipt facts are well formed (``_static_receipt_fact_summary``) for
+      all of ``nav``, ``flows`` and ``capital_anchors``, bound to the
+      receipt's requested window; and
+    * the calculation row is a sub-projection of them: it holds no classified
+      flow and no capital anchor, no more NAV rows than the receipt reports,
+      and every one of its NAV dates lies in the receipt's own NAV dates.
+
+    A FUNDED epoch never reaches this function; its facts stay exactly equal
+    to its calculation row.
+    """
+
+    try:
+        window_start = _date(requested_start, "static receipt requested_start")
+        window_end = _date(requested_end, "static receipt requested_end")
+    except ReportValidationError:
+        return False
+    if not isinstance(observed_facts, Mapping) or set(observed_facts) != set(
+        _RECEIPT_FACT_GROUPS
+    ):
+        return False
+    summaries = {
+        group: _static_receipt_fact_summary(
+            observed_facts[group], window_start, window_end
+        )
+        for group in _RECEIPT_FACT_GROUPS
+    }
+    nav = summaries["nav"]
+    if nav is None or any(summary is None for summary in summaries.values()):
+        return False
+    if (
+        calculation_row.get("classified_flows") != []
+        or calculation_row.get("capital_anchors") != []
+    ):
+        return False
+    nav_rows = calculation_row.get("nav_observations")
+    if not isinstance(nav_rows, list) or len(nav_rows) > nav[0]:
+        return False
+    for nav_row in nav_rows:
+        if not isinstance(nav_row, Mapping) or nav[1] is None or nav[2] is None:
+            return False
+        try:
+            nav_day = _date(nav_row.get("as_of_date"), "static receipt NAV as_of_date")
+        except ReportValidationError:
+            return False
+        if not nav[1] <= nav_day <= nav[2]:
+            return False
+    return True
+
+
 def _verified_epoch_authority_details(
     manifest: Mapping[str, Any],
     verification: Mapping[str, Any],
@@ -8814,6 +9104,34 @@ def _verified_epoch_authority_details(
                             matching_crosswalk[0]["effective_end"],
                         )
                     ]
+                    # The epoch's admission decides how its receipt facts bind:
+                    # FUNDED facts equal the projection exactly, BLOCKED facts
+                    # are the ledger window (see
+                    # `_blocked_static_receipt_facts_bind`).  The key is the
+                    # same epoch tuple the calculation row is matched on.
+                    matching_admission = [
+                        row
+                        for row in subject_object(
+                            "authority/mapped-epoch-admission.json"
+                        )["admissions"]
+                        if (
+                            row["account_id"],
+                            row["strategy_id"],
+                            row["effective_start"],
+                            row["effective_end"],
+                        )
+                        == (
+                            receipt["account_id"],
+                            receipt["strategy_id"],
+                            receipt["requested_start"],
+                            matching_crosswalk[0]["effective_end"],
+                        )
+                    ]
+                    admission_status = (
+                        matching_admission[0]["status"]
+                        if len(matching_admission) == 1
+                        else None
+                    )
                     expected_end = matching_crosswalk[0]["effective_end"] or cutoff
                     issuer = receipt["issuer"]
 
@@ -8833,6 +9151,22 @@ def _verified_epoch_authority_details(
                             "first_date": dates[0] if dates else None,
                             "last_date": dates[-1] if dates else None,
                         }
+
+                    def receipt_facts_bind() -> bool:
+                        if admission_status == "FUNDED":
+                            return receipt.get("observed_facts") == {
+                                "nav": observed_facts("nav_observations"),
+                                "flows": observed_facts("classified_flows"),
+                                "capital_anchors": observed_facts("capital_anchors"),
+                            }
+                        if admission_status == "BLOCKED":
+                            return _blocked_static_receipt_facts_bind(
+                                receipt.get("observed_facts"),
+                                matching_calculation[0],
+                                receipt["requested_start"],
+                                receipt["requested_end"],
+                            )
+                        return False
 
                     expected_staged_inputs = {
                         "provider_ledger_generation_id": selected_identities[
@@ -8868,18 +9202,14 @@ def _verified_epoch_authority_details(
                 if (
                     len(matching_crosswalk) != 1
                     or len(matching_calculation) != 1
+                    or len(matching_admission) != 1
                     or receipt.get("requested_end") != expected_end
                     or receipt.get("calculation_cutoff_date") != cutoff
                     or issuer.get("adapter_name") != "static-snapshot-coverage"
                     or issuer.get("adapter_version") != "1"
                     or cast(str, receipt.get("coverage_as_of_date")) < cutoff
                     or staged_inputs != expected_staged_inputs
-                    or receipt.get("observed_facts")
-                    != {
-                        "nav": observed_facts("nav_observations"),
-                        "flows": observed_facts("classified_flows"),
-                        "capital_anchors": observed_facts("capital_anchors"),
-                    }
+                    or not receipt_facts_bind()
                     or entry.get("contract") != expected_contract
                 ):
                     raise ReportValidationError(failure)
@@ -9348,6 +9678,25 @@ def _verified_epoch_authority_details(
             "own_path_links": (
                 manifest_row["observation_trace"]["links"]
                 if "performance_status" in manifest_row
+                else None
+            ),
+            # The R3 zero-capital member has no trace; the report reconciles
+            # it by value from its hash-bound calculation-input row.  These
+            # four keys are PRIVATE siblings of the published payload, like
+            # the trace above, and never enter a published row.
+            "performance_status": manifest_row.get("performance_status"),
+            "performance_reason": manifest_row.get("performance_reason"),
+            "performance_opening_date": manifest_row.get("performance_opening_date"),
+            "by_value_source": (
+                {
+                    field: calculation_by_key[key].get(field)
+                    for field in (
+                        "nav_observations",
+                        "classified_flows",
+                        "capital_anchors",
+                    )
+                }
+                if _r3_zero_capital_member(manifest_row)
                 else None
             ),
             "performance_payload": (

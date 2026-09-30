@@ -1910,3 +1910,704 @@ def test_window_probe_fires_check_twr_views_on_a_corrupted_single_link_return(
     assert {finding.klass for finding in findings} == {checks.BLOCKER_INVARIANT}
     path_view = findings[0].observed["report.twr_mwr[0].return_path_cumulative_return"]
     assert path_view["window"] == [date(2026, 7, 1), date(2026, 7, 30)]
+
+
+# --- R3 zero-capital member: reconcile by value (gates D and D2) -----------------
+#
+# A funded member whose own return is undefined across a zero-capital run (R3:
+# UNAVAILABLE + ZERO_CAPITAL_RETURN_UNDEFINED) has no observation trace.  Its
+# NAV and flows are admitted and hash bound in the epoch calculation inputs, and
+# the strategy composite is the SUMMED-VALUE composite -- per boundary
+# sum(V_end - F_eod) / sum(V_begin + F_bod) - 1 -- which the ledger and the HWM
+# already use.  The beginning-capital weighted mean of member returns cannot
+# take the income the member earns on a day it starts at zero capital.
+
+R3_DAYS = (
+    "2026-01-01",
+    "2026-01-02",
+    "2026-01-05",
+    "2026-01-06",
+    "2026-01-07",
+    "2026-01-08",
+)
+R3_KEY = ("account-r", "strategy-shared", "2026-01-01", None)
+_PRIVATE_DETAIL_FIELDS = (
+    "own_path_links",
+    "by_value_source",
+    "performance_status",
+    "performance_reason",
+    "performance_opening_date",
+)
+_OWN_TRACE_MISSING = r"own trace path is missing for strategy-shared \(account-r\)"
+_DO_NOT_RECONCILE = (
+    "multi-account member own paths do not reconcile to the strategy composite"
+)
+
+
+def _r3_observations(
+    days: tuple[str, ...], values: tuple[str, ...]
+) -> dict[date, Decimal]:
+    return {date.fromisoformat(d): Decimal(v) for d, v in zip(days, values)}
+
+
+def _r3_leg(amount: str, recognized: str) -> Any:
+    from quant_engine.portfolio_ledger.returns import FlowLeg
+
+    value = Decimal(amount)
+    return FlowLeg(
+        amount=value,
+        flow_class="EXTERNAL_IN" if value > 0 else "EXTERNAL_OUT",
+        event_date=date.fromisoformat(recognized),
+        nav_recognition_date=date.fromisoformat(recognized),
+        timing="DATE_ONLY",
+    )
+
+
+def _usd(value: str) -> dict[str, str]:
+    return {"currency": "USD", "status": "AVAILABLE", "value": value}
+
+
+def _zero_run_source(
+    account_id: str, days: tuple[str, ...], values: tuple[str, ...]
+) -> dict[str, Any]:
+    """The hash-bound calculation-input facts of the zero-run member.
+
+    NAV rows and classified flows in the shape the epoch calculation inputs
+    carry them (typed USD amounts, the flow's recognition date).  The 40 is
+    withdrawn in full at the end of the second day.
+    """
+
+    return {
+        "nav_observations": [
+            {
+                "account_id": account_id,
+                "as_of_date": day,
+                "nav": _usd(value),
+                "record_id": f"{account_id}:nav:{day}",
+                "value_basis": "ACCOUNT_VALUE",
+            }
+            for day, value in zip(days, values)
+        ],
+        "classified_flows": [
+            {
+                "account_id": account_id,
+                "amount": _usd("-40"),
+                "blocker_code": None,
+                "classification_status": "CLASSIFIED",
+                "disposition": "EXTERNAL",
+                "event_date": days[1],
+                "event_id": f"classified-flow:{account_id}:withdrawal",
+                "flow_type": "WITHDRAWAL",
+                "nav_recognition_date": days[1],
+                "source_record_id": f"{account_id}:withdrawal",
+            }
+        ],
+        "capital_anchors": [],
+    }
+
+
+def _r3_member_detail(
+    source: dict[str, Any] | None, opening_day: str, **changes: Any
+) -> dict[str, Any]:
+    detail: dict[str, Any] = {
+        "account_label": "Zero-run member",
+        "last_four": "4321",
+        "epoch_admission_status": "FUNDED",
+        "epoch_output_status": "OK",
+        "epoch_blocking_reason": None,
+        "own_path_links": [],
+        "performance_status": "UNAVAILABLE",
+        "performance_reason": "ZERO_CAPITAL_RETURN_UNDEFINED",
+        "performance_opening_date": opening_day,
+        "by_value_source": source,
+        "performance_payload": {
+            "flow_count": 1,
+            "flow_timing": None,
+            "nav_observations": 6,
+            "observed_end": "2026-01-08",
+            "observed_start": opening_day,
+            "twr": None,
+            "twr_status": "UNAVAILABLE",
+        },
+    }
+    detail.update(changes)
+    return detail
+
+
+def _three_member_catalog(rows: list[dict[str, str]]) -> dict[str, Any]:
+    accounts = ("account-a", "account-b", "account-r")
+    return {
+        "assignments": [_owned_assignment(a, "strategy-shared") for a in accounts],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [{"account_id": a} for a in accounts],
+                    "observed_start": "2026-01-02",
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-shared",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "component_account_ids": list(accounts),
+                "date": row["date"],
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": row["return"],
+                "strategy_id": "strategy-shared",
+            }
+            for row in rows
+        ],
+    }
+
+
+def _r3_world(
+    *,
+    canonical: str = "summed",
+    canonical_income: str = "3.81",
+    member_income: str = "3.81",
+    twr_shift: str | None = None,
+    r3_changes: dict[str, Any] | None = None,
+    compact: bool = False,
+) -> tuple[
+    dict[str, Any],
+    dict[tuple[str, str, str, str | None], dict[str, Any]],
+    dict[str, Any],
+]:
+    """Two traced members plus the zero-run member, and the strategy path.
+
+    The traced members' numbers come from the return engine.  The canonical
+    strategy rows are the link of the SUMMED member values and flows (the
+    ledger construction), or -- ``canonical="weighted"`` -- the beginning-capital
+    weighted mean with the zero-capital sub-period skipped.  ``member_income``
+    differs from ``canonical_income`` only to tamper the member's own facts.
+    ``compact`` keeps three dates (the synthetic baseline's window).
+    """
+
+    from quant_engine.portfolio_ledger.returns import (
+        MemberReturn,
+        OpeningPoint,
+        composite,
+        link_epoch,
+        member_returns,
+    )
+
+    if compact:
+        days = R3_DAYS[:2] + ("2026-01-03",)
+        a_values, b_values = ("100", "101", "102.01"), ("200", "204", "232.08")
+        zero_run = ("40", "0")
+        deposit_day = days[2]
+    else:
+        days = R3_DAYS
+        a_values = ("100", "101", "102.01", "103.0301", "104.060401", "105.10100501")
+        b_values = ("200", "204", "208.08", "232", "236.64", "241.3728")
+        zero_run = ("40", "0", "0", "0")
+        deposit_day = days[3]
+    canonical_r = _r3_observations(
+        days, zero_run + (canonical_income,) * (len(days) - len(zero_run))
+    )
+    member_values = zero_run + (member_income,) * (len(days) - len(zero_run))
+    first = date.fromisoformat(days[0])
+    obs_a = _r3_observations(days, a_values)
+    obs_b = _r3_observations(days, b_values)
+    deposit = _r3_leg("20", deposit_day)
+    withdrawal = _r3_leg("-40", days[1])
+    prior = "LAST_OBSERVATION_BEFORE_START"
+    epoch_a = link_epoch(obs_a, [], OpeningPoint(first, obs_a[first], prior))
+    epoch_b = link_epoch(obs_b, [deposit], OpeningPoint(first, obs_b[first], prior))
+    assert epoch_a.status == epoch_b.status == "AVAILABLE"
+    if canonical == "summed":
+        summed = {d: obs_a[d] + obs_b[d] + canonical_r[d] for d in obs_a}
+        reference = link_epoch(
+            summed,
+            [deposit, withdrawal],
+            OpeningPoint(
+                first, summed[first], "FIRST_POSITIVE_OBSERVATION_ON_OR_AFTER_START"
+            ),
+        )
+        assert reference.status == "AVAILABLE"
+        rows = [
+            {
+                "date": link.end_date.isoformat(),
+                "return": decimal_text(link.period_return),
+            }
+            for link in reference.links
+        ]
+    else:
+        # The zero-run member enters only where it holds capital: its first
+        # sub-period (40 -> 0 after the withdrawal, flow-neutral, return 0) and,
+        # in the long world, the flat day after the income day.
+        zero_member = [
+            MemberReturn(
+                "account-r",
+                date.fromisoformat(days[1]),
+                Decimal("40"),
+                Decimal("0"),
+                first,
+            )
+        ]
+        if not compact:
+            zero_member.append(
+                MemberReturn(
+                    "account-r",
+                    date.fromisoformat(days[5]),
+                    Decimal(canonical_income),
+                    Decimal("0"),
+                    date.fromisoformat(days[4]),
+                )
+            )
+        weighted = composite(
+            (
+                *member_returns("account-a", epoch_a),
+                *member_returns("account-b", epoch_b),
+                *zero_member,
+            )
+        )
+        rows = [
+            {
+                "date": item.end_date.isoformat(),
+                "return": decimal_text(item.period_return),
+            }
+            for item in weighted
+        ]
+    shift = Decimal(twr_shift) if twr_shift else Decimal(0)
+    details = _shared_member_epoch_details(
+        {
+            "account-a": decimal_text(epoch_a.twr + shift),
+            "account-b": decimal_text(epoch_b.twr),
+        },
+        {
+            "account-a": _manifest_trace_links(epoch_a),
+            "account-b": _manifest_trace_links(epoch_b),
+        },
+    )
+    details[R3_KEY] = _r3_member_detail(
+        _zero_run_source("account-r", days, member_values),
+        days[0],
+        **(r3_changes or {}),
+    )
+    return _three_member_catalog(rows), details, {"a": epoch_a, "b": epoch_b}
+
+
+def _performance(
+    catalog: dict[str, Any],
+    details: dict[tuple[str, str, str, str | None], dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    rows = reporter._account_strategy_performance(catalog, None, set(details), details)
+    return {row["account_id"]: row for row in rows}
+
+
+def test_r3_zero_capital_member_reconciles_by_value_and_publishes_no_own_path() -> None:
+    """D-1 (fail-before): the zero-run member enters the composite by value.
+
+    Two traced members and a funded R3 member (40, withdrawn, flat at zero for
+    three days, then 3.81 of income with no flow; empty trace, UNAVAILABLE,
+    ZERO_CAPITAL_RETURN_UNDEFINED).  The canonical strategy path is the
+    summed-value path.  The merge base raised ``own trace path is missing``;
+    the strategy now publishes, the traced members keep their own paths, and
+    the R3 row publishes no TWR and no return path (the oracle's "not
+    derivable").
+    """
+
+    catalog, details, epochs = _r3_world()
+
+    rows = _performance(catalog, details)
+
+    for account_id, epoch in (("account-a", epochs["a"]), ("account-b", epochs["b"])):
+        assert rows[account_id]["twr"] == decimal_text(epoch.twr)
+        assert (
+            rows[account_id]["return_path_status"]
+            == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+        )
+        # The path compounds the link factors at 34 digits; the epoch TWR was
+        # chained at 28, so equality is numerical, far inside the 1e-12 gate.
+        assert abs(
+            Decimal(rows[account_id]["return_path_cumulative_return"]) - epoch.twr
+        ) < Decimal("1e-20")
+        assert rows[account_id]["return_path_observations"] == len(epoch.links)
+    zero_run = rows["account-r"]
+    assert zero_run["twr"] is None
+    assert zero_run["twr_status"] == "UNAVAILABLE"
+    assert zero_run["epoch_admission_status"] == "FUNDED"
+    for field in (
+        "return_path_status",
+        "return_path_cumulative_return",
+        "return_path_observations",
+        "return_path_observed_start",
+        "return_path_observed_end",
+        "return_path_series_sha256",
+        "return_path_authority",
+        "return_path_evidence_layer",
+    ):
+        assert zero_run[field] is None
+
+
+def test_r3_reconcile_rejects_the_weighted_path_that_drops_the_zero_capital_income() -> (
+    None
+):
+    """D-2: the canonical path must be the summed-value path, not the weighted skip.
+
+    Same world, but the canonical strategy rows are the beginning-capital
+    weighted mean with the zero-capital sub-period skipped: the 3.81 of income
+    earned on zero capital is missing from it.  The summed-value reconcile
+    refuses it (the single date the weighted construction cannot see).
+    """
+
+    catalog, details, _epochs = _r3_world(canonical="weighted")
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=f"{_DO_NOT_RECONCILE} for strategy-shared",
+    ):
+        _performance(catalog, details)
+
+
+def test_r3_world_still_gates_a_traced_member_epoch_twr() -> None:
+    """D-3: the member gate is unchanged: a traced TWR off by 1e-9 fails closed."""
+
+    catalog, details, _epochs = _r3_world(twr_shift="0.000000001")
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="multi-account member epoch TWR differs from the member return path",
+    ):
+        _performance(catalog, details)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        pytest.param(
+            {"performance_reason": "FLOW_AFTER_CLOSING_OBSERVATION"},
+            _OWN_TRACE_MISSING,
+            id="traceless_funded_member_with_another_unavailable_reason",
+        ),
+        pytest.param(
+            {"performance_status": "AVAILABLE", "performance_reason": None},
+            _OWN_TRACE_MISSING,
+            id="available_member_with_an_empty_trace",
+        ),
+        pytest.param(
+            {"performance_status": None, "performance_reason": None},
+            _OWN_TRACE_MISSING,
+            id="performance_status_absent_with_an_empty_trace",
+        ),
+        pytest.param(
+            {"performance_reason": None},
+            _OWN_TRACE_MISSING,
+            id="unavailable_without_any_reason",
+        ),
+        pytest.param(
+            {"by_value_source": None},
+            r"by-value source is missing for strategy-shared \(account-r\)",
+            id="r3_member_without_its_calculation_inputs",
+        ),
+    ),
+)
+def test_r3_allow_list_keeps_every_other_untraced_member_failing_closed(
+    changes: dict[str, Any], message: str
+) -> None:
+    """D-4: only UNAVAILABLE + ZERO_CAPITAL_RETURN_UNDEFINED enters by value."""
+
+    catalog, details, _epochs = _r3_world(r3_changes=changes)
+
+    with pytest.raises(reporter.ReportValidationError, match=message):
+        _performance(catalog, details)
+
+
+def test_r3_allow_list_refuses_a_traced_member_whose_performance_is_unavailable() -> (
+    None
+):
+    """D-4 (fail-before): an UNAVAILABLE non-R3 member never enters as traced.
+
+    The member carries a verified-looking trace AND reports its performance
+    UNAVAILABLE for another reason.  The merge base treated any member with
+    links as traced; the allow-list now refuses it by name.
+    """
+
+    catalog, details, epochs = _r3_world()
+    details[R3_KEY].update(
+        performance_reason="NONPOSITIVE_LINK_FACTOR",
+        own_path_links=_manifest_trace_links(epochs["a"]),
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"performance is unavailable outside the R3 allow-list "
+        r"for strategy-shared \(account-r\): NONPOSITIVE_LINK_FACTOR",
+    ):
+        _performance(catalog, details)
+
+
+def test_r3_income_tampered_by_a_small_amount_fails_the_1e_12_gate() -> None:
+    """D-5: 3.81 -> 3.8101 in the member's own facts misses the path by ~3e-7.
+
+    The gap is between 1e-12 and 1e-4 by construction: a band as wide as 1e-4
+    would accept it, the 1e-12 gate does not.  The canonical path is unchanged.
+    """
+
+    catalog, details, _epochs = _r3_world(member_income="3.8101")
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=f"{_DO_NOT_RECONCILE} for strategy-shared",
+    ):
+        _performance(catalog, details)
+    # The same world with the untampered facts publishes: only the tamper fails.
+    clean_catalog, clean_details, _ = _r3_world()
+    assert _performance(clean_catalog, clean_details)["account-r"]["twr"] is None
+
+
+def _mutated_source(mutation: str) -> dict[str, Any]:
+    _catalog, details, _epochs = _r3_world()
+    source = copy.deepcopy(details[R3_KEY]["by_value_source"])
+    navs = source["nav_observations"]
+    flows = source["classified_flows"]
+    if mutation == "nav_not_usd":
+        navs[2]["nav"]["currency"] = "EUR"
+    elif mutation == "nav_not_available":
+        navs[2]["nav"]["status"] = "UNAVAILABLE"
+    elif mutation == "nav_other_account":
+        navs[2]["account_id"] = "account-a"
+    elif mutation == "nav_conflict":
+        navs.append({**navs[2], "nav": _usd("7")})
+    elif mutation == "flow_unclassified":
+        flows[0]["classification_status"] = "BLOCKED"
+    elif mutation == "flow_not_usd":
+        flows[0]["amount"]["currency"] = "EUR"
+    elif mutation == "flow_other_account":
+        flows[0]["account_id"] = "account-a"
+    elif mutation == "flow_after_last_nav":
+        flows.append(
+            {**flows[0], "event_id": "late", "nav_recognition_date": "2026-01-09"}
+        )
+    elif mutation == "flow_recognition_before_event":
+        flows[0]["event_date"] = "2026-01-05"
+    elif mutation == "anchor_unsupported":
+        source["capital_anchors"].append(
+            {
+                "account_id": "account-r",
+                "amount": _usd("10"),
+                "capital_type": "SOMETHING_ELSE",
+                "event_date": "2026-01-06",
+                "nav_recognition_date": "2026-01-06",
+            }
+        )
+    return source
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("nav_not_usd", "NAV observation lacks source-native USD"),
+        ("nav_not_available", "NAV observation lacks source-native USD"),
+        ("nav_other_account", "NAV observation account differs from the epoch"),
+        ("nav_conflict", "NAV observations conflict on one date"),
+        ("flow_unclassified", "classified flow is not CLASSIFIED"),
+        ("flow_not_usd", "classified flow lacks source-native USD"),
+        ("flow_other_account", "classified flow account differs from the epoch"),
+        ("flow_after_last_nav", "flow is recognized after the last observation"),
+        ("flow_recognition_before_event", "recognition precedes its economic event"),
+        ("anchor_unsupported", "capital anchor type is unsupported"),
+    ),
+)
+def test_r3_by_value_source_fails_closed_on_anything_the_hwm_inputs_refuse(
+    mutation: str, message: str
+) -> None:
+    """The by-value facts follow HWM T0's rules; anything else raises.
+
+    USD AVAILABLE NAVs, CLASSIFIED flows (signed at the NAV recognition date),
+    STRATEGY_CAPITAL_ALLOCATION anchors as beginning-of-period legs and
+    OPENING_CAPITAL_ANCHOR ignored; a flow after the last observation, a
+    foreign account or a conflicting NAV fail closed.
+    """
+
+    catalog, details, _epochs = _r3_world()
+    details[R3_KEY]["by_value_source"] = _mutated_source(mutation)
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=rf"by-value source is invalid for strategy-shared \(account-r\): .*{message}",
+    ):
+        _performance(catalog, details)
+
+
+def test_r3_by_value_opening_must_be_an_observation_of_the_member() -> None:
+    catalog, details, _epochs = _r3_world(
+        r3_changes={"performance_opening_date": "2025-12-31"}
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"by-value source is invalid for strategy-shared \(account-r\): "
+        r".*not an observation",
+    ):
+        _performance(catalog, details)
+
+
+def test_r3_member_without_a_valued_sub_period_fails_closed() -> None:
+    """An R3 member with nothing to value never silently drops out of the gate.
+
+    The engine only reports ZERO_CAPITAL_RETURN_UNDEFINED for a sub-period that
+    starts at zero capital, so an R3 member whose facts hold no NAV after its
+    opening is inconsistent.  In a two-member strategy, accepting it with no
+    periods would leave the traced member alone, the reconcile would be skipped
+    (fewer than two members) and the canonical path never compared.
+    """
+
+    catalog, details, _epochs = _r3_world()
+    del details[("account-b", "strategy-shared", "2026-01-01", None)]
+    catalog["assignments"] = [
+        item for item in catalog["assignments"] if item["account_id"] != "account-b"
+    ]
+    for evidence in catalog["strategy_provider_evidence"]:
+        evidence["account"]["account_scopes"] = [
+            scope
+            for scope in evidence["account"]["account_scopes"]
+            if scope["account_id"] != "account-b"
+        ]
+    source = details[R3_KEY]["by_value_source"]
+    source["nav_observations"] = source["nav_observations"][:1]
+    source["classified_flows"] = []
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"by-value source is invalid for strategy-shared \(account-r\): "
+        r".*no valued sub-period after the opening",
+    ):
+        _performance(catalog, details)
+
+
+def test_r3_by_value_reads_opening_anchors_as_nothing_and_allocations_as_capital() -> (
+    None
+):
+    """OPENING_CAPITAL_ANCHOR is ignored; a capital allocation joins the capital.
+
+    An opening anchor leaves the composite untouched.  A STRATEGY_CAPITAL_ALLOCATION
+    anchor is an exact-timestamp leg: it enlarges the member's beginning capital
+    of the sub-period it is recognized in, so the summed path moves and no longer
+    equals the canonical path -- proving the anchor is read, as capital.
+    """
+
+    catalog, details, _epochs = _r3_world()
+    opening_anchor = {
+        "account_id": "account-r",
+        "amount": {"currency": "EUR", "status": "AVAILABLE", "value": "999"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "nav_recognition_date": "2026-01-01",
+    }
+    details[R3_KEY]["by_value_source"]["capital_anchors"].append(opening_anchor)
+    assert _performance(catalog, details)["account-r"]["twr"] is None
+
+    allocation = {
+        "account_id": "account-r",
+        "amount": _usd("10"),
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "event_date": "2026-01-06",
+        "nav_recognition_date": "2026-01-06",
+    }
+    details[R3_KEY]["by_value_source"]["capital_anchors"].append(allocation)
+    with pytest.raises(reporter.ReportValidationError, match=_DO_NOT_RECONCILE):
+        _performance(catalog, details)
+
+
+def test_r3_private_inputs_never_reach_a_published_row() -> None:
+    """D-8: the trace, the by-value source and the R3 labels stay private."""
+
+    catalog, details, _epochs = _r3_world()
+
+    rows = _performance(catalog, details)
+
+    assert set(rows) == {"account-a", "account-b", "account-r"}
+    for row in rows.values():
+        assert not set(row) & set(_PRIVATE_DETAIL_FIELDS)
+    # The rows are what the fixture's public payloads say, no more.
+    assert rows["account-r"]["flow_count"] == 1
+    assert rows["account-r"]["nav_observations"] == 6
+
+
+def test_public_builder_threads_the_r3_inputs_into_the_composite_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam (fail-before): the real builder carries the R3 inputs to the gate.
+
+    ``build_report_data`` rebuilds the current-epoch details from the verified
+    epoch authority.  Dropping the private R3 inputs there would leave the
+    zero-run member traceless (``own trace path is missing``) and the tamper
+    below unseen; with them threaded the real path reaches the summed-value
+    reconcile and fails closed on the tampered income, exactly as the unit
+    path does.  A merge-base builder raises ``own trace path is missing``.
+    """
+
+    catalog, details, _epochs = _r3_world(compact=True)
+    source = details[R3_KEY]["by_value_source"]
+    # Tamper the member's own income (3.81 -> 3.8101) in its hash-bound facts.
+    for nav in source["nav_observations"]:
+        if nav["nav"]["value"] == "3.81":
+            nav["nav"] = _usd("3.8101")
+    for evidence in catalog["strategy_provider_evidence"]:
+        evidence["account"]["provider_id"] = "synthetic"
+        for scope in evidence["account"]["account_scopes"]:
+            scope.update(observed_start="2026-01-01", observed_end="2026-01-03")
+    catalog = json.loads(json.dumps(catalog).replace("strategy-shared", "strategy-1"))
+    details = {
+        (key[0], "strategy-1", key[2], key[3]): detail
+        for key, detail in details.items()
+    }
+    crosswalk = {
+        "calculation_cutoff_date": "2026-01-03",
+        "rows": [
+            {
+                "account_id": key[0],
+                "strategy_id": key[1],
+                "effective_start": key[2],
+                "effective_end": key[3],
+                "account_label": "SYNTHETIC member",
+                "last_four": "4321",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            }
+            for key in details
+        ],
+    }
+    full = _full_report_fixture()
+    baseline = full._baseline_catalog()
+    baseline["accounts"] = [
+        *baseline["accounts"],
+        {
+            "account_id": "account-r",
+            "base_currency": "USD",
+            "provider": "SYNTHETIC",
+            "role": "INVESTMENT",
+        },
+    ]
+    baseline_root = full._published_baseline(tmp_path, {**baseline, **catalog})
+    monkeypatch.setattr(
+        full.reporter,
+        "_validate_epoch_manifest_input",
+        lambda *_args, **_kwargs: (
+            {},
+            {"generation_id": "a" * 64},
+            b"{}",
+            b"{}",
+            json.dumps(crosswalk).encode("utf-8"),
+            details,
+        ),
+    )
+
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match=_DO_NOT_RECONCILE,
+    ):
+        full.reporter.build_report_data(
+            baseline_root,
+            epoch_manifest_path=tmp_path / "synthetic-manifest.json",
+            epoch_manifest_source_path=tmp_path / "synthetic-source.json",
+            epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
+            epoch_manifest_generation_root=REPOSITORY_ROOT,
+        )
