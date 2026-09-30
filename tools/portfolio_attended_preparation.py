@@ -17,7 +17,12 @@ import subprocess
 from types import ModuleType
 from typing import Any, Callable, Mapping, TypedDict, cast
 
-from quant_engine.core import run_storage
+from quant_engine.core import (
+    GenerationManifest,
+    ManifestValidationError,
+    VerificationStatus,
+    run_storage,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -105,6 +110,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "stage_current_epoch_manifest": "tools/stage_current_epoch_manifest.py",
     "static_snapshot_coverage_receipts": "tools/static_snapshot_coverage_receipts.py",
     "target_series": "tools/portfolio_target_series.py",
+    "value_basis_bounds": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/value_basis_bounds.py",
     "verify_account_manifest_generation": "tools/verify_account_manifest_generation.py",
 }
 
@@ -152,6 +158,7 @@ _PREPARATION_STAGE_CODE = {
         "hwm_input_kernel",
         "hwm_governed",
         "hwm_kernel",
+        "value_basis_bounds",
     ),
     "capital": (
         "attended_preparation",
@@ -972,6 +979,135 @@ def _accepted_intervals(
         )
         day = next_day
     return rows
+
+
+_LEDGER_CATALOG_ARTIFACT_ID = "normalized/provider-ledger.json"
+
+
+def _verified_ledger_catalog(generation: Path) -> Mapping[str, Any]:
+    """Read a staged provider-ledger catalog only after its manifest binds the bytes."""
+
+    manifest_path = generation / "generation.json"
+    catalog_path = generation / "provider-ledger.json"
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (manifest_path, catalog_path)
+    ):
+        raise AttendedPreparationError(
+            "staged provider ledger generation is unavailable"
+        )
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ManifestValidationError as exc:
+        raise AttendedPreparationError(
+            "staged provider ledger manifest is invalid"
+        ) from exc
+    if manifest.generation_id != generation.name:
+        raise AttendedPreparationError(
+            "staged provider ledger generation differs from its manifest identity"
+        )
+    if manifest.verification is not VerificationStatus.VERIFIED:
+        raise AttendedPreparationError(
+            "staged provider ledger generation is not verified"
+        )
+    declared = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == _LEDGER_CATALOG_ARTIFACT_ID
+    ]
+    if len(declared) != 1:
+        raise AttendedPreparationError(
+            "staged provider ledger catalog is not bound by its manifest"
+        )
+    content = catalog_path.read_bytes()
+    if (hashlib.sha256(content).hexdigest(), len(content)) != (
+        declared[0].sha256,
+        declared[0].size_bytes,
+    ):
+        raise AttendedPreparationError(
+            "staged provider ledger catalog differs from its manifest"
+        )
+    try:
+        catalog = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AttendedPreparationError(
+            "staged provider ledger catalog is not valid JSON"
+        ) from exc
+    if not isinstance(catalog, dict):
+        raise AttendedPreparationError(
+            "staged provider ledger catalog must be an object"
+        )
+    return catalog
+
+
+def _hwm_membership_strategy_ids(hwm_generation: Mapping[str, Any]) -> list[str]:
+    memberships = hwm_generation.get("memberships")
+    if not isinstance(memberships, list) or not memberships:
+        raise AttendedPreparationError("governed HWM memberships differ")
+    strategy_ids: list[str] = []
+    for row in memberships:
+        strategy_id = row.get("strategy_id") if isinstance(row, Mapping) else None
+        if not isinstance(strategy_id, str) or not strategy_id:
+            raise AttendedPreparationError(
+                "governed HWM membership strategy id differs"
+            )
+        strategy_ids.append(strategy_id)
+    return strategy_ids
+
+
+def _hwm_complete_through(
+    *,
+    hwm_generation: Mapping[str, Any],
+    ledger_generation_root: Path,
+    contract: Mapping[str, Any],
+    cutoff: str,
+) -> str:
+    """The last date on which every governed HWM member has a USD value basis.
+
+    The governed composite needs every member on every day of its grid. That date is
+    the cutoff unless the ledger records a member's native NAV days after the
+    contract's admitted FX end as OUTSIDE_ADMITTED_FX_BOUNDARY findings, in which case
+    the member's value basis, and so the composite, ends at that FX end (FXB-1,
+    `quant_engine.portfolio_ledger.value_basis_bounds`). A shortfall without such a
+    finding is not bounded here: the grid keeps the cutoff and the executor fails
+    closed on the uncovered member-period.
+    """
+
+    from quant_engine.portfolio_ledger.value_basis_bounds import (
+        ValueBasisBoundError,
+        derive_value_basis_bounds,
+    )
+
+    cutoff_date = date.fromisoformat(_date(cutoff, "governed HWM cutoff"))
+    members = _hwm_membership_strategy_ids(hwm_generation)
+    catalog = _verified_ledger_catalog(ledger_generation_root)
+    try:
+        bounds = derive_value_basis_bounds(catalog, contract, cutoff_date)
+        common = bounds.common_complete_date(members)
+    except ValueBasisBoundError as exc:
+        raise AttendedPreparationError(
+            f"governed HWM value-basis bound differs: {exc}"
+        ) from exc
+    periods = hwm_generation.get("component_periods")
+    if not isinstance(periods, list):
+        raise AttendedPreparationError("governed HWM component periods differ")
+    member_ids = set(members)
+    for row in periods:
+        if not isinstance(row, Mapping):
+            raise AttendedPreparationError("governed HWM component period differs")
+        strategy_id = row.get("strategy_id")
+        if not isinstance(strategy_id, str) or strategy_id not in member_ids:
+            continue
+        value_end = bounds.effective_end(strategy_id)
+        period_end = date.fromisoformat(
+            _date(row.get("interval_end"), "governed HWM period end")
+        )
+        if value_end < cutoff_date and period_end > value_end:
+            raise AttendedPreparationError(
+                "governed HWM component period after the value-basis end: "
+                f"{strategy_id} {row.get('interval_start')}..{row.get('interval_end')}"
+            )
+    return common.isoformat()
 
 
 def _maximum_age_days(contract: Mapping[str, Any]) -> int:
@@ -1968,9 +2104,23 @@ def _prepare_attended_inputs(
         hwm_generation = hwm_inputs.build_selected_hwm_inputs(
             **(selected_hwm_inputs | {"calendar_authority_path": hwm_calendar})
         )
+        # The composite needs every member on every day of its grid, so the grid
+        # ends at the last date on which every member has a USD value basis: the
+        # cutoff, unless a member's admitted FX ends earlier (FXB-1). The executor
+        # is unchanged and still fails closed on any other uncovered member-period.
+        complete_through = _hwm_complete_through(
+            hwm_generation=hwm_generation,
+            ledger_generation_root=root
+            / "stages"
+            / "ledger"
+            / "generations"
+            / str(ledger_result["generation_id"]),
+            contract=_read(contract, "financial contract"),
+            cutoff=cutoff,
+        )
         _write(hwm_input, hwm_generation)
         result = compute_governed_as_held_composite_hwm(
-            _accepted_intervals(hwm_generation, calendar, cutoff),
+            _accepted_intervals(hwm_generation, calendar, complete_through),
             hwm_generation["memberships"],
             hwm_generation["component_periods"],
             policy_bytes=effective_policy,
@@ -1993,7 +2143,7 @@ def _prepare_attended_inputs(
             ).read_bytes(),
             calendar_accepted_sha256=str(calendar["authority_evidence_sha256"]),
             evaluated_on=evaluated_on,
-            complete_through=cutoff,
+            complete_through=complete_through,
             maximum_age_days=_maximum_age_days(_read(contract, "financial contract")),
             assurance_profile="RELEASE_QC",
         )
