@@ -1428,12 +1428,20 @@ def _r3_member_value_periods(
         opening = _date(
             detail.get("performance_opening_date"), "performance_opening_date"
         )
-        return value_periods(account_id, observations, legs, opening)
+        periods = value_periods(account_id, observations, legs, opening)
+        if not periods:
+            # The engine only reports ZERO_CAPITAL_RETURN_UNDEFINED for a
+            # sub-period that starts at zero capital, so an R3 member with no
+            # observation after its opening is inconsistent evidence.  Were it
+            # accepted with nothing to value, a two-member strategy would keep
+            # one member and the reconcile would skip the canonical comparison.
+            raise ReportValidationError("no valued sub-period after the opening")
     except (ReportValidationError, ReturnsError) as exc:
         raise ReportValidationError(
             "multi-account member by-value source is invalid "
             f"for {strategy_id} ({account_id}): {exc}"
         ) from exc
+    return periods
 
 
 def _reconcile_multi_account_strategy_composite(
