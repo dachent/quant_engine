@@ -3255,6 +3255,511 @@ def test_span_splice_reads_the_real_producer_receipt(
     ]
 
 
+# PR #506 fix round r1: one isolated fixture for each span gate that deleting left
+# every test green. A payload is isolated when every other guard is satisfied (the
+# capital chain, the receipt totals, the admission shape): its whole findings list,
+# bar the missing-baseline NOT_READY, is then the gate's own finding, so deleting the
+# gate turns exactly its test RED. The one gate that another guard provably dominates
+# is pinned by what the guards do jointly, with the proof in its docstring.
+#
+# A sweep that deleted, one at a time, each guard of the receipt found the guards in
+# ISOLATED_GUARDS and the ragged-span test unpinned (each SPAN_CASES fixture that
+# reaches a span or count guard fires a second guard, and none reaches the rest);
+# they are pinned below. Not pinned singly, by design: the receipt's daily and epoch
+# recomputations. With every span inside the receipt window, any one forged total
+# breaks two of the three relations {identity, daily recompute, epoch recompute},
+# each implied by the other two while every span return is above -1, so no payload
+# isolates either recompute; the identity alone covers a ragged receipt, where
+# nothing is recomputable.
+
+
+def _only(findings: list[checks.Finding]) -> list[tuple[str, str, str]]:
+    return [(f.check_id, f.klass, f.entity) for f in _ignoring_expected(findings)]
+
+
+def _ragged_perimeter(report: dict[str, Any]) -> None:
+    """The receipt's perimeter runs three days past alpha's last published row.
+
+    One more daily observation (return 0) lies past the published rows: the totals
+    are unchanged, the counts one higher. The report cannot recompute a total over
+    evidence it does not publish.
+    """
+
+    _span_receipt_field(
+        admission_cutoff="2026-09-20",
+        daily_return_observations=5,
+        epoch_holding_period_link_observations=6,
+        observed_end="2026-09-20",
+    )(report)
+
+
+def _daily_labelled_headline(report: dict[str, Any]) -> None:
+    """alpha's headline and provider-evidence value are the plain daily compound."""
+
+    summary = report["strategy_summary"][0]
+    summary["account_live_cumulative_return"] = "0.25"
+    summary["account_live_cumulative_return_label"] = DAILY_LABEL
+    account = report["strategy_provider_evidence"][0]["account"]
+    account["cumulative_return"] = "0.25"
+    account["cumulative_return_label"] = DAILY_LABEL
+
+
+def _provider_live_layer(report: dict[str, Any]) -> None:
+    """alpha's summary row is on PROVIDER_LIVE, with provider-live rows on the same
+    dates as its account-live rows (the same missing date, no receipt of its own)."""
+
+    report["strategy_summary"][0]["nav_evidence_layer"] = "PROVIDER_LIVE"
+    for day, value in SPAN_DAILY:
+        report["strategy_returns"].append(
+            {
+                "strategy_id": "alpha",
+                "date": day,
+                "return": value,
+                "evidence_layer": "PROVIDER_LIVE",
+            }
+        )
+
+
+def _receipt_on_layer(layer: str) -> Mutator:
+    def mutate(report: dict[str, Any]) -> None:
+        receipts = report["strategy_history_contract"]["epoch_hpr_receipts"]
+        receipts[0]["evidence_layer"] = layer
+
+    return mutate
+
+
+def _capital_after_span(capital: str) -> Mutator:
+    """The capital that opens the rows after the span (dated E + 1 and the cutoff)."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        for day in (SPAN_NEXT, CUTOFF):
+            _alpha_row(day)(report)["beginning_capital"] = capital
+
+    return mutate
+
+
+def test_receipt_identity_alone_catches_a_forged_epoch_total(tmp_path: Path) -> None:
+    """(d) The receipt identity (1 + daily) x prod(1 + span) = 1 + epoch.
+
+    Over a perimeter the report publishes, a forged total is also caught by
+    recomputing the receipt's daily and epoch totals from the report's own rows, so a
+    fixture there fires two guards (``receipt_identity_broken`` above) and pins
+    neither. A receipt that runs past the last published row is not recomputable;
+    the identity is then the only tie between its totals and its spans. Here the
+    epoch total is forged (0.2 for 0.1) with every span, count and published value
+    consistent, and only the identity can fire.
+    """
+
+    perimeter = [_span_payload, _ragged_perimeter]
+    assert _only(run(build(tmp_path / "good", Spec(report=perimeter)))) == []
+    forged = [*perimeter, _span_receipt_field(epoch_cumulative_return="0.2")]
+    found = _ignoring_expected(run(build(tmp_path / "bad", Spec(report=forged))))
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [
+        ("returns.epoch_hpr_receipts_verified", checks.BLOCKER_INVARIANT, "alpha")
+    ]
+    assert found[0].message.startswith(
+        "(1 + daily_cumulative_return) x prod(1 + span return) differs from "
+        "1 + epoch_cumulative_return by "
+    )
+    assert ";" not in found[0].message  # the identity is the only contradiction
+
+
+def test_account_live_receipt_never_bridges_a_provider_live_summary(
+    tmp_path: Path,
+) -> None:
+    """(e) Receipts are ACCOUNT_LIVE only: the summary row's NAV layer decides.
+
+    alpha keeps its verified ACCOUNT_LIVE receipt but its summary row is on
+    PROVIDER_LIVE. A daily-labelled headline (the provider-live compound) is clean:
+    the receipt is not declared for that layer (splicing every layer would flag the
+    label). An epoch-labelled headline is the account-live splice: no receipt can
+    bridge a provider-live path, so it is compared with the provider-live compound
+    and is a blocker (splicing every layer would bridge it and pass). The receipt
+    and everything else are unchanged, so only the layer gate decides.
+    """
+
+    daily = [_span_payload, _provider_live_layer, _daily_labelled_headline]
+    assert _only(run(build(tmp_path / "daily", Spec(report=daily)))) == []
+    epoch = [_span_payload, _provider_live_layer]
+    assert _only(run(build(tmp_path / "epoch", Spec(report=epoch)))) == [
+        ("returns.strategy_return_views_agree", checks.BLOCKER_INVARIANT, "alpha")
+    ]
+
+
+def test_receipt_filed_on_a_non_live_layer_is_ignored(tmp_path: Path) -> None:
+    """(e) A receipt row is admitted only on the ACCOUNT_LIVE layer.
+
+    The same verified receipt filed under PROVIDER_LIVE is ignored, exactly as if
+    none were published: the epoch-labelled headline is compared with the unspliced
+    compound and is the only finding (splicing every layer would admit the receipt
+    and pass). Nothing but the receipt's layer differs from the clean payload.
+    """
+
+    assert _only(run(build(tmp_path / "good", Spec(report=[_span_payload])))) == []
+    filed = [_span_payload, _receipt_on_layer("PROVIDER_LIVE")]
+    assert _only(run(build(tmp_path / "bad", Spec(report=filed)))) == [
+        ("returns.strategy_return_views_agree", checks.BLOCKER_INVARIANT, "alpha")
+    ]
+
+
+def _unobserved_span_start(report: dict[str, Any]) -> None:
+    """Remove alpha's row dated S: the span (S, E] then starts on no observed row,
+    the row dated E + 1 still closes the gap and no row lies in (S, E]."""
+
+    _drop_alpha_row(SPAN_START)(report)
+    _span_receipt_field(
+        daily_return_observations=3, epoch_holding_period_link_observations=4
+    )(report)
+
+
+def test_span_that_starts_on_no_observed_row_is_blocked_and_never_spliced(
+    tmp_path: Path,
+) -> None:
+    """(f) S must be an observed daily row. Dominated, so pinned jointly.
+
+    ``_span_problems`` reports ``len(at_start) != 1`` itself, but the capital-chain
+    step after it is an exhaustive if/elif/else::
+
+        if after is None or after.day != E + 1:   -> contradiction (gap not closed)
+        elif len(at_start) == 1 and unique(after): -> the chain return
+        else:                                      -> contradiction (ambiguous chain)
+
+    Every input with ``len(at_start) != 1`` (no row at S, or several) therefore
+    ends in a contradiction whether or not the S predicate exists: it never changes
+    whether a span is admitted, only the wording (with no row at S the else message
+    alone says "duplicate daily rows"). No payload isolates it, so this test does
+    not claim to pin the predicate: deleting the predicate alone leaves it green.
+    It pins what the two guards do jointly. With every other guard satisfied (row S
+    removed, E + 1 present, nothing in (S, E], receipt totals equal to the rows'),
+    a span that starts on no observed row is the only span finding and is never
+    spliced: a recompute that needs it declines instead of agreeing with it. It
+    turns RED if the predicate and the else branch are both deleted. (The else
+    branch is pinned on its own by ``duplicate_row_dated_E_plus_1`` in
+    ISOLATED_GUARDS.)
+    """
+
+    row = _window_row("twr.strategy", "alpha", SPAN_RETURN, window_start=SPAN_START)
+    good = run(build(tmp_path / "good", Spec(report=[_span_payload])), [row])
+    assert _only(good) == []
+    bad = run(
+        build(tmp_path / "bad", Spec(report=[_span_payload, _unobserved_span_start])),
+        [row],
+    )
+    assert _only(bad) == [
+        (
+            "returns.epoch_hpr_receipts_verified",
+            checks.BLOCKER_INVARIANT,
+            "alpha|2026-03-01..2026-03-03",
+        ),
+        ("expected.twr.strategy", checks.NOT_READY, "alpha|H"),
+    ]
+
+
+def _total_loss_span(report: dict[str, Any]) -> None:
+    """A span of exactly -1 whose capital chain agrees within the tolerance.
+
+    The capital that closes a total loss is 0, which the chain guard rejects as
+    unavailable. alpha keeps 0.00001 of 1250 instead (a chain return of
+    -0.999999992, 8e-9 from -1 against the tolerance of 1e-8); the receipt total and
+    the published epoch value are the total loss, so every other guard is satisfied.
+    """
+
+    _span_field(**{"return": "-1"})(report)
+    _capital_after_span("0.00001")(report)
+    _span_receipt_field(epoch_cumulative_return="-1")(report)
+    report["strategy_summary"][0]["account_live_cumulative_return"] = "-1"
+    report["strategy_provider_evidence"][0]["account"]["cumulative_return"] = "-1"
+
+
+def test_span_return_of_minus_one_is_refused_when_the_chain_cannot_tell(
+    tmp_path: Path,
+) -> None:
+    """(g) A span return must be above -1.
+
+    At any ordinary capital a span return of -1 also differs from the capital chain
+    and from the receipt totals (``span_return_not_above_minus_one`` above fires all
+    three), and at a closing capital of 0 the chain is unavailable. Only a chain
+    within 1e-8 of -1 (a closing capital below 1e-8 of the capital at S's close)
+    cannot tell -1 from the chain: there the return guard is the only one that fires.
+    """
+
+    found = _ignoring_expected(
+        run(build(tmp_path, Spec(report=[_span_payload, _total_loss_span])))
+    )
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [
+        (
+            "returns.epoch_hpr_receipts_verified",
+            checks.BLOCKER_INVARIANT,
+            "alpha|2026-03-01..2026-03-03",
+        )
+    ]
+    assert found[0].message == "the span return is not a decimal above -1"
+
+
+@pytest.mark.parametrize(
+    ("boundary", "capital"),
+    [
+        # 100 booked at the close of S: the span then applies to 1350, not 1250
+        ("close_of_S", str(Decimal(1350) * (1 + Decimal(SPAN_RETURN)))),
+        # 100 booked at the open of E + 1: the row dated E + 1 opens at 1100 + 100
+        ("open_of_E_plus_1", "1200"),
+    ],
+)
+def test_span_boundary_flow_is_a_fail_closed_capital_chain_blocker(
+    tmp_path: Path, boundary: str, capital: str
+) -> None:
+    """Characterisation (PR #506 review r0: Codex and Kimi, Important): a flow at the
+    close of S or the open of E + 1 blocks an otherwise consistent receipt.
+
+    The producer rejects funding strictly inside (S, E] and requires constant shares
+    across [S, E]; it does not establish that no flow lies at the close of S or the
+    open of E + 1. Such a flow leaves the span return (the NAV ratio) correct but
+    breaks ``bc(E + 1) = bc(S) x (1 + r_S) x (1 + span)``, and the validator has no
+    flow feed to tell it from a wrong span return. A documented false-blocker
+    residual: fail-closed (BLOCKER_INVARIANT, the span is never spliced, so a
+    recompute that needs it declines) and never a false pass. The cross-check is
+    the only guard that fires; weakening it to admit such receipts would fail open.
+    """
+
+    row = _window_row("twr.strategy", "alpha", SPAN_RETURN, window_start=SPAN_START)
+    flowed = [_span_payload, _capital_after_span(capital)]
+    found = run(build(tmp_path, Spec(report=flowed)), [row])
+    assert _only(found) == [
+        (
+            "returns.epoch_hpr_receipts_verified",
+            checks.BLOCKER_INVARIANT,
+            "alpha|2026-03-01..2026-03-03",
+        ),
+        ("expected.twr.strategy", checks.NOT_READY, "alpha|H"),
+    ], boundary
+    span = next(f for f in found if f.check_id == "returns.epoch_hpr_receipts_verified")
+    assert span.message.startswith("the span return differs from the capital chain ")
+    assert ";" not in span.message  # the cross-check is the only contradiction
+
+
+def _row_inside_the_span(report: dict[str, Any]) -> None:
+    """A published row dated inside (S, E], counted by the receipt (totals unchanged:
+    its return is 0)."""
+
+    _append(("strategy_returns",), SPAN_ROW_INSIDE)(report)
+    _span_receipt_field(
+        daily_return_observations=5, epoch_holding_period_link_observations=6
+    )(report)
+
+
+def _no_row_dated_after_the_span(report: dict[str, Any]) -> None:
+    """The row dated E + 1 is not published: the next row (09-17) opens at the same
+    1100, so the capital chain still agrees with the span; the receipt counts 3 rows."""
+
+    _drop_alpha_row(SPAN_NEXT)(report)
+    _span_receipt_field(
+        daily_return_observations=3, epoch_holding_period_link_observations=4
+    )(report)
+
+
+def _row_dated_after_the_span_twice(report: dict[str, Any]) -> None:
+    """A second row dated E + 1 (same values), counted by the receipt."""
+
+    report["strategy_returns"].append(copy.deepcopy(_alpha_row(SPAN_NEXT)(report)))
+    _span_receipt_field(
+        daily_return_observations=5, epoch_holding_period_link_observations=6
+    )(report)
+
+
+def _span_published_twice(report: dict[str, Any]) -> None:
+    """The same span twice: a valid span, then one that overlaps it. The receipt
+    counts both (links = 4 + 2) and its totals compound both (1.25 x 0.88 x 0.88)."""
+
+    spans = report["strategy_history_contract"]["epoch_hpr_receipts"][0]["receipt"][
+        "span_return_receipts"
+    ]
+    spans.append(copy.deepcopy(spans[0]))
+    _span_receipt_field(
+        epoch_cumulative_return="-0.032", epoch_holding_period_link_observations=6
+    )(report)
+    report["strategy_summary"][0]["account_live_cumulative_return"] = "-0.032"
+    report["strategy_provider_evidence"][0]["account"]["cumulative_return"] = "-0.032"
+
+
+def _receipt_for_a_strategy_without_rows(report: dict[str, Any]) -> None:
+    """A second receipt, for a strategy the report publishes no daily rows for. It
+    declares no span and its totals are 0 = 0, so nothing else can fire."""
+
+    ghost = _span_receipt()
+    ghost["strategy_id"] = "ghost"
+    ghost["receipt"].update(
+        daily_cumulative_return="0",
+        daily_return_observations=4,
+        epoch_cumulative_return="0",
+        epoch_holding_period_link_observations=4,
+        span_return_receipts=[],
+    )
+    report["strategy_history_contract"]["epoch_hpr_receipts"].append(ghost)
+
+
+SPAN_ENTITY = "alpha|2026-03-01..2026-03-03"
+MISSING_DATE_INSIDE = "missing_source_date does not fall strictly inside (S, E)"
+TOTALS_MISSING = "the receipt lacks a decimal daily or epoch cumulative return"
+WINDOW_MISSING = "the receipt lacks an observed_start/observed_end window"
+
+# case -> (mutators, finding class, finding entity, the guard's message)
+ISOLATED_GUARDS: dict[str, tuple[list[Mutator], str, str, str]] = {
+    "missing_date_on_S": (
+        [_span_field(missing_source_date=SPAN_START)],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        MISSING_DATE_INSIDE,
+    ),
+    "missing_date_on_E": (
+        [_span_field(missing_source_date=SPAN_END)],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        MISSING_DATE_INSIDE,
+    ),
+    "row_inside_the_span": (
+        [_row_inside_the_span],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        "daily rows lie inside the span: 2026-03-02",
+    ),
+    "row_after_E_is_not_E_plus_1": (
+        [_no_row_dated_after_the_span],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        "the first daily row after E is dated 2026-09-17, not 2026-03-04",
+    ),
+    "duplicate_row_dated_E_plus_1": (
+        [_row_dated_after_the_span_twice],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        "duplicate daily rows make the capital chain ambiguous",
+    ),
+    "overlapping_span": (
+        [_span_published_twice],
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        "the span overlaps a span ending 2026-03-03",
+    ),
+    "link_count": (
+        [_span_receipt_field(epoch_holding_period_link_observations=6)],
+        checks.BLOCKER_INVARIANT,
+        "alpha",
+        "epoch_holding_period_link_observations 6 is not "
+        "daily_return_observations + spans (5)",
+    ),
+    "daily_observation_count": (
+        [
+            _span_receipt_field(
+                daily_return_observations=5, epoch_holding_period_link_observations=6
+            )
+        ],
+        checks.BLOCKER_INVARIANT,
+        "alpha",
+        "daily_return_observations 5 is not the report's 4 daily rows in the "
+        "receipt window",
+    ),
+    "daily_total_missing": (
+        [_span_receipt_field(daily_cumulative_return=None)],
+        checks.BLOCKER_AUTHORITY,
+        "alpha",
+        TOTALS_MISSING,
+    ),
+    "epoch_total_missing": (
+        [_span_receipt_field(epoch_cumulative_return=None)],
+        checks.BLOCKER_AUTHORITY,
+        "alpha",
+        TOTALS_MISSING,
+    ),
+    "window_start_missing": (
+        [_span_receipt_field(observed_start=None)],
+        checks.BLOCKER_AUTHORITY,
+        "alpha",
+        WINDOW_MISSING,
+    ),
+    "window_end_missing": (
+        [_span_receipt_field(observed_end=None)],
+        checks.BLOCKER_AUTHORITY,
+        "alpha",
+        WINDOW_MISSING,
+    ),
+    "receipt_without_daily_rows": (
+        [_receipt_for_a_strategy_without_rows],
+        checks.BLOCKER_AUTHORITY,
+        "ghost",
+        "an epoch HPR receipt names a strategy without daily rows",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ISOLATED_GUARDS))
+def test_each_remaining_span_guard_fires_alone(tmp_path: Path, case: str) -> None:
+    """Each admission, total and authority guard of a receipt not pinned above, on a
+    payload where it alone can fire.
+
+    Deleting any of them left every test green: the SPAN_CASES fixture that reaches
+    a span or count guard also trips a second guard (a row published inside the span
+    changes the receipt's row count too), and none reaches the guards for a missing
+    total, a missing window or a strategy without daily rows. Here the receipt counts
+    what the report publishes, so the guard's message is the whole finding and
+    deleting the guard turns exactly its case RED.
+    """
+
+    mutators, klass, entity, message = ISOLATED_GUARDS[case]
+    assert _only(run(build(tmp_path / "good", Spec(report=[_span_payload])))) == []
+    bad = Spec(report=[_span_payload, *mutators])
+    found = _ignoring_expected(run(build(tmp_path / "bad", bad)))
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [
+        ("returns.epoch_hpr_receipts_verified", klass, entity)
+    ]
+    assert message in found[0].message
+    assert ";" not in found[0].message  # one contradiction: this guard's
+
+
+def _ragged_span_past_the_rows(report: dict[str, Any]) -> None:
+    """A second span (2026-09-17, 2026-09-19] on a ragged receipt: it starts on
+    alpha's last published row and ends past it, and the receipt counts the one
+    more observation (2026-09-20) that lies past the published rows."""
+
+    receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0]["receipt"]
+    receipt["span_return_receipts"].append(
+        {
+            "end_endpoint_sha256": "4" * 64,
+            "missing_source_date": "2026-09-18",
+            "return": "-0.05",
+            "span_days": 2,
+            "span_end_date": "2026-09-19",
+            "span_start_date": CUTOFF,
+            "start_endpoint_sha256": "5" * 64,
+            "subscription_events_in_span": 0,
+        }
+    )
+    _span_receipt_field(
+        admission_cutoff="2026-09-20",
+        daily_return_observations=5,
+        epoch_cumulative_return="0.045",
+        epoch_holding_period_link_observations=7,
+        observed_end="2026-09-20",
+    )(report)
+
+
+def test_ragged_receipt_span_past_the_published_rows_is_not_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """A span that starts on the last published row and ends past it belongs to
+    evidence the report does not publish.
+
+    The report holds no row after that span's E, so verifying it like the others
+    would block it ("the span does not close the gap"): a legitimate ragged receipt
+    would fail. It is left unverified and unspliced (it lies outside the headline's
+    window), and the receipt's totals still tie to it through the identity
+    (1.25 x 0.88 x 0.95 = 1 + 0.045). The payload is otherwise clean, so deleting
+    the ragged skip is the only thing that can turn it into a blocker.
+    """
+
+    ragged = [_span_payload, _ragged_span_past_the_rows]
+    assert _only(run(build(tmp_path, Spec(report=ragged)))) == []
+
+
 def test_check_error_fails_closed(tmp_path: Path) -> None:
     def broken(ctx: checks.Context) -> list[checks.Finding]:
         raise KeyError("drifted")
