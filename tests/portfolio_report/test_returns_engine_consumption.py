@@ -2450,6 +2450,39 @@ def test_r3_by_value_opening_must_be_an_observation_of_the_member() -> None:
         _performance(catalog, details)
 
 
+def test_r3_member_without_a_valued_sub_period_fails_closed() -> None:
+    """An R3 member with nothing to value never silently drops out of the gate.
+
+    The engine only reports ZERO_CAPITAL_RETURN_UNDEFINED for a sub-period that
+    starts at zero capital, so an R3 member whose facts hold no NAV after its
+    opening is inconsistent.  In a two-member strategy, accepting it with no
+    periods would leave the traced member alone, the reconcile would be skipped
+    (fewer than two members) and the canonical path never compared.
+    """
+
+    catalog, details, _epochs = _r3_world()
+    del details[("account-b", "strategy-shared", "2026-01-01", None)]
+    catalog["assignments"] = [
+        item for item in catalog["assignments"] if item["account_id"] != "account-b"
+    ]
+    for evidence in catalog["strategy_provider_evidence"]:
+        evidence["account"]["account_scopes"] = [
+            scope
+            for scope in evidence["account"]["account_scopes"]
+            if scope["account_id"] != "account-b"
+        ]
+    source = details[R3_KEY]["by_value_source"]
+    source["nav_observations"] = source["nav_observations"][:1]
+    source["classified_flows"] = []
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"by-value source is invalid for strategy-shared \(account-r\): "
+        r".*no valued sub-period after the opening",
+    ):
+        _performance(catalog, details)
+
+
 def test_r3_by_value_reads_opening_anchors_as_nothing_and_allocations_as_capital() -> (
     None
 ):
