@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
@@ -17,7 +17,14 @@ from typing import Any, NamedTuple, cast
 
 import pytest
 
-from quant_engine.core import run_storage
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    run_storage,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_attended_preparation as preparation
@@ -2195,13 +2202,237 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
         )
 
 
+FX_TEST_CUTOFF = "2026-09-17"
+# The synthetic contract FX end and pin used by the FXB-1 worlds below. The FX
+# tests rewrite the fixture's contract copy to carry them, so nothing here
+# restates the real contract's admitted FX end.
+FX_TEST_END = "2026-09-13"
+FX_TEST_GENERATION = "f" * 64
+
+
+def _write_ledger_generation(
+    output: Path,
+    catalog: dict[str, object],
+    *,
+    verification: VerificationStatus = VerificationStatus.VERIFIED,
+    artifact_id: str = "normalized/provider-ledger.json",
+) -> str:
+    """Stage one minimal provider-ledger generation whose manifest binds its catalog.
+
+    Preparation reads the staged catalog only after checking it against the
+    generation manifest, so the fixture publishes a real, content-addressed
+    manifest instead of the empty placeholder it used before FXB-1.
+    """
+
+    content = canonical_json_bytes(catalog)
+    as_of = date(2026, 9, 17)
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity(name="quant-engine-provider-ledger", version="5"),
+        coverage=CoverageClaim.from_dict(
+            {
+                "boundary": "synthetic provider-ledger fixture",
+                "fact_types": ["nav_observations"],
+                "known_gaps": [],
+                "observed_end": as_of.isoformat(),
+                "observed_start": as_of.isoformat(),
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=as_of,
+                schema_name="provider-ledger-catalog",
+                schema_version="2",
+            ),
+        ),
+        verification=verification,
+    )
+    generation = output / "generations" / manifest.generation_id
+    generation.mkdir(parents=True, exist_ok=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "provider-ledger.json").write_bytes(content)
+    (generation / "admit-or-declare-receipt.json").write_text("{}", encoding="utf-8")
+    return manifest.generation_id
+
+
+def _ledger_catalog(
+    findings: list[dict[str, object]] | None = None,
+    nav_observations: list[dict[str, object]] | None = None,
+    *,
+    fx_generation_id: str = FX_TEST_GENERATION,
+) -> dict[str, object]:
+    """A synthetic provider-ledger catalog carrying only what FXB-1 reads."""
+
+    return {
+        "as_of_date": FX_TEST_CUTOFF,
+        "catalog_schema_version": 2,
+        "nav_observations": nav_observations or [],
+        "portfolio_fx_generation": {
+            "generation_id": fx_generation_id,
+            "selection": "OWNER_SELECTED_SYNTHETIC_FX",
+        },
+        "quality_findings": findings or [],
+    }
+
+
+def _iso_days(first: str, last: str) -> list[str]:
+    start = date.fromisoformat(first)
+    return [
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range((date.fromisoformat(last) - start).days + 1)
+    ]
+
+
+def _hwm_period_rows(
+    strategy_id: str, first: str, last: str
+) -> list[dict[str, object]]:
+    days = _iso_days(first, last)
+    return [
+        {"strategy_id": strategy_id, "interval_start": start, "interval_end": end}
+        for start, end in zip(days, days[1:])
+    ]
+
+
+def _fx_finding(day: str, *, boundary: str = FX_TEST_END) -> dict[str, object]:
+    """The finding the provider ledger emits for one unconverted native NAV day."""
+
+    return {
+        "fact_type": "nav_observations",
+        "fx_boundary": boundary,
+        "original_record_id": f"p-fx:{day}",
+        "original_source_date": day,
+        "provider_id": "p-fx",
+        "record_id": f"p-fx:p-fx:{day}",
+        "source_artifact_id": "csv/daily_holdings.csv",
+        "source_record_id": f"p-fx:{day}",
+        "source_row_sha256": "b" * 64,
+        "status": "OUTSIDE_ADMITTED_FX_BOUNDARY",
+    }
+
+
+def _nav_row(provider: str, strategy: str, day: str, account: str) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "as_of_date": day,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "c" * 64,
+        "mapping_status": "MAPPED",
+        "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+        "provider_id": provider,
+        "record_id": f"{provider}:nav-{day}",
+        "source_record_id": f"nav-{day}",
+        "strategy_id": strategy,
+    }
+
+
+class _FxWorld(NamedTuple):
+    catalog: dict[str, object]
+    memberships: list[dict[str, object]]
+    periods: list[dict[str, object]]
+
+
+def _fx_world(
+    *, findings: bool = True, fx_strategy_ends: str = FX_TEST_END
+) -> _FxWorld:
+    """Two governed members: ``s-fx`` (USD basis ends early) and ``s-other``.
+
+    With ``findings`` the ledger records every native NAV day of ``p-fx`` after the
+    admitted FX end as an OUTSIDE_ADMITTED_FX_BOUNDARY finding. Without them the same
+    early end is an unexplained shortfall that FXB-1 must not bound.
+    """
+
+    first_unconverted = (
+        date.fromisoformat(FX_TEST_END) + timedelta(days=1)
+    ).isoformat()
+    catalog = _ledger_catalog(
+        findings=(
+            [_fx_finding(day) for day in _iso_days(first_unconverted, FX_TEST_CUTOFF)]
+            if findings
+            else []
+        ),
+        nav_observations=[
+            _nav_row("p-fx", "s-fx", day, "account-fx-0001")
+            for day in _iso_days("2026-09-10", FX_TEST_END)
+        ]
+        + [
+            _nav_row("p-other", "s-other", day, "account-other-0001")
+            for day in _iso_days("2026-09-10", FX_TEST_CUTOFF)
+        ],
+    )
+    memberships = [
+        {
+            "strategy_id": "s-fx",
+            "effective_start": "2026-09-10",
+            "membership_evidence_sha256": "1" * 64,
+        },
+        {
+            "strategy_id": "s-other",
+            "effective_start": "2026-09-10",
+            "membership_evidence_sha256": "2" * 64,
+        },
+    ]
+    periods = _hwm_period_rows("s-fx", "2026-09-10", fx_strategy_ends) + (
+        _hwm_period_rows("s-other", "2026-09-10", FX_TEST_CUTOFF)
+    )
+    return _FxWorld(catalog, memberships, periods)
+
+
+def _bind_contract_fx_end(contract_path: Path, fx_end: str = FX_TEST_END) -> None:
+    """Rewrite the fixture's contract copy so its one FX segment ends at ``fx_end``."""
+
+    contract = json.loads(contract_path.read_bytes())
+    (segment,) = [
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] == "portfolio-fx-rates"
+    ]
+    segment["interval"]["observed_end"] = fx_end
+    segment["current_generation"] = {
+        **segment["current_generation"],
+        "generation_id": FX_TEST_GENERATION,
+        "as_of": fx_end,
+    }
+    contract_path.write_bytes(json.dumps(contract, indent=2).encode() + b"\n")
+
+
+def _capture_hwm_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[list[dict[str, str]], dict[str, object]]]:
+    """Replace the governed HWM executor with a recorder of its grid and arguments."""
+
+    from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
+
+    captured: list[tuple[list[dict[str, str]], dict[str, object]]] = []
+
+    def compute(
+        intervals: list[dict[str, str]], *_args: object, **kwargs: object
+    ) -> dict[str, object]:
+        captured.append((list(intervals), dict(kwargs)))
+        return {}
+
+    monkeypatch.setattr(hwm, "compute_governed_as_held_composite_hwm", compute)
+    return captured
+
+
 def _preparation_function_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     history_rebuild_required: bool = False,
+    ledger_catalog: dict[str, object] | None = None,
+    hwm_memberships: list[dict[str, object]] | None = None,
+    hwm_component_periods: list[dict[str, object]] | None = None,
 ) -> tuple[Path, dict[str, int], dict[str, object]]:
-    """Keep checkpoint control flow real while replacing only numerical producers."""
+    """Keep checkpoint control flow real while replacing only numerical producers.
+
+    The staged ledger generation is real (manifest plus catalog) and the governed
+    memberships carry ``strategy_id``, because the governed HWM grid ends at the
+    FXB-1 common value-basis date of those strategies.
+    """
 
     import portfolio_current_decomposition_plan as plans
     import portfolio_current_dependence as dependence
@@ -2316,6 +2547,7 @@ def _preparation_function_fixture(
                 "ledger_models",
                 "ledger_returns",
                 "provider_ledger",
+                "value_basis_bounds",
                 "layered_history_repository_dependencies",
             )
         },
@@ -2430,15 +2662,12 @@ def _preparation_function_fixture(
         generation = output / "generations" / (label * 64)
         generation.mkdir(parents=True, exist_ok=True)
         (generation / "generation.json").write_text("{}", encoding="utf-8")
-        if label == "l":
-            (generation / "admit-or-declare-receipt.json").write_text(
-                "{}", encoding="utf-8"
-            )
         return {"generation_id": generation.name}
 
     def build_ledger(_recipe: Path, output: Path) -> dict[str, str]:
         calls["ledger"] += 1
-        return staged_generation(output, "l")
+        catalog = _ledger_catalog() if ledger_catalog is None else ledger_catalog
+        return {"generation_id": _write_ledger_generation(output, catalog)}
 
     def build_baseline(_recipe: Path, _ledger: Path, output: Path) -> dict[str, str]:
         calls["baseline"] += 1
@@ -2491,13 +2720,24 @@ def _preparation_function_fixture(
         lambda **_kwargs: json.loads(calendar.read_bytes()),
         raising=False,
     )
+    memberships = (
+        [
+            {
+                "strategy_id": "s-default",
+                "effective_start": "2026-09-16",
+                "membership_evidence_sha256": "1" * 64,
+            }
+        ]
+        if hwm_memberships is None
+        else hwm_memberships
+    )
     monkeypatch.setattr(
         hwm_inputs,
         "build_selected_hwm_inputs",
         lambda **_kwargs: {
             "calendar_sha256": "calendar",
-            "component_periods": [],
-            "memberships": [{"effective_start": "2026-09-16"}],
+            "component_periods": list(hwm_component_periods or []),
+            "memberships": list(memberships),
         },
     )
 
@@ -2635,7 +2875,13 @@ def test_hwm_stage_checkpoints_and_reuses_its_selected_calendar(
         return {
             "calendar_sha256": "derived-calendar",
             "component_periods": [],
-            "memberships": [{"effective_start": "2026-09-16"}],
+            "memberships": [
+                {
+                    "strategy_id": "s-default",
+                    "effective_start": "2026-09-16",
+                    "membership_evidence_sha256": "1" * 64,
+                }
+            ],
         }
 
     monkeypatch.setattr(
@@ -2725,6 +2971,303 @@ def test_preparation_persists_exact_hwm_decimals_before_verification_and_resume(
     preparation.prepare_attended_inputs(**kwargs, resume=True)
     assert checkpoint.read_bytes() == before
     assert calls["hwm"] == 1
+
+
+def _prepare_fx_world(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    world: _FxWorld,
+) -> tuple[Path, dict[str, int]]:
+    """Run the real preparation over ``world`` with the contract bound to its FX end."""
+
+    spec, calls, _identity = _preparation_function_fixture(
+        tmp_path,
+        monkeypatch,
+        ledger_catalog=world.catalog,
+        hwm_memberships=world.memberships,
+        hwm_component_periods=world.periods,
+    )
+    _bind_contract_fx_end(tmp_path / "contract.json")
+    return spec, calls
+
+
+def _prepare(spec: Path, output: Path, *, resume: bool = False) -> dict[str, Any]:
+    return preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=resume,
+    )
+
+
+def test_h1a_the_governed_hwm_grid_ends_at_the_common_value_basis_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: a strategy whose USD basis ends at the admitted FX end ends the grid there.
+
+    The ledger records the unconverted native days of ``s-fx`` after the contract's
+    FX end as OUTSIDE_ADMITTED_FX_BOUNDARY findings. The composite needs every
+    member, so the governed HWM runs to the common complete date, not the cutoff.
+    """
+
+    spec, _calls = _prepare_fx_world(tmp_path, monkeypatch, _fx_world())
+    captured = _capture_hwm_compute(monkeypatch)
+    output = tmp_path / "prepared"
+
+    _prepare(spec, output)
+
+    ((grid, kwargs),) = captured
+    assert [(row["interval_start"], row["interval_end"]) for row in grid] == [
+        ("2026-09-10", "2026-09-11"),
+        ("2026-09-11", "2026-09-12"),
+        ("2026-09-12", "2026-09-13"),
+    ]
+    assert kwargs["complete_through"] == FX_TEST_END
+    checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "hwm.json", "HWM checkpoint"
+    )
+    assert checkpoint["stage"] == "hwm"
+
+
+def test_h1b_without_findings_the_governed_hwm_grid_ends_at_the_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No FX finding, no bound: every member runs to the cutoff as before FXB-1."""
+
+    world = _fx_world(findings=False, fx_strategy_ends=FX_TEST_CUTOFF)
+    spec, _calls = _prepare_fx_world(tmp_path, monkeypatch, world)
+    captured = _capture_hwm_compute(monkeypatch)
+
+    _prepare(spec, tmp_path / "prepared")
+
+    ((grid, kwargs),) = captured
+    assert grid[0]["interval_start"] == "2026-09-10"
+    assert grid[-1]["interval_end"] == FX_TEST_CUTOFF
+    assert len(grid) == 7
+    assert kwargs["complete_through"] == FX_TEST_CUTOFF
+
+
+def test_h1d_an_unexplained_early_end_is_not_turned_into_a_common_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shortfall without an FX finding keeps the full grid, so the executor fails.
+
+    ``s-fx`` stops at 2026-09-13 here with no OUTSIDE_ADMITTED_FX_BOUNDARY finding.
+    Preparation must not derive a common date from the data (the sweep bypass): it
+    hands the executor the full grid, whose coverage check then raises
+    (tests/portfolio_ledger/test_hwm_governed_execution.py pins that half).
+    """
+
+    world = _fx_world(findings=False)
+    spec, _calls = _prepare_fx_world(tmp_path, monkeypatch, world)
+    captured = _capture_hwm_compute(monkeypatch)
+
+    _prepare(spec, tmp_path / "prepared")
+
+    ((grid, kwargs),) = captured
+    assert grid[-1]["interval_end"] == FX_TEST_CUTOFF
+    assert kwargs["complete_through"] == FX_TEST_CUTOFF
+
+
+def _break_boundary(world: _FxWorld) -> None:
+    world.catalog["quality_findings"][0]["fx_boundary"] = "2026-09-12"  # type: ignore[index]
+
+
+def _add_nav_after_the_fx_end(world: _FxWorld) -> None:
+    world.catalog["nav_observations"].append(  # type: ignore[attr-defined]
+        _nav_row("p-fx", "s-fx", "2026-09-14", "account-fx-0001")
+    )
+
+
+def _repin_ledger_fx_generation(world: _FxWorld) -> None:
+    world.catalog["portfolio_fx_generation"]["generation_id"] = "e" * 64  # type: ignore[index]
+
+
+def _drop_the_mapped_value_basis(world: _FxWorld) -> None:
+    world.catalog["nav_observations"] = [
+        row
+        for row in world.catalog["nav_observations"]  # type: ignore[attr-defined]
+        if row["provider_id"] != "p-fx"
+    ]
+
+
+def _add_a_period_after_the_value_basis_end(world: _FxWorld) -> None:
+    world.periods.extend(_hwm_period_rows("s-fx", "2026-09-13", "2026-09-14"))
+
+
+def _drop_a_membership_strategy_id(world: _FxWorld) -> None:
+    del world.memberships[0]["strategy_id"]
+
+
+@pytest.mark.parametrize(
+    ("break_world", "message"),
+    [
+        (_break_boundary, "differs from the contract FX end"),
+        (_add_nav_after_the_fx_end, "after the admitted FX end"),
+        (_repin_ledger_fx_generation, "differs from the contract pin"),
+        (_drop_the_mapped_value_basis, "no mapped value basis"),
+        (_add_a_period_after_the_value_basis_end, "after the value-basis end"),
+        (_drop_a_membership_strategy_id, "membership strategy id"),
+    ],
+)
+def test_h1c_an_inconsistent_value_basis_stops_before_the_hwm_is_computed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    break_world: Any,
+    message: str,
+) -> None:
+    """Every FXB-1 inconsistency fails closed in preparation, before any numbers."""
+
+    world = _fx_world()
+    break_world(world)
+    spec, _calls = _prepare_fx_world(tmp_path, monkeypatch, world)
+    captured = _capture_hwm_compute(monkeypatch)
+    output = tmp_path / "prepared"
+
+    with pytest.raises(preparation.AttendedPreparationError, match=message):
+        _prepare(spec, output)
+
+    assert captured == []
+    assert not (output / "preparation" / "checkpoints" / "hwm.json").exists()
+
+
+def _staged_ledger(tmp_path: Path, catalog: dict[str, object], **kwargs: Any) -> Path:
+    generation_id = _write_ledger_generation(tmp_path / "ledger", catalog, **kwargs)
+    return tmp_path / "ledger" / "generations" / generation_id
+
+
+def _bound_contract(tmp_path: Path) -> dict[str, Any]:
+    path = tmp_path / "contract.json"
+    path.write_bytes(
+        (
+            preparation.ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
+    _bind_contract_fx_end(path)
+    return cast("dict[str, Any]", json.loads(path.read_bytes()))
+
+
+def test_hwm_complete_through_is_the_common_value_basis_date_of_the_members(
+    tmp_path: Path,
+) -> None:
+    world = _fx_world()
+    generation = {"memberships": world.memberships, "component_periods": world.periods}
+    kwargs = {
+        "ledger_generation_root": _staged_ledger(tmp_path, world.catalog),
+        "contract": _bound_contract(tmp_path),
+        "cutoff": FX_TEST_CUTOFF,
+    }
+
+    common = preparation._hwm_complete_through(hwm_generation=generation, **kwargs)
+    assert common == FX_TEST_END
+    only_other = {
+        "memberships": world.memberships[1:],
+        "component_periods": world.periods,
+    }
+    unbounded = preparation._hwm_complete_through(hwm_generation=only_other, **kwargs)
+    assert unbounded == FX_TEST_CUTOFF
+
+
+def _tamper_the_catalog_bytes(generation: Path) -> Path:
+    catalog = generation / "provider-ledger.json"
+    catalog.write_bytes(catalog.read_bytes() + b" ")
+    return generation
+
+
+def _remove_the_catalog(generation: Path) -> Path:
+    (generation / "provider-ledger.json").unlink()
+    return generation
+
+
+def _corrupt_the_manifest(generation: Path) -> Path:
+    (generation / "generation.json").write_bytes(b"{}")
+    return generation
+
+
+def _rename_the_generation(generation: Path) -> Path:
+    return generation.rename(generation.with_name("0" * 64))
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        (_tamper_the_catalog_bytes, "catalog differs from its manifest"),
+        (_remove_the_catalog, "generation is unavailable"),
+        (_corrupt_the_manifest, "manifest is invalid"),
+        (_rename_the_generation, "differs from its manifest identity"),
+    ],
+)
+def test_hwm_complete_through_reads_only_a_catalog_its_manifest_binds(
+    tmp_path: Path, tamper: Any, message: str
+) -> None:
+    world = _fx_world()
+    generation = tamper(_staged_ledger(tmp_path, world.catalog))
+
+    with pytest.raises(preparation.AttendedPreparationError, match=message):
+        preparation._hwm_complete_through(
+            hwm_generation={
+                "memberships": world.memberships,
+                "component_periods": world.periods,
+            },
+            ledger_generation_root=generation,
+            contract=_bound_contract(tmp_path),
+            cutoff=FX_TEST_CUTOFF,
+        )
+
+
+@pytest.mark.parametrize(
+    ("verification", "artifact_id", "message"),
+    [
+        (VerificationStatus.PENDING, "normalized/provider-ledger.json", "not verified"),
+        (
+            VerificationStatus.VERIFIED,
+            "normalized/another-catalog.json",
+            "not bound by its manifest",
+        ),
+    ],
+)
+def test_hwm_complete_through_needs_a_verified_manifest_that_declares_the_catalog(
+    tmp_path: Path,
+    verification: VerificationStatus,
+    artifact_id: str,
+    message: str,
+) -> None:
+    world = _fx_world()
+    generation = _staged_ledger(
+        tmp_path, world.catalog, verification=verification, artifact_id=artifact_id
+    )
+
+    with pytest.raises(preparation.AttendedPreparationError, match=message):
+        preparation._hwm_complete_through(
+            hwm_generation={
+                "memberships": world.memberships,
+                "component_periods": world.periods,
+            },
+            ledger_generation_root=generation,
+            contract=_bound_contract(tmp_path),
+            cutoff=FX_TEST_CUTOFF,
+        )
+
+
+def test_the_hwm_stage_code_identity_covers_the_value_basis_bound_module() -> None:
+    """The module the stage executes must be part of the stage's checkpoint identity."""
+
+    assert [
+        stage
+        for stage, names in preparation._PREPARATION_STAGE_CODE.items()
+        if "value_basis_bounds" in names
+    ] == ["hwm"]
+    assert preparation._runtime_path("value_basis_bounds") == (
+        preparation.ROOT
+        / "packages"
+        / "portfolio-ledger"
+        / "src"
+        / "quant_engine"
+        / "portfolio_ledger"
+        / "value_basis_bounds.py"
+    )
 
 
 def test_preparation_resume_skips_completed_dependence_after_plan_interruption(
@@ -2887,6 +3430,20 @@ def test_epoch_leaf_code_change_rebuilds_epoch_and_dependents_only(
             {
                 "baseline": 1,
                 "capital": 2,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 1,
+                "plan": 2,
+                "rebind": 1,
+            },
+        ),
+        (
+            "code",
+            "value_basis_bounds",
+            {
+                "baseline": 1,
+                "capital": 1,
                 "dependence": 1,
                 "dependence_verify": 1,
                 "hwm": 2,
