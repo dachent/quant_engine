@@ -207,9 +207,14 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
 
 # --- v2 row set (successor of PR #485's v1; inputs acceptance/v2/*) ---
 
+# Main commit (merge of PR #492) at which acceptance/derive_a and
+# acceptance/derive_b, run from that checkout against the v2 inputs manifest,
+# reproduce every row below; re-verified at main 549eb89 (post-#502), see
+# derivations.*.reproduced_at_main. The pre-merge lane commits the baseline was
+# first stamped with (fb10931 / dac6e41) are no longer named.
 V2_COMMITS = {
-    "a": "fb1093136ec9bd5bcfa763e5f71d9cd6a7d620ea",
-    "b": "dac6e410046045ed6e5b37899eae039679d137ac",
+    "a": "b7f9ec537506055a078d0d96058ea30f22d30f5a",
+    "b": "b7f9ec537506055a078d0d96058ea30f22d30f5a",
 }
 V2_AGREE_COUNT = 91
 V2_NOT_DERIVABLE_COUNT = 14
