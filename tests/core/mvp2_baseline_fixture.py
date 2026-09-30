@@ -228,8 +228,15 @@ def _window(
 
 def _epoch_details(
     payloads: Mapping[tuple[str, str, str, str | None], dict[str, Any]],
+    own_path_links: Mapping[tuple[str, str, str, str | None], list[dict[str, Any]]],
 ) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
-    """Wrap recomputed payloads in the manifest epoch-detail shape the report consumes."""
+    """Wrap recomputed payloads in the manifest epoch-detail shape the report consumes.
+
+    ``own_path_links`` carries each member epoch's manifest observation-trace
+    links (the schema-9 shape the manifest producer persists); the report
+    compounds them into the member's own return path and reconciles each
+    multi-account strategy composite from them.
+    """
 
     return {
         key: {
@@ -238,16 +245,41 @@ def _epoch_details(
             "epoch_admission_status": "FUNDED",
             "epoch_output_status": "OK",
             "epoch_blocking_reason": None,
+            "own_path_links": own_path_links[key],
             "performance_payload": payload,
         }
         for key, payload in payloads.items()
     }
 
 
+def _manifest_trace_links(epoch: Any) -> list[dict[str, Any]]:
+    """One member epoch's observation trace in the manifest schema-9 shape."""
+
+    from quant_engine.portfolio_ledger import decimal_text
+
+    return [
+        {
+            "start_date": link.start_date.isoformat(),
+            "end_date": link.end_date.isoformat(),
+            "base_nav": decimal_text(link.beginning_value),
+            "beginning_flow": decimal_text(link.beginning_flow),
+            "ending_nav": decimal_text(link.ending_value),
+            "ending_flow": decimal_text(link.ending_flow),
+            "net_flow": decimal_text(link.beginning_flow + link.ending_flow),
+            "factor": decimal_text(link.factor),
+            "cumulative_index": decimal_text(link.cumulative_index * Decimal(100)),
+            "running_hwm_index": decimal_text(link.running_hwm_index * Decimal(100)),
+            "drawdown": decimal_text(link.drawdown),
+        }
+        for link in epoch.links
+    ]
+
+
 def _engine_epoch_payloads(
     baseline_doc: dict[str, Any],
 ) -> tuple[
     dict[tuple[str, str, str, str | None], dict[str, Any]],
+    dict[tuple[str, str, str, str | None], list[dict[str, Any]]],
     set[tuple[str, str, str, str | None]],
 ]:
     """Recompute each required epoch's expected report payload from the engine.
@@ -263,8 +295,9 @@ def _engine_epoch_payloads(
     synthetic source also binds no strategy-mapped flow legs, so each path is
     the pure chain-linked account NAV series inside the assignment window,
     linked in the manifest's 40-digit epoch context.  Returns the expected
-    payloads plus the keys whose R1 opening is a pre-start observation (the
-    P1-era window-first opening differs exactly there).
+    payloads, each epoch's manifest observation-trace links, plus the keys
+    whose R1 opening is a pre-start observation (the P1-era window-first
+    opening differs exactly there).
     """
 
     from quant_engine.portfolio_ledger import decimal_text
@@ -280,6 +313,7 @@ def _engine_epoch_payloads(
         )
     observations = _account_observations(baseline_doc)
     payloads: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
+    own_path_links: dict[tuple[str, str, str, str | None], list[dict[str, Any]]] = {}
     pre_start_keys: set[tuple[str, str, str, str | None]] = set()
     for assignment in baseline_doc["assignments"]:
         strategy_id = assignment["strategy_id"]
@@ -318,9 +352,10 @@ def _engine_epoch_payloads(
             "observed_start": min(window).isoformat(),
             "observed_end": max(window).isoformat(),
         }
+        own_path_links[key] = _manifest_trace_links(linked)
         if opening.basis == "LAST_OBSERVATION_BEFORE_START":
             pre_start_keys.add(key)
-    return payloads, pre_start_keys
+    return payloads, own_path_links, pre_start_keys
 
 
 def _p1_era_epoch_payloads(
@@ -827,9 +862,12 @@ def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) ->
     )
 
     project_coverage_metadata(baseline_doc, ledger_doc)
-    expected_payloads, pre_start_keys = _engine_epoch_payloads(baseline_doc)
+    expected_payloads, expected_links, pre_start_keys = _engine_epoch_payloads(
+        baseline_doc
+    )
     performance = reporter._account_strategy_performance(
-        baseline_doc, current_epoch_details=_epoch_details(expected_payloads)
+        baseline_doc,
+        current_epoch_details=_epoch_details(expected_payloads, expected_links),
     )
     required_performance = [
         row for row in performance if row["strategy_id"] in required_ids
@@ -858,18 +896,28 @@ def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) ->
     # legs the only moving rule is the R1 opening point, so exactly the
     # successor epochs with a pre-start observation move.
     stale_payloads = _p1_era_epoch_payloads(baseline_doc)
-    stale_performance = reporter._account_strategy_performance(
-        baseline_doc, current_epoch_details=_epoch_details(stale_payloads)
-    )
-    stale_by_key = {_epoch_key(row): row for row in stale_performance}
     moved = {
         key
         for key, payload in expected_payloads.items()
-        if abs(Decimal(stale_by_key[key]["twr"]) - Decimal(payload["twr"]))
+        if abs(Decimal(stale_payloads[key]["twr"]) - Decimal(payload["twr"]))
         > Decimal("1e-12")
     }
     if moved != pre_start_keys:
         raise AssertionError(
             f"synthetic P1-era fail-before proof moved {sorted(moved)}, "
             f"expected exactly {sorted(pre_start_keys)}"
+        )
+    # The strengthened report fails closed on the retired oracle itself: a
+    # moved member TWR no longer equals its own engine-correct trace path, so
+    # the report rejects the stale detail set instead of publishing it.
+    try:
+        reporter._account_strategy_performance(
+            baseline_doc,
+            current_epoch_details=_epoch_details(stale_payloads, expected_links),
+        )
+    except reporter.ReportValidationError:
+        pass
+    else:
+        raise AssertionError(
+            "engine-correct report accepted the retired P1-era oracle values"
         )
