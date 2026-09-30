@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 import time as time_module
-from typing import Any, Final, Mapping, Sequence, cast
+from typing import Any, Collection, Final, Mapping, Sequence, cast
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -63,6 +63,7 @@ from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
 from quant_engine.portfolio_ledger.value_basis_bounds import (
+    RULE_ID,
     ValueBasisBoundError,
     ValueBasisBounds,
     derive_value_basis_bounds,
@@ -1140,6 +1141,225 @@ def _report_value_basis_bounds(
         )
     except ValueBasisBoundError as exc:
         raise ReportValidationError(f"value-basis bound differs: {exc}") from exc
+
+
+def _governed_hwm_bounded_end(
+    proof: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    calculation_cutoff_date: str | None,
+    value_basis_bounds: ValueBasisBounds | None,
+) -> _BoundedEnd | None:
+    """The governed HWM may end before the cutoff only at its members' bound.
+
+    The executor fails closed on any member-period left uncovered inside its grid
+    and the verifier recomputed the proof from the hash-verified input
+    generation.  This is the report-side statement: when FXB-1 bounds a strategy,
+    the proof ends exactly at the common value-basis end of the generation's
+    memberships (the cutoff when no member is bounded), never at another date.
+    Nothing bounded, or no resolved cutoff, keeps today's behaviour: no check.
+    """
+
+    if (
+        calculation_cutoff_date is None
+        or value_basis_bounds is None
+        or not value_basis_bounds.strategies
+    ):
+        return None
+    failure = ReportValidationError(
+        "governed HWM complete date is not the value-basis bound"
+    )
+    try:
+        generation = json.loads(input_generation_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise failure from exc
+    memberships = (
+        generation.get("memberships") if isinstance(generation, dict) else None
+    )
+    if not isinstance(memberships, list) or not memberships:
+        raise failure
+    members = [
+        row.get("strategy_id") if isinstance(row, dict) else None for row in memberships
+    ]
+    if not all(isinstance(item, str) and item for item in members):
+        raise failure
+    member_ids = cast(list[str], members)
+    cutoff = _date(calculation_cutoff_date, "calculation cutoff date")
+    try:
+        complete_through = _date(
+            proof.get("complete_through"), "governed HWM complete_through"
+        )
+    except ReportValidationError as exc:
+        raise failure from exc
+    if (
+        value_basis_bounds.calculation_cutoff != cutoff
+        or complete_through != value_basis_bounds.common_complete_date(member_ids)
+    ):
+        raise failure
+    if complete_through >= cutoff:
+        return None
+    return _BoundedEnd(
+        complete_through.isoformat(),
+        value_basis_bounds.bounded_by(member_ids, complete_through),
+    )
+
+
+def _value_basis_bounds_disclosure(
+    value_basis_bounds: ValueBasisBounds,
+    report: Mapping[str, Any],
+    *,
+    required_strategy_ids: Collection[str],
+    history_end: _BoundedEnd | None,
+    hwm_end: _BoundedEnd | None,
+) -> dict[str, Any] | None:
+    """The report-only ``value_basis_bounds`` block (FXB-1, l0-design 1.7).
+
+    It says why published dates precede the calculation cutoff: one entry per
+    published date before the cutoff that a bound explains, listing the
+    strategies whose value basis ends there.  An entry exists only for a date the
+    report really publishes and only under a fixed rule, so nothing else is
+    implied: the block is absent when no strategy is bounded, and it adds nothing
+    inside the governed proof, the lens rows or the account rows.  The count of
+    unconverted native observations covers the findings up to the cutoff only.
+    """
+
+    bounds = value_basis_bounds
+    if not bounds.strategies:
+        return None
+    cutoff = bounds.calculation_cutoff
+    ends = {
+        strategy_id: bound.effective_end.isoformat()
+        for strategy_id, bound in bounds.strategies.items()
+    }
+    entries: list[dict[str, Any]] = []
+
+    def add(
+        section: str,
+        entity: str,
+        field_name: str,
+        day: str,
+        bounded_by: Sequence[str],
+    ) -> None:
+        entries.append(
+            {
+                "section": section,
+                "entity": entity,
+                "field": field_name,
+                "date": day,
+                "bounded_by": sorted(bounded_by),
+            }
+        )
+
+    history = report.get("strategy_history_contract")
+    if (
+        history_end is not None
+        and isinstance(history, Mapping)
+        and history.get("as_of_date") == history_end.end
+    ):
+        add(
+            "strategy_history_contract",
+            "portfolio",
+            "as_of_date",
+            history_end.end,
+            history_end.bounded_by,
+        )
+    dependence = report.get("dependence_analysis")
+    if (
+        history_end is not None
+        and isinstance(dependence, Mapping)
+        and dependence.get("complete_through") == history_end.end
+    ):
+        add(
+            "dependence_analysis",
+            "portfolio",
+            "complete_through",
+            history_end.end,
+            history_end.bounded_by,
+        )
+    governed = report.get("hwm_governed_proof")
+    if (
+        hwm_end is not None
+        and isinstance(governed, Mapping)
+        and governed.get("complete_through") == hwm_end.end
+    ):
+        add(
+            "hwm_governed_proof",
+            "portfolio",
+            "complete_through",
+            hwm_end.end,
+            hwm_end.bounded_by,
+        )
+    required = sorted(required_strategy_ids)
+    common = bounds.common_complete_date(required) if required else cutoff
+    lenses = report.get("decomposition_lenses")
+    lens_rows = lenses.get("lenses") if isinstance(lenses, Mapping) else None
+    if common < cutoff and isinstance(lens_rows, list):
+        for lens in lens_rows:
+            if (
+                isinstance(lens, Mapping)
+                and lens.get("as_of_date") == common.isoformat()
+            ):
+                add(
+                    "decomposition_lenses",
+                    f"{lens.get('lens_id')}:{lens.get('evidence_mode')}",
+                    "as_of_date",
+                    common.isoformat(),
+                    bounds.bounded_by(required, common),
+                )
+    for row in _objects(report.get("account_summary", []), "account_summary"):
+        account_id = row.get("account_id")
+        bounded = [
+            strategy_id
+            for strategy_id, bound in bounds.strategies.items()
+            if account_id in bound.account_ids
+            and row.get("as_of_date") == ends[strategy_id]
+        ]
+        if bounded and isinstance(account_id, str):
+            add(
+                "account_summary",
+                account_id,
+                "as_of_date",
+                str(row["as_of_date"]),
+                bounded,
+            )
+    for row in _objects(report.get("strategy_summary", []), "strategy_summary"):
+        strategy_id = row.get("strategy_id")
+        if (
+            isinstance(strategy_id, str)
+            and strategy_id in ends
+            and row.get("account_live_observed_end") == ends[strategy_id]
+        ):
+            add(
+                "strategy_summary",
+                strategy_id,
+                "account_live_observed_end",
+                ends[strategy_id],
+                [strategy_id],
+            )
+    for row in _objects(report.get("twr_mwr", []), "twr_mwr"):
+        strategy_id = row.get("strategy_id")
+        if (
+            row.get("effective_end") is None
+            and isinstance(strategy_id, str)
+            and strategy_id in ends
+            and row.get("observed_end") == ends[strategy_id]
+        ):
+            add(
+                "twr_mwr",
+                f"{row.get('account_id')}|{strategy_id}|{row.get('effective_start')}",
+                "observed_end",
+                ends[strategy_id],
+                [strategy_id],
+            )
+    return {
+        "schema_version": 1,
+        "rule": RULE_ID,
+        "calculation_cutoff_date": cutoff.isoformat(),
+        "common_complete_date": common.isoformat(),
+        "strategies": bounds.strategies_json(),
+        "bounded_sections": sorted(
+            entries, key=lambda item: (item["section"], item["entity"])
+        ),
+    }
 
 
 def _merge_attribution(
@@ -6296,6 +6516,16 @@ def build_report_data(
         if hwm_governed_result is not None
         else None
     )
+    hwm_bounded_end = (
+        _governed_hwm_bounded_end(
+            governed_hwm_proof,
+            hwm_governed_generation_bytes or b"",
+            calculation_cutoff_date,
+            value_basis_bounds,
+        )
+        if governed_hwm_proof is not None
+        else None
+    )
     if (invested_capital_result is None) != (
         invested_capital_input_generation_path is None
     ):
@@ -6690,6 +6920,20 @@ def build_report_data(
             ),
             "generation_id": attribution_ref["generation_id"],
         }
+    if value_basis_bounds is not None:
+        value_basis_disclosure = _value_basis_bounds_disclosure(
+            value_basis_bounds,
+            report,
+            required_strategy_ids={
+                strategy_id
+                for strategy_id, control in strategy_product_controls.items()
+                if control.get("product_requirement") == "REQUIRED"
+            },
+            history_end=history_bounded_end,
+            hwm_end=hwm_bounded_end,
+        )
+        if value_basis_disclosure is not None:
+            report["value_basis_bounds"] = value_basis_disclosure
     report = _object(_public_report_value(report), "public report")
     return report, canonical_json_bytes(report), baseline_catalog_path
 
