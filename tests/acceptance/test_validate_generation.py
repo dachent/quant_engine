@@ -3277,6 +3277,32 @@ def _only(findings: list[checks.Finding]) -> list[tuple[str, str, str]]:
     return [(f.check_id, f.klass, f.entity) for f in _ignoring_expected(findings)]
 
 
+# The one NOT_READY a receipt earns when its observed_end is after the strategy's last
+# published ACCOUNT_LIVE row: visible, never blocking (I4-r2, R2-2).
+RAGGED_RECEIPT = ("returns.epoch_hpr_receipts_verified", checks.NOT_READY, "alpha")
+RAGGED_POINTER = (
+    "$.strategy_history_contract.epoch_hpr_receipts[0].receipt.observed_end"
+)
+
+
+def _ragged_not_ready(
+    found: list[checks.Finding], observed_end: str, unverified: list[str]
+) -> None:
+    """The findings hold exactly one NOT_READY, for alpha's receipt, saying what could
+    not be verified: where the receipt ends, the last row the report publishes, the
+    spans it skipped and that its totals were not re-derived."""
+
+    (ragged,) = [f for f in found if f.klass == checks.NOT_READY]
+    assert (ragged.check_id, ragged.klass, ragged.entity) == RAGGED_RECEIPT
+    assert ragged.json_path == RAGGED_POINTER
+    assert ragged.observed == {
+        "observed_end": observed_end,
+        "last_published_row": CUTOFF,
+        "unverified_spans": unverified,
+        "totals_recomputed": False,
+    }
+
+
 def _ragged_perimeter(report: dict[str, Any]) -> None:
     """The receipt's perimeter runs three days past alpha's last published row.
 
@@ -3347,21 +3373,27 @@ def test_receipt_identity_alone_catches_a_forged_epoch_total(tmp_path: Path) -> 
     neither. A receipt that runs past the last published row is not recomputable;
     the identity is then the only tie between its totals and its spans. Here the
     epoch total is forged (0.2 for 0.1) with every span, count and published value
-    consistent, and only the identity can fire.
+    consistent, and only the identity can fire. The perimeter itself is visible in
+    both payloads as the NOT_READY of a receipt that runs past the published rows
+    (R2-2), so the clean pair holds that alone and the forged one adds the blocker.
     """
 
     perimeter = [_span_payload, _ragged_perimeter]
-    assert _only(run(build(tmp_path / "good", Spec(report=perimeter)))) == []
+    assert _only(run(build(tmp_path / "good", Spec(report=perimeter)))) == [
+        RAGGED_RECEIPT
+    ]
     forged = [*perimeter, _span_receipt_field(epoch_cumulative_return="0.2")]
     found = _ignoring_expected(run(build(tmp_path / "bad", Spec(report=forged))))
     assert [(f.check_id, f.klass, f.entity) for f in found] == [
-        ("returns.epoch_hpr_receipts_verified", checks.BLOCKER_INVARIANT, "alpha")
+        ("returns.epoch_hpr_receipts_verified", checks.BLOCKER_INVARIANT, "alpha"),
+        RAGGED_RECEIPT,
     ]
     assert found[0].message.startswith(
         "(1 + daily_cumulative_return) x prod(1 + span return) differs from "
         "1 + epoch_cumulative_return by "
     )
     assert ";" not in found[0].message  # the identity is the only contradiction
+    _ragged_not_ready(found, "2026-09-20", [])
 
 
 def test_account_live_receipt_never_bridges_a_provider_live_summary(
@@ -3427,9 +3459,9 @@ def test_span_that_starts_on_no_observed_row_is_blocked_and_never_spliced(
     Every input with ``len(at_start) != 1`` (no row at S, or several) therefore
     ends in a contradiction whether or not the S predicate exists: it never changes
     whether a span is admitted, only the wording (with no row at S the else message
-    alone says "duplicate daily rows"). No payload isolates it, so this test does
-    not claim to pin the predicate: deleting the predicate alone leaves it green.
-    It pins what the two guards do jointly. With every other guard satisfied (row S
+    alone says "duplicate daily rows"). No payload isolates it as a gate, but the
+    wording is observable, and the last assertion pins it: deleting the predicate
+    alone turns this test RED (I4-r2 R2-4). With every other guard satisfied (row S
     removed, E + 1 present, nothing in (S, E], receipt totals equal to the rows'),
     a span that starts on no observed row is the only span finding and is never
     spliced: a recompute that needs it declines instead of agreeing with it. It
@@ -3453,6 +3485,8 @@ def test_span_that_starts_on_no_observed_row_is_blocked_and_never_spliced(
         ),
         ("expected.twr.strategy", checks.NOT_READY, "alpha|H"),
     ]
+    span = next(f for f in bad if f.check_id == "returns.epoch_hpr_receipts_verified")
+    assert "S 2026-03-01 is not exactly one observed daily row" in span.message
 
 
 def _total_loss_span(report: dict[str, Any]) -> None:
@@ -3753,11 +3787,382 @@ def test_ragged_receipt_span_past_the_published_rows_is_not_a_blocker(
     would fail. It is left unverified and unspliced (it lies outside the headline's
     window), and the receipt's totals still tie to it through the identity
     (1.25 x 0.88 x 0.95 = 1 + 0.045). The payload is otherwise clean, so deleting
-    the ragged skip is the only thing that can turn it into a blocker.
+    the ragged skip is the only thing that can turn it into a blocker. What the
+    report cannot verify is not silent (I4-r2, R2-2): the receipt earns exactly one
+    NOT_READY that names the skipped span and says its totals were not re-derived.
     """
 
     ragged = [_span_payload, _ragged_span_past_the_rows]
-    assert _only(run(build(tmp_path, Spec(report=ragged)))) == []
+    found = _ignoring_expected(run(build(tmp_path, Spec(report=ragged))))
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [RAGGED_RECEIPT]
+    _ragged_not_ready(found, "2026-09-20", ["2026-09-17..2026-09-19"])
+
+
+def _forge_the_ragged_span(report: dict[str, Any]) -> None:
+    """The ragged span's return forged to -0.9, the receipt's epoch total re-derived
+    so the identity holds (1.25 x 0.88 x 0.1 = 1 + (-0.89))."""
+
+    _span_receipt_field(epoch_cumulative_return="-0.89")(report)
+    receipt = report["strategy_history_contract"]["epoch_hpr_receipts"][0]["receipt"]
+    receipt["span_return_receipts"][1]["return"] = "-0.9"
+
+
+def test_a_forged_ragged_span_is_visible_as_not_ready(tmp_path: Path) -> None:
+    """(P1b, Codex r1 Important) A ragged span is never verified, so its return can be
+    any number the receipt says, with the identity kept by an epoch total that ties to
+    it. Nothing the report publishes changes: the span starts on the last published
+    row, ends past it and lies outside the headline's window. The receipt is the only
+    place the forgery lives, so it must not pass silently (it gave no finding).
+    """
+
+    forged = [_span_payload, _ragged_span_past_the_rows, _forge_the_ragged_span]
+    found = _ignoring_expected(run(build(tmp_path, Spec(report=forged))))
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [RAGGED_RECEIPT]
+    _ragged_not_ready(found, "2026-09-20", ["2026-09-17..2026-09-19"])
+
+
+@pytest.mark.parametrize(
+    ("changes", "observed_end"),
+    [
+        # one day past alpha's last published row (2026-09-17) is already ragged
+        pytest.param({"observed_end": "2026-09-18"}, "2026-09-18", id="one_day_past"),
+        # (P1c) an in-window receipt that extends its own observed_end to skip the
+        # re-derivation of its totals, with the daily total forged to 0.5 and the
+        # epoch total re-derived so the identity holds (1.5 x 0.88 = 1 + 0.32)
+        pytest.param(
+            {
+                "admission_cutoff": "2099-01-01",
+                "daily_cumulative_return": "0.5",
+                "epoch_cumulative_return": "0.32",
+                "observed_end": "2099-01-01",
+            },
+            "2099-01-01",
+            id="p1c_extended_and_forged_daily_total",
+        ),
+    ],
+)
+def test_a_receipt_cannot_skip_rederivation_by_extending_its_own_observed_end(
+    tmp_path: Path, changes: dict[str, str], observed_end: str
+) -> None:
+    """(P1c, Codex r1 Important) A receipt whose observed_end is after the last
+    published row is not re-derived, so it can opt out of the check on its own totals
+    by extending its own perimeter: a forged daily total passed with the identity
+    kept (it gave no finding). It is visible as the one NOT_READY. Every span still
+    starts inside the published rows, so none is skipped (``unverified_spans`` is
+    empty) and each is verified as before; ``one_day_past`` is the boundary, a
+    receipt that ends one day after the last published row with nothing forged.
+    """
+
+    assert _only(run(build(tmp_path / "good", Spec(report=[_span_payload])))) == []
+    forged = [_span_payload, _span_receipt_field(**changes)]
+    found = _ignoring_expected(run(build(tmp_path / "bad", Spec(report=forged))))
+    assert [(f.check_id, f.klass, f.entity) for f in found] == [RAGGED_RECEIPT]
+    _ragged_not_ready(found, observed_end, [])
+
+
+def test_each_ragged_receipt_earns_its_own_not_ready(tmp_path: Path) -> None:
+    """R2-2 is one NOT_READY per ACCOUNT_LIVE receipt, not per span and not per
+    strategy: a strategy with two receipts (a duplicate the receipt check already
+    blocks) that both run past the published rows earns two, each at its own pointer.
+    """
+
+    twice = [_span_payload, _ragged_perimeter, _duplicate_span_receipt]
+    found = _ignoring_expected(run(build(tmp_path, Spec(report=twice))))
+    receipts = "$.strategy_history_contract.epoch_hpr_receipts"
+    assert [(f.check_id, f.klass, f.entity, f.json_path) for f in found] == [
+        (
+            "returns.epoch_hpr_receipts_verified",
+            checks.BLOCKER_AUTHORITY,
+            "alpha",
+            f"{receipts}[1]",
+        ),
+        (*RAGGED_RECEIPT, f"{receipts}[0].receipt.observed_end"),
+        (*RAGGED_RECEIPT, f"{receipts}[1].receipt.observed_end"),
+    ]
+
+
+def _alpha_summary(**changes: str) -> Mutator:
+    """Change alpha's summary row: the window it reports and its headline."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["strategy_summary"][0].update(changes)
+
+    return mutate
+
+
+def _without_annualization(findings: list[checks.Finding]) -> list[checks.Finding]:
+    """``_ignoring_expected`` minus the warning a summary window shorter than a year
+    raises for alpha's annualized figure (not what these tests are about)."""
+
+    return [
+        f
+        for f in _ignoring_expected(findings)
+        if f.check_id != "lint.short_window_annualization"
+    ]
+
+
+def _located(findings: list[checks.Finding]) -> list[tuple[str, str, str, str]]:
+    return [(f.check_id, f.klass, f.entity, f.json_path) for f in findings]
+
+
+VIEWS = ("returns.strategy_return_views_agree", checks.BLOCKER_INVARIANT, "alpha")
+HEADLINE = "$.strategy_summary[0].account_live_cumulative_return"
+UNANCHORED = "the epoch-basis views cannot be anchored to the rows: "
+INSIDE_THE_SPAN = "lies inside span (2026-03-01, 2026-03-03]"
+
+
+@pytest.mark.parametrize(
+    ("changes", "pointer", "reason"),
+    [
+        # (a) the summary window starts on E: its boundary B = E - 1 is the missing
+        # date, strictly inside the span (S, E], and the headline is forged
+        pytest.param(
+            {
+                "account_live_observed_start": SPAN_END,
+                "account_live_cumulative_return": "0.5",
+            },
+            "account_live_observed_start",
+            f"window start {SPAN_MISSING} {INSIDE_THE_SPAN}",
+            id="a_start_on_E_forged_headline",
+        ),
+        # (b) the same window with the headline the payload published (0.1)
+        pytest.param(
+            {"account_live_observed_start": SPAN_END},
+            "account_live_observed_start",
+            f"window start {SPAN_MISSING} {INSIDE_THE_SPAN}",
+            id="b_start_on_E_honest_headline",
+        ),
+        # (c) the summary window ends on the missing date, strictly inside the span
+        pytest.param(
+            {
+                "account_live_observed_end": SPAN_MISSING,
+                "account_live_cumulative_return": "0.5",
+            },
+            "account_live_observed_end",
+            f"window end {SPAN_MISSING} {INSIDE_THE_SPAN}",
+            id="c_end_on_the_missing_date",
+        ),
+    ],
+)
+def test_a_summary_window_edge_inside_a_span_is_a_blocker_not_silence(
+    tmp_path: Path, changes: dict[str, str], pointer: str, reason: str
+) -> None:
+    """R2-1 (a)-(c) (P2, decision seat r1): an epoch-basis window that cannot be
+    anchored to the report's rows is a blocker.
+
+    ``splice_window`` declines when a window edge lies strictly inside a span: there
+    is no observed NAV to cut at. The epoch group is then left without a row-anchored
+    view and its headline is compared with nothing, so a forged headline passed with
+    no finding at all (main's validator blocked the same payload). Exactly one
+    BLOCKER_INVARIANT per strategy now names the decline, whatever the headline says,
+    at the summary field whose edge is inside the span.
+    """
+
+    bad = Spec(report=[_span_payload, _alpha_summary(**changes)])
+    found = _without_annualization(run(build(tmp_path, bad)))
+    assert _located(found) == [(*VIEWS, f"$.strategy_summary[0].{pointer}")]
+    assert found[0].message == UNANCHORED + reason
+    assert found[0].observed["declined"] == reason
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        # B = E: a window that starts on the row after E has an observed NAV at its
+        # boundary, so the epoch-basis views are compared, as ever
+        pytest.param(
+            {
+                "account_live_observed_start": SPAN_NEXT,
+                "account_live_cumulative_return": "0",
+            },
+            [],
+            id="start_on_E_plus_1_agrees",
+        ),
+        pytest.param(
+            {
+                "account_live_observed_start": SPAN_NEXT,
+                "account_live_cumulative_return": "0.5",
+            },
+            [(*VIEWS, HEADLINE)],
+            id="start_on_E_plus_1_disagrees",
+        ),
+        # a window that ends on E takes the whole span; one that ends on S takes none
+        pytest.param({"account_live_observed_end": SPAN_END}, [], id="end_on_E"),
+        pytest.param(
+            {
+                "account_live_observed_end": SPAN_START,
+                "account_live_cumulative_return": "0.25",
+            },
+            [],
+            id="end_on_S",
+        ),
+    ],
+)
+def test_a_window_edge_on_an_observed_row_or_a_span_end_is_still_compared(
+    tmp_path: Path, changes: dict[str, str], expected: list[tuple[str, ...]]
+) -> None:
+    """Control for R2-1: only an edge strictly inside a span declines. An edge on an
+    observed row or on a span's end is compared with the spliced rows as before, so
+    an honest headline is clean and a forged one is the ordinary disagreement."""
+
+    bad = Spec(report=[_span_payload, _alpha_summary(**changes)])
+    found = _without_annualization(run(build(tmp_path, bad)))
+    assert _located(found) == expected
+    for finding in found:
+        assert finding.message.startswith(
+            "epoch-basis strategy return views for one window disagree by "
+        )
+
+
+@pytest.mark.parametrize(
+    "headline",
+    [
+        pytest.param("0.5", id="forged_headline"),
+        pytest.param("0.045", id="honest_headline"),
+    ],
+)
+def test_a_ragged_span_inside_a_summary_window_past_the_rows_is_a_blocker_and_not_ready(
+    tmp_path: Path, headline: str
+) -> None:
+    """R2-1 (d): a ragged span (never verified, so not blocked by a receipt finding)
+    inside a summary window that runs past the last published row.
+
+    The receipt is ragged and its span (2026-09-17, 2026-09-19] is unverified, so
+    ``splice_window`` declines and the headline had nothing to be compared with
+    (forged or honest, it gave no finding). The exception for a span a receipt
+    blocker already reports does not apply: the ragged span has none, only R2-2's
+    NOT_READY, so the decline is its own blocker and the NOT_READY stays beside it.
+    With the window at the cutoff the span lies outside it and only the NOT_READY
+    remains.
+    """
+
+    ragged = [_span_payload, _ragged_span_past_the_rows]
+    outside = _without_annualization(
+        run(build(tmp_path / "outside", Spec(report=ragged)))
+    )
+    assert _located(outside) == [(*RAGGED_RECEIPT, RAGGED_POINTER)]
+    extended = _alpha_summary(
+        account_live_observed_end="2026-09-20", account_live_cumulative_return=headline
+    )
+    spec = Spec(report=[*ragged, extended])
+    found = _without_annualization(run(build(tmp_path / "inside", spec)))
+    assert _located(found) == [(*VIEWS, HEADLINE), (*RAGGED_RECEIPT, RAGGED_POINTER)]
+    assert found[0].message == UNANCHORED + (
+        "span (2026-09-17, 2026-09-19] inside the window is unverified"
+    )
+    _ragged_not_ready(found, "2026-09-20", ["2026-09-17..2026-09-19"])
+
+
+@pytest.mark.parametrize(
+    ("mutators", "klass", "entity"),
+    [
+        pytest.param(
+            [_duplicate_span_receipt],
+            checks.BLOCKER_AUTHORITY,
+            "alpha",
+            id="duplicate_receipts",
+        ),
+        pytest.param(
+            [_drop_span_start_capital],
+            checks.BLOCKER_AUTHORITY,
+            SPAN_ENTITY,
+            id="capital_chain_unavailable",
+        ),
+    ],
+)
+def test_a_decline_a_receipt_blocker_already_reports_is_not_reported_twice(
+    tmp_path: Path, mutators: list[Mutator], klass: str, entity: str
+) -> None:
+    """R2-1 exception: when the splice declines on an unverified span that already has
+    a BLOCKER-class receipt finding, the receipt finding is the whole report. The
+    other span-level cases (the f, characterisation, g and ISOLATED_GUARDS tests and
+    the chain-tolerance test below) hold the same for a contradicted span; these two
+    are the other ways a span is blocked, a receipt the strategy publishes twice (every
+    span demoted) and a capital chain the report cannot supply."""
+
+    found = run(build(tmp_path, Spec(report=[_span_payload, *mutators])))
+    assert _only(found) == [("returns.epoch_hpr_receipts_verified", klass, entity)]
+
+
+def test_a_window_edge_inside_a_blocked_span_is_reported_beside_the_span_blocker(
+    tmp_path: Path,
+) -> None:
+    """R2-1 exception, its limit: it covers a decline whose only reason is an
+    unverified span that a receipt blocker already reports. A window edge strictly
+    inside the span is a second reason (the splice would decline there with a verified
+    span too), so it is reported beside the span's own blocker. The forged span alone
+    (the summary window at the cutoff) is the span blocker and nothing else.
+    """
+
+    span_blocker = (
+        "returns.epoch_hpr_receipts_verified",
+        checks.BLOCKER_INVARIANT,
+        SPAN_ENTITY,
+        "$.strategy_history_contract.epoch_hpr_receipts[0].receipt"
+        ".span_return_receipts[0]",
+    )
+    forged = [_span_payload, _forge_span]
+    alone = _without_annualization(run(build(tmp_path / "alone", Spec(report=forged))))
+    assert _located(alone) == [span_blocker]
+    edge = [*forged, _alpha_summary(account_live_observed_end=SPAN_MISSING)]
+    found = _without_annualization(run(build(tmp_path / "edge", Spec(report=edge))))
+    assert _located(found) == [
+        span_blocker,
+        (*VIEWS, "$.strategy_summary[0].account_live_observed_end"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("span_return", "epoch_total", "blocked"),
+    [
+        # forged by +1e-6 (-0.12 -> -0.119999): 1.25 x 0.880001 = 1 + 0.10000125
+        pytest.param("-0.119999", "0.10000125", True, id="forged_by_1e-6"),
+        # 5e-9 off, inside the 1e-8 tolerance: 1.25 x 0.880000005 = 1 + 0.10000000625
+        pytest.param(
+            "-0.119999995", "0.10000000625", False, id="within_the_1e-8_tolerance"
+        ),
+    ],
+)
+def test_the_span_return_tolerance_against_the_capital_chain_is_one_hundred_millionth(
+    tmp_path: Path, span_return: str, epoch_total: str, blocked: bool
+) -> None:
+    """R2-3 (M1, decision seat r1): the tolerance of the load-bearing capital-chain
+    cross-check is pinned, from above and from below.
+
+    Every earlier forgery was at least 1e-2 off the chain, so widening the tolerance
+    (1e-8 to 1e-4, or to the 0.01 USD tolerance) left all 173 tests green. Here the
+    span return is 1e-6 off ``bc(E + 1) / (bc(S) x (1 + r_S)) - 1 = -0.12`` with the
+    receipt's epoch total, the headline and the provider-evidence value all re-derived
+    to be consistent with the forged span, so the identity, the totals and the views
+    agree and only the cross-check can fire: exactly one BLOCKER_INVARIANT. A return
+    5e-9 off is within the tolerance and clean, which holds it from below.
+    """
+
+    def tie_everything_to_the_span(report: dict[str, Any]) -> None:
+        _span_field(**{"return": span_return})(report)
+        _span_receipt_field(epoch_cumulative_return=epoch_total)(report)
+        report["strategy_summary"][0]["account_live_cumulative_return"] = epoch_total
+        account = report["strategy_provider_evidence"][0]["account"]
+        account["cumulative_return"] = epoch_total
+
+    spec = Spec(report=[_span_payload, tie_everything_to_the_span])
+    found = _ignoring_expected(run(build(tmp_path, spec)))
+    if not blocked:
+        assert found == []
+        return
+    assert _located(found) == [
+        (
+            "returns.epoch_hpr_receipts_verified",
+            checks.BLOCKER_INVARIANT,
+            SPAN_ENTITY,
+            "$.strategy_history_contract.epoch_hpr_receipts[0].receipt"
+            ".span_return_receipts[0]",
+        )
+    ]
+    assert found[0].message.startswith(
+        "the span return differs from the capital chain "
+    )
+    assert ";" not in found[0].message  # the cross-check is the only contradiction
 
 
 def test_check_error_fails_closed(tmp_path: Path) -> None:
