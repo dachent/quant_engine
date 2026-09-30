@@ -29,7 +29,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from quant_engine.core import read_current
+from quant_engine.core import read_current, read_generation
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger.value_basis_bounds import (
     ADMITTED_FX_END,
@@ -651,6 +651,11 @@ def test_dependence_report_without_a_bound_still_requires_the_cutoff(
             "dependence calculation cutoff differs",
             id="correlation-elsewhere",
         ),
+        pytest.param(
+            ("complete_through", "2026-01-01"),
+            "dependence calculation cutoff differs",
+            id="correlation-before-the-bound",
+        ),
     ],
 )
 def test_bounded_dependence_end_must_hold_in_every_layer(
@@ -663,6 +668,27 @@ def test_bounded_dependence_end_must_hold_in_every_layer(
     )
 
     with pytest.raises(reporter.ReportValidationError, match=message):
+        reporter._dependence_report(
+            root,
+            generation_dir=generation,
+            calculation_cutoff_date="2026-01-04",
+            bounded_complete_through="2026-01-02",
+        )
+
+
+@pytest.mark.parametrize("manifest_end", ["2026-01-03", "2026-01-04"])
+def test_bounded_dependence_manifest_coverage_must_end_at_the_bound(
+    full: Any, tmp_path: Path, manifest_end: str
+) -> None:
+    """The generation manifest is a layer too: its coverage must end at the bound."""
+
+    root, generation = _dependence_generation(
+        full, tmp_path, cutoff="2026-01-02", manifest_end=manifest_end
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="dependence calculation cutoff differs"
+    ):
         reporter._dependence_report(
             root,
             generation_dir=generation,
@@ -1044,6 +1070,71 @@ def test_public_builder_fails_closed_on_an_inconsistent_ledger_finding(
         full.reporter.ReportValidationError, match="value-basis bound differs"
     ):
         full.reporter.build_report_data(**arguments)
+
+
+def test_publish_reads_the_dependence_generation_again_at_the_bounded_end(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired (fail-before): ``publish_report`` re-reads the dependence generation.
+
+    After rebuilding the report it reads the correlation generation a second time
+    to bind the artifact into the published generation.  The removed call required
+    the cutoff there as well, so an FX-bounded dependence analysis could be built
+    and verified but never published.  The rebuilt report is replaced by a
+    synthetic one; the dependence read, the bound it derives and the generation
+    it publishes are the real code.
+    """
+
+    baseline_root = full._published_baseline(tmp_path / "baseline-scope")
+    _catalog, baseline_ref, catalog_path = full.reporter._baseline(baseline_root, None)
+    dependence_root = full._published_dependence(
+        tmp_path / "dependence", cutoff="2026-01-02"
+    )
+
+    def publish(history_end: str) -> dict[str, Any]:
+        report = {
+            "account_summary": [],
+            "as_of_date": "2026-01-03",
+            "baseline": {"generation_id": baseline_ref["generation_id"]},
+            "calculation_cutoff_date": "2026-01-04",
+            "strategy_history_contract": {"as_of_date": history_end},
+            "strategy_summary": [],
+            "twr_mwr": [],
+        }
+        content = canonical_json_bytes(report)
+        candidate = (
+            tmp_path / f"candidates-{history_end}" / hashlib.sha256(content).hexdigest()
+        )
+        candidate.mkdir(parents=True)
+        (candidate / full.reporter.REPORT_DATA_NAME).write_bytes(content)
+        monkeypatch.setattr(
+            full.reporter,
+            "build_report_data",
+            lambda *_a, **_k: (report, content, catalog_path),
+        )
+        return full.reporter.publish_report(  # type: ignore[no-any-return]
+            baseline_root,
+            candidate,
+            None,
+            None,
+            None,
+            tmp_path / f"published-{history_end}",
+            correlation_root=dependence_root,
+        )
+
+    published = publish("2026-01-02")
+
+    manifest = read_generation(
+        tmp_path / "published-2026-01-02", published["generation_id"]
+    )
+    assert "input/portfolio-correlation.json" in {
+        item.artifact_id for item in manifest.artifacts
+    }
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="dependence calculation cutoff differs",
+    ):
+        publish("2026-01-04")
 
 
 # ── the governed HWM end check ───────────────────────────────────────────────

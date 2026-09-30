@@ -1682,6 +1682,7 @@ def _published_dependence(
     *,
     cutoff: str | None = None,
     cutoff_mutation: tuple[str, str] | None = None,
+    manifest_end: str | None = None,
 ) -> Path:
     root = tmp_path / "dependence"
     series_ids = [f"Current Strategy {index}" for index in range(1, 8)]
@@ -1803,7 +1804,11 @@ def _published_dependence(
             fact_types=("dependence",),
             observed_start=date(2026, 1, 2),
             observed_end=(
-                date.fromisoformat(cutoff) if cutoff is not None else date(2026, 1, 3)
+                date.fromisoformat(manifest_end)
+                if manifest_end is not None
+                else date.fromisoformat(cutoff)
+                if cutoff is not None
+                else date(2026, 1, 3)
             ),
         ),
         artifacts=(artifact,),
