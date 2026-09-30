@@ -686,6 +686,411 @@ def test_composite_rejects_invalid_members() -> None:
         member_returns("a", unavailable)
 
 
+# --- value periods and the summed-value composite -------------------------------
+#
+# The composite of a strategy is the summed member values and flows linked on the
+# union of the members' boundaries:  r = sum(V_end - F_eod) / sum(V_begin + F_bod) - 1.
+# ``value_periods`` exposes one member's per-sub-period numerator and denominator
+# (it does not fail on zero capital, where a member's own ratio is undefined),
+# and ``summed_value_composite`` adds them across members.  The imports are local
+# so that a missing engine function fails only its own test.
+
+
+def _engine() -> Any:
+    from quant_engine.portfolio_ledger import returns
+
+    return returns
+
+
+def _summed_reference(
+    members: list[tuple[dict[date, Decimal], list[FlowLeg]]], opening_day: str
+) -> EpochLink:
+    """link_epoch over the summed member values and every member leg."""
+
+    summed: dict[date, Decimal] = {}
+    for observations, _legs in members:
+        for key, value in observations.items():
+            summed[key] = summed.get(key, D(0)) + value
+    legs = [item for _obs, member_legs in members for item in member_legs]
+    opening = OpeningPoint(day(opening_day), summed[day(opening_day)], FIRST)
+    return link_epoch(summed, legs, opening)
+
+
+def test_value_periods_reproduce_the_link_engine_numerators_and_denominators() -> None:
+    engine = _engine()
+    observations = series(
+        d2026_03_02="100",
+        d2026_03_03="104",
+        d2026_03_04="131",
+        d2026_03_05="120",
+        d2026_03_06="121.5",
+        d2026_03_09="125",
+    )
+    embedded = leg("5", "2026-03-02", flow_class="INTERNAL_IN")
+    fill = leg(
+        "20",
+        "2026-03-04",
+        timing=EXACT_TIMESTAMP,
+        event="2026-03-03",
+        economic="2026-03-03",
+        flow_class="INTERNAL_IN",
+    )
+    withdrawal = leg("-15", "2026-03-05")
+    # Recognized on a Saturday: it belongs to the sub-period ending Monday.
+    weekend = leg("3", "2026-03-07", flow_class="INTERNAL_IN")
+    legs = [embedded, fill, withdrawal, weekend]
+    opening = OpeningPoint(day("2026-03-02"), D("100"), FIRST)
+
+    link = link_epoch(observations, legs, opening)
+    periods = engine.value_periods("m", observations, legs, day("2026-03-02"))
+
+    assert link.status == "AVAILABLE"
+    assert [(p.start_date, p.end_date) for p in periods] == [
+        (item.start_date, item.end_date) for item in link.links
+    ]
+    assert [p.beginning_capital for p in periods] == [
+        item.beginning_capital for item in link.links
+    ]
+    assert [p.ending_value_ex_flow for p in periods] == [
+        item.ending_value - item.ending_flow for item in link.links
+    ]
+    # The same Decimal operation the link engine performs: bit-for-bit factors.
+    assert [p.ending_value_ex_flow / p.beginning_capital for p in periods] == [
+        item.factor for item in link.links
+    ]
+    assert {p.member_id for p in periods} == {"m"}
+    # The BOD fill joins the beginning capital of its own sub-period; the
+    # embedded leg never reaches any period.
+    assert [(p.beginning_capital, p.ending_value_ex_flow) for p in periods] == [
+        (D("100"), D("104")),
+        (D("124"), D("131")),
+        (D("131"), D("135")),
+        (D("120"), D("121.5")),
+        (D("121.5"), D("122")),
+    ]
+
+
+def test_value_periods_do_not_fail_on_zero_capital() -> None:
+    engine = _engine()
+    observations = series(
+        d2026_07_13="100", d2026_07_14="0", d2026_07_15="0", d2026_07_16="3.81"
+    )
+    liquidation = leg("-100", "2026-07-14")
+    opening = OpeningPoint(day("2026-07-13"), D("100"), FIRST)
+
+    # The return engine declares the epoch unavailable (R3) ...
+    assert (
+        link_epoch(observations, [liquidation], opening).reason
+        == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    )
+    # ... while the member's values are still there to be summed.
+    periods = engine.value_periods("r3", observations, [liquidation], day("2026-07-13"))
+
+    assert [(p.start_date, p.end_date) for p in periods] == [
+        (day("2026-07-13"), day("2026-07-14")),
+        (day("2026-07-14"), day("2026-07-15")),
+        (day("2026-07-15"), day("2026-07-16")),
+    ]
+    assert [(p.beginning_capital, p.ending_value_ex_flow) for p in periods] == [
+        (D("100"), D("100")),
+        (D("0"), D("0")),
+        (D("0"), D("3.81")),
+    ]
+
+
+def test_value_periods_keep_the_link_engines_leg_assignment_and_fail_closed() -> None:
+    engine = _engine()
+    observations = series(d2026_01_01="100", d2026_01_02="101", d2026_01_05="102")
+
+    # A leg recognized on the opening date is embedded in the opening value.
+    (first, second) = engine.value_periods(
+        "m", observations, [leg("7", "2026-01-01")], day("2026-01-01")
+    )
+    assert (first.beginning_capital, first.ending_value_ex_flow) == (D("100"), D("101"))
+    assert (second.beginning_capital, second.ending_value_ex_flow) == (
+        D("101"),
+        D("102"),
+    )
+    # No sub-period after the opening: nothing to value, nothing rejected.
+    assert (
+        engine.value_periods("m", {day("2026-01-01"): D("1")}, [], day("2026-01-01"))
+        == ()
+    )
+    # A leg after the last observation would be dropped from the money identity.
+    with pytest.raises(ReturnsError, match="after the last observation"):
+        engine.value_periods(
+            "m", observations, [leg("1", "2026-01-06")], day("2026-01-01")
+        )
+    # The opening must be an observation of the series.
+    with pytest.raises(ReturnsError, match="not an observation"):
+        engine.value_periods("m", observations, [], day("2025-12-31"))
+    with pytest.raises(ReturnsError, match="member_id"):
+        engine.value_periods("", observations, [], day("2026-01-01"))
+    with pytest.raises(ReturnsError, match="Decimal"):
+        engine.value_periods(
+            "m",
+            {day("2026-01-01"): 100.0, day("2026-01-02"): D("1")},
+            [],
+            day("2026-01-01"),  # type: ignore[dict-item]
+        )
+    with pytest.raises(ReturnsError, match="FlowLeg"):
+        engine.value_periods("m", observations, ["leg"], day("2026-01-01"))  # type: ignore[list-item]
+
+
+def test_summed_value_composite_equals_the_summed_series() -> None:
+    engine = _engine()
+    a_obs = series(
+        d2026_03_01="100",
+        d2026_03_02="102",
+        d2026_03_03="113",
+        d2026_03_04="114.1",
+        d2026_03_05="113.2",
+    )
+    a_legs = [leg("10", "2026-03-03", flow_class="INTERNAL_IN")]
+    b_obs = series(
+        d2026_03_01="50",
+        d2026_03_02="51",
+        d2026_03_03="52.3",
+        d2026_03_04="54.7",
+        d2026_03_05="49.9",
+    )
+    b_legs = [
+        leg("4", "2026-03-04", timing=EXACT_TIMESTAMP, flow_class="INTERNAL_IN"),
+        leg("-2", "2026-03-05"),
+    ]
+    periods = [
+        *engine.value_periods("a", a_obs, a_legs, day("2026-03-01")),
+        *engine.value_periods("b", b_obs, b_legs, day("2026-03-01")),
+    ]
+
+    combined = engine.summed_value_composite(periods)
+
+    reference = _summed_reference([(a_obs, a_legs), (b_obs, b_legs)], "2026-03-01")
+    assert [item.end_date for item in combined] == [
+        link.end_date for link in reference.links
+    ]
+    assert [item.member_ids for item in combined] == [("a", "b")] * 4
+    for item, link in zip(combined, reference.links):
+        assert item.beginning_capital == link.beginning_capital
+        assert abs(item.period_return - link.period_return) < D("1e-25")
+
+
+def test_summed_value_composite_equals_the_weighted_composite_on_positive_capital() -> (
+    None
+):
+    engine = _engine()
+    a_obs = series(d2026_03_01="100", d2026_03_02="102", d2026_03_03="113")
+    b_obs = series(d2026_03_01="250", d2026_03_02="247", d2026_03_03="260")
+    a = _link_from_start(a_obs, [], "2026-03-02")
+    b = _link_from_start(b_obs, [], "2026-03-02")
+    weighted = composite([*member_returns("a", a), *member_returns("b", b)])
+
+    summed = engine.summed_value_composite(
+        [
+            *engine.value_periods("a", a_obs, [], day("2026-03-01")),
+            *engine.value_periods("b", b_obs, [], day("2026-03-01")),
+        ]
+    )
+
+    assert [item.end_date for item in summed] == [item.end_date for item in weighted]
+    assert [item.member_ids for item in summed] == [
+        item.member_ids for item in weighted
+    ]
+    for left, right in zip(summed, weighted):
+        assert left.beginning_capital == right.beginning_capital
+        assert abs(left.period_return - right.period_return) < D("1e-25")
+
+
+def test_summed_value_composite_takes_the_income_of_a_zero_capital_member() -> None:
+    engine = _engine()
+    # A traced member earning 1 % a day and a zero-run member: 40, withdrawn in
+    # full, flat at zero twice, then 3.81 of income with no flow.
+    traced_obs = series(
+        d2026_01_01="100",
+        d2026_01_02="101",
+        d2026_01_05="102.01",
+        d2026_01_06="103.0301",
+        d2026_01_07="104.060401",
+        d2026_01_08="105.10100501",
+    )
+    zero_run_obs = series(
+        d2026_01_01="40",
+        d2026_01_02="0",
+        d2026_01_05="0",
+        d2026_01_06="0",
+        d2026_01_07="3.81",
+        d2026_01_08="3.81",
+    )
+    withdrawal = leg("-40", "2026-01-02")
+    periods = [
+        *engine.value_periods("t", traced_obs, [], day("2026-01-01")),
+        *engine.value_periods("r", zero_run_obs, [withdrawal], day("2026-01-01")),
+    ]
+
+    combined = engine.summed_value_composite(periods)
+
+    by_end = {item.end_date: item for item in combined}
+    income_day = by_end[day("2026-01-07")]
+    # Explicit arithmetic: (104.060401 + 3.81) / 103.0301 - 1, not the traced 1 %.
+    assert income_day.beginning_capital == D("103.0301")
+    assert income_day.member_ids == ("r", "t")
+    assert income_day.period_return == (D("104.060401") + D("3.81")) / D("103.0301") - 1
+    assert by_end[day("2026-01-06")].member_ids == ("t",)
+    reference = _summed_reference(
+        [(traced_obs, []), (zero_run_obs, [withdrawal])], "2026-01-01"
+    )
+    for item, link in zip(combined, reference.links):
+        assert item.end_date == link.end_date
+        assert abs(item.period_return - link.period_return) < D("1e-25")
+    # The beginning-capital weighted mean with the zero-capital period skipped
+    # is 1 % on that date: income without capital is exactly what it cannot see.
+    weighted_members = [
+        MemberReturn(
+            p.member_id,
+            p.end_date,
+            p.beginning_capital,
+            p.ending_value_ex_flow / p.beginning_capital - 1,
+            p.start_date,
+        )
+        for p in periods
+        if p.beginning_capital > 0
+    ]
+    weighted = {item.end_date: item for item in composite(weighted_members)}
+    assert abs(weighted[day("2026-01-07")].period_return - D("0.01")) < D("1e-25")
+    assert income_day.period_return - weighted[day("2026-01-07")].period_return > D(
+        "0.03"
+    )
+
+
+def test_summed_value_composite_passes_a_lone_member_through_unchanged() -> None:
+    engine = _engine()
+    (single,) = engine.summed_value_composite(
+        [
+            engine.ValuePeriod(
+                "a", day("2026-01-01"), day("2026-01-02"), D("100"), D("101")
+            )
+        ]
+    )
+    assert single.period_return == D("0.01")
+    assert single.beginning_capital == D("100")
+    assert single.member_ids == ("a",)
+    # Through value_periods the lone return is the link engine's own, bit for bit.
+    observations = series(d2026_01_01="3", d2026_01_02="3.5", d2026_01_05="3.3")
+    link = _link_from_start(observations, [], "2026-01-01")
+    periods = engine.value_periods("a", observations, [], day("2026-01-01"))
+    assert [item.period_return for item in engine.summed_value_composite(periods)] == [
+        item.period_return for item in link.links
+    ]
+
+
+def test_summed_value_composite_refuses_a_member_not_valued_on_a_union_boundary() -> (
+    None
+):
+    engine = _engine()
+    a_obs = series(d2026_01_01="100", d2026_01_02="110", d2026_01_03="121")
+    b_obs = series(d2026_01_01="100", d2026_01_03="121")
+    periods = [
+        *engine.value_periods("a", a_obs, [], day("2026-01-01")),
+        *engine.value_periods("b", b_obs, [], day("2026-01-01")),
+    ]
+
+    with pytest.raises(ReturnsError, match="not valued on every boundary"):
+        engine.summed_value_composite(periods)
+
+    b_valued = engine.value_periods(
+        "b", {**b_obs, day("2026-01-02"): D("110")}, [], day("2026-01-01")
+    )
+    good = engine.summed_value_composite(
+        [*engine.value_periods("a", a_obs, [], day("2026-01-01")), *b_valued]
+    )
+    wealth = D(1)
+    for item in good:
+        wealth *= 1 + item.period_return
+    assert abs(wealth - 1 - D("0.21")) < D("1e-25")
+
+
+def test_summed_value_composite_zero_capital_needs_zero_value() -> None:
+    engine = _engine()
+    first, second = day("2026-01-01"), day("2026-01-02")
+    value = engine.ValuePeriod
+
+    # Value with no capital at risk has no return: fail closed.
+    with pytest.raises(ReturnsError, match="zero capital"):
+        engine.summed_value_composite([value("a", first, second, D("0"), D("5"))])
+    with pytest.raises(ReturnsError, match="zero capital"):
+        engine.summed_value_composite(
+            [
+                value("a", first, second, D("0"), D("3")),
+                value("b", first, second, D("0"), D("2")),
+            ]
+        )
+    # Offsetting values still leave value on zero capital.
+    with pytest.raises(ReturnsError, match="zero capital"):
+        engine.summed_value_composite(
+            [
+                value("a", first, second, D("0"), D("3")),
+                value("b", first, second, D("0"), D("-1")),
+            ]
+        )
+    # A date with no capital and no value carries no return and is skipped.
+    third = day("2026-01-05")
+    result = engine.summed_value_composite(
+        [
+            value("a", first, second, D("0"), D("0")),
+            value("a", second, third, D("10"), D("11")),
+        ]
+    )
+    assert [(item.end_date, item.period_return) for item in result] == [
+        (third, D("0.1"))
+    ]
+
+
+@pytest.mark.parametrize("ending", ("0", "-5"))
+def test_summed_value_composite_refuses_a_non_positive_factor(ending: str) -> None:
+    engine = _engine()
+    with pytest.raises(ReturnsError, match="factor"):
+        engine.summed_value_composite(
+            [
+                engine.ValuePeriod(
+                    "a", day("2026-01-01"), day("2026-01-02"), D("100"), D(ending)
+                )
+            ]
+        )
+
+
+def test_summed_value_composite_rejects_invalid_members() -> None:
+    engine = _engine()
+    first, second = day("2026-01-01"), day("2026-01-02")
+    value = engine.ValuePeriod
+    for periods in (
+        # the same member repeats an end date
+        [
+            value("a", first, second, D("1"), D("1")),
+            value("a", first, second, D("1"), D("1")),
+        ],
+        # empty sub-period
+        [value("a", second, second, D("1"), D("1"))],
+        [value("a", second, first, D("1"), D("1"))],
+        # negative beginning capital
+        [value("a", first, second, D("-1"), D("1"))],
+        # not finite / not Decimal
+        [value("a", first, second, D("NaN"), D("1"))],
+        [value("a", first, second, D("1"), D("Infinity"))],
+        [value("a", first, second, 1.0, D("1"))],
+        [value("a", first, second, D("1"), 1)],
+        # not a date
+        [value("a", "2026-01-01", second, D("1"), D("1"))],
+        [value("a", datetime(2026, 1, 1), second, D("1"), D("1"))],
+        # no member id
+        [value("", first, second, D("1"), D("1"))],
+        # not a ValuePeriod
+        [MemberReturn("a", second, D("1"), D("0"), first)],
+    ):
+        with pytest.raises(ReturnsError):
+            engine.summed_value_composite(periods)
+    assert engine.summed_value_composite([]) == ()
+
+
 # --- decimal context -------------------------------------------------------------
 
 

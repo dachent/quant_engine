@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -174,9 +175,26 @@ def _verified_schema9_epoch_bundle(
     static_receipt: bool = False,
     static_receipt_mutation: str | None = None,
     static_closed_epoch: bool = False,
+    static_blocked_facts: bool = False,
     all_numeric_candidates: bool = False,
     canonical_selected_policy: bool = False,
+    r3_account_id: str | None = None,
 ) -> tuple[Path, bytes, bytes, bytes, bytes]:
+    """Build one verified schema-9 epoch generation around synthetic rows.
+
+    ``static_closed_epoch`` binds the static receipt to the closed tt-portfolio
+    epoch (BLOCKED by the fixture's admission).  ``static_blocked_facts``
+    reproduces the real BLOCKED census-assignment epoch: the receipt keeps the
+    ledger's own observed facts (41 NAV rows, 3 flow rows) while the hash-bound
+    calculation row of a BLOCKED epoch is stripped to its one closing NAV, no
+    flows and no anchors (``FUNDED_EPOCH_FACT_PROJECTION_V2``).
+    ``r3_account_id`` (with ``all_numeric_candidates``) turns that account's
+    open tt-portfolio epoch into the R3 zero-capital shape: FUNDED and OK with
+    its performance UNAVAILABLE for ZERO_CAPITAL_RETURN_UNDEFINED, an empty
+    observation trace, and NAV and flow facts in its calculation row (NAV 50 on
+    2026-08-11, 42 on 2026-08-13 after a 10 end-of-day withdrawal).
+    """
+
     epoch_root = tmp_path
     for index in range(1):
         epoch_root /= f"independent-epoch-component-{index:02d}-abcdefghijk"
@@ -277,6 +295,24 @@ def _verified_schema9_epoch_bundle(
                     "flow_count": 0,
                 }
             )
+            if (row["account_id"], row["strategy_id"], row["effective_end"]) == (
+                r3_account_id,
+                "tt-portfolio",
+                None,
+            ):
+                manifest_row.update(
+                    {
+                        "return_on_net_capital": None,
+                        "annualized_return_on_net_capital": None,
+                        "observation_linked_return": None,
+                        "observed_hwm_index": None,
+                        "observed_max_drawdown": None,
+                        "observation_trace": {"links": []},
+                        "performance_status": "UNAVAILABLE",
+                        "performance_reason": "ZERO_CAPITAL_RETURN_UNDEFINED",
+                        "flow_count": 1,
+                    }
+                )
         rows.append(manifest_row)
         census_assignments.append(
             (
@@ -455,6 +491,59 @@ def _verified_schema9_epoch_bundle(
             "schema_version": manifest_schema_version,
             "calculation_cutoff_date": manifest_cutoff,
         }
+    closed_tt_epoch = next(
+        row
+        for row in included
+        if row["strategy_id"] == "tt-portfolio" and row["effective_end"] == "2026-01-04"
+    )
+    stripped_blocked_projection = (
+        static_receipt and static_closed_epoch and static_blocked_facts
+    )
+    r3_epoch = next(
+        (
+            row
+            for row in included
+            if (row["account_id"], row["strategy_id"], row["effective_end"])
+            == (r3_account_id, "tt-portfolio", None)
+        ),
+        None,
+    )
+
+    def usd_fact(value: str) -> dict[str, str]:
+        return {"currency": "USD", "status": "AVAILABLE", "value": value}
+
+    r3_navs = (
+        []
+        if r3_epoch is None
+        else [
+            {
+                "account_id": r3_epoch["account_id"],
+                "as_of_date": day,
+                "nav": usd_fact(value),
+                "record_id": f"r3-nav-{day}",
+                "value_basis": "ACCOUNT_VALUE",
+            }
+            for day, value in (("2026-08-11", "50"), ("2026-08-13", "42"))
+        ]
+    )
+    r3_flows = (
+        []
+        if r3_epoch is None
+        else [
+            {
+                "account_id": r3_epoch["account_id"],
+                "amount": usd_fact("-10"),
+                "blocker_code": None,
+                "classification_status": "CLASSIFIED",
+                "disposition": "EXTERNAL",
+                "event_date": "2026-08-13",
+                "event_id": "classified-flow:r3-withdrawal",
+                "flow_type": "WITHDRAWAL",
+                "nav_recognition_date": "2026-08-13",
+                "source_record_id": "r3-withdrawal",
+            }
+        ]
+    )
     calculation_rows = [
         {
             "epoch": {
@@ -489,10 +578,65 @@ def _verified_schema9_epoch_bundle(
                     },
                 ]
                 if row["strategy_id"] == "volatis-strategy"
+                else (
+                    r3_navs
+                    if row is r3_epoch
+                    else (
+                        [
+                            {
+                                "account_id": row["account_id"],
+                                "as_of_date": "2026-01-04",
+                                "record_id": "tt-nav-closing",
+                                "value": "100",
+                            }
+                        ]
+                        if stripped_blocked_projection and row is closed_tt_epoch
+                        else []
+                    )
+                )
+            ),
+            "classified_flows": (
+                [
+                    {
+                        "account_id": row["account_id"],
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "-10",
+                        },
+                        "blocker_code": None,
+                        "classification_status": "CLASSIFIED",
+                        "disposition": "EXTERNAL",
+                        "event_date": "2026-01-02",
+                        "event_id": "classified-flow:synthetic-1",
+                        "flow_type": "WITHDRAWAL",
+                        "nav_recognition_date": "2026-01-02",
+                        "source_record_id": "synthetic-1",
+                    }
+                ]
+                if static_receipt_mutation == "blocked_calc_flow"
+                and row is closed_tt_epoch
+                else (r3_flows if row is r3_epoch else [])
+            ),
+            "capital_anchors": (
+                [
+                    {
+                        "account_id": row["account_id"],
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "10",
+                        },
+                        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+                        "event_date": "2026-01-02",
+                        "nav_recognition_date": "2026-01-02",
+                        "strategy_id": row["strategy_id"],
+                    }
+                ]
+                if static_receipt_mutation == "blocked_calc_anchor"
+                and row is closed_tt_epoch
                 else []
             ),
-            "classified_flows": [],
-            "capital_anchors": [],
         }
         for row in included
     ]
@@ -594,6 +738,36 @@ def _verified_schema9_epoch_bundle(
         }
         for chain in blocker_chains
     ]
+    receipt_epoch = (
+        closed_tt_epoch
+        if static_closed_epoch
+        else next(row for row in included if row["strategy_id"] == "volatis-strategy")
+    )
+    receipt_epoch_key = tuple(
+        receipt_epoch[field]
+        for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+    )
+
+    def is_receipt_epoch(admission_row: dict[str, object]) -> bool:
+        return (
+            tuple(
+                admission_row[field]
+                for field in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
+            )
+            == receipt_epoch_key
+        )
+
+    if static_receipt_mutation == "missing_admission":
+        admission_rows = [row for row in admission_rows if not is_receipt_epoch(row)]
+    elif static_receipt_mutation == "unknown_admission_status":
+        for admission_row in admission_rows:
+            if is_receipt_epoch(admission_row):
+                admission_row["status"] = "PENDING_REVIEW"
     flow_policy_bytes = (
         ROOT / "contracts" / "account-strategy-flow-classification-policy-v1.json"
     ).read_bytes()
@@ -665,6 +839,51 @@ def _verified_schema9_epoch_bundle(
                 and row["effective_end"] == "2026-01-04"
             )
         static_end = funded_assignment["effective_end"] or calculation_cutoff
+        observed_facts_payload: dict[str, dict[str, object]] = {
+            "nav": {
+                "row_count": 0 if static_closed_epoch else 3,
+                "first_date": None if static_closed_epoch else "2026-08-11",
+                "last_date": None if static_closed_epoch else "2026-08-13",
+            },
+            "flows": {"row_count": 0, "first_date": None, "last_date": None},
+            "capital_anchors": {"row_count": 0, "first_date": None, "last_date": None},
+        }
+        if static_closed_epoch and static_blocked_facts:
+            # The ledger's own observed facts of a BLOCKED census-assignment
+            # epoch: the full daily window, not the stripped calculation row.
+            observed_facts_payload = {
+                "nav": {
+                    "row_count": 41,
+                    "first_date": funded_assignment["effective_start"],
+                    "last_date": static_end,
+                },
+                "flows": {
+                    "row_count": 3,
+                    "first_date": "2025-12-16",
+                    "last_date": "2026-01-02",
+                },
+                "capital_anchors": {
+                    "row_count": 0,
+                    "first_date": None,
+                    "last_date": None,
+                },
+            }
+        nav_facts = observed_facts_payload["nav"]
+        if static_receipt_mutation == "funded_nav_count":
+            nav_facts["row_count"] = 4
+        elif static_receipt_mutation == "blocked_first_after_last":
+            nav_facts["first_date"], nav_facts["last_date"] = (
+                nav_facts["last_date"],
+                nav_facts["first_date"],
+            )
+        elif static_receipt_mutation == "blocked_first_before_window":
+            nav_facts["first_date"] = "2025-11-24"
+        elif static_receipt_mutation == "blocked_last_after_window":
+            nav_facts["last_date"] = "2026-01-05"
+        elif static_receipt_mutation == "blocked_nav_count_below_calculation":
+            nav_facts.update(row_count=0, first_date=None, last_date=None)
+        elif static_receipt_mutation == "blocked_calculation_nav_outside_dates":
+            nav_facts["last_date"] = "2026-01-02"
         static_staged_inputs = {
             "provider_ledger_generation_id": "1" * 64,
             "provider_ledger_artifact": {
@@ -702,19 +921,7 @@ def _verified_schema9_epoch_bundle(
                 "generation_as_of_date": "2026-08-13",
             },
             "staged_inputs": static_staged_inputs,
-            "observed_facts": {
-                "nav": {
-                    "row_count": 0 if static_closed_epoch else 3,
-                    "first_date": None if static_closed_epoch else "2026-08-11",
-                    "last_date": None if static_closed_epoch else "2026-08-13",
-                },
-                "flows": {"row_count": 0, "first_date": None, "last_date": None},
-                "capital_anchors": {
-                    "row_count": 0,
-                    "first_date": None,
-                    "last_date": None,
-                },
-            },
+            "observed_facts": observed_facts_payload,
             "missing_intervals": [],
             "coverage_as_of_date": "2026-08-16",
             "completeness": "RETAINED_STATIC_SNAPSHOT_ONLY",
@@ -1340,6 +1547,434 @@ def test_epoch_history_rejects_self_consistent_static_receipt_crosswalk_mutation
     with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
         reporter._epoch_history_snapshot_evidence(
             epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+def test_epoch_history_accepts_blocked_epoch_static_receipt_with_its_ledger_facts(
+    tmp_path: Path,
+) -> None:
+    """A-1 (fail-before): a BLOCKED epoch's receipt keeps its ledger facts.
+
+    The static receipt of a BLOCKED (census assignment-only) epoch reports the
+    facts of the selected ledger window -- 41 NAV rows and 3 flow rows -- because
+    the producer and the independent verifier bind ``observed_facts`` to the
+    ledger.  The hash-bound calculation row of the same BLOCKED epoch is
+    stripped by design (one closing NAV, no flows, no anchors), so the report
+    must not demand the ledger facts equal that projection.  Merge base:
+    ``epoch receipt authority semantic graph differs``.
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_closed_epoch=True,
+            static_blocked_facts=True,
+        )
+    )
+    bundle = read_generation_bundle(
+        epoch_root, json.loads(source_bytes)["generation_id"]
+    )
+    calculation_inputs = json.loads(
+        bundle.payloads["authority/calculation-inputs.json"]
+    )
+    (blocked_row,) = [
+        row
+        for row in calculation_inputs["rows"]
+        if row["epoch"]["strategy_id"] == "tt-portfolio"
+        and row["epoch"]["effective_end"] == "2026-01-04"
+        and row["nav_observations"]
+    ]
+    # Guard: the fixture really is the stripped projection of the real epoch.
+    assert len(blocked_row["nav_observations"]) == 1
+    assert blocked_row["classified_flows"] == []
+    assert blocked_row["capital_anchors"] == []
+
+    reporter._epoch_history_snapshot_evidence(
+        epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+    )
+
+
+def test_epoch_history_rejects_funded_static_receipt_with_tampered_facts(
+    tmp_path: Path,
+) -> None:
+    """A-2: a FUNDED epoch's receipt facts still equal the projection exactly.
+
+    Fails before and after the change: a FUNDED epoch's calculation row equals
+    the ledger projection, so its receipt may not carry any other fact.
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_receipt_mutation="funded_nav_count",
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+@pytest.mark.parametrize("mutation", ("blocked_calc_flow", "blocked_calc_anchor"))
+def test_epoch_history_rejects_blocked_epoch_calculation_row_carrying_facts(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A-3: the BLOCKED calculation row is a sub-projection with no flow or anchor.
+
+    The ledger facts the receipt reports may be wider than the calculation row,
+    never the other way round, and a BLOCKED epoch's calculation row carries no
+    flow and no capital anchor.
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_closed_epoch=True,
+            static_blocked_facts=True,
+            static_receipt_mutation=mutation,
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "blocked_first_after_last",
+        "blocked_first_before_window",
+        "blocked_last_after_window",
+    ),
+)
+def test_epoch_history_rejects_blocked_receipt_facts_outside_the_epoch_window(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A-4: malformed BLOCKED receipt facts fail closed (schema-valid but wrong).
+
+    A first date after the last date, or a date outside the epoch's requested
+    window, passes the receipt schema; the structural check refuses it.
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_closed_epoch=True,
+            static_blocked_facts=True,
+            static_receipt_mutation=mutation,
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("blocked_nav_count_below_calculation", "blocked_calculation_nav_outside_dates"),
+)
+def test_epoch_history_rejects_blocked_receipt_that_does_not_cover_the_projection(
+    tmp_path: Path, mutation: str
+) -> None:
+    """The receipt's NAV facts must cover the stripped calculation row's NAV.
+
+    A receipt reporting fewer NAV rows than the calculation row holds, or a NAV
+    date outside the receipt's own first/last dates, cannot be the ledger window
+    the calculation row was projected from.
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_closed_epoch=True,
+            static_blocked_facts=True,
+            static_receipt_mutation=mutation,
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing_admission", "unknown_admission_status"))
+@pytest.mark.parametrize("blocked_facts", (True, False))
+def test_epoch_history_rejects_static_receipt_without_a_funded_or_blocked_admission(
+    tmp_path: Path, mutation: str, blocked_facts: bool
+) -> None:
+    """A-5: the receipt's epoch must have exactly one FUNDED or BLOCKED admission.
+
+    A BLOCKED-looking receipt is never accepted just because its epoch has no
+    admission row, and an admission status other than FUNDED/BLOCKED is refused
+    at the receipt (the facts are equal here, so only the admission decides).
+    """
+
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_closed_epoch=True,
+            static_blocked_facts=blocked_facts,
+            static_receipt_mutation=mutation,
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+def _summary(
+    row_count: object, first_date: object, last_date: object
+) -> dict[str, object]:
+    return {"row_count": row_count, "first_date": first_date, "last_date": last_date}
+
+
+def _blocked_facts(
+    nav: dict[str, object] | None = None,
+    flows: dict[str, object] | None = None,
+    capital_anchors: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "nav": nav or _summary(41, "2025-11-25", "2026-01-04"),
+        "flows": flows or _summary(3, "2025-12-16", "2026-01-02"),
+        "capital_anchors": capital_anchors or _summary(0, None, None),
+    }
+
+
+def _stripped_calculation_row(**changes: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "nav_observations": [{"as_of_date": "2026-01-04", "value": "100"}],
+        "classified_flows": [],
+        "capital_anchors": [],
+    }
+    row.update(changes)
+    return row
+
+
+def test_blocked_static_receipt_facts_bind_accepts_the_real_shapes() -> None:
+    start, end = "2025-11-25", "2026-01-04"
+    bind = reporter._blocked_static_receipt_facts_bind
+    # 38b6: 41 NAV rows and 3 flows; 98f5: the same NAV window and no flow.
+    assert bind(_blocked_facts(), _stripped_calculation_row(), start, end)
+    assert bind(
+        _blocked_facts(flows=_summary(0, None, None)),
+        _stripped_calculation_row(),
+        start,
+        end,
+    )
+    # A receipt that saw exactly the stripped row, and a row with no NAV at all.
+    assert bind(
+        _blocked_facts(nav=_summary(1, "2026-01-04", "2026-01-04")),
+        _stripped_calculation_row(),
+        start,
+        end,
+    )
+    assert bind(
+        _blocked_facts(nav=_summary(0, None, None)),
+        _stripped_calculation_row(nav_observations=[]),
+        start,
+        end,
+    )
+
+
+@pytest.mark.parametrize(
+    ("facts", "row"),
+    (
+        pytest.param(
+            {**_blocked_facts(), "positions": _summary(0, None, None)},
+            {},
+            id="extra_fact_group",
+        ),
+        pytest.param(
+            {key: value for key, value in _blocked_facts().items() if key != "flows"},
+            {},
+            id="missing_fact_group",
+        ),
+        pytest.param(
+            _blocked_facts(nav={**_summary(41, "2025-11-25", "2026-01-04"), "x": 1}),
+            {},
+            id="summary_with_extra_key",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(True, "2025-11-25", "2026-01-04")),
+            {},
+            id="boolean_row_count",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(-1, None, None)), {}, id="negative_row_count"
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary("41", "2025-11-25", "2026-01-04")),
+            {},
+            id="text_row_count",
+        ),
+        pytest.param(
+            _blocked_facts(flows=_summary(0, "2025-12-16", None)),
+            {},
+            id="dates_without_rows",
+        ),
+        pytest.param(
+            _blocked_facts(flows=_summary(2, None, None)),
+            {},
+            id="rows_without_dates",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(41, "2025-11-25", "01/04/2026")),
+            {},
+            id="non_iso_date",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(41, "2026-01-04", "2025-11-25")),
+            {},
+            id="first_after_last",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(41, "2025-11-24", "2026-01-04")),
+            {},
+            id="first_before_the_window",
+        ),
+        pytest.param(
+            _blocked_facts(flows=_summary(3, "2025-12-16", "2026-01-05")),
+            {},
+            id="flow_after_the_window",
+        ),
+        pytest.param(
+            _blocked_facts(),
+            {"classified_flows": [{"event_date": "2026-01-02"}]},
+            id="calculation_row_with_a_flow",
+        ),
+        pytest.param(
+            _blocked_facts(),
+            {"capital_anchors": [{"event_date": "2026-01-02"}]},
+            id="calculation_row_with_an_anchor",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(1, "2026-01-04", "2026-01-04")),
+            {
+                "nav_observations": [
+                    {"as_of_date": "2026-01-03"},
+                    {"as_of_date": "2026-01-04"},
+                ]
+            },
+            id="more_calculation_nav_than_receipt_nav",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(41, "2025-11-25", "2026-01-02")),
+            {},
+            id="calculation_nav_after_the_receipt_last_date",
+        ),
+        pytest.param(
+            _blocked_facts(nav=_summary(41, "2026-01-05", "2026-01-05")),
+            {},
+            id="receipt_window_entirely_after_the_epoch",
+        ),
+        pytest.param(
+            _blocked_facts(),
+            {"nav_observations": [{"value": "100"}]},
+            id="calculation_nav_without_a_date",
+        ),
+        pytest.param(_blocked_facts(), {"nav_observations": None}, id="no_nav_list"),
+        pytest.param("not-an-object", {}, id="facts_not_an_object"),
+    ),
+)
+def test_blocked_static_receipt_facts_bind_refuses_everything_else(
+    facts: object, row: dict[str, object]
+) -> None:
+    assert not reporter._blocked_static_receipt_facts_bind(
+        facts, _stripped_calculation_row(**row), "2025-11-25", "2026-01-04"
+    )
+
+
+def test_verified_epoch_details_feed_the_summed_value_reconcile_with_the_r3_member(
+    tmp_path: Path,
+) -> None:
+    """Seam (fail-before): the verified generation's own output feeds the gate.
+
+    Producer: ``_verified_epoch_authority_details`` over a verified schema-9
+    generation in which one tt-portfolio epoch is the R3 zero-capital member
+    (FUNDED, OK, UNAVAILABLE for ZERO_CAPITAL_RETURN_UNDEFINED, empty trace).
+    Consumer: ``_reconcile_multi_account_strategy_composite``.  The details
+    carry the private R3 inputs -- the performance status, reason, opening date
+    and the member's calculation-input facts, for that member only -- and the
+    reconcile accepts a canonical path equal to the independently computed
+    summed-value composite (five traced members 100 -> 101 and the R3 member 50
+    -> 42 after a 10 end-of-day withdrawal: 557 / 550 - 1) and refuses one that
+    is off by 1e-9.  The merge base's details carry none of it.
+    """
+
+    r3 = "account-702c489650e59956"
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path, all_numeric_candidates=True, r3_account_id=r3
+        )
+    )
+    source = json.loads(source_bytes)
+    details = reporter._validate_epoch_generation_authority(
+        epoch_root, source, manifest_bytes, crosswalk_bytes
+    )
+    bundle = read_generation_bundle(epoch_root, source["generation_id"])
+    calculation_rows = json.loads(bundle.payloads["authority/calculation-inputs.json"])[
+        "rows"
+    ]
+    (r3_row,) = [
+        row
+        for row in calculation_rows
+        if row["epoch"]["account_id"] == r3
+        and row["epoch"]["strategy_id"] == "tt-portfolio"
+    ]
+
+    zero_run = details[(r3, "tt-portfolio", "2025-11-25", None)]
+    assert zero_run["epoch_admission_status"] == "FUNDED"
+    assert zero_run["own_path_links"] == []
+    assert zero_run["performance_status"] == "UNAVAILABLE"
+    assert zero_run["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert zero_run["performance_opening_date"] == "2026-08-11"
+    assert zero_run["by_value_source"] == {
+        "nav_observations": r3_row["nav_observations"],
+        "classified_flows": r3_row["classified_flows"],
+        "capital_anchors": r3_row["capital_anchors"],
+    }
+    assert len(zero_run["by_value_source"]["nav_observations"]) == 2
+    assert zero_run["performance_payload"]["twr"] is None
+    assert zero_run["performance_payload"]["twr_status"] == "UNAVAILABLE"
+    traced = [
+        detail
+        for key, detail in details.items()
+        if key[1] == "tt-portfolio" and key[0] != r3
+    ]
+    assert len(traced) == 5
+    for detail in traced:
+        assert detail["performance_status"] == "AVAILABLE"
+        assert detail["performance_reason"] is None
+        assert detail["by_value_source"] is None
+        assert len(detail["own_path_links"]) == 1
+
+    expected = Decimal("557") / Decimal("550") - Decimal(1)
+    reporter._reconcile_multi_account_strategy_composite(
+        "tt-portfolio", details, {"tt-portfolio": {"cumulative_return": str(expected)}}
+    )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="multi-account member own paths do not reconcile "
+        "to the strategy composite for tt-portfolio",
+    ):
+        reporter._reconcile_multi_account_strategy_composite(
+            "tt-portfolio",
+            details,
+            {"tt-portfolio": {"cumulative_return": str(expected + Decimal("1e-9"))}},
         )
 
 
