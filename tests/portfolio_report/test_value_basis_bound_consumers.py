@@ -1044,3 +1044,526 @@ def test_public_builder_fails_closed_on_an_inconsistent_ledger_finding(
         full.reporter.ReportValidationError, match="value-basis bound differs"
     ):
         full.reporter.build_report_data(**arguments)
+
+
+# ── the governed HWM end check ───────────────────────────────────────────────
+
+
+def _hwm_generation(*strategy_ids: str) -> bytes:
+    """The membership part of a governed HWM input generation."""
+
+    return canonical_json_bytes(
+        {
+            "component_periods": [],
+            "memberships": [
+                {
+                    "effective_start": "2025-11-25",
+                    "membership_evidence_sha256": "a" * 64,
+                    "strategy_id": strategy_id,
+                }
+                for strategy_id in strategy_ids
+            ],
+        }
+    )
+
+
+def _hwm_proof(complete_through: Any) -> dict[str, Any]:
+    return {
+        "age_status": "COMPLETE_DATA_AGE_WARNING",
+        "complete_through": complete_through,
+        "current_drawdown": "0",
+        "current_hwm": "100",
+        "current_index": "100",
+        "maximum_drawdown": "0",
+        "status": "AVAILABLE",
+    }
+
+
+def test_governed_hwm_end_at_the_members_common_bound_is_accepted() -> None:
+    """Paired (fail-before): the HWM check, like the dependence, names its bound."""
+
+    bounds = _bounds({"robuxio-crypto": "2026-01-01", "qsi": "2026-01-01"})
+
+    bounded = reporter._governed_hwm_bounded_end(
+        _hwm_proof("2026-01-01"),
+        _hwm_generation("robuxio-crypto", "qsi", "tt-portfolio"),
+        "2026-01-04",
+        bounds,
+    )
+
+    assert bounded == reporter._BoundedEnd("2026-01-01", ("qsi", "robuxio-crypto"))
+
+
+@pytest.mark.parametrize(
+    ("complete_through", "members", "bounds"),
+    [
+        pytest.param(
+            "2026-01-02",
+            ("robuxio-crypto", "qsi"),
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+            id="a-different-date-before-the-cutoff",
+        ),
+        pytest.param(
+            "2026-01-04",
+            ("robuxio-crypto", "qsi"),
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+            id="the-cutoff-while-a-member-is-bounded",
+        ),
+        pytest.param(
+            "2026-01-05",
+            ("robuxio-crypto", "qsi"),
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+            id="after-the-cutoff",
+        ),
+        pytest.param(
+            "2026-01-01",
+            ("qsi", "tt-portfolio"),
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+            id="no-member-is-bounded",
+        ),
+        pytest.param(
+            "2026-01-01",
+            ("robuxio-crypto",),
+            _bounds({"robuxio-crypto": "2026-01-01"}, cutoff="2026-01-05"),
+            id="bound-of-another-cutoff",
+        ),
+        pytest.param(
+            None,
+            ("robuxio-crypto",),
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+            id="no-complete-through",
+        ),
+    ],
+)
+def test_governed_hwm_end_that_is_not_the_bound_fails_closed(
+    complete_through: Any,
+    members: tuple[str, ...],
+    bounds: ValueBasisBounds,
+) -> None:
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="governed HWM complete date is not the value-basis bound",
+    ):
+        reporter._governed_hwm_bounded_end(
+            _hwm_proof(complete_through),
+            _hwm_generation(*members),
+            "2026-01-04",
+            bounds,
+        )
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [b"not json", b"{}", canonical_json_bytes({"memberships": []})],
+    ids=["not-json", "no-memberships", "empty-memberships"],
+)
+def test_governed_hwm_check_needs_the_verified_memberships(generation: bytes) -> None:
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="governed HWM complete date is not the value-basis bound",
+    ):
+        reporter._governed_hwm_bounded_end(
+            _hwm_proof("2026-01-01"),
+            generation,
+            "2026-01-04",
+            _bounds({"robuxio-crypto": "2026-01-01"}),
+        )
+
+
+def test_governed_hwm_end_at_the_cutoff_needs_no_explanation() -> None:
+    bounds = _bounds({"robuxio-crypto": "2026-01-01"})
+
+    assert (
+        reporter._governed_hwm_bounded_end(
+            _hwm_proof("2026-01-04"),
+            _hwm_generation("qsi", "tt-portfolio"),
+            "2026-01-04",
+            bounds,
+        )
+        is None
+    )
+
+
+def test_governed_hwm_end_is_not_checked_without_bounds_or_a_cutoff() -> None:
+    """Nothing bounded, or no resolved cutoff: today's behaviour, no check."""
+
+    proof = _hwm_proof("2026-01-02")
+    generation = _hwm_generation("robuxio-crypto")
+
+    for cutoff, bounds in (
+        ("2026-01-04", None),
+        ("2026-01-04", _bounds({})),
+        (None, _bounds({"robuxio-crypto": "2026-01-01"})),
+    ):
+        assert (
+            reporter._governed_hwm_bounded_end(proof, generation, cutoff, bounds)
+            is None
+        )
+
+
+def test_public_builder_checks_the_governed_hwm_end(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The builder runs the check on the verified proof of the governed bundle."""
+
+    arguments = _fx_world(full, tmp_path, monkeypatch)
+    arguments.update(
+        hwm_governed_result={"status": "synthetic"},
+        hwm_governed_generation_bytes=_hwm_generation(FX_STRATEGY, "strategy-2"),
+        hwm_governed_calendar_bytes=b"calendar",
+        hwm_governed_receipt_bytes=b"receipt",
+    )
+    proofs = {"complete_through": FX_END}
+    monkeypatch.setattr(
+        full.reporter,
+        "_report_governed_hwm_proof",
+        lambda *_a, **_k: _hwm_proof(proofs["complete_through"]),
+    )
+
+    report, _content, _path = full.reporter.build_report_data(**arguments)
+
+    assert report["hwm_governed_proof"]["complete_through"] == FX_END
+    assert {
+        "date": FX_END,
+        "bounded_by": [FX_STRATEGY],
+        "entity": "portfolio",
+        "field": "complete_through",
+        "section": "hwm_governed_proof",
+    } in report["value_basis_bounds"]["bounded_sections"]
+
+    proofs["complete_through"] = "2026-07-29"
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="governed HWM complete date is not the value-basis bound",
+    ):
+        full.reporter.build_report_data(**arguments)
+
+
+# ── the value_basis_bounds disclosure ────────────────────────────────────────
+
+SHADOW_ACCOUNT = "account-d2e5821e608e25f1"
+SHADOW_REQUIRED = (
+    "grizzlybears-vtma",
+    "p123-ai-factor",
+    "p123-eu",
+    "qsi",
+    "robuxio-crypto",
+    "tt-portfolio",
+    "volatis-strategy",
+)
+
+
+def _shadow_bounds() -> ValueBasisBounds:
+    """Robuxio's value basis ends at the admitted FX end, 14 days before the cutoff."""
+
+    end = date(2026, 9, 3)
+    return ValueBasisBounds(
+        calculation_cutoff=date(2026, 9, 17),
+        strategies={
+            "robuxio-crypto": StrategyValueBound(
+                strategy_id="robuxio-crypto",
+                effective_end=end,
+                bound_kind=ADMITTED_FX_END,
+                provider_ids=("matrixport",),
+                account_ids=(SHADOW_ACCOUNT,),
+                fx_source_id=FX_SOURCE_ID,
+                fx_generation_id=FX_GENERATION_ID,
+                fx_observed_end=end,
+                unconverted_count=14,
+                first_unconverted=date(2026, 9, 4),
+                last_unconverted=date(2026, 9, 17),
+            )
+        },
+    )
+
+
+def _shadow_report() -> dict[str, Any]:
+    """The report sections the disclosure reads, with the real run dates."""
+
+    lens_dates = (
+        ("ECONOMIC_FACTOR", "2026-07-31"),
+        ("ETF_STYLE", "2026-09-03"),
+        ("RETURN_SECTOR", "2026-09-03"),
+        ("RETURN_INDUSTRY", "2026-07-31"),
+    )
+    epochs: tuple[tuple[str, str, str, str | None, str | None], ...] = (
+        (SHADOW_ACCOUNT, "robuxio-crypto", "2025-12-06", None, "2026-09-03"),
+        ("account-702c", "tt-portfolio", "2025-11-25", None, "2026-09-17"),
+        ("account-38b6", "tt-portfolio", "2025-11-25", "2026-01-04", None),
+        ("account-38b6", "qsi", "2026-01-05", None, "2026-09-17"),
+    )
+    return {
+        "account_summary": [
+            {"account_id": "account-1b44", "as_of_date": "2026-09-17"},
+            {"account_id": SHADOW_ACCOUNT, "as_of_date": "2026-09-03"},
+            {"account_id": "reserve-classification", "as_of_date": "2026-08-16"},
+        ],
+        "decomposition_lenses": {
+            "lenses": [
+                {
+                    "as_of_date": as_of,
+                    "evidence_mode": "LIVE_ONLY",
+                    "lens_id": lens_id,
+                }
+                for lens_id, as_of in lens_dates
+            ],
+            "modes": {
+                "LIVE_PLUS_BACKTEST": [
+                    {
+                        "as_of_date": as_of,
+                        "evidence_mode": "LIVE_PLUS_BACKTEST",
+                        "lens_id": lens_id,
+                    }
+                    for lens_id, as_of in lens_dates
+                ]
+            },
+        },
+        "dependence_analysis": {"complete_through": "2026-09-03"},
+        "hwm_governed_proof": {"complete_through": "2026-09-03"},
+        "strategy_history_contract": {"as_of_date": "2026-09-03"},
+        "strategy_summary": [
+            {
+                "account_live_observed_end": (
+                    "2026-09-03" if strategy_id == "robuxio-crypto" else "2026-09-17"
+                ),
+                "strategy_id": strategy_id,
+            }
+            for strategy_id in SHADOW_REQUIRED
+        ],
+        "twr_mwr": [
+            {
+                "account_id": account_id,
+                "effective_end": effective_end,
+                "effective_start": effective_start,
+                "observed_end": observed_end,
+                "strategy_id": strategy_id,
+            }
+            for (
+                account_id,
+                strategy_id,
+                effective_start,
+                effective_end,
+                observed_end,
+            ) in epochs
+        ],
+    }
+
+
+def _robuxio_entry(section: str, entity: str, field: str) -> dict[str, Any]:
+    return {
+        "bounded_by": ["robuxio-crypto"],
+        "date": "2026-09-03",
+        "entity": entity,
+        "field": field,
+        "section": section,
+    }
+
+
+SHADOW_BLOCK: dict[str, Any] = {
+    "schema_version": 1,
+    "rule": "FXB-1",
+    "calculation_cutoff_date": "2026-09-17",
+    "common_complete_date": "2026-09-03",
+    "strategies": [
+        {
+            "strategy_id": "robuxio-crypto",
+            "effective_end": "2026-09-03",
+            "bound_kind": "ADMITTED_FX_END",
+            "provider_ids": ["matrixport"],
+            "account_ids": [SHADOW_ACCOUNT],
+            "fx_source_id": "portfolio-fx-rates",
+            "fx_generation_id": FX_GENERATION_ID,
+            "fx_observed_end": "2026-09-03",
+            "unconverted_native_observations": {
+                "count": 14,
+                "first_date": "2026-09-04",
+                "last_date": "2026-09-17",
+            },
+        }
+    ],
+    "bounded_sections": [
+        _robuxio_entry("account_summary", SHADOW_ACCOUNT, "as_of_date"),
+        _robuxio_entry("decomposition_lenses", "ETF_STYLE:LIVE_ONLY", "as_of_date"),
+        _robuxio_entry("decomposition_lenses", "RETURN_SECTOR:LIVE_ONLY", "as_of_date"),
+        _robuxio_entry("dependence_analysis", "portfolio", "complete_through"),
+        _robuxio_entry("hwm_governed_proof", "portfolio", "complete_through"),
+        _robuxio_entry("strategy_history_contract", "portfolio", "as_of_date"),
+        _robuxio_entry(
+            "strategy_summary", "robuxio-crypto", "account_live_observed_end"
+        ),
+        _robuxio_entry(
+            "twr_mwr", f"{SHADOW_ACCOUNT}|robuxio-crypto|2025-12-06", "observed_end"
+        ),
+    ],
+}
+
+
+def _disclosure(
+    report: Mapping[str, Any] | None = None,
+    bounds: ValueBasisBounds | None = None,
+    *,
+    required: tuple[str, ...] = SHADOW_REQUIRED,
+    history: bool = True,
+    hwm: bool = True,
+) -> dict[str, Any] | None:
+    end = reporter._BoundedEnd("2026-09-03", ("robuxio-crypto",))
+    return reporter._value_basis_bounds_disclosure(
+        _shadow_bounds() if bounds is None else bounds,
+        _shadow_report() if report is None else report,
+        required_strategy_ids=required,
+        history_end=end if history else None,
+        hwm_end=end if hwm else None,
+    )
+
+
+def test_disclosure_states_every_date_that_the_bound_explains() -> None:
+    """Paired (fail-before): the exact block of the real run inputs (design 1.7)."""
+
+    assert _disclosure() == SHADOW_BLOCK
+
+
+def test_disclosure_is_absent_when_nothing_is_bounded() -> None:
+    assert _disclosure(bounds=_bounds({}, cutoff="2026-09-17")) is None
+
+
+def test_disclosure_lists_only_what_the_bound_explains() -> None:
+    """Every entry is a published date before the cutoff that a bound explains."""
+
+    report = _shadow_report()
+    # An account or strategy that no bound names, dated before the cutoff for
+    # some other reason, is not explained by FXB-1.
+    report["account_summary"].append(
+        {"account_id": "account-other", "as_of_date": "2026-09-03"}
+    )
+    report["strategy_summary"][0]["account_live_observed_end"] = "2026-09-03"
+    # A row whose date is not the bound is not explained either.
+    report["account_summary"][1]["as_of_date"] = "2026-09-02"
+    report["strategy_summary"][4]["account_live_observed_end"] = "2026-09-02"
+    # A closed epoch (effective_end set) is not a current row.
+    report["twr_mwr"].append(
+        {
+            "account_id": SHADOW_ACCOUNT,
+            "effective_end": "2026-01-04",
+            "effective_start": "2025-11-25",
+            "observed_end": "2026-09-03",
+            "strategy_id": "robuxio-crypto",
+        }
+    )
+    # A lens whose date is not the common complete date.
+    report["decomposition_lenses"]["lenses"][1]["as_of_date"] = "2026-09-02"
+
+    block = _disclosure(report)
+
+    assert block is not None
+    entries = {(row["section"], row["entity"]) for row in block["bounded_sections"]}
+    assert entries == {
+        ("decomposition_lenses", "RETURN_SECTOR:LIVE_ONLY"),
+        ("dependence_analysis", "portfolio"),
+        ("hwm_governed_proof", "portfolio"),
+        ("strategy_history_contract", "portfolio"),
+        ("twr_mwr", f"{SHADOW_ACCOUNT}|robuxio-crypto|2025-12-06"),
+    }
+
+
+def test_disclosure_needs_the_gates_to_have_accepted_an_end() -> None:
+    """History, dependence and HWM entries exist only when a gate accepted them."""
+
+    block = _disclosure(history=False, hwm=False)
+
+    assert block is not None
+    sections = {row["section"] for row in block["bounded_sections"]}
+    assert sections.isdisjoint(
+        {"strategy_history_contract", "dependence_analysis", "hwm_governed_proof"}
+    )
+    report = _shadow_report()
+    report["dependence_analysis"] = {"status": "UNAVAILABLE_NOT_CONFIGURED"}
+    block = _disclosure(report)
+    assert block is not None
+    sections = {row["section"] for row in block["bounded_sections"]}
+    assert "dependence_analysis" not in sections
+    assert "strategy_history_contract" in sections
+
+
+def test_disclosure_common_date_follows_the_required_strategies() -> None:
+    """Only a bounded required strategy moves the common date and the lenses."""
+
+    block = _disclosure(
+        required=tuple(s for s in SHADOW_REQUIRED if s != "robuxio-crypto")
+    )
+
+    assert block is not None
+    assert block["common_complete_date"] == "2026-09-17"
+    assert all(
+        row["section"] != "decomposition_lenses" for row in block["bounded_sections"]
+    )
+
+
+def test_public_builder_publishes_the_value_basis_bounds_disclosure(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The builder publishes the disclosure; the ledger findings are its source."""
+
+    arguments = _fx_world(full, tmp_path, monkeypatch)
+
+    report, _content, _path = full.reporter.build_report_data(**arguments)
+
+    def entry(section: str, entity: str, field: str) -> dict[str, Any]:
+        return {
+            "bounded_by": [FX_STRATEGY],
+            "date": FX_END,
+            "entity": entity,
+            "field": field,
+            "section": section,
+        }
+
+    assert report["value_basis_bounds"] == {
+        "schema_version": 1,
+        "rule": "FXB-1",
+        "calculation_cutoff_date": CUTOFF,
+        "common_complete_date": FX_END,
+        "strategies": [
+            {
+                "strategy_id": FX_STRATEGY,
+                "effective_end": FX_END,
+                "bound_kind": "ADMITTED_FX_END",
+                "provider_ids": ["synthetic"],
+                "account_ids": [FX_ACCOUNT],
+                "fx_source_id": "portfolio-fx-rates",
+                "fx_generation_id": FX_GENERATION_ID,
+                "fx_observed_end": FX_END,
+                "unconverted_native_observations": {
+                    "count": 2,
+                    "first_date": "2026-07-31",
+                    "last_date": "2026-08-01",
+                },
+            }
+        ],
+        "bounded_sections": [
+            entry("account_summary", FX_ACCOUNT, "as_of_date"),
+            entry("dependence_analysis", "portfolio", "complete_through"),
+            entry("strategy_history_contract", "portfolio", "as_of_date"),
+            entry("strategy_summary", FX_STRATEGY, "account_live_observed_end"),
+            entry("twr_mwr", f"{FX_ACCOUNT}|{FX_STRATEGY}|2026-07-01", "observed_end"),
+        ],
+    }
+
+
+def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged(
+    full: Any, tmp_path: Path
+) -> None:
+    """With nothing bounded the key is absent and every other byte is unchanged.
+
+    The v1 default report (synthetic baseline, no provider ledger, no cutoff) is
+    31,543 bytes with sha256 cfb1ab00... as recorded by the #503 acceptance
+    ruling and re-verified on the merge base of this lane.
+    """
+
+    baseline_root = full._published_baseline(tmp_path)
+
+    report, content, _path = full.reporter.build_report_data(baseline_root)
+
+    assert "value_basis_bounds" not in report
+    assert len(content) == 31543
+    assert hashlib.sha256(content).hexdigest() == (
+        "cfb1ab0012f918cd500cf662b8c682302ca5f28a1b1dd56eaf8048c16ae91b78"
+    )
