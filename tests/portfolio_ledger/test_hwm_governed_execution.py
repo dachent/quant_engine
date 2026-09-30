@@ -680,3 +680,178 @@ def test_verifier_rejects_truncated_presented_grid(tmp_path):
             performance_policy_bytes=fx["performance_policy_bytes"],
             legacy_policy_bytes=fx["legacy_policy_bytes"],
         )
+
+
+# --- FXB-1 / H1: the executor contract the governed HWM preparation relies on. ----
+#
+# When one member's USD value basis ends at the admitted FX end while the others run
+# to the cutoff, preparation ends the governed grid at the common complete date. The
+# executor is unchanged: these tests pin that it still fails closed on the full grid
+# and accepts the truncated one. The grid comes from preparation's own
+# ``_accepted_intervals`` so the producer and the real executor meet here.
+
+
+def _early_ending_member(tmp_path, *, ends="2026-01-05"):
+    """The default fixture with member B's periods cut off after ``ends``.
+
+    Member A keeps trading to the end of the fixture, as every other strategy does
+    when one strategy's USD value basis stops at the admitted FX end.
+    """
+    fx = _fixture(tmp_path)
+    periods = [
+        row
+        for row in fx["component_periods"]
+        if row["strategy_id"] == "a-daily" or row["interval_end"] <= ends
+    ]
+    generation = _generation(
+        periods,
+        policy_binding=hashlib.sha256(fx["policy_bytes"]).hexdigest(),
+        calendar_binding=fx["calendar_accepted_sha256"],
+        receipt_binding=hashlib.sha256(fx["input_receipt_bytes"]).hexdigest(),
+    )
+    return fx, periods, generation
+
+
+def _verify(fx, generation, result):
+    from quant_engine.portfolio_ledger.hwm import _json_safe
+
+    return verify_governed_hwm_result(
+        json.loads(json.dumps(_json_safe(result))),
+        input_generation_bytes=json.dumps(generation, sort_keys=True).encode(),
+        calendar_bytes=fx["calendar_authority_bytes"],
+        input_receipt_bytes=fx["input_receipt_bytes"],
+        policy_bytes=fx["policy_bytes"],
+        product_contract_bytes=fx["product_contract_bytes"],
+        performance_policy_bytes=fx["performance_policy_bytes"],
+        legacy_policy_bytes=fx["legacy_policy_bytes"],
+    )
+
+
+def test_a_member_ending_early_fails_the_full_grid_closed(tmp_path):
+    """The grid to the cutoff leaves B's last days uncovered, so the executor raises."""
+    fx, periods, generation = _early_ending_member(tmp_path)
+
+    with pytest.raises(
+        HwmCoverageError,
+        match=(
+            r"membership coverage differs; uncovered governed member-period: "
+            r"b-session 2026-01-05\.\.2026-01-06"
+        ),
+    ):
+        _run(fx, component_periods=periods, generation=generation)
+
+
+def test_the_grid_truncated_at_the_common_complete_date_is_accepted(tmp_path):
+    """The grid to B's last day computes, ages from that day, and verifies."""
+    import portfolio_attended_preparation as preparation
+
+    fx, periods, generation = _early_ending_member(tmp_path)
+    calendar = json.loads(fx["calendar_authority_bytes"])
+    grid = preparation._accepted_intervals(generation, calendar, "2026-01-05")
+    assert [row["interval_end"] for row in grid] == [
+        "2026-01-03",
+        "2026-01-04",
+        "2026-01-05",
+    ]
+
+    result = _run(
+        fx,
+        accepted_intervals=grid,
+        component_periods=periods,
+        generation=generation,
+        complete_through="2026-01-05",
+        evaluated_on="2026-01-07",
+        maximum_age_days=1,
+    )
+
+    assert result["status"] == "AVAILABLE"
+    assert result["complete_through"] == "2026-01-05"
+    assert result["calculation_age_days"] == 2
+    assert result["age_status"] == "COMPLETE_DATA_AGE_WARNING"
+    assert result["warnings"] == ["HWM_COMPLETE_DATA_AGE"]
+    assert [row["interval_end"] for row in result["periods"]] == [
+        "2026-01-03",
+        "2026-01-04",
+        "2026-01-05",
+    ]
+    # A's rows after the boundary stay in the generation, outside the grid.
+    assert max(row["interval_end"] for row in generation["component_periods"]) == (
+        "2026-01-07"
+    )
+    verified = _verify(fx, generation, result)
+    assert verified["receipt_sha256"] == result["receipt_sha256"]
+
+
+def test_the_truncated_grid_does_not_age_when_the_data_is_current(tmp_path):
+    """Within the maximum age the truncated result is CURRENT, not a warning."""
+    import portfolio_attended_preparation as preparation
+
+    fx, periods, generation = _early_ending_member(tmp_path)
+    calendar = json.loads(fx["calendar_authority_bytes"])
+    grid = preparation._accepted_intervals(generation, calendar, "2026-01-05")
+
+    result = _run(
+        fx,
+        accepted_intervals=grid,
+        component_periods=periods,
+        generation=generation,
+        complete_through="2026-01-05",
+        evaluated_on="2026-01-07",
+        maximum_age_days=2,
+    )
+
+    assert result["age_status"] == "CURRENT"
+    assert result["warnings"] == []
+
+
+def test_an_interior_gap_inside_the_truncated_grid_still_fails_closed(tmp_path):
+    """Truncating at the common date never excuses a member's missing day inside it."""
+    import portfolio_attended_preparation as preparation
+
+    fx, periods, _generation_unused = _early_ending_member(tmp_path)
+    gapped = [
+        row
+        for row in periods
+        if not (row["strategy_id"] == "a-daily" and row["interval_end"] == "2026-01-04")
+    ]
+    generation = _generation(
+        gapped,
+        policy_binding=hashlib.sha256(fx["policy_bytes"]).hexdigest(),
+        calendar_binding=fx["calendar_accepted_sha256"],
+        receipt_binding=hashlib.sha256(fx["input_receipt_bytes"]).hexdigest(),
+    )
+    calendar = json.loads(fx["calendar_authority_bytes"])
+    grid = preparation._accepted_intervals(generation, calendar, "2026-01-05")
+
+    with pytest.raises(
+        HwmCoverageError,
+        match=(
+            r"membership coverage differs; uncovered governed member-period: "
+            r"a-daily 2026-01-03\.\.2026-01-04"
+        ),
+    ):
+        _run(
+            fx,
+            accepted_intervals=grid,
+            component_periods=gapped,
+            generation=generation,
+            complete_through="2026-01-05",
+        )
+
+
+def test_the_executor_still_requires_the_grid_to_end_at_complete_through(tmp_path):
+    """complete_through is the grid's own end: a cutoff label cannot hide a short grid."""
+    import portfolio_attended_preparation as preparation
+
+    fx, periods, generation = _early_ending_member(tmp_path)
+    calendar = json.loads(fx["calendar_authority_bytes"])
+    grid = preparation._accepted_intervals(generation, calendar, "2026-01-05")
+
+    with pytest.raises(HwmCoverageError, match="complete_through differs"):
+        _run(
+            fx,
+            accepted_intervals=grid,
+            component_periods=periods,
+            generation=generation,
+            complete_through="2026-01-07",
+        )
