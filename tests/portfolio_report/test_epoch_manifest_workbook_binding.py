@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -177,6 +178,7 @@ def _verified_schema9_epoch_bundle(
     static_blocked_facts: bool = False,
     all_numeric_candidates: bool = False,
     canonical_selected_policy: bool = False,
+    r3_account_id: str | None = None,
 ) -> tuple[Path, bytes, bytes, bytes, bytes]:
     """Build one verified schema-9 epoch generation around synthetic rows.
 
@@ -186,6 +188,11 @@ def _verified_schema9_epoch_bundle(
     ledger's own observed facts (41 NAV rows, 3 flow rows) while the hash-bound
     calculation row of a BLOCKED epoch is stripped to its one closing NAV, no
     flows and no anchors (``FUNDED_EPOCH_FACT_PROJECTION_V2``).
+    ``r3_account_id`` (with ``all_numeric_candidates``) turns that account's
+    open tt-portfolio epoch into the R3 zero-capital shape: FUNDED and OK with
+    its performance UNAVAILABLE for ZERO_CAPITAL_RETURN_UNDEFINED, an empty
+    observation trace, and NAV and flow facts in its calculation row (NAV 50 on
+    2026-08-11, 42 on 2026-08-13 after a 10 end-of-day withdrawal).
     """
 
     epoch_root = tmp_path
@@ -288,6 +295,24 @@ def _verified_schema9_epoch_bundle(
                     "flow_count": 0,
                 }
             )
+            if (row["account_id"], row["strategy_id"], row["effective_end"]) == (
+                r3_account_id,
+                "tt-portfolio",
+                None,
+            ):
+                manifest_row.update(
+                    {
+                        "return_on_net_capital": None,
+                        "annualized_return_on_net_capital": None,
+                        "observation_linked_return": None,
+                        "observed_hwm_index": None,
+                        "observed_max_drawdown": None,
+                        "observation_trace": {"links": []},
+                        "performance_status": "UNAVAILABLE",
+                        "performance_reason": "ZERO_CAPITAL_RETURN_UNDEFINED",
+                        "flow_count": 1,
+                    }
+                )
         rows.append(manifest_row)
         census_assignments.append(
             (
@@ -474,6 +499,51 @@ def _verified_schema9_epoch_bundle(
     stripped_blocked_projection = (
         static_receipt and static_closed_epoch and static_blocked_facts
     )
+    r3_epoch = next(
+        (
+            row
+            for row in included
+            if (row["account_id"], row["strategy_id"], row["effective_end"])
+            == (r3_account_id, "tt-portfolio", None)
+        ),
+        None,
+    )
+
+    def usd_fact(value: str) -> dict[str, str]:
+        return {"currency": "USD", "status": "AVAILABLE", "value": value}
+
+    r3_navs = (
+        []
+        if r3_epoch is None
+        else [
+            {
+                "account_id": r3_epoch["account_id"],
+                "as_of_date": day,
+                "nav": usd_fact(value),
+                "record_id": f"r3-nav-{day}",
+                "value_basis": "ACCOUNT_VALUE",
+            }
+            for day, value in (("2026-08-11", "50"), ("2026-08-13", "42"))
+        ]
+    )
+    r3_flows = (
+        []
+        if r3_epoch is None
+        else [
+            {
+                "account_id": r3_epoch["account_id"],
+                "amount": usd_fact("-10"),
+                "blocker_code": None,
+                "classification_status": "CLASSIFIED",
+                "disposition": "EXTERNAL",
+                "event_date": "2026-08-13",
+                "event_id": "classified-flow:r3-withdrawal",
+                "flow_type": "WITHDRAWAL",
+                "nav_recognition_date": "2026-08-13",
+                "source_record_id": "r3-withdrawal",
+            }
+        ]
+    )
     calculation_rows = [
         {
             "epoch": {
@@ -509,16 +579,20 @@ def _verified_schema9_epoch_bundle(
                 ]
                 if row["strategy_id"] == "volatis-strategy"
                 else (
-                    [
-                        {
-                            "account_id": row["account_id"],
-                            "as_of_date": "2026-01-04",
-                            "record_id": "tt-nav-closing",
-                            "value": "100",
-                        }
-                    ]
-                    if stripped_blocked_projection and row is closed_tt_epoch
-                    else []
+                    r3_navs
+                    if row is r3_epoch
+                    else (
+                        [
+                            {
+                                "account_id": row["account_id"],
+                                "as_of_date": "2026-01-04",
+                                "record_id": "tt-nav-closing",
+                                "value": "100",
+                            }
+                        ]
+                        if stripped_blocked_projection and row is closed_tt_epoch
+                        else []
+                    )
                 )
             ),
             "classified_flows": (
@@ -542,7 +616,7 @@ def _verified_schema9_epoch_bundle(
                 ]
                 if static_receipt_mutation == "blocked_calc_flow"
                 and row is closed_tt_epoch
-                else []
+                else (r3_flows if row is r3_epoch else [])
             ),
             "capital_anchors": (
                 [
@@ -1822,6 +1896,86 @@ def test_blocked_static_receipt_facts_bind_refuses_everything_else(
     assert not reporter._blocked_static_receipt_facts_bind(
         facts, _stripped_calculation_row(**row), "2025-11-25", "2026-01-04"
     )
+
+
+def test_verified_epoch_details_feed_the_summed_value_reconcile_with_the_r3_member(
+    tmp_path: Path,
+) -> None:
+    """Seam (fail-before): the verified generation's own output feeds the gate.
+
+    Producer: ``_verified_epoch_authority_details`` over a verified schema-9
+    generation in which one tt-portfolio epoch is the R3 zero-capital member
+    (FUNDED, OK, UNAVAILABLE for ZERO_CAPITAL_RETURN_UNDEFINED, empty trace).
+    Consumer: ``_reconcile_multi_account_strategy_composite``.  The details
+    carry the private R3 inputs -- the performance status, reason, opening date
+    and the member's calculation-input facts, for that member only -- and the
+    reconcile accepts a canonical path equal to the independently computed
+    summed-value composite (five traced members 100 -> 101 and the R3 member 50
+    -> 42 after a 10 end-of-day withdrawal: 557 / 550 - 1) and refuses one that
+    is off by 1e-9.  The merge base's details carry none of it.
+    """
+
+    r3 = "account-702c489650e59956"
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path, all_numeric_candidates=True, r3_account_id=r3
+        )
+    )
+    source = json.loads(source_bytes)
+    details = reporter._validate_epoch_generation_authority(
+        epoch_root, source, manifest_bytes, crosswalk_bytes
+    )
+    bundle = read_generation_bundle(epoch_root, source["generation_id"])
+    calculation_rows = json.loads(bundle.payloads["authority/calculation-inputs.json"])[
+        "rows"
+    ]
+    (r3_row,) = [
+        row
+        for row in calculation_rows
+        if row["epoch"]["account_id"] == r3
+        and row["epoch"]["strategy_id"] == "tt-portfolio"
+    ]
+
+    zero_run = details[(r3, "tt-portfolio", "2025-11-25", None)]
+    assert zero_run["epoch_admission_status"] == "FUNDED"
+    assert zero_run["own_path_links"] == []
+    assert zero_run["performance_status"] == "UNAVAILABLE"
+    assert zero_run["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert zero_run["performance_opening_date"] == "2026-08-11"
+    assert zero_run["by_value_source"] == {
+        "nav_observations": r3_row["nav_observations"],
+        "classified_flows": r3_row["classified_flows"],
+        "capital_anchors": r3_row["capital_anchors"],
+    }
+    assert len(zero_run["by_value_source"]["nav_observations"]) == 2
+    assert zero_run["performance_payload"]["twr"] is None
+    assert zero_run["performance_payload"]["twr_status"] == "UNAVAILABLE"
+    traced = [
+        detail
+        for key, detail in details.items()
+        if key[1] == "tt-portfolio" and key[0] != r3
+    ]
+    assert len(traced) == 5
+    for detail in traced:
+        assert detail["performance_status"] == "AVAILABLE"
+        assert detail["performance_reason"] is None
+        assert detail["by_value_source"] is None
+        assert len(detail["own_path_links"]) == 1
+
+    expected = Decimal("557") / Decimal("550") - Decimal(1)
+    reporter._reconcile_multi_account_strategy_composite(
+        "tt-portfolio", details, {"tt-portfolio": {"cumulative_return": str(expected)}}
+    )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="multi-account member own paths do not reconcile "
+        "to the strategy composite for tt-portfolio",
+    ):
+        reporter._reconcile_multi_account_strategy_composite(
+            "tt-portfolio",
+            details,
+            {"tt-portfolio": {"cumulative_return": str(expected + Decimal("1e-9"))}},
+        )
 
 
 def test_epoch_history_accepts_canonical_selected_policy_identity(
