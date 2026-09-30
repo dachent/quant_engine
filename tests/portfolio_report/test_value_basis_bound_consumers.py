@@ -772,11 +772,21 @@ CUTOFF = "2026-09-17"
 
 
 def _fx_ledger(
-    tmp_path: Path, finding_days: tuple[str, ...], *, boundary: str = FX_END
+    tmp_path: Path,
+    finding_days: tuple[str, ...],
+    *,
+    boundary: str = FX_END,
+    omit_findings: bool = False,
+    findings_override: Any = None,
 ) -> tuple[dict[str, Any], Path]:
-    """A hash-bound provider ledger whose native NAV days after the FX end are findings."""
+    """A hash-bound provider ledger whose native NAV days after the FX end are findings.
 
-    ledger = {
+    ``omit_findings`` drops the ``quality_findings`` key (a ledger that records none,
+    like the synthetic ledger of the mvp2 product world); ``findings_override``
+    replaces the value (a malformed one).
+    """
+
+    ledger: dict[str, Any] = {
         "nav_observations": [
             {
                 "account_id": FX_ACCOUNT,
@@ -805,6 +815,10 @@ def _fx_ledger(
         ],
         "reconciliation_checks": [],
     }
+    if omit_findings:
+        del ledger["quality_findings"]
+    if findings_override is not None:
+        ledger["quality_findings"] = findings_override
     content = canonical_json_bytes(ledger)
     ledger_root = tmp_path / "provider-ledger"
     generation = ledger_root / "generations" / ("9" * 64)
@@ -828,6 +842,7 @@ def _fx_world(
     *,
     finding_days: tuple[str, ...] = ("2026-07-31", "2026-08-01"),
     boundary: str = FX_END,
+    omit_findings: bool = False,
 ) -> dict[str, Any]:
     """Arguments of a ``build_report_data`` call for one FX-bounded strategy.
 
@@ -904,7 +919,9 @@ def _fx_world(
         full.reporter, "_history_contract", lambda *_a, **_k: ({}, history_ref)
     )
 
-    reference, ledger_root = _fx_ledger(tmp_path, finding_days, boundary=boundary)
+    reference, ledger_root = _fx_ledger(
+        tmp_path, finding_days, boundary=boundary, omit_findings=omit_findings
+    )
     catalog = full._baseline_catalog()
     catalog["source_artifacts"].append(reference)
     catalog["assignments"] = [
@@ -1077,6 +1094,62 @@ def test_public_builder_fails_closed_on_an_inconsistent_ledger_finding(
 
     with pytest.raises(
         full.reporter.ReportValidationError, match="value-basis bound differs"
+    ):
+        full.reporter.build_report_data(**arguments)
+
+
+def _derived_bounds(full: Any, tmp_path: Path, **ledger: Any) -> Any:
+    """The report's bound derivation over a hash-bound ledger of the given shape."""
+
+    reference, ledger_root = _fx_ledger(tmp_path, (), **ledger)
+    catalog = full._baseline_catalog()
+    catalog["source_artifacts"].append(reference)
+    baseline_root = full._published_baseline(tmp_path / "baseline-scope", catalog)
+    return full.reporter._report_value_basis_bounds(
+        catalog, baseline_root, ledger_root, CUTOFF
+    )
+
+
+def test_a_ledger_that_records_no_quality_findings_bounds_nothing(
+    full: Any, tmp_path: Path
+) -> None:
+    """Paired (fail-before; the 172-outcome test found it): no findings, no bound.
+
+    The synthetic provider ledger of the mvp2 product world has no ``quality_findings``
+    key at all.  The raw-observation coverage already reads that as no findings; the
+    bound derivation must do the same and bound nothing, leaving every gate strict,
+    instead of refusing the whole catalog.
+    """
+
+    bounds = _derived_bounds(full, tmp_path, omit_findings=True)
+
+    assert bounds is not None
+    assert dict(bounds.strategies) == {}
+    assert bounds.effective_end(FX_STRATEGY) == date.fromisoformat(CUTOFF)
+
+
+@pytest.mark.parametrize("malformed", [{}, "none", [1]])
+def test_a_malformed_quality_findings_value_still_fails_closed(
+    full: Any, tmp_path: Path, malformed: Any
+) -> None:
+    """Only an absent key means no findings; a present but malformed value raises."""
+
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="value-basis bound differs"
+    ):
+        _derived_bounds(full, tmp_path, findings_override=malformed)
+
+
+def test_public_builder_reads_a_ledger_without_findings_as_bounding_nothing(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without findings nothing explains the short end: gate B keeps failing closed."""
+
+    arguments = _fx_world(full, tmp_path, monkeypatch, omit_findings=True)
+
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="strategy history calculation cutoff differs",
     ):
         full.reporter.build_report_data(**arguments)
 
