@@ -440,12 +440,20 @@ class LiveRow:
 
 @dataclass(frozen=True)
 class ReceiptSpan:
-    """A declared gap span ``(start, end]``; only a verified span is ever spliced."""
+    """A declared gap span ``(start, end]``; only a verified span is ever spliced.
+
+    ``blocked`` marks an unverified span whose failure is already a BLOCKER-class
+    ``returns.epoch_hpr_receipts_verified`` finding: a contradicted or unverifiable
+    span, or one of a strategy that publishes its receipt twice. A span left
+    unverified only because its receipt runs past the published rows is not blocked;
+    that receipt is reported NOT_READY instead.
+    """
 
     start: date
     end: date
     value: Decimal | None
     verified: bool
+    blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -462,13 +470,19 @@ class Splice:
 
     ``value`` is ``None`` when the window has no daily row or when the comparator
     declines (``declined`` says why): an edge strictly inside a span, or an
-    unverified span inside the window, has no exact value.
+    unverified span inside the window, has no exact value. ``edge`` names the window
+    edge (``"start"`` or ``"end"``) that lies strictly inside a span. ``reported`` is
+    true when the only reason for the decline is an unverified span that already has
+    a BLOCKER-class receipt finding, so ``check_strategy_return_views`` does not
+    report that span twice.
     """
 
     value: Decimal | None
     rows: int
     spans: int
     declined: str | None = None
+    edge: str | None = None
+    reported: bool = False
 
 
 _RECEIPTS_PATH = "$.strategy_history_contract.epoch_hpr_receipts"
@@ -628,6 +642,8 @@ def _verify_receipt(
     # A receipt may describe evidence past the published daily rows (a ragged
     # perimeter past the calculation cutoff); spans starting at or after the last
     # published row are then never spliced, and its totals are not recomputable.
+    # Nothing in the report can vouch for either, so the receipt is reported
+    # NOT_READY (visible, never blocking) with what was left unverified.
     ragged = receipt_end is not None and rows_end is not None and receipt_end > rows_end
     if not series:
         findings.append(
@@ -641,6 +657,7 @@ def _verify_receipt(
             )
         )
     spans: list[ReceiptSpan] = []
+    skipped: list[str] = []
     previous_end: date | None = None
     ordered: list[tuple[date, date, int, Mapping[str, Any]]] = []
     for index, raw in enumerate(raw_spans):
@@ -666,13 +683,15 @@ def _verify_receipt(
         value = to_decimal(raw.get("return"))
         if ragged and rows_end is not None and start >= rows_end:
             spans.append(ReceiptSpan(start, end, value, False))
+            skipped.append(f"{start.isoformat()}..{end.isoformat()}")
             continue
         contradictions, missing, chained = _span_problems(
             raw, start, end, value, series, previous_end
         )
         previous_end = end if previous_end is None else max(previous_end, end)
-        spans.append(ReceiptSpan(start, end, value, not contradictions and not missing))
-        if contradictions or missing:
+        failed = bool(contradictions or missing)
+        spans.append(ReceiptSpan(start, end, value, not failed, failed))
+        if failed:
             findings.append(
                 _receipt_finding(
                     BLOCKER_INVARIANT if contradictions else BLOCKER_AUTHORITY,
@@ -693,6 +712,25 @@ def _verify_receipt(
                     "; ".join(contradictions + missing),
                 )
             )
+    if ragged and rows_end is not None:
+        findings.append(
+            _receipt_finding(
+                NOT_READY,
+                strategy,
+                {
+                    "observed_end": receipt.get("observed_end"),
+                    "last_published_row": rows_end.isoformat(),
+                    "unverified_spans": skipped,
+                    "totals_recomputed": False,
+                },
+                "a receipt that ends on or before the report's last published daily "
+                "row, so its spans and totals can be re-derived from the report's rows",
+                f"{pointer}.observed_end",
+                "the receipt runs past the report's last published daily row: its "
+                "totals are not re-derived and its spans starting at or after that "
+                "row are not verified",
+            )
+        )
     findings.extend(
         _receipt_totals(
             strategy, pointer, receipt, raw_spans, spans, series, ragged, receipt_start
@@ -865,7 +903,7 @@ def _epoch_receipt_index(ctx: Context) -> tuple[dict[str, EpochReceipt], list[Fi
             entries[0][0],
             any(receipt.declares_spans for receipt in verified),
             tuple(
-                replace(span, verified=False)
+                replace(span, verified=False, blocked=True)
                 for receipt in verified
                 for span in receipt.spans
             ),
@@ -921,6 +959,7 @@ def splice_window(
                 len(selected),
                 0,
                 f"window start {boundary} lies inside span ({span.start}, {span.end}]",
+                edge="start",
             )
         if span.start < last < span.end:
             return Splice(
@@ -928,6 +967,7 @@ def splice_window(
                 len(selected),
                 0,
                 f"window end {last} lies inside span ({span.start}, {span.end}]",
+                edge="end",
             )
         if span.start >= boundary and span.end <= last:
             if not span.verified or span.value is None:
@@ -936,6 +976,7 @@ def splice_window(
                     len(selected),
                     0,
                     f"span ({span.start}, {span.end}] inside the window is unverified",
+                    reported=span.blocked,
                 )
             total *= Decimal(1) + span.value
             spliced += 1
@@ -2747,6 +2788,13 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
     from the report's own rows. A strategy with span receipts whose headline is not
     epoch-labelled is itself a finding. Without receipts or an epoch label every
     view is one daily group, exactly as before.
+
+    A decline is never silent. When ``splice_window`` cannot give an epoch-basis
+    value for the summary window (an edge strictly inside a span, or an unverified
+    span inside the window) the epoch-labelled headline has nothing to be compared
+    with; that is one ``BLOCKER_INVARIANT`` per strategy, at the summary field whose
+    edge is inside the span (the headline for an unverified span), unless the decline
+    is only an unverified span that a BLOCKER-class receipt finding already reports.
     """
 
     names = strategy_names(ctx)
@@ -2844,6 +2892,39 @@ def check_strategy_return_views(ctx: Context) -> Iterator[Finding]:
                     True,
                 )
             )
+        elif spliced.rows and not spliced.reported:
+            # The splice declined (a window edge strictly inside a span, or an
+            # unverified span inside the window) and no receipt blocker says why: the
+            # epoch-labelled views are left with no row-anchored value to be compared
+            # with, and a forged headline would pass unseen. A window the epoch basis
+            # cannot anchor to the rows is a finding, never a silence.
+            field = (
+                "account_live_cumulative_return"
+                if spliced.edge is None
+                else f"account_live_observed_{spliced.edge}"
+            )
+            yield _finding(
+                "returns.strategy_return_views_agree",
+                BLOCKER_INVARIANT,
+                strategy,
+                {
+                    "account_live_cumulative_return": row.get(
+                        "account_live_cumulative_return"
+                    ),
+                    "account_live_cumulative_return_label": row.get(
+                        "account_live_cumulative_return_label"
+                    ),
+                    "window": list(window),
+                    "declined": spliced.declined,
+                },
+                "an epoch-basis window anchored to the report's daily rows: the "
+                "epoch-labelled views equal the daily rows spliced with the verified "
+                "epoch HPR receipt spans",
+                REPORT,
+                f"$.strategy_summary[{position}].{field}",
+                ("B2",),
+                f"the epoch-basis views cannot be anchored to the rows: {spliced.declined}",
+            )
         yield from _return_group(
             strategy,
             window,
@@ -2895,7 +2976,10 @@ def check_epoch_hpr_receipts(ctx: Context) -> Iterator[Finding]:
     daily and epoch totals, row count and identity. A contradiction is a
     ``BLOCKER_INVARIANT``; a receipt the report gives no means to verify (malformed,
     duplicated, no daily rows, no capital chain) is a ``BLOCKER_AUTHORITY``. A span
-    that fails is never spliced, so a forged receipt cannot launder a headline.
+    that fails is never spliced, so a forged receipt cannot launder a headline. A
+    receipt that runs past the report's last published daily row cannot be fully
+    re-derived: its spans from that row on are unverified and its totals are not
+    recomputed, which is one ``NOT_READY`` per receipt (visible, never blocking).
     """
 
     yield from _epoch_receipt_index(ctx)[1]
