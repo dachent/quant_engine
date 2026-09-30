@@ -3071,6 +3071,42 @@ def test_h1d_an_unexplained_early_end_is_not_turned_into_a_common_date(
     assert kwargs["complete_through"] == FX_TEST_CUTOFF
 
 
+def test_h1e_a_gap_before_the_fx_end_does_not_move_the_grid_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: the grid ends at the admitted FX end, not at the member's last NAV day (W18).
+
+    ``s-fx`` is FX-bounded (findings after the contract FX end) but its own NAV rows
+    and governed periods stop two days before that end, a genuine gap. The grid and
+    ``complete_through`` stay at the FX end, so the real executor rejects the uncovered
+    member-period (tests/portfolio_ledger/test_hwm_governed_execution.py pins that
+    half) instead of the grid ending early at the gap and hiding it. Every other world
+    in this module ends ``s-fx`` exactly at the FX end, which is why only this one tells
+    the contract end from a data-derived end.
+    """
+
+    gap_end = (date.fromisoformat(FX_TEST_END) - timedelta(days=2)).isoformat()
+    world = _fx_world(fx_strategy_ends=gap_end)
+    world.catalog["nav_observations"] = [
+        row
+        for row in world.catalog["nav_observations"]  # type: ignore[attr-defined]
+        if row["provider_id"] != "p-fx" or row["as_of_date"] <= gap_end
+    ]
+    assert gap_end < FX_TEST_END
+    spec, _calls = _prepare_fx_world(tmp_path, monkeypatch, world)
+    captured = _capture_hwm_compute(monkeypatch)
+
+    _prepare(spec, tmp_path / "prepared")
+
+    ((grid, kwargs),) = captured
+    assert [(row["interval_start"], row["interval_end"]) for row in grid] == [
+        ("2026-09-10", "2026-09-11"),
+        ("2026-09-11", "2026-09-12"),
+        ("2026-09-12", "2026-09-13"),
+    ]
+    assert kwargs["complete_through"] == FX_TEST_END
+
+
 def _break_boundary(world: _FxWorld) -> None:
     world.catalog["quality_findings"][0]["fx_boundary"] = "2026-09-12"  # type: ignore[index]
 

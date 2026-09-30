@@ -363,6 +363,45 @@ def test_b9_a_finding_for_a_provider_without_mapped_nav_rows_raises() -> None:
         _derive(unmapped_only)
 
 
+@pytest.mark.parametrize("gap_days", [1, 2, 30])
+def test_b10_a_nav_gap_before_the_fx_end_does_not_move_the_value_end(
+    gap_days: int,
+) -> None:
+    """E(s) is the contract FX end F, never the last NAV day the ledger holds (W18).
+
+    The bounded provider's MAPPED NAV rows end ``gap_days`` before F, a genuine gap in
+    the value basis. The bound record is still the one of the Matrixport shape: its end
+    is F. A data-derived end (the last mapped NAV day of the strategy) would absorb the
+    gap into the bound instead of leaving the uncovered member-period for the governed
+    HWM executor to reject, so every consumer would stop failing closed on it. Every
+    other world in this module ends the bounded provider's rows exactly at F, which is
+    why only this one tells the two ends apart.
+    """
+
+    last_day = FX_END - timedelta(days=gap_days)
+    gapped = _matrixport_shaped_catalog()
+    gapped["nav_observations"] = [
+        row
+        for row in gapped["nav_observations"]
+        if row["provider_id"] != FX_PROVIDER or row["as_of_date"] <= _iso(last_day)
+    ]
+    assert max(
+        row["as_of_date"]
+        for row in gapped["nav_observations"]
+        if row["provider_id"] == FX_PROVIDER
+    ) == _iso(last_day)
+
+    bounds = _derive(gapped)
+
+    bound = bounds.strategies[FX_STRATEGY]
+    assert bound == _derive().strategies[FX_STRATEGY]
+    assert bound.effective_end == FX_END == bound.fx_observed_end
+    assert bounds.effective_end(FX_STRATEGY) == FX_END
+    assert bounds.common_complete_date([FX_STRATEGY, OTHER_STRATEGY]) == FX_END
+    assert bounds.bounded_by([FX_STRATEGY, OTHER_STRATEGY], FX_END) == (FX_STRATEGY,)
+    assert bounds.bounded_by([FX_STRATEGY], last_day) == ()
+
+
 @pytest.mark.parametrize(
     ("status", "fact_type"),
     [
