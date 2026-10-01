@@ -1671,6 +1671,66 @@ def test_disclosure_common_date_follows_the_required_strategies() -> None:
     )
 
 
+def _date_every_lens_row(report: dict[str, Any], day: str) -> None:
+    """Date every lens row the report publishes, whichever collection holds it."""
+
+    lenses = report["decomposition_lenses"]
+    rows = [
+        *lenses["lenses"],
+        *(row for mode_rows in lenses["modes"].values() for row in mode_rows),
+    ]
+    assert rows, "the fixture must carry lens rows"
+    for row in rows:
+        row["as_of_date"] = day
+
+
+@pytest.mark.parametrize(
+    "required",
+    (
+        pytest.param(
+            tuple(item for item in SHADOW_REQUIRED if item != "robuxio-crypto"),
+            id="a_bounded_strategy_that_is_not_required",
+        ),
+        pytest.param((), id="no_required_strategy"),
+    ),
+)
+def test_disclosure_lists_no_lens_row_dated_at_the_cutoff(
+    required: tuple[str, ...],
+) -> None:
+    """W21 (seat mutation M-A13-1): the lens rule needs a date before the cutoff.
+
+    Robuxio is bounded, so the block exists, but it is not REQUIRED here: the
+    common complete date of the REQUIRED strategies is the cutoff itself, and a
+    lens row dated then is current rather than bounded.  The ``common < cutoff``
+    guard keeps the rule silent.  Without it every such row would be listed with
+    an empty ``bounded_by``, claiming that a bound explains a date that is not
+    before the cutoff.  The paired good case is
+    ``test_disclosure_states_every_date_that_the_bound_explains``, where a
+    bounded REQUIRED strategy puts the common date before the cutoff and the
+    lens rows dated then are listed.
+    """
+
+    report = _shadow_report()
+    _date_every_lens_row(report, "2026-09-17")
+
+    block = _disclosure(report, required=required)
+
+    assert block is not None
+    assert block["common_complete_date"] == "2026-09-17"
+    assert [row["strategy_id"] for row in block["strategies"]] == ["robuxio-crypto"]
+    assert [
+        row
+        for row in block["bounded_sections"]
+        if row["section"] == "decomposition_lenses"
+    ] == []
+    # Every entry that remains names a bound and a date before the cutoff.
+    assert block["bounded_sections"]
+    assert all(
+        row["bounded_by"] and row["date"] < block["calculation_cutoff_date"]
+        for row in block["bounded_sections"]
+    )
+
+
 def test_public_builder_publishes_the_value_basis_bounds_disclosure(
     full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
