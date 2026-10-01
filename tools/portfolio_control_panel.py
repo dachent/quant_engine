@@ -4336,6 +4336,8 @@ def _reconcile_hwm_coverage(
             )
             row["status"] = "UNAVAILABLE"
             row["uncovered_details"] = details
+            # The details carry the current cutoff weights of the strategy rows.
+            row["weight_basis"] = WEIGHT_BASIS_CURRENT
             row["value"] = hwm_summary.get("uncovered_value_usd")
     else:
         normalized.append(
@@ -4350,6 +4352,7 @@ def _reconcile_hwm_coverage(
                 "status": "UNAVAILABLE",
                 "uncovered_details": details,
                 "value": hwm_summary.get("uncovered_value_usd"),
+                "weight_basis": WEIGHT_BASIS_CURRENT,
             }
         )
     return normalized
@@ -7959,6 +7962,10 @@ def _strategy_underwriting(
                 cluster.get("observed_pair_correlation_maximum") if cluster else None
             ),
             "strategy_systematic_weight": strategy.get("systematic_weight"),
+            # The two weights come from two sets: the strategy's current cutoff weight
+            # and the policy weights behind the cluster budget.
+            "strategy_weight_basis": strategy.get("weight_basis"),
+            "cluster_weight_basis": WEIGHT_BASIS_POLICY if cluster else None,
             "strategy_correlation_one_loss_contribution": (
                 _number_text(loss_contribution)
                 if loss_contribution is not None

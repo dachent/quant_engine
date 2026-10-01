@@ -6482,6 +6482,13 @@ def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
     # The snapshot row is the table's own recorded column, under its own label.
     assert allocation["systematic_weight"] == "0.1111111111111111111111111111111111"
     assert allocation["weight_basis"] == "HISTORICAL_SNAPSHOT_2026_01_03"
+    # The coverage row that carries the uncovered detail shows the same current weight
+    # and says so; no weight anywhere in the report is left without a label.
+    coverage_row = next(
+        row for row in report["coverage_data_quality"] if "uncovered_details" in row
+    )
+    assert coverage_row["weight_basis"] == "CURRENT_CUTOFF"
+    assert capital_fixture.unlabeled_weight_paths(report) == []
 
 
 def test_portable_hwm_proof_coexists_with_governed_report_hwm(

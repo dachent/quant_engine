@@ -223,6 +223,77 @@ def test_the_capital_legend_renders_the_payload_status_never_a_literal() -> None
     assert {item.literal for item in found} <= {"PUBLISHED"}, found
 
 
+def _underwriting_payload(fit: dict[str, Any]) -> dict[str, Any]:
+    layer = {"status": "AVAILABLE"}
+    return {
+        "strategy_underwriting": {
+            "counts": {
+                "authoritative_design": 0,
+                "strategies": 1,
+                "version_matched_long_history": 0,
+                "quantified_model_account_gap": 0,
+                "empirical_regime_comparison": 0,
+            },
+            "policy_id": "synthetic-policy",
+            "policy_sha256": "0" * 64,
+            "rows": [
+                {
+                    "advisory_disposition": {"reasons": []},
+                    "design_fit": {},
+                    "evidence_layers": {
+                        "account_live": layer,
+                        "backtest": layer,
+                        "design": layer,
+                        "implementation_reconciliation": layer,
+                        "provider_or_model_live": layer,
+                    },
+                    "long_history": {},
+                    "model_account_gap": {},
+                    "portfolio_fit": fit,
+                    "regime_conformance": {},
+                    "strategy_id": "s-alpha",
+                    "strategy_name": "S Alpha",
+                }
+            ],
+        }
+    }
+
+
+def test_underwriting_fit_cell_says_which_weight_set_each_weight_is(
+    tmp_path: Path,
+) -> None:
+    fit = {
+        "cluster_allocation_weight": "0.668",
+        "cluster_label": "Equity beta",
+        "cluster_weight_basis": "POLICY_PORT_DEPENDENCE_1",
+        "portfolio_fit_status": "WITHIN_CURRENT_CLUSTER_STRESS_BOUNDARY",
+        "strategy_systematic_weight": "0.12",
+        "strategy_weight_basis": "CURRENT_CUTOFF",
+    }
+    dom = _run(tmp_path, _underwriting_payload(fit), "renderUnderwriting")
+    cell = dom["#underwriting-table"]["innerHTML"]
+
+    assert "cluster weight 66.8% (Policy weights (PORT-DEPENDENCE-1))" in cell
+    assert "Strategy weight 12.0% (Current cutoff weights)" in cell
+
+
+def test_underwriting_fit_cell_labels_no_missing_weight(tmp_path: Path) -> None:
+    fit = {
+        "cluster_allocation_weight": None,
+        "cluster_label": None,
+        "cluster_weight_basis": None,
+        "portfolio_fit_status": "WITHIN_CURRENT_CLUSTER_STRESS_BOUNDARY",
+        "strategy_systematic_weight": "0.12",
+        "strategy_weight_basis": "CURRENT_CUTOFF",
+    }
+    dom = _run(tmp_path, _underwriting_payload(fit), "renderUnderwriting")
+    cell = dom["#underwriting-table"]["innerHTML"]
+
+    assert "Strategy weight 12.0% (Current cutoff weights)" in cell
+    assert "Weight basis not labeled" not in cell
+    assert "cluster weight — · pair range" in cell
+
+
 def test_capital_view_kpi_does_not_call_a_missing_total_an_accepted_baseline(
     tmp_path: Path,
 ) -> None:

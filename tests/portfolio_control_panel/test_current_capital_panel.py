@@ -293,3 +293,47 @@ def test_keys_the_panel_does_not_know_are_ignored_in_the_report_and_the_block() 
 
     assert parts == panel._capital_summary(_summary())
     panel._reconcile_capital_with_baseline(parts, {"current_capital": extended})
+
+
+def _uncovered_hwm_summary() -> dict[str, Any]:
+    return {
+        "excluded_details": [],
+        "excluded_strategies": [],
+        "uncovered_details": [
+            {
+                "current_value_usd": "100",
+                "strategy_id": "s-alpha",
+                "strategy_name": "S Alpha",
+                "systematic_weight": "0.12",
+            }
+        ],
+        "uncovered_strategies": ["S Alpha"],
+        "uncovered_value_usd": "100",
+    }
+
+
+@pytest.mark.parametrize("has_exception_row", [True, False], ids=["row", "appended"])
+def test_the_hwm_exception_coverage_row_says_it_shows_current_cutoff_weights(
+    has_exception_row: bool,
+) -> None:
+    """Its uncovered details repeat the current weights of ``strategy_summary``."""
+
+    coverage: list[dict[str, Any]] = [
+        {"category": "FACT_COVERAGE", "item": "nav", "status": "PARTIAL"}
+    ]
+    if has_exception_row:
+        coverage.append(
+            {
+                "category": "RECONCILIATION_EXCEPTION",
+                "item": "full-systematic-hwm-unavailable",
+            }
+        )
+
+    rows = panel._reconcile_hwm_coverage(coverage, _uncovered_hwm_summary())
+
+    exception = next(
+        row for row in rows if row.get("item") == "full-systematic-hwm-unavailable"
+    )
+    assert exception["uncovered_details"][0]["systematic_weight"] == "0.12"
+    assert exception["weight_basis"] == "CURRENT_CUTOFF"
+    assert fx.unlabeled_weight_paths(rows) == []

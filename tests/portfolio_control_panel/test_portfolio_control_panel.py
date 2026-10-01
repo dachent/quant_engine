@@ -724,6 +724,7 @@ def _report() -> dict[str, object]:
             "strategy_id": ACTIVE_STRATEGY_IDS[index],
             "strategy_name": STRATEGY_NAMES[index],
             "systematic_weight": str(1 / 7),
+            "weight_basis": "CURRENT_CUTOFF",
             "version_ref": None,
             "version_compatibility_reason": "Synthetic version remains unresolved.",
             "version_compatibility_status": "UNRESOLVED",
@@ -747,6 +748,7 @@ def _report() -> dict[str, object]:
             "source_key": "synthetic-summary",
             "strategy_id": None,
             "systematic_weight": None,
+            "weight_basis": "HISTORICAL_SNAPSHOT_2026_07_30",
         },
         *[
             {
@@ -756,6 +758,7 @@ def _report() -> dict[str, object]:
                 "source_key": "synthetic-allocations",
                 "strategy_id": ACTIVE_STRATEGY_IDS[index],
                 "systematic_weight": str(1 / 7),
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_07_30",
             }
             for index in range(7)
         ],
@@ -12237,6 +12240,16 @@ def test_panel_publishes_the_report_current_capital_with_status_as_of_and_labels
     assert {row["weight_basis"] for row in data["dependence_modes"].values()} == {
         "POLICY_PORT_DEPENDENCE_1"
     }
+    # The underwriting fit shows a current strategy weight beside a policy cluster
+    # weight: each says which set it is.
+    fits = [row["portfolio_fit"] for row in data["strategy_underwriting"]["rows"]]
+    assert {fit["strategy_weight_basis"] for fit in fits} == {"CURRENT_CUTOFF"}
+    clustered = [fit for fit in fits if fit["cluster_allocation_weight"] is not None]
+    assert clustered
+    assert {fit["cluster_weight_basis"] for fit in clustered} == {
+        "POLICY_PORT_DEPENDENCE_1"
+    }
+    assert capital_fixture.unlabeled_weight_paths(data) == []
     verified = panel.verify_candidate(
         inputs["report"],
         inputs["legacy"],

@@ -300,3 +300,35 @@ def with_current_capital(
             catalog, required_ids, reserve_value=reserve_value
         ),
     }
+
+
+def unlabeled_weight_paths(document: Any) -> list[str]:
+    """Weight-bearing leaves that no ``weight_basis`` label covers.
+
+    A leaf is covered when its own object, or an ancestor, carries a key named
+    ``weight_basis`` (or ``<what>_weight_basis`` for an object that shows two sets).
+    Implementation-level cash weights (``implementation_*`` sections) are not
+    capital weights and are skipped.
+    """
+
+    found: list[str] = []
+
+    def walk(node: Any, path: str, labeled: bool) -> None:
+        if isinstance(node, Mapping):
+            here = labeled or any(str(key).endswith("weight_basis") for key in node)
+            for key, child in node.items():
+                name = str(key)
+                if "implementation" in name:
+                    continue
+                where = f"{path}.{name}" if path else name
+                if isinstance(child, (Mapping, list)):
+                    walk(child, where, here)
+                elif child is not None and "weight" in name and not here:
+                    if not name.endswith(("weight_basis", "weight_authority")):
+                        found.append(where)
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                walk(child, f"{path}[{index}]", labeled)
+
+    walk(document, "", False)
+    return found

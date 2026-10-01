@@ -6442,6 +6442,8 @@ def _reconcile_hwm_coverage(
             )
             row["status"] = "UNAVAILABLE"
             row["uncovered_details"] = details
+            # The details carry the current cutoff weights of `strategy_summary`.
+            row["weight_basis"] = WEIGHT_BASIS_CURRENT
             row["value"] = hwm_summary.get("uncovered_value_usd")
     else:
         normalized.append(
@@ -6456,6 +6458,7 @@ def _reconcile_hwm_coverage(
                 "status": "UNAVAILABLE",
                 "uncovered_details": details,
                 "value": hwm_summary.get("uncovered_value_usd"),
+                "weight_basis": WEIGHT_BASIS_CURRENT,
             }
         )
     return normalized
