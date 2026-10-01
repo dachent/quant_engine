@@ -2520,8 +2520,14 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     tmp_path: Path,
 ) -> None:
     """Golden byte-identity regression: a spec without the hwm-inputs source
-    must produce a catalog and generation manifest byte-identical to the
-    pre-envelope builder (hashes captured from the pre-envelope code path)."""
+    must produce a catalog and generation manifest with exactly these hashes.
+
+    The pins moved once, with cluster 2 task T1 (the catalog gained the
+    ``current_capital`` and ``audit_snapshot`` blocks and the two audit checks
+    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0).
+    ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
+    that nothing else moved: undoing exactly those changes reproduces the
+    previous catalog hash ``fde46f73...``."""
     spec_path, _spec_data = _spec(tmp_path)
     output_root = tmp_path / "private-output"
     evidence = baseline.stage_baseline(spec_path, output_root)
@@ -2531,11 +2537,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "fde46f735538e0cce5246e32e9ce15e9e071ed0d0d992507c954969f8f8e61ce"
+        == "d8a5654f54a3049bccee3aba1c7c513904a431331ac0024036a1a6b8ce044488"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "58a0fcf30bc5b21a09444b1fbdd19cc5d9c7f10a4f42d382472cbd8cfc8f8b39"
+        == "655ea8426e8788bb71e02e24cecc0fa95b5ccd0fe3d2dc0e49348b44897f031f"
     )
 
 
@@ -3869,7 +3875,9 @@ def test_reserve_and_total_liquid_are_available_once_every_reserve_account_is_ad
     assert block["total_liquid"]["status"] == "AVAILABLE"
     # systematic 500 + retained 7.5 + reserve 1010
     assert block["total_liquid"]["current_value"]["value"] == "1517.5"
-    assert block["total_liquid"]["as_of_date"] == "2026-07-14"
+    # The total is dated by its oldest component: echo-x's 2025-11-24 observation.
+    assert block["retained_excluded"]["as_of_date"] == "2025-11-24"
+    assert block["total_liquid"]["as_of_date"] == "2025-11-24"
     checks = _cc_checks(block, case)
     assert checks["capital-identity-at-cutoff"]["status"] == "PASS"
     assert checks["capital-identity-at-cutoff"]["total_liquid_usd"] == "1517.5"
