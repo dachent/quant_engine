@@ -982,7 +982,13 @@ def _fx_world(
         }
         for row in rows
     ]
-    baseline_root = full._published_baseline(tmp_path / "baseline-scope", catalog)
+    # The epoch manifest funds one account, so it is the only account row besides the
+    # reserve: the baseline's current capital stands on it (one account, every strategy).
+    baseline_root = full._published_baseline(
+        tmp_path / "baseline-scope",
+        catalog,
+        capital_funding=full.capital_fixture.shared_funding(catalog, FX_ACCOUNT),
+    )
     epoch_key = (FX_ACCOUNT, FX_STRATEGY, "2026-07-01", None)
     epoch_details = {
         epoch_key: {
@@ -1944,8 +1950,11 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     bytes with sha256 cfb1ab00... under the #503 acceptance ruling.  Cluster 2 (T2)
     moves it on purpose: the report now carries the capital status and date of each
     strategy, the weight-basis labels, and the as-of date of each capital row.  The
-    pin below is the new report; the paired test that follows proves the move is
-    exactly that and nothing else by undoing those fields and reproducing cfb1ab00....
+    synthetic baseline also funds every strategy's current capital with an account of
+    its own (the report refuses a strategy value that no account stands behind), so
+    the report lists those nine accounts.  The pin below is the new report; the paired
+    test that follows proves the move is exactly that and nothing else by undoing
+    those fields and those accounts and reproducing cfb1ab00....
     """
 
     baseline_root = full._published_baseline(tmp_path)
@@ -1953,9 +1962,9 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     report, content, _path = full.reporter.build_report_data(baseline_root)
 
     assert "value_basis_bounds" not in report
-    assert len(content) == 32702
+    assert len(content) == 34412
     assert hashlib.sha256(content).hexdigest() == (
-        "57e31595c0e6d508111c4bd7c567451121e577aabc66ca83916b324c02b3c39b"
+        "14e9800fc654825eb831650fae4bad3510fdcbb50244ee2be0b938306161c33a"
     )
 
 
@@ -1984,10 +1993,22 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     for row in undone["portfolio_summary"]:
         row.pop("as_of_date", None)
         row.pop("weight_basis", None)
+    # The synthetic baseline funds each strategy's current capital with a synthetic
+    # account (``mirror-<strategy_id>``) that v1 did not have; the rows of the accounts
+    # v1 did have are untouched.
+    funding = [
+        row
+        for row in undone["account_summary"]
+        if row["account_id"].startswith("mirror-")
+    ]
+    assert len(funding) == 9
+    undone["account_summary"] = [
+        row for row in undone["account_summary"] if row not in funding
+    ]
     content = canonical_json_bytes(undone)
-    # The published synthetic baseline now carries its `current_capital` block, so its
-    # catalog bytes and generation identity differ from v1's; those two identities
-    # are the only other bytes that moved.
+    # The published synthetic baseline now carries its `current_capital` block and the
+    # funding accounts, so its catalog bytes and generation identity differ from v1's;
+    # those two identities are the only other bytes that moved.
     for current, recorded in (
         (
             report["baseline"]["generation_id"],

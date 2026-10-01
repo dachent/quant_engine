@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
@@ -1632,8 +1633,14 @@ def _published_baseline(
     catalog: dict[str, Any] | None = None,
     *,
     product_contract_path: Path | None = None,
+    capital_funding: Mapping[str, Sequence[str]] | None = None,
 ) -> Path:
-    """Publish a synthetic baseline after explicitly binding test controls."""
+    """Publish a synthetic baseline after explicitly binding test controls.
+
+    ``capital_funding`` names the accounts that stand behind each strategy of the
+    mirrored ``current_capital`` block (see ``current_capital_fixture``); without it
+    each strategy stands on its own synthetic funding account.
+    """
 
     root = tmp_path / "baseline"
     catalog = _baseline_catalog() if catalog is None else catalog
@@ -1659,7 +1666,9 @@ def _published_baseline(
         # fixture that does not care about capital arithmetic gets the block its own
         # allocations imply (value for value), scoped by the product contract that
         # is bound for this publication, so the report's consumers see a well-formed,
-        # internally consistent block.  Tests that exercise capital build their own.
+        # internally consistent block.  Every strategy stands on a member account
+        # (the report refuses a strategy value no account backs), which the catalog
+        # then carries with its NAV.  Tests that exercise capital build their own.
         contract = json.loads(
             Path(reporter._PORTABLE_HWM_PRODUCT_CONTRACT).read_text(encoding="utf-8")
         )
@@ -1670,6 +1679,7 @@ def _published_baseline(
                 for row in contract["strategies"]
                 if row.get("product_requirement") == "REQUIRED"
             ],
+            funding=capital_funding,
         )
     content = canonical_json_bytes(catalog)
     artifact = SourceArtifact(
