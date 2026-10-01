@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -1096,8 +1096,11 @@ def _strategy_interval_return(
 def _validate_hwm_return_parity(
     hwm_returns: Sequence[Mapping[str, Any]],
     ledger_strategy_returns: Sequence[Mapping[str, Any]],
+    *,
+    declared_nav_gap_dates_by_strategy: Mapping[str, frozenset[date]] | None = None,
+    recompute_gap_interval: Callable[[str, date, date], Decimal] | None = None,
 ) -> None:
-    """Fail closed when HWM intervals diverge from ACCOUNT_LIVE strategy TWR."""
+    """Reconcile HWM observed intervals to ACCOUNT_LIVE ledger coverage."""
 
     account_live = [
         row
@@ -1118,10 +1121,10 @@ def _validate_hwm_return_parity(
         strategy_id = _text(row.get("strategy_id"), "ledger return strategy_id")
         ledger_by_strategy[strategy_id].append(row)
     tolerance = Decimal("1e-12")
+    declared_gaps = declared_nav_gap_dates_by_strategy or {}
     for strategy_id, rows in sorted(hwm_by_strategy.items()):
         start = min(
-            _day(row.get("interval_start"), "HWM return interval_start")
-            for row in rows
+            _day(row.get("interval_start"), "HWM return interval_start") for row in rows
         )
         end = max(
             _day(row.get("interval_end"), "HWM return interval_end") for row in rows
@@ -1135,31 +1138,79 @@ def _validate_hwm_return_parity(
             raise SelectedHwmInputError(
                 "HWM return parity lacks ACCOUNT_LIVE ledger rows: " + strategy_id
             )
+        hwm_by_endpoint: dict[date, Mapping[str, Any]] = {}
+        for row in rows:
+            endpoint = _day(row.get("interval_end"), "HWM return interval_end")
+            if endpoint in hwm_by_endpoint:
+                raise SelectedHwmInputError(
+                    "HWM return parity has duplicate HWM endpoint: " + strategy_id
+                )
+            hwm_by_endpoint[endpoint] = row
+        ledger_by_endpoint: dict[date, Mapping[str, Any]] = {}
+        for row in ledger_rows:
+            endpoint = _day(row.get("date"), "ledger return date")
+            if endpoint in ledger_by_endpoint:
+                raise SelectedHwmInputError(
+                    "HWM return parity has duplicate ACCOUNT_LIVE ledger endpoint: "
+                    + strategy_id
+                )
+            if endpoint not in hwm_by_endpoint:
+                raise SelectedHwmInputError(
+                    "HWM return parity ledger endpoint has no HWM interval: "
+                    + strategy_id
+                )
+            ledger_by_endpoint[endpoint] = row
+        reconciled_returns: dict[date, Decimal] = {}
+        for endpoint, hwm_row in hwm_by_endpoint.items():
+            hwm_return = _decimal(hwm_row.get("net_return"), "HWM interval return")
+            ledger_row = ledger_by_endpoint.get(endpoint)
+            if ledger_row is not None:
+                ledger_return = _decimal(
+                    ledger_row.get("return"), "ledger strategy return"
+                )
+                if abs(hwm_return - ledger_return) > tolerance:
+                    raise SelectedHwmInputError(
+                        "HWM return parity differs at shared endpoint "
+                        + endpoint.isoformat()
+                        + " for "
+                        + strategy_id
+                    )
+                reconciled_returns[endpoint] = ledger_return
+                continue
+            interval_start = _day(
+                hwm_row.get("interval_start"), "HWM return interval_start"
+            )
+            if not any(
+                interval_start < gap < endpoint
+                for gap in declared_gaps.get(strategy_id, frozenset())
+            ):
+                raise SelectedHwmInputError(
+                    "HWM return parity unexplained HWM interval: " + strategy_id
+                )
+            if recompute_gap_interval is None:
+                raise SelectedHwmInputError(
+                    "HWM return parity not derivable for declared gap: " + strategy_id
+                )
+            recomputed_return = recompute_gap_interval(
+                strategy_id, interval_start, endpoint
+            )
+            if abs(hwm_return - recomputed_return) > tolerance:
+                raise SelectedHwmInputError(
+                    "HWM return parity gap link differs for " + strategy_id
+                )
+            reconciled_returns[endpoint] = recomputed_return
         with localcontext() as context:
             context.prec = 40
             context.rounding = ROUND_HALF_EVEN
             hwm_compound = Decimal(1)
-            for row in rows:
+            reconciled_compound = Decimal(1)
+            for endpoint in sorted(hwm_by_endpoint):
                 hwm_compound *= Decimal(1) + _decimal(
-                    row.get("net_return"), "HWM interval return"
+                    hwm_by_endpoint[endpoint].get("net_return"),
+                    "HWM interval return",
                 )
-            ledger_compound = Decimal(1)
-            seen_dates: set[date] = set()
-            for row in sorted(
-                ledger_rows,
-                key=lambda item: _day(item.get("date"), "ledger return date"),
-            ):
-                observed_on = _day(row.get("date"), "ledger return date")
-                if observed_on in seen_dates:
-                    raise SelectedHwmInputError(
-                        "HWM return parity has duplicate ACCOUNT_LIVE ledger date: "
-                        + strategy_id
-                    )
-                seen_dates.add(observed_on)
-                ledger_compound *= Decimal(1) + _decimal(
-                    row.get("return"), "ledger strategy return"
-                )
-            residual = hwm_compound - ledger_compound
+                reconciled_compound *= Decimal(1) + reconciled_returns[endpoint]
+            residual = hwm_compound - reconciled_compound
         if abs(residual) > tolerance:
             raise SelectedHwmInputError(
                 "HWM return parity differs for "
@@ -1167,10 +1218,148 @@ def _validate_hwm_return_parity(
                 + ": hwm="
                 + str(hwm_compound)
                 + " ledger="
-                + str(ledger_compound)
+                + str(reconciled_compound)
                 + " residual="
                 + str(residual)
             )
+
+
+def _declared_nav_gap_dates_by_strategy(
+    provider_ledger: Mapping[str, Any],
+    crosswalk: Mapping[EpochKey, Row],
+) -> dict[str, frozenset[date]]:
+    """Bind every selected strategy to its ledger-declared NAV omissions."""
+
+    provider_by_account: dict[str, str] = {}
+    for index, row in enumerate(
+        _rows(provider_ledger.get("nav_observations"), "ledger NAV observations")
+    ):
+        account_id = _text(row.get("account_id"), f"ledger NAV {index}.account_id")
+        provider_id = _text(row.get("provider_id"), f"ledger NAV {index}.provider_id")
+        prior = provider_by_account.setdefault(account_id, provider_id)
+        if prior != provider_id:
+            raise SelectedHwmInputError("ledger account NAV has multiple providers")
+    raw_provider_coverage = provider_ledger.get("provider_coverage", [])
+    provider_coverage = (
+        list(raw_provider_coverage.values())
+        if isinstance(raw_provider_coverage, Mapping)
+        else _rows(raw_provider_coverage, "ledger provider coverage")
+    )
+    gaps_by_provider: dict[str, frozenset[date]] = {}
+    for index, row in enumerate(provider_coverage):
+        provider_id = _text(
+            row.get("provider_id"), f"provider coverage {index}.provider_id"
+        )
+        coverage = _mapping(row.get("coverage"), f"provider coverage {index}")
+        gaps_by_provider[provider_id] = frozenset(
+            _day(
+                exclusion.get("item", "").removeprefix("nav_missing_date:"),
+                "declared NAV gap date",
+            )
+            for exclusion in _rows(
+                coverage.get("declared_exclusions", []),
+                f"provider coverage {index}.declared_exclusions",
+            )
+            if _text(exclusion.get("item"), "declared exclusion item").startswith(
+                "nav_missing_date:"
+            )
+        )
+    result: dict[str, frozenset[date]] = {}
+    for strategy_id in sorted({key[1] for key in crosswalk}):
+        providers = {
+            provider_by_account.get(key[0])
+            for key in crosswalk
+            if key[1] == strategy_id
+        }
+        if None in providers:
+            raise SelectedHwmInputError(
+                "parity not derivable: selected account lacks ledger provider identity"
+            )
+        result[strategy_id] = frozenset(
+            gap
+            for provider_id in providers
+            for gap in gaps_by_provider.get(provider_id, frozenset())
+        )
+    return result
+
+
+def _recompute_gap_interval_return(
+    strategy_id: str,
+    start: date,
+    end: date,
+    *,
+    crosswalk: Mapping[EpochKey, Row],
+    calculation: Mapping[EpochKey, Row],
+    output: Mapping[EpochKey, Row],
+) -> Decimal:
+    """Re-link one declared-gap interval from the verified USD member inputs."""
+
+    start_text = start.isoformat()
+    end_text = end.isoformat()
+    contributors: list[
+        tuple[EpochKey, Decimal, Decimal, Decimal, Decimal, list[Row]]
+    ] = []
+    for key in sorted(
+        key
+        for key in crosswalk
+        if key[1] == strategy_id
+        and key in calculation
+        and key in output
+        and date.fromisoformat(key[2]) <= start
+        and (key[3] is None or end <= date.fromisoformat(key[3]))
+    ):
+        _links, navs, flows, flow_evidence = _validated_account_sources(
+            key, calculation[key], output[key]
+        )
+        beginning = navs.get(start_text)
+        ending = navs.get(end_text)
+        if beginning is None or ending is None:
+            raise SelectedHwmInputError(
+                "parity not derivable: declared-gap endpoint lacks observed NAV"
+            )
+        interval_evidence = [
+            row
+            for recognition_day, rows in flow_evidence.items()
+            if start_text < recognition_day <= end_text
+            for row in rows
+        ]
+        beginning_flow = sum(
+            (
+                _available_usd_amount(row.get("amount"), "strategy capital allocation")
+                for row in interval_evidence
+                if row.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+            ),
+            Decimal("0"),
+        )
+        net_flow = sum(
+            (
+                amount
+                for recognition_day, amount in flows.items()
+                if start_text < recognition_day <= end_text
+            ),
+            Decimal("0"),
+        )
+        contributors.append(
+            (
+                key,
+                beginning,
+                ending,
+                beginning_flow,
+                net_flow - beginning_flow,
+                interval_evidence,
+            )
+        )
+    if not contributors:
+        raise SelectedHwmInputError(
+            "parity not derivable: declared-gap interval has no funded members"
+        )
+    return _strategy_interval_return(
+        start=start,
+        end=end,
+        beginning=sum((row[1] for row in contributors), Decimal("0")),
+        ending=sum((row[2] for row in contributors), Decimal("0")),
+        contributors=contributors,
+    )
 
 
 def _require_complete_flow_coverage(
@@ -1621,12 +1810,29 @@ def _selected_hwm_source_rows(
         source_generation_sha256=source_generation_sha256,
         artifact_sha256s=artifact_sha256s,
     )
-    _validate_hwm_return_parity(
-        returns,
-        _rows(
-            provider_ledger.get("strategy_returns", []), "ledger strategy_returns"
-        ),
+    ledger_strategy_returns = _rows(
+        provider_ledger.get("strategy_returns", []), "ledger strategy_returns"
     )
+    if any(
+        row.get("evidence_layer") == "ACCOUNT_LIVE" for row in ledger_strategy_returns
+    ):
+        _validate_hwm_return_parity(
+            returns,
+            ledger_strategy_returns,
+            declared_nav_gap_dates_by_strategy=_declared_nav_gap_dates_by_strategy(
+                provider_ledger, crosswalk
+            ),
+            recompute_gap_interval=lambda strategy_id, start, end: (
+                _recompute_gap_interval_return(
+                    strategy_id,
+                    start,
+                    end,
+                    crosswalk=crosswalk,
+                    calculation=calculation,
+                    output=output,
+                )
+            ),
+        )
     return _SelectedHwmSourceRows(
         artifact_sha256s=artifact_sha256s,
         calendar=calendar,

@@ -1589,7 +1589,9 @@ def _timed_flow_strategy_rows(
     dict[tuple[str, str, str, str | None], dict[str, Any]],
     dict[tuple[str, str, str, str | None], dict[str, Any]],
 ]:
-    strategy_id = "tt-internal-transfer" if internal_transfer else "volatis-bod-allocation"
+    strategy_id = (
+        "tt-internal-transfer" if internal_transfer else "volatis-bod-allocation"
+    )
     start = "2026-07-13"
     end = "2026-07-14"
     keys = [
@@ -1658,19 +1660,55 @@ def _timed_flow_strategy_rows(
     crosswalk = {key: {"assignment_id": f"assignment-{key[0]}"} for key in keys}
     calculation = {
         keys[0]: {
-            "nav_observations": [nav(keys[0][0], start, "100"), nav(keys[0][0], end, first_ending)],
-            "capital_anchors": [anchor(keys[0][0], first_bod)] if first_bod != "0" else [],
-            "classified_flows": [classified_flow(keys[0][0], first_eod)] if first_eod != "0" else [],
+            "nav_observations": [
+                nav(keys[0][0], start, "100"),
+                nav(keys[0][0], end, first_ending),
+            ],
+            "capital_anchors": [anchor(keys[0][0], first_bod)]
+            if first_bod != "0"
+            else [],
+            "classified_flows": [classified_flow(keys[0][0], first_eod)]
+            if first_eod != "0"
+            else [],
         },
         keys[1]: {
-            "nav_observations": [nav(keys[1][0], start, "100"), nav(keys[1][0], end, second_ending)],
-            "capital_anchors": [anchor(keys[1][0], second_bod)] if second_bod != "0" else [],
-            "classified_flows": [classified_flow(keys[1][0], second_eod)] if second_eod != "0" else [],
+            "nav_observations": [
+                nav(keys[1][0], start, "100"),
+                nav(keys[1][0], end, second_ending),
+            ],
+            "capital_anchors": [anchor(keys[1][0], second_bod)]
+            if second_bod != "0"
+            else [],
+            "classified_flows": [classified_flow(keys[1][0], second_eod)]
+            if second_eod != "0"
+            else [],
         },
     }
     output = {
-        keys[0]: {"observation_trace": {"links": [link(base="100", beginning_flow=first_bod, ending=first_ending, ending_flow=first_eod)]}},
-        keys[1]: {"observation_trace": {"links": [link(base="100", beginning_flow=second_bod, ending=second_ending, ending_flow=second_eod)]}},
+        keys[0]: {
+            "observation_trace": {
+                "links": [
+                    link(
+                        base="100",
+                        beginning_flow=first_bod,
+                        ending=first_ending,
+                        ending_flow=first_eod,
+                    )
+                ]
+            }
+        },
+        keys[1]: {
+            "observation_trace": {
+                "links": [
+                    link(
+                        base="100",
+                        beginning_flow=second_bod,
+                        ending=second_ending,
+                        ending_flow=second_eod,
+                    )
+                ]
+            }
+        },
     }
     return crosswalk, calculation, output
 
@@ -1702,8 +1740,116 @@ def test_nets_tt_like_internal_transfer_only_after_preserving_timing_legs() -> N
 def test_rejects_hwm_compound_residual_above_strict_parity_tolerance() -> None:
     with pytest.raises(SelectedHwmInputError, match="HWM return parity"):
         selected_hwm._validate_hwm_return_parity(
-            [{"strategy_id": "volatis", "interval_start": "2026-07-13", "interval_end": "2026-07-14", "net_return": "0.1"}],
-            [{"strategy_id": "volatis", "date": "2026-07-14", "evidence_layer": "ACCOUNT_LIVE", "return": "0.100000000002"}],
+            [
+                {
+                    "strategy_id": "volatis",
+                    "interval_start": "2026-07-13",
+                    "interval_end": "2026-07-14",
+                    "net_return": "0.1",
+                }
+            ],
+            [
+                {
+                    "strategy_id": "volatis",
+                    "date": "2026-07-14",
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "return": "0.100000000002",
+                }
+            ],
+        )
+
+
+def _robuxio_gap_parity_rows() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    return (
+        [
+            {
+                "strategy_id": "robuxio-crypto",
+                "interval_start": "2026-01-01",
+                "interval_end": "2026-01-02",
+                "net_return": "0.1",
+            },
+            {
+                "strategy_id": "robuxio-crypto",
+                "interval_start": "2026-01-02",
+                "interval_end": "2026-01-04",
+                "net_return": "0.2",
+            },
+        ],
+        [
+            {
+                "strategy_id": "robuxio-crypto",
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": "0.1",
+            }
+        ],
+    )
+
+
+def test_reconciles_declared_gap_spanning_hwm_link_from_admitted_inputs() -> None:
+    """Removing the declared-gap branch makes this Robuxio-shaped coverage fail."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    selected_hwm._validate_hwm_return_parity(
+        hwm_rows,
+        ledger_rows,
+        declared_nav_gap_dates_by_strategy={
+            "robuxio-crypto": frozenset({date(2026, 1, 3)})
+        },
+        recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+    )
+
+
+def test_rejects_hwm_only_interval_without_declared_gap() -> None:
+    """Accepting an unexplained HWM-only interval would hide missing coverage."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="unexplained HWM interval"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={"robuxio-crypto": frozenset()},
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+        )
+
+
+def test_rejects_account_live_endpoint_without_hwm_interval() -> None:
+    """Dropping the ledger-only coverage branch would accept stale projected rows."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+    ledger_rows.append(
+        {
+            "strategy_id": "robuxio-crypto",
+            "date": "2026-01-03",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+        }
+    )
+
+    with pytest.raises(
+        SelectedHwmInputError, match="ledger endpoint has no HWM interval"
+    ):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 3)})
+            },
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+        )
+
+
+def test_rejects_wrong_recomputed_gap_link_return() -> None:
+    """Skipping the link_epoch recomputation must not allow an asserted gap value."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="gap link differs"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 3)})
+            },
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.19"),
         )
 
 
@@ -1711,6 +1857,14 @@ def test_parity_gate_is_called_when_account_live_ledger_rows_are_present(
     tmp_path: Path,
 ) -> None:
     def mutate(ledger: dict[str, Any]) -> None:
+        for nav in ledger["nav_observations"]:
+            nav["provider_id"] = "synthetic"
+        ledger["provider_coverage"] = [
+            {
+                "provider_id": "synthetic",
+                "coverage": {"declared_exclusions": []},
+            }
+        ]
         ledger["strategy_returns"] = [
             {
                 "strategy_id": "grizzlybears-vtma",
