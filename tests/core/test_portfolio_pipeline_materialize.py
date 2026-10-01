@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 
@@ -1541,6 +1541,9 @@ def _fixture(
                 "source_key": "provider-ledger-generation",
             },
         ],
+        # The registry the current capital rows are checked against: one row per
+        # registered strategy, none more, none fewer.
+        "strategies": [{"strategy_id": "strategy-1"}],
     }
     baseline = _generation(
         stages / "baseline",
@@ -4499,6 +4502,14 @@ def _snapshot_replay_drift(payload: dict[str, object]) -> None:
     snapshot["replay"] = {**snapshot["replay"], "reserve_total_usd": "1"}
 
 
+def _registry_names_a_strategy_the_block_lacks(payload: dict[str, object]) -> None:
+    # A required strategy is missing from the published rows while the baseline's
+    # own registry still names it.
+    registry = payload["strategies"]
+    assert isinstance(registry, list)
+    registry.append({"strategy_id": "strategy-2"})
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -4510,6 +4521,7 @@ def _snapshot_replay_drift(payload: dict[str, object]) -> None:
         _stale_valuation_date,
         _wrong_weight,
         _snapshot_replay_drift,
+        _registry_names_a_strategy_the_block_lacks,
     ],
 )
 def test_semantic_financial_identities_fail_on_a_false_current_capital(
@@ -4548,6 +4560,293 @@ def test_semantic_requires_the_current_capital_and_audit_snapshot_blocks(
             materializer.semantic(
                 recipe, output_root / "evidence" / "post-build-semantic.json"
             )
+
+
+def test_semantic_reports_a_registered_strategy_the_block_lacks(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+    baseline = next((output_root / "stages" / "baseline" / "generations").iterdir())
+    _mutate_json(
+        baseline / "portfolio-baseline.json", _registry_names_a_strategy_the_block_lacks
+    )
+
+    with pytest.raises(materializer.MaterializationError, match="financial_identities"):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+    evidence = _financial_check(output_root)["evidence"]
+    assert isinstance(evidence, dict)
+    current = evidence["current_capital"]
+    assert current["identity_status"] == "FAIL"
+    assert current["problems"] == ["missing strategy rows: strategy-2"]
+
+
+def test_semantic_requires_the_strategy_registry_the_rows_are_checked_against(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+    baseline = next((output_root / "stages" / "baseline" / "generations").iterdir())
+
+    def drop_the_registry(payload: dict[str, object]) -> None:
+        payload.pop("strategies")
+
+    _mutate_json(baseline / "portfolio-baseline.json", drop_the_registry)
+
+    with pytest.raises(
+        materializer.MaterializationError, match="baseline current capital differs"
+    ):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+
+# The strategy universe of the current capital block is the baseline's own
+# registry (`strategies`), not whatever rows the block publishes.  The baseline
+# below is hand-written, figure by figure, so no expectation comes from the
+# baseline builder.
+
+_GATE_DAY = "2026-09-17"
+
+
+def _gate_row(
+    strategy_id: str, account_id: str, value: str, weight: str
+) -> dict[str, Any]:
+    """One published strategy row with a single member account."""
+
+    return {
+        "as_of_date": _GATE_DAY,
+        "current_value": _cc_amount(value),
+        "current_weight": weight,
+        "members": [
+            {
+                "account_id": account_id,
+                "as_of_date": _GATE_DAY,
+                "assignment_ids": [f"assignment-{account_id}"],
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "nav_record_id": f"nav-{account_id}",
+                "source_key": "provider-ledger",
+                "status": "AVAILABLE",
+                "value": _cc_amount(value),
+            }
+        ],
+        "reason": None,
+        "scope": "SYSTEMATIC",
+        "status": "AVAILABLE",
+        "strategy_id": strategy_id,
+    }
+
+
+def _three_strategy_baseline() -> dict[str, Any]:
+    """strategy-a, -b and -c own one account each, valued 200, 200 and 600.
+
+    The systematic total is 1000 and the weights are 0.2, 0.2 and 0.6.  No
+    reserve account is admitted, so reserve and total liquid are honestly
+    NOT_READY.
+    """
+
+    book = [
+        ("strategy-a", "account-a", "200", "0.2"),
+        ("strategy-b", "account-b", "200", "0.2"),
+        ("strategy-c", "account-c", "600", "0.6"),
+    ]
+    not_ready = {
+        "as_of_date": None,
+        "components": [],
+        "current_value": _cc_amount(None),
+        "reason": "not every component is current",
+        "status": "NOT_READY_AT_CUTOFF",
+    }
+    return {
+        "as_of_date": _GATE_DAY,
+        "assignments": [
+            {
+                "account_id": account_id,
+                "assignment_id": f"assignment-{account_id}",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "pool_id": "systematic-capital",
+                "strategy_id": strategy_id,
+                "strategy_mapping_disposition": "MAPPED",
+            }
+            for strategy_id, account_id, _, _ in book
+        ],
+        "current_capital": {
+            "basis": "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE",
+            "currency": "USD",
+            "reserve": dict(not_ready),
+            "retained_excluded": {
+                "as_of_date": None,
+                "components": [],
+                "current_value": _cc_amount("0"),
+                "reason": None,
+                "status": "AVAILABLE",
+            },
+            "strategies": [_gate_row(*entry) for entry in book],
+            "systematic": {
+                "as_of_date": _GATE_DAY,
+                "components": [entry[0] for entry in book],
+                "current_value": _cc_amount("1000"),
+                "reason": None,
+                "status": "AVAILABLE",
+            },
+            "total_liquid": dict(not_ready),
+            "valuation_date": _GATE_DAY,
+            "weight_basis": "CURRENT_CUTOFF",
+        },
+        "nav_observations": [
+            {
+                "account_id": account_id,
+                "as_of_date": _GATE_DAY,
+                "nav": _cc_amount(value),
+                "record_id": f"nav-{account_id}",
+                "source_key": "provider-ledger",
+            }
+            for _, account_id, value, _ in book
+        ],
+        "provider_admissions": [],
+        "strategies": [{"strategy_id": entry[0]} for entry in book],
+    }
+
+
+def _remove_strategy_b_with_its_assignments(
+    baseline: dict[str, Any],
+) -> dict[str, Any]:
+    """Corrupt the block the way the review did, leaving the registry alone.
+
+    strategy-b's row and every assignment of it go; the systematic total drops
+    from 1000 to 800 and the two remaining weights are recomputed (0.25, 0.75),
+    so the block reconciles with itself and with the remaining facts.
+    """
+
+    corrupted = copy.deepcopy(baseline)
+    capital = corrupted["current_capital"]
+    capital["strategies"] = [
+        row for row in capital["strategies"] if row["strategy_id"] != "strategy-b"
+    ]
+    weights = {"strategy-a": "0.25", "strategy-c": "0.75"}
+    for row in capital["strategies"]:
+        row["current_weight"] = weights[row["strategy_id"]]
+    capital["systematic"]["components"] = ["strategy-a", "strategy-c"]
+    capital["systematic"]["current_value"] = _cc_amount("800")
+    corrupted["assignments"] = [
+        item for item in corrupted["assignments"] if item["strategy_id"] != "strategy-b"
+    ]
+    return corrupted
+
+
+def test_capital_gate_accepts_the_hand_written_three_strategy_baseline() -> None:
+    accepted, evidence = materializer._current_capital_identity(
+        _three_strategy_baseline()
+    )
+
+    assert accepted is True
+    assert evidence["problems"] == []
+    assert evidence["strategy_mismatches"] == []
+    assert evidence["component_mismatches"] == []
+    assert evidence["recomputed_strategy_count"] == 3
+    assert evidence["systematic_total_usd"] == "1000"
+    # Reserve and total liquid are not current: reported, never stamped PASS.
+    assert evidence["identity_status"] == "NOT_READY"
+    assert evidence["not_ready_components"] == ["reserve", "total_liquid"]
+
+
+def test_capital_gate_rejects_a_strategy_removed_with_its_assignments() -> None:
+    """The review's mutation: a corrupted baseline drops one required strategy,
+    its row and all its assignments, lowers the systematic total and recomputes
+    the remaining weights.  The registry still names the strategy, so the gate
+    must fail closed rather than reconcile the smaller universe."""
+
+    accepted, evidence = materializer._current_capital_identity(
+        _remove_strategy_b_with_its_assignments(_three_strategy_baseline())
+    )
+
+    assert accepted is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["problems"] == ["missing strategy rows: strategy-b"]
+    # The refusal reports the same evidence shape as an accepted block.
+    good = materializer._current_capital_identity(_three_strategy_baseline())[1]
+    assert set(evidence) == set(good)
+
+
+def test_capital_gate_follows_the_registry_not_a_fixed_strategy_count() -> None:
+    """Paired with the rejection above: the identical corrupted block is accepted
+    when the registry itself holds the smaller universe, so the registry equality
+    is the only thing that separated the two runs, and no count is assumed."""
+
+    baseline = _remove_strategy_b_with_its_assignments(_three_strategy_baseline())
+    baseline["strategies"] = [
+        {"strategy_id": "strategy-a"},
+        {"strategy_id": "strategy-c"},
+    ]
+
+    accepted, evidence = materializer._current_capital_identity(baseline)
+
+    assert accepted is True
+    assert evidence["problems"] == []
+    assert evidence["recomputed_strategy_count"] == 2
+    assert evidence["systematic_total_usd"] == "800"
+
+
+@pytest.mark.parametrize(
+    ("registry_ids", "problems"),
+    [
+        (
+            ["strategy-a", "strategy-b"],
+            ["unregistered strategy rows: strategy-c"],
+        ),
+        (
+            [],
+            ["unregistered strategy rows: strategy-a, strategy-b, strategy-c"],
+        ),
+        (
+            # The same number of ids is not the same ids.
+            ["strategy-a", "strategy-b", "strategy-x"],
+            [
+                "missing strategy rows: strategy-x",
+                "unregistered strategy rows: strategy-c",
+            ],
+        ),
+    ],
+    ids=["extra-row", "empty-registry", "same-count-different-ids"],
+)
+def test_capital_gate_rejects_published_rows_the_registry_does_not_name(
+    registry_ids: list[str], problems: list[str]
+) -> None:
+    baseline = _three_strategy_baseline()
+    baseline["strategies"] = [{"strategy_id": item} for item in registry_ids]
+
+    accepted, evidence = materializer._current_capital_identity(baseline)
+
+    assert accepted is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["problems"] == problems
+
+
+@pytest.mark.parametrize(
+    ("registry", "message"),
+    [
+        (None, "baseline current capital differs"),
+        ("strategy-a", "baseline current capital differs"),
+        (["strategy-a"], "baseline current capital differs"),
+        ([{"name": "no identity"}], "registry strategy_id must be non-empty text"),
+    ],
+    ids=["absent", "not-a-list", "rows-not-objects", "row-without-an-id"],
+)
+def test_capital_gate_fails_closed_on_an_unreadable_registry(
+    registry: object, message: str
+) -> None:
+    baseline = _three_strategy_baseline()
+    if registry is None:
+        del baseline["strategies"]
+    else:
+        baseline["strategies"] = registry
+
+    with pytest.raises(materializer.MaterializationError, match=message):
+        materializer._current_capital_identity(baseline)
 
 
 Mutator = Callable[[Path], None]
