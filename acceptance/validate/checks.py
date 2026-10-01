@@ -2422,6 +2422,296 @@ def check_reconciliation_recompute(ctx: Context) -> Iterator[Finding]:
             )
 
 
+# -------------------------- value-basis bounds and the oracle (L6c, N28)
+#
+# A strategy whose admitted FX ends before the cutoff has no USD value past that end
+# (FXB-1), so a published date before the cutoff can be correct. The report says so
+# in its top-level ``value_basis_bounds`` block. The validator never takes that
+# block at its word: a date finding becomes ``NOT_READY`` instead of
+# ``BLOCKER_AUTHORITY`` only when an entry of the block has the finding's
+# (section, entity, date) and a non-empty ``bounded_by``, and the oracle confirms it
+# -- every bounded strategy has an expected ``capital.strategy.cutoff`` row whose
+# ``as_of`` is that date. ``dates.value_basis_bound`` then checks the block itself
+# against the oracle and the validator's cutoff. Without an expected baseline
+# nothing is reclassified and only the oracle-free clauses of the block check run.
+
+BOUNDS_CHECK = "dates.value_basis_bound"
+_BOUNDS_BLOCK = "value_basis_bounds"
+_BOUNDS_DEFECTS = ("N28",)
+
+
+@dataclass(frozen=True)
+class BoundStrategy:
+    position: int
+    strategy_id: str
+    effective_end: date
+    raw_end: Any
+
+
+@dataclass(frozen=True)
+class BoundedSection:
+    position: int
+    section: str
+    entity: str
+    day: date
+    bounded_by: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ValueBasisDisclosure:
+    """The ``value_basis_bounds`` block as read, with every structural problem."""
+
+    cutoff: date | None
+    raw_cutoff: Any
+    strategies: tuple[BoundStrategy, ...]
+    sections: tuple[BoundedSection, ...]
+    problems: tuple[str, ...]
+
+
+def _read_value_basis_disclosure(block: Any) -> ValueBasisDisclosure:
+    if not isinstance(block, Mapping):
+        return ValueBasisDisclosure(
+            None, None, (), (), ("value_basis_bounds is not an object",)
+        )
+    problems: list[str] = []
+    raw_cutoff = block.get("calculation_cutoff_date")
+    cutoff = to_date(raw_cutoff)
+    if cutoff is None:
+        problems.append("calculation_cutoff_date is not a date")
+    strategies: list[BoundStrategy] = []
+    raw_strategies = block.get("strategies")
+    if not isinstance(raw_strategies, list):
+        problems.append("strategies is not a list")
+    else:
+        seen: set[str] = set()
+        for position, item in enumerate(raw_strategies):
+            strategy_id = item.get("strategy_id") if isinstance(item, Mapping) else None
+            if not isinstance(strategy_id, str) or not strategy_id:
+                problems.append(f"strategies[{position}] has no strategy_id")
+                continue
+            if strategy_id in seen:
+                problems.append(
+                    f"strategies[{position}] repeats strategy {strategy_id}"
+                )
+                continue
+            seen.add(strategy_id)
+            raw_end = item.get("effective_end")
+            end = to_date(raw_end)
+            if end is None:
+                problems.append(f"strategies[{position}].effective_end is not a date")
+                continue
+            strategies.append(BoundStrategy(position, strategy_id, end, raw_end))
+    sections: list[BoundedSection] = []
+    raw_sections = block.get("bounded_sections")
+    if not isinstance(raw_sections, list):
+        problems.append("bounded_sections is not a list")
+    else:
+        for position, item in enumerate(raw_sections):
+            if not isinstance(item, Mapping):
+                problems.append(f"bounded_sections[{position}] is not an object")
+                continue
+            section, entity = item.get("section"), item.get("entity")
+            bounded_by = item.get("bounded_by")
+            day = to_date(item.get("date"))
+            if not isinstance(section, str) or not isinstance(entity, str):
+                problems.append(
+                    f"bounded_sections[{position}] has no section or entity"
+                )
+            elif day is None:
+                problems.append(f"bounded_sections[{position}].date is not a date")
+            elif not isinstance(bounded_by, list) or not all(
+                isinstance(name, str) and name for name in bounded_by
+            ):
+                problems.append(
+                    f"bounded_sections[{position}].bounded_by is not a list of strategy ids"
+                )
+            else:
+                sections.append(
+                    BoundedSection(position, section, entity, day, tuple(bounded_by))
+                )
+    return ValueBasisDisclosure(
+        cutoff, raw_cutoff, tuple(strategies), tuple(sections), tuple(problems)
+    )
+
+
+def value_basis_disclosure(ctx: Context) -> ValueBasisDisclosure | None:
+    """The report's ``value_basis_bounds`` block, or ``None`` when it has none."""
+
+    if "value_basis_disclosure" in ctx._cache:
+        cached = ctx._cache["value_basis_disclosure"]
+        return cached if isinstance(cached, ValueBasisDisclosure) else None
+    block = ctx.report.get(_BOUNDS_BLOCK)
+    result = None if block is None else _read_value_basis_disclosure(block)
+    ctx._cache["value_basis_disclosure"] = result
+    return result
+
+
+def _oracle_cutoff_dates(ctx: Context) -> dict[str, frozenset[date]] | None:
+    """Per strategy, the ``as_of`` dates of its expected ``capital.strategy.cutoff`` rows.
+
+    ``None`` without an expected baseline; a strategy whose rows carry no ``as_of``
+    maps to an empty set (the oracle names no date for it).
+    """
+
+    if ctx.expected is None:
+        return None
+    cached = ctx._cache.get("oracle_cutoff_dates")
+    if isinstance(cached, dict):
+        return cached
+    found: dict[str, set[date]] = {}
+    for row in ctx.expected:
+        if row.get("metric_id") != "capital.strategy.cutoff":
+            continue
+        days = found.setdefault(str(row.get("entity")), set())
+        day = to_date(row.get("as_of"))
+        if day is not None:
+            days.add(day)
+    result = {strategy: frozenset(days) for strategy, days in found.items()}
+    ctx._cache["oracle_cutoff_dates"] = result
+    return result
+
+
+def verified_value_basis_bound(
+    ctx: Context, section: str, entity: str, day: date
+) -> BoundedSection | None:
+    """The block entry that explains this date, when the oracle confirms it.
+
+    The entry has the same (section, entity, date) and a non-empty ``bounded_by``,
+    the date precedes the cutoff, the block has no structural problem, and every
+    bounded strategy has an expected ``capital.strategy.cutoff`` row whose only
+    ``as_of`` is that date. ``None`` means the finding is unchanged.
+    """
+
+    disclosure = value_basis_disclosure(ctx)
+    oracle = _oracle_cutoff_dates(ctx)
+    if disclosure is None or disclosure.problems or oracle is None or day >= ctx.cutoff:
+        return None
+    for entry in disclosure.sections:
+        if (
+            (entry.section, entry.entity, entry.day) == (section, entity, day)
+            and entry.bounded_by
+            and all(oracle.get(name) == frozenset({day}) for name in entry.bounded_by)
+        ):
+            return entry
+    return None
+
+
+def _bound_message(entry: BoundedSection, what: str) -> str:
+    return (
+        f"{what} ends before the cutoff only because the value basis of "
+        f"{', '.join(entry.bounded_by)} ends at that date (value_basis_bounds entry "
+        "confirmed by the oracle capital.strategy.cutoff as_of, FXB-1)"
+    )
+
+
+def check_value_basis_bound(ctx: Context) -> Iterator[Finding]:
+    """N28/FXB-1: the report's ``value_basis_bounds`` block against the oracle.
+
+    ``BLOCKER_AUTHORITY`` for a bounded strategy whose ``effective_end`` differs from
+    the oracle's ``capital.strategy.cutoff`` ``as_of`` (a missing oracle row counts)
+    or whose block ``calculation_cutoff_date`` differs from the validator cutoff;
+    ``BLOCKER_INVARIANT`` for an entry whose date is not the earliest
+    ``effective_end`` over its ``bounded_by`` (empty, or naming a strategy the
+    block does not list) and for a block the check cannot read. Without an expected
+    baseline only the oracle-free clauses run. Silent when the report has no block.
+    """
+
+    disclosure = value_basis_disclosure(ctx)
+    if disclosure is None:
+        return
+    for problem in disclosure.problems:
+        yield _finding(
+            BOUNDS_CHECK,
+            BLOCKER_INVARIANT,
+            _BOUNDS_BLOCK,
+            problem,
+            "a well-formed value_basis_bounds block",
+            REPORT,
+            f"$.{_BOUNDS_BLOCK}",
+            _BOUNDS_DEFECTS,
+            f"the value-basis disclosure cannot be read: {problem}",
+        )
+    oracle = _oracle_cutoff_dates(ctx)
+    for strategy in disclosure.strategies:
+        reasons: list[str] = []
+        expected_end: Any = None
+        if oracle is not None:
+            days = oracle.get(strategy.strategy_id, frozenset())
+            expected_end = (
+                next(iter(days)).isoformat()
+                if len(days) == 1
+                else sorted(day.isoformat() for day in days) or None
+            )
+            if not days:
+                reasons.append(
+                    "the oracle has no capital.strategy.cutoff row with an as_of "
+                    f"for {strategy.strategy_id}"
+                )
+            elif days != frozenset({strategy.effective_end}):
+                reasons.append(
+                    f"effective_end {strategy.effective_end} differs from the oracle "
+                    f"capital.strategy.cutoff as_of {expected_end}"
+                )
+        if disclosure.cutoff is not None and disclosure.cutoff != ctx.cutoff:
+            reasons.append(
+                f"calculation_cutoff_date {disclosure.cutoff} differs from the "
+                f"declared cutoff {ctx.cutoff}"
+            )
+        if reasons:
+            yield _finding(
+                BOUNDS_CHECK,
+                BLOCKER_AUTHORITY,
+                strategy.strategy_id,
+                {
+                    "effective_end": strategy.raw_end,
+                    "calculation_cutoff_date": disclosure.raw_cutoff,
+                },
+                {
+                    "effective_end": expected_end,
+                    "calculation_cutoff_date": ctx.cutoff,
+                },
+                REPORT,
+                f"$.{_BOUNDS_BLOCK}.strategies[{strategy.position}]",
+                _BOUNDS_DEFECTS,
+                "the value-basis bound is not the oracle's: " + "; ".join(reasons),
+            )
+    ends = {
+        strategy.strategy_id: strategy.effective_end
+        for strategy in disclosure.strategies
+    }
+    for entry in disclosure.sections:
+        reason = None
+        if not entry.bounded_by:
+            reason = (
+                "bounded_by is empty, so no strategy's value basis ends at the date"
+            )
+        else:
+            unknown = [name for name in entry.bounded_by if name not in ends]
+            if unknown:
+                reason = (
+                    f"bounded_by names strategies the block does not bound: {unknown}"
+                )
+            else:
+                earliest = min(ends[name] for name in entry.bounded_by)
+                if entry.day != earliest:
+                    reason = (
+                        f"the date {entry.day} is not the earliest effective_end "
+                        f"({earliest}) over bounded_by"
+                    )
+        if reason is not None:
+            yield _finding(
+                BOUNDS_CHECK,
+                BLOCKER_INVARIANT,
+                f"{entry.section}|{entry.entity}",
+                {"date": entry.day, "bounded_by": list(entry.bounded_by)},
+                "date = min(effective_end over bounded_by)",
+                REPORT,
+                f"$.{_BOUNDS_BLOCK}.bounded_sections[{entry.position}]",
+                _BOUNDS_DEFECTS,
+                f"the value-basis entry is inconsistent: {reason}",
+            )
+
+
 def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
     """B4/B13: current capital must be dated at the declared cutoff."""
 
@@ -2447,16 +2737,20 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
     for position, row in enumerate(rows(ctx.report, "account_summary")):
         as_of = to_date(row.get("as_of_date"))
         if as_of is not None and as_of < cutoff and is_available(row.get("status")):
+            account = str(row.get("account_id"))
+            bound = verified_value_basis_bound(ctx, "account_summary", account, as_of)
             yield _finding(
                 "capital.as_of_cutoff",
-                BLOCKER_AUTHORITY,
-                str(row.get("account_id")),
+                BLOCKER_AUTHORITY if bound is None else NOT_READY,
+                account,
                 row.get("as_of_date"),
                 cutoff,
                 REPORT,
                 f"$.account_summary[{position}].as_of_date",
                 ("B4",),
-                "current account value is presented available but dated before the cutoff",
+                "current account value is presented available but dated before the cutoff"
+                if bound is None
+                else _bound_message(bound, "current account value"),
             )
     if stale_allocations:
         for position, row in enumerate(rows(ctx.report, "reconciliation_checks")):
@@ -4075,7 +4369,19 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
         if day is None or day == cutoff:
             continue
         after = day > cutoff
-        if is_available(status) or after:
+        bound = (
+            verified_value_basis_bound(
+                ctx, "decomposition_lenses", entity.removeprefix("decomposition:"), day
+            )
+            if not after
+            and is_available(status)
+            and entity.startswith("decomposition:")
+            else None
+        )
+        if bound is not None:
+            klass = NOT_READY
+            message = _bound_message(bound, "section")
+        elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
                 "section is dated after the declared cutoff"
@@ -5962,6 +6268,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
+    (BOUNDS_CHECK, check_value_basis_bound),
     ("dates.weekly_current_week", check_weekly_current_week),
     ("completeness.required_outputs", check_completeness),
     ("code.data_deref_before_guard", check_app_guard),
