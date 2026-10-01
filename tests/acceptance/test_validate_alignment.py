@@ -982,6 +982,45 @@ def test_the_strategy_level_recompute_is_still_declined_beside_a_confirmed_block
     ]
 
 
+def test_the_flow_recompute_never_counts_the_trace_of_a_skipped_blocked_row(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1a (fail-before): R2 keeps assignment-only intervals out of the flows.
+
+    An oracle window that starts inside A1's history leaves no view to compare, so
+    the count is recomputed from the panel's traces.  The product's blocked manifest
+    row carries no trace; were one to carry three events in the window, the recompute
+    still leaves them out, as the multi-epoch aggregate does.  Mutation MY-3 (the
+    recompute counts every manifest row of the account) turns this red.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+
+    def traced(panel: dict[str, Any]) -> None:
+        for row in panel["account_manifest"]["rows"]:
+            if row.get("admission_status") == "BLOCKED":
+                row["capital_flow_trace"] = [
+                    {
+                        "amount": "10",
+                        "class": "DEPOSIT",
+                        "event_date": "2026-01-15",
+                        "nav_recognition_date": "2026-01-15",
+                    }
+                ] * 3
+
+    spec = _blocked_epochs(["A1"])
+    spec.panel.append(traced)
+    gen_dir = build(tmp_path / "gen", spec)
+    rows = [
+        {**row, "window_start": "2025-12-15", "expected": "0"}
+        for row in _oracle(census_sha=sha)
+        if row["metric_id"] == "flows.account.count"
+    ]
+    assert _expected_findings(_run(gen_dir, rows, repo)) == []
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
