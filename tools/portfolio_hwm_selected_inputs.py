@@ -36,6 +36,13 @@ from quant_engine.portfolio_ledger.hwm_governed import (
     validate_governed_hwm_calendar_authority,
 )
 from quant_engine.portfolio_ledger.hwm_input_builder import build_governed_hwm_inputs
+from quant_engine.portfolio_ledger.returns import (
+    DATE_ONLY,
+    EXACT_TIMESTAMP,
+    FlowLeg,
+    link_epoch,
+    opening_point,
+)
 
 
 account_verifier = import_module("verify_account_manifest_generation")
@@ -393,7 +400,7 @@ def _verify_account_manifest_replay(
     provider_ledger_generation_path: Path,
     baseline_generation_path: Path,
     membership_census_path: Path | None = None,
-) -> tuple[str, str, GenerationManifest]:
+) -> tuple[str, str, GenerationManifest, Row]:
     payloads = bundle.payloads
     selected = strict_json_object(
         payloads["authority/selected-input-identities.json"],
@@ -533,6 +540,7 @@ def _verify_account_manifest_replay(
         _sha(provider_selected.get("generation_id"), "provider ledger generation_id"),
         _sha(provider_manifest_identity.get("sha256"), "provider manifest sha256"),
         provider_source,
+        strict_json_object(provider_ledger.contents, label="selected provider ledger"),
     )
 
 
@@ -826,7 +834,7 @@ def _validated_account_links(
     calculation: Mapping[str, Any],
     output: Mapping[str, Any],
 ) -> list[Row]:
-    links, _, _, _ = _validated_account_sources(key, calculation, output)
+    links, *_ = _validated_account_sources(key, calculation, output)
     return links
 
 
@@ -834,7 +842,12 @@ def _validated_account_sources(
     key: EpochKey,
     calculation: Mapping[str, Any],
     output: Mapping[str, Any],
-) -> tuple[list[Row], dict[str, Decimal], dict[str, Decimal], dict[str, list[Row]]]:
+) -> tuple[
+    list[Row],
+    dict[str, Decimal],
+    dict[str, Decimal],
+    dict[str, list[Row]],
+]:
     if _contains_forbidden_quality_marker(
         calculation
     ) or _contains_forbidden_quality_marker(output):
@@ -1014,14 +1027,150 @@ def _validated_account_sources(
     # members define.  Any other epoch must carry its linked evidence.
     if not links and not _r3_zero_capital_member(output):
         raise SelectedHwmInputError("selected epoch has no observation-linked returns")
-    return links, nav_by_date, dict(flows_by_date), dict(flow_evidence_by_date)
+    return (
+        links,
+        nav_by_date,
+        dict(flows_by_date),
+        dict(flow_evidence_by_date),
+    )
 
 
-def _fraction_decimal(value: Fraction) -> str:
+def _fraction_decimal(value: Fraction | Decimal) -> str:
     with localcontext() as context:
         context.prec = 34
         context.rounding = ROUND_HALF_EVEN
-        return str(Decimal(value.numerator) / Decimal(value.denominator))
+        if isinstance(value, Fraction):
+            return str(Decimal(value.numerator) / Decimal(value.denominator))
+        return str(+value)
+
+
+def _strategy_interval_return(
+    *,
+    start: date,
+    end: date,
+    beginning: Decimal,
+    ending: Decimal,
+    contributors: Sequence[
+        tuple[EpochKey, Decimal, Decimal, Decimal, Decimal, list[Row]]
+    ],
+) -> Decimal:
+    """Reuse the return kernel for the HWM strategy's summed member values."""
+
+    observations = {start: beginning, end: ending}
+    opening = opening_point(observations, end)
+    if opening is None or opening.as_of != start:
+        raise SelectedHwmInputError("aggregated strategy opening NAV is unavailable")
+    legs: list[FlowLeg] = []
+    for key, _starting, _ending, beginning_flow, ending_flow, _evidence in contributors:
+        for amount, timing in (
+            (beginning_flow, EXACT_TIMESTAMP),
+            (ending_flow, DATE_ONLY),
+        ):
+            if amount == 0:
+                continue
+            flow_class = "INTERNAL_IN" if amount > 0 else "INTERNAL_OUT"
+            legs.append(
+                FlowLeg(
+                    amount=amount,
+                    flow_class=flow_class,
+                    event_date=end,
+                    nav_recognition_date=end,
+                    timing=timing,
+                    economic_date=end if timing == EXACT_TIMESTAMP else None,
+                    source_record_ids=(
+                        f"hwm:{key[0]}:{start.isoformat()}:{end.isoformat()}:{timing}",
+                    ),
+                )
+            )
+    with localcontext() as context:
+        context.prec = 40
+        context.rounding = ROUND_HALF_EVEN
+        linked = link_epoch(observations, legs, opening)
+    if linked.twr is None or len(linked.links) != 1:
+        raise SelectedHwmInputError(
+            "aggregated strategy observation factor is unavailable in return kernel"
+        )
+    return linked.twr
+
+
+def _validate_hwm_return_parity(
+    hwm_returns: Sequence[Mapping[str, Any]],
+    ledger_strategy_returns: Sequence[Mapping[str, Any]],
+) -> None:
+    """Fail closed when HWM intervals diverge from ACCOUNT_LIVE strategy TWR."""
+
+    account_live = [
+        row
+        for row in ledger_strategy_returns
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    ]
+    # Synthetic unit fixtures predating the ledger strategy-return surface do not
+    # claim an ACCOUNT_LIVE path. Real selected ledgers must carry it, and once
+    # present every HWM strategy window is checked below.
+    if not account_live:
+        return
+    hwm_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in hwm_returns:
+        strategy_id = _text(row.get("strategy_id"), "HWM return strategy_id")
+        hwm_by_strategy[strategy_id].append(row)
+    ledger_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in account_live:
+        strategy_id = _text(row.get("strategy_id"), "ledger return strategy_id")
+        ledger_by_strategy[strategy_id].append(row)
+    tolerance = Decimal("1e-12")
+    for strategy_id, rows in sorted(hwm_by_strategy.items()):
+        start = min(
+            _day(row.get("interval_start"), "HWM return interval_start")
+            for row in rows
+        )
+        end = max(
+            _day(row.get("interval_end"), "HWM return interval_end") for row in rows
+        )
+        ledger_rows = [
+            row
+            for row in ledger_by_strategy.get(strategy_id, [])
+            if start < _day(row.get("date"), "ledger return date") <= end
+        ]
+        if not ledger_rows:
+            raise SelectedHwmInputError(
+                "HWM return parity lacks ACCOUNT_LIVE ledger rows: " + strategy_id
+            )
+        with localcontext() as context:
+            context.prec = 40
+            context.rounding = ROUND_HALF_EVEN
+            hwm_compound = Decimal(1)
+            for row in rows:
+                hwm_compound *= Decimal(1) + _decimal(
+                    row.get("net_return"), "HWM interval return"
+                )
+            ledger_compound = Decimal(1)
+            seen_dates: set[date] = set()
+            for row in sorted(
+                ledger_rows,
+                key=lambda item: _day(item.get("date"), "ledger return date"),
+            ):
+                observed_on = _day(row.get("date"), "ledger return date")
+                if observed_on in seen_dates:
+                    raise SelectedHwmInputError(
+                        "HWM return parity has duplicate ACCOUNT_LIVE ledger date: "
+                        + strategy_id
+                    )
+                seen_dates.add(observed_on)
+                ledger_compound *= Decimal(1) + _decimal(
+                    row.get("return"), "ledger strategy return"
+                )
+            residual = hwm_compound - ledger_compound
+        if abs(residual) > tolerance:
+            raise SelectedHwmInputError(
+                "HWM return parity differs for "
+                + strategy_id
+                + ": hwm="
+                + str(hwm_compound)
+                + " ledger="
+                + str(ledger_compound)
+                + " residual="
+                + str(residual)
+            )
 
 
 def _require_complete_flow_coverage(
@@ -1182,7 +1331,7 @@ def _derive_builder_rows(
                 and (key[3] is None or end <= date.fromisoformat(key[3]))
             ]
             contributors: list[
-                tuple[EpochKey, Decimal, Decimal, Decimal, list[Row]]
+                tuple[EpochKey, Decimal, Decimal, Decimal, Decimal, list[Row]]
             ] = []
             for key in required_epochs:
                 starting_nav = nav_by_epoch[key].get(start_text)
@@ -1205,8 +1354,26 @@ def _derive_builder_rows(
                     if start_text < recognition_day <= end_text
                     for row in rows
                 ]
+                interval_beginning_flow = sum(
+                    (
+                        _available_usd_amount(
+                            row.get("amount"), "strategy capital allocation"
+                        )
+                        for row in interval_evidence
+                        if row.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+                    ),
+                    Decimal("0"),
+                )
+                interval_ending_flow = interval_flow - interval_beginning_flow
                 contributors.append(
-                    (key, starting_nav, ending_nav, interval_flow, interval_evidence)
+                    (
+                        key,
+                        starting_nav,
+                        ending_nav,
+                        interval_beginning_flow,
+                        interval_ending_flow,
+                        interval_evidence,
+                    )
                 )
             if not contributors:
                 raise SelectedHwmInputError(
@@ -1218,8 +1385,13 @@ def _derive_builder_rows(
                     "aggregated strategy beginning NAV must be positive"
                 )
             ending = sum((row[2] for row in contributors), Decimal("0"))
-            net_flow = sum((row[3] for row in contributors), Decimal("0"))
-            net_return = Fraction(ending - beginning - net_flow) / Fraction(beginning)
+            net_return = _strategy_interval_return(
+                start=start,
+                end=end,
+                beginning=beginning,
+                ending=ending,
+                contributors=contributors,
+            )
             if net_return <= -1:
                 raise SelectedHwmInputError(
                     "aggregated strategy observation factor must be positive"
@@ -1234,10 +1406,12 @@ def _derive_builder_rows(
                         "epoch_effective_end": key[3],
                         "starting_nav": str(starting_nav),
                         "ending_nav": str(ending_nav),
-                        "net_flow": str(interval_flow),
+                        "beginning_flow": str(beginning_flow),
+                        "ending_flow": str(ending_flow),
+                        "net_flow": str(beginning_flow + ending_flow),
                         "flow_evidence": flow_evidence,
                     }
-                    for key, starting_nav, ending_nav, interval_flow, flow_evidence in sorted(
+                    for key, starting_nav, ending_nav, beginning_flow, ending_flow, flow_evidence in sorted(
                         contributors
                     )
                 ],
@@ -1411,7 +1585,7 @@ def _selected_hwm_source_rows(
         artifact_id: strict_json_object(bundle.payloads[artifact_id], label=artifact_id)
         for artifact_id in _REQUIRED_ARTIFACTS
     }
-    source_generation_id, source_generation_sha256, source_manifest = (
+    source_generation_id, source_generation_sha256, source_manifest, provider_ledger = (
         _verify_account_manifest_replay(
             bundle,
             account_manifest_admission_policy_path=(
@@ -1446,6 +1620,12 @@ def _selected_hwm_source_rows(
         source_generation_id=source_generation_id,
         source_generation_sha256=source_generation_sha256,
         artifact_sha256s=artifact_sha256s,
+    )
+    _validate_hwm_return_parity(
+        returns,
+        _rows(
+            provider_ledger.get("strategy_returns", []), "ledger strategy_returns"
+        ),
     )
     return _SelectedHwmSourceRows(
         artifact_sha256s=artifact_sha256s,
