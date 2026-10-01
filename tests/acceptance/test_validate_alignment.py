@@ -1107,13 +1107,20 @@ LENS_ENTITY = "decomposition:ECONOMIC_FACTOR:LIVE_ONLY"
 BLOCK = "value_basis_bounds"
 
 
-def _bound_strategy(strategy: str, end: str = BOUND_DAY) -> dict[str, Any]:
-    return {
+def _bound_strategy(
+    strategy: str, end: str = BOUND_DAY, account_ids: Any = ("A1",)
+) -> dict[str, Any]:
+    """A bounded strategy as the block lists it; ``account_ids`` as given
+    (``_ABSENT``: the key is left out)."""
+
+    row = {
         "strategy_id": strategy,
         "effective_end": end,
         "bound_kind": "ADMITTED_FX_END",
         "provider_ids": ["matrixport"],
-        "account_ids": ["A1"],
+        "account_ids": list(account_ids)
+        if isinstance(account_ids, tuple)
+        else account_ids,
         "fx_source_id": "portfolio-fx-rates",
         "fx_generation_id": "9" * 64,
         "fx_observed_end": end,
@@ -1123,6 +1130,9 @@ def _bound_strategy(strategy: str, end: str = BOUND_DAY) -> dict[str, Any]:
             "last_date": CUTOFF,
         },
     }
+    if account_ids is _ABSENT:
+        del row["account_ids"]
+    return row
 
 
 def _bound_entry(
@@ -1549,6 +1559,116 @@ def test_a_date_after_the_cutoff_is_never_reclassified(tmp_path: Path) -> None:
         for f in findings
         if f.check_id == "dates.section_as_of_vs_cutoff" and f.entity == LENS_ENTITY
     ] == BLOCKERS
+
+
+# -------------------- L6c fix round 1: an account is bound only by a strategy that owns it
+#
+# An account_summary entry names an account.  The bound explains that account's early
+# date only when the account belongs to a strategy the entry is bounded by: the
+# block's own strategies[*].account_ids (published view to published view; the
+# oracle has no account-to-strategy map).  Without that, a stale available account
+# could be relabelled NOT_READY by a valid bound of a strategy that owns other
+# accounts (Codex and Kimi lane-eps-r0).  A decomposition_lenses entry names a lens
+# ({lens_id}:{evidence_mode}), not an account, so it is tied to its strategies by the
+# oracle check alone and the account test does not apply to it.
+
+
+def test_an_account_the_bounded_strategy_does_not_own_keeps_its_blocker(
+    tmp_path: Path,
+) -> None:
+    """L6c fix 3 (fail-before): A1 is bound by alpha while alpha owns only B2.
+
+    The block is otherwise valid and the oracle confirms alpha's end, so the check
+    stays silent about the block; A1's early date is not explained by it.  The lens
+    entry is not an account and is still reclassified.  Mutation MC-8 (the account
+    test left out) turns this red.
+    """
+
+    block = _bounds_block(
+        [_bound_strategy("alpha", account_ids=("B2",))], [ACCOUNT_ENTRY, LENS_ENTRY]
+    )
+    assert _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")]) == {
+        "account": BLOCKERS,
+        "lens": NOT_READY_ONLY,
+        "bound": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "account_ids",
+    [(), _ABSENT, "A1", {"A1": True}, [1, None], ["A1", 5]],
+    ids=["empty", "missing", "bare_string", "mapping", "not_strings", "mixed"],
+)
+def test_account_ids_that_do_not_declare_the_account_leave_the_blocker(
+    tmp_path: Path, account_ids: Any
+) -> None:
+    """L6c fix 3 (fail-before): no readable account list, no account to bind.
+
+    A bare string or a mapping that merely contains "A1" is not a list of accounts.
+    """
+
+    block = _bounds_block(
+        [_bound_strategy("alpha", account_ids=account_ids)],
+        [ACCOUNT_ENTRY, LENS_ENTRY],
+    )
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["account"] == BLOCKERS
+    assert result["lens"] == NOT_READY_ONLY
+
+
+def test_an_account_owned_by_none_of_two_bounded_strategies_keeps_its_blocker(
+    tmp_path: Path,
+) -> None:
+    """L6c fix 3 (fail-before): the union over bounded_by is what has to hold A1."""
+
+    both = ("alpha", "beta")
+    block = _bounds_block(
+        [
+            _bound_strategy("alpha", account_ids=("B2",)),
+            _bound_strategy("beta", account_ids=("B1",)),
+        ],
+        [_bound_entry("account_summary", "A1", "as_of_date", both)],
+    )
+    oracle = [_strategy_cutoff("alpha"), _strategy_cutoff("beta")]
+    result = _l6c_run(tmp_path, block, oracle)
+    assert result["account"] == BLOCKERS
+    assert result["bound"] == []
+
+
+def test_an_account_owned_by_one_of_two_bounded_strategies_is_verified(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): A1 belongs to beta, and both strategies are confirmed.
+
+    The oracle check already requires every strategy in bounded_by to end at the
+    date, so one owner among them explains the account's date.
+    """
+
+    both = ("alpha", "beta")
+    block = _bounds_block(
+        [
+            _bound_strategy("alpha", account_ids=("B2",)),
+            _bound_strategy("beta", account_ids=("A1", "B1")),
+        ],
+        [_bound_entry("account_summary", "A1", "as_of_date", both)],
+    )
+    oracle = [_strategy_cutoff("alpha"), _strategy_cutoff("beta")]
+    result = _l6c_run(tmp_path, block, oracle)
+    assert result["account"] == NOT_READY_ONLY
+    assert result["bound"] == []
+
+
+def test_a_lens_entry_needs_no_account_of_its_strategies(tmp_path: Path) -> None:
+    """Control (green on main): the exemption; a lens entity is not an account id.
+
+    Alpha owns no account at all and the lens is still bound by it.  Mutation MC-9
+    (the account test applied to every entry) turns this red.
+    """
+
+    block = _bounds_block([_bound_strategy("alpha", account_ids=())], [LENS_ENTRY])
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["lens"] == NOT_READY_ONLY
+    assert result["account"] == BLOCKERS
 
 
 # --------------------------------------------- L6c seam: the real producer's block
