@@ -19,11 +19,13 @@ A check that cannot evaluate raises; the runner turns that into a blocking
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import math
+from pathlib import Path
 import re
 from typing import Any
 
@@ -32,13 +34,17 @@ from .generation import (
     APP,
     PAYLOAD_FILES,
     CANDIDATE,
+    CENSUS_CONTRACT,
     FRESHNESS,
     GENERATION_MANIFEST,
     INDEX,
     PANEL,
     PANEL_SCRIPT,
     REPORT,
+    ContractCensus,
     Generation,
+    GenerationError,
+    load_contract_census,
 )
 
 BLOCKER_INVARIANT = "BLOCKER_INVARIANT"
@@ -188,6 +194,10 @@ class Context:
     expected_not_derivable: list[dict[str, Any]] = field(default_factory=list)
     corrections: list[dict[str, Any]] | None = None
     _cache: dict[str, Any] = field(default_factory=dict)
+    # The repository whose ``contracts/`` the census check reads (upstream authority,
+    # never a production output). ``None`` is the checkout that holds this module,
+    # which is where ``tools/validate_generation.py`` runs from.
+    repo_root: Path | None = None
 
     @property
     def report(self) -> dict[str, Any]:
@@ -419,6 +429,266 @@ def compound_window(
     if not selected:
         return None, 0
     return compound(selected), len(selected)
+
+
+# ------------------------- blocked epoch rows and the contract census (L6a, N26)
+#
+# A ``BLOCKED_ADMISSION`` epoch is a governed outcome, not a numeric view: its epoch
+# is an ``ASSIGNMENT_ONLY`` interval of the contract census, and spec R2 keeps those
+# out of account TWR / MWR / flows (the oracle's account values are the funded
+# epoch's values). The report publishes such a row with null windows and values, so
+# comparing it with an account-level expected value can only give a false
+# regression. The validator therefore skips a blocked row, and its matched panel
+# manifest row, for the account-level expected metrics, but only when the census it
+# reads from upstream authority confirms the row: the census must be the very bytes
+# the expected baseline pins, hold an ASSIGNMENT_ONLY assignment with the row's
+# (strategy_id, effective_start, effective_end), hold no FUNDED_MEMBERSHIP
+# assignment with that tuple, and hold at least as many ASSIGNMENT_ONLY assignments
+# as blocked rows share the tuple. Anything else fails closed: the row is compared
+# exactly as before and ``identity.blocked_admission_census`` says why.
+
+CENSUS_CHECK = "identity.blocked_admission_census"
+_ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
+_FUNDED_MEMBERSHIP = "FUNDED_MEMBERSHIP"
+_CENSUS_DEFECTS = ("N26",)
+
+EpochTuple = tuple[str, str | None, str | None]
+
+
+def is_blocked_admission(row: Mapping[str, Any]) -> bool:
+    """A ``twr_mwr`` row whose two statuses both say the epoch was blocked."""
+
+    return (
+        row.get("twr_status") == "BLOCKED_ADMISSION"
+        and row.get("epoch_admission_status") == "BLOCKED"
+    )
+
+
+def _day_text(value: Any) -> str | None:
+    """A date as comparable text: ``None`` stays ``None``; junk never matches a date."""
+
+    if value is None:
+        return None
+    day = to_date(value)
+    return day.isoformat() if day is not None else f"<unreadable:{value!r}>"
+
+
+def _epoch_tuple(row: Mapping[str, Any]) -> EpochTuple:
+    return (
+        str(row.get("strategy_id")),
+        _day_text(row.get("effective_start")),
+        _day_text(row.get("effective_end")),
+    )
+
+
+@dataclass(frozen=True)
+class CensusState:
+    """The census when it can be trusted, else why it cannot."""
+
+    census: ContractCensus | None
+    problem: str | None
+
+
+def _census_authority_digests(ctx: Context) -> tuple[set[str], bool]:
+    """The census digests the expected baseline pins, and whether a pointer is unusable."""
+
+    digests: set[str] = set()
+    unusable = False
+    for row in ctx.expected or []:
+        pointers = row.get("authority_pointer")
+        if not isinstance(pointers, list):
+            continue
+        for pointer in pointers:
+            if (
+                not isinstance(pointer, Mapping)
+                or pointer.get("path") != CENSUS_CONTRACT
+            ):
+                continue
+            digest = pointer.get("sha256")
+            if isinstance(digest, str) and digest:
+                digests.add(digest.lower())
+            else:
+                unusable = True
+    return digests, unusable
+
+
+def _read_census(ctx: Context) -> CensusState:
+    if ctx.expected is None:
+        return CensusState(
+            None,
+            "no expected baseline was supplied, so the census has no authority "
+            "pointer to be bound to",
+        )
+    digests, unusable = _census_authority_digests(ctx)
+    if unusable:
+        return CensusState(
+            None, f"an authority pointer for {CENSUS_CONTRACT} carries no sha256"
+        )
+    if not digests:
+        return CensusState(
+            None,
+            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT}",
+        )
+    if len(digests) > 1:
+        return CensusState(
+            None,
+            f"the expected baseline pins several digests for {CENSUS_CONTRACT}: "
+            f"{sorted(digests)}",
+        )
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    try:
+        census = load_contract_census(root)
+    except GenerationError as exc:
+        return CensusState(None, str(exc))
+    (pinned,) = digests
+    if census.sha256 != pinned:
+        return CensusState(
+            None,
+            f"the census contract sha256 {census.sha256} differs from the expected "
+            f"baseline's authority pointer {pinned}",
+        )
+    return CensusState(census, None)
+
+
+def census_state(ctx: Context) -> CensusState:
+    cached = ctx._cache.get("census_state")
+    if isinstance(cached, CensusState):
+        return cached
+    state = _read_census(ctx)
+    ctx._cache["census_state"] = state
+    return state
+
+
+@dataclass(frozen=True)
+class BlockedEpochs:
+    """The blocked rows the census confirmed (skipped) and the findings about the rest."""
+
+    skipped: frozenset[tuple[str, str, str]]
+    findings: tuple[Finding, ...]
+
+
+def _classify_blocked_epochs(ctx: Context) -> BlockedEpochs:
+    blocked = [
+        (position, row) for position, row in twr_rows(ctx) if is_blocked_admission(row)
+    ]
+    if not blocked:
+        return BlockedEpochs(frozenset(), ())
+    state = census_state(ctx)
+    census = state.census
+    if census is None:
+        return BlockedEpochs(
+            frozenset(),
+            (
+                _finding(
+                    CENSUS_CHECK,
+                    NOT_READY,
+                    "contract-census",
+                    state.problem,
+                    "a readable contract census whose sha256 equals the expected "
+                    "baseline's authority pointer",
+                    CENSUS_CONTRACT,
+                    "$.current_census.account_sleeves",
+                    _CENSUS_DEFECTS,
+                    f"the contract census cannot confirm the {len(blocked)} blocked "
+                    f"epoch row(s) ({state.problem}); no blocked row is skipped",
+                ),
+            ),
+        )
+    assignment_only: Counter[EpochTuple] = Counter()
+    funded: Counter[EpochTuple] = Counter()
+    for assignment in census.assignments:
+        key = (
+            assignment.strategy_id,
+            _day_text(assignment.effective_start),
+            _day_text(assignment.effective_end),
+        )
+        if assignment.status == _ASSIGNMENT_ONLY:
+            assignment_only[key] += 1
+        elif assignment.status == _FUNDED_MEMBERSHIP:
+            funded[key] += 1
+    groups: dict[EpochTuple, list[tuple[int, dict[str, Any]]]] = {}
+    for position, row in blocked:
+        groups.setdefault(_epoch_tuple(row), []).append((position, row))
+    skipped: set[tuple[str, str, str]] = set()
+    findings: list[Finding] = []
+    for key, group in groups.items():
+        reasons: list[str] = []
+        if assignment_only[key] == 0:
+            reasons.append(
+                "the census holds no ASSIGNMENT_ONLY assignment with this "
+                "(strategy_id, effective_start, effective_end)"
+            )
+        if funded[key] > 0:
+            reasons.append(
+                f"the census holds {funded[key]} FUNDED_MEMBERSHIP assignment(s) "
+                "with this tuple"
+            )
+        if reasons:
+            for position, row in group:
+                findings.append(
+                    _finding(
+                        CENSUS_CHECK,
+                        BLOCKER_AUTHORITY,
+                        "|".join(epoch_key(row)),
+                        {
+                            "strategy_id": key[0],
+                            "effective_start": row.get("effective_start"),
+                            "effective_end": row.get("effective_end"),
+                            "twr_status": row.get("twr_status"),
+                            "epoch_admission_status": row.get("epoch_admission_status"),
+                            "epoch_blocking_reason": row.get("epoch_blocking_reason"),
+                        },
+                        {
+                            "census": CENSUS_CONTRACT,
+                            "requires": "an ASSIGNMENT_ONLY assignment with this "
+                            "(strategy_id, effective_start, effective_end) and no "
+                            "FUNDED_MEMBERSHIP assignment with it",
+                        },
+                        REPORT,
+                        f"$.twr_mwr[{position}]",
+                        _CENSUS_DEFECTS,
+                        "the blocked epoch row is not an ASSIGNMENT_ONLY census "
+                        "interval: " + "; ".join(reasons),
+                    )
+                )
+        elif len(group) > assignment_only[key]:
+            findings.append(
+                _finding(
+                    CENSUS_CHECK,
+                    BLOCKER_AUTHORITY,
+                    "|".join(str(part) for part in key),
+                    {
+                        "blocked_rows": len(group),
+                        "accounts": sorted(
+                            str(row.get("account_id")) for _, row in group
+                        ),
+                    },
+                    {"assignment_only_assignments_at_least": len(group)},
+                    REPORT,
+                    f"$.twr_mwr[{group[0][0]}]",
+                    _CENSUS_DEFECTS,
+                    f"{len(group)} blocked rows share this (strategy_id, "
+                    f"effective_start, effective_end) but the census holds only "
+                    f"{assignment_only[key]} ASSIGNMENT_ONLY assignment(s); none of "
+                    "them is skipped",
+                )
+            )
+        else:
+            skipped.update(epoch_key(row) for _, row in group)
+    return BlockedEpochs(frozenset(skipped), tuple(findings))
+
+
+def blocked_epochs(ctx: Context) -> BlockedEpochs:
+    cached = ctx._cache.get("blocked_epochs")
+    if isinstance(cached, BlockedEpochs):
+        return cached
+    result = _classify_blocked_epochs(ctx)
+    ctx._cache["blocked_epochs"] = result
+    return result
 
 
 # ------------------------------------------ epoch HPR span receipts (C1 section 5-5)
@@ -1608,6 +1878,20 @@ def check_absolute_paths(ctx: Context) -> Iterator[Finding]:
         ("F6",),
         "published generation embeds absolute local paths",
     )
+
+
+def check_blocked_admission_census(ctx: Context) -> Iterator[Finding]:
+    """N26/R2: every BLOCKED_ADMISSION epoch row is an ASSIGNMENT_ONLY census interval.
+
+    A blocked row is skipped by the account-level expected metrics only when this
+    check has nothing to say about it (see ``blocked_epochs``). A row whose tuple the
+    census does not hold, a tuple the census funds, or more blocked rows than the
+    census counts is a ``BLOCKER_AUTHORITY``; a census that cannot be read, or whose
+    bytes the expected baseline does not pin, is one ``NOT_READY`` and nothing is
+    skipped. Silent when the report has no blocked row.
+    """
+
+    yield from blocked_epochs(ctx).findings
 
 
 def check_cutoff_consistency(ctx: Context) -> Iterator[Finding]:
@@ -4795,7 +5079,14 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
         "flows.account.count",
         "date.source_last_observation",
     ):
-        epochs = _epoch_views(ctx, entity)
+        # L6a: a blocked epoch row the census confirms never enters an account view
+        # (R2); an unconfirmed one is compared as before.
+        skipped = blocked_epochs(ctx).skipped
+        epochs = [
+            (position, row)
+            for position, row in _epoch_views(ctx, entity)
+            if epoch_key(row) not in skipped
+        ]
         manifest = manifest_rows(ctx)
         for position, row in epochs:
             start, end = (
@@ -4957,7 +5248,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 parts = [
                     _flows_net(row)
                     for key, (_, row) in manifest.items()
-                    if key[0] == entity
+                    if key[0] == entity and key not in skipped
                 ]
                 total = (
                     sum(part for part in parts if part is not None)
@@ -4968,7 +5259,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 traces = [
                     row.get("capital_flow_trace")
                     for key, (_, row) in manifest.items()
-                    if key[0] == entity
+                    if key[0] == entity and key not in skipped
                 ]
                 total = sum(len(t) for t in traces if isinstance(t, list))
             out.append(
@@ -5583,6 +5874,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.release_pinned", check_release_pinned),
     ("identity.absolute_local_paths", check_absolute_paths),
     ("identity.cutoff_consistency", check_cutoff_consistency),
+    (CENSUS_CHECK, check_blocked_admission_census),
     ("preservation.report_to_panel", check_report_to_panel),
     ("preservation.capital_summary", check_capital_summary_preserved),
     ("preservation.counts", check_counts),

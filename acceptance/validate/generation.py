@@ -23,6 +23,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+# The contract whose census names which account sleeves hold a funded membership
+# interval and which hold an assignment-only one (acceptance metric spec R2).
+CENSUS_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
+
 GENERATION_MANIFEST = "generation.json"
 CANDIDATE = "candidate.json"
 PANEL = "data/dashboard_data.json"
@@ -143,6 +147,85 @@ def _load_json_bytes(data: bytes, label: str) -> Any:
 
 def read_json_file(path: Path) -> Any:
     return _load_json_bytes(_read_resident(path), str(path))
+
+
+@dataclass(frozen=True)
+class CensusAssignment:
+    """One ``current_census.account_sleeves[*].assignments[*]`` entry."""
+
+    strategy_id: str
+    status: str
+    effective_start: str | None
+    effective_end: str | None
+
+
+@dataclass(frozen=True)
+class ContractCensus:
+    """The census assignments of the contract bytes that were read, and their digest."""
+
+    sha256: str
+    assignments: tuple[CensusAssignment, ...]
+
+
+def _census_text(value: Any, label: str) -> str:
+    if isinstance(value, str) and value:
+        return value
+    raise GenerationError(f"{CENSUS_CONTRACT} {label} is not usable text")
+
+
+def _census_day(value: Any, label: str) -> str | None:
+    return None if value is None else _census_text(value, label)
+
+
+def load_contract_census(repo_root: Path) -> ContractCensus:
+    """The contract census of ``<repo_root>/contracts/portfolio-financial-mvp-source-v1.json``.
+
+    This reads upstream authority (the census names which account sleeves hold a
+    ``FUNDED_MEMBERSHIP`` interval and which hold an ``ASSIGNMENT_ONLY`` one), never a
+    production output. The file is read whole, once, and hashed as it is read, so the
+    digest the caller compares is the digest of the bytes that were parsed. Any
+    structure the census check cannot rely on raises ``GenerationError``.
+    """
+
+    path = repo_root / CENSUS_CONTRACT
+    if not path.is_file():
+        raise GenerationError(f"the contract census does not exist: {path}")
+    data = _read_resident(path)
+    value = _load_json_bytes(data, CENSUS_CONTRACT)
+    census = value.get("current_census") if isinstance(value, dict) else None
+    sleeves = census.get("account_sleeves") if isinstance(census, dict) else None
+    if not isinstance(sleeves, list):
+        raise GenerationError(
+            f"{CENSUS_CONTRACT} has no current_census.account_sleeves list"
+        )
+    assignments: list[CensusAssignment] = []
+    for index, sleeve in enumerate(sleeves):
+        listed = sleeve.get("assignments") if isinstance(sleeve, dict) else None
+        if not isinstance(listed, list):
+            raise GenerationError(
+                f"{CENSUS_CONTRACT} account_sleeves[{index}] has no assignments list"
+            )
+        for position, item in enumerate(listed):
+            label = f"account_sleeves[{index}].assignments[{position}]"
+            if not isinstance(item, dict):
+                raise GenerationError(f"{CENSUS_CONTRACT} {label} is not an object")
+            assignments.append(
+                CensusAssignment(
+                    strategy_id=_census_text(
+                        item.get("strategy_id"), f"{label}.strategy_id"
+                    ),
+                    status=_census_text(item.get("status"), f"{label}.status"),
+                    effective_start=_census_day(
+                        item.get("effective_start"), f"{label}.effective_start"
+                    ),
+                    effective_end=_census_day(
+                        item.get("effective_end"), f"{label}.effective_end"
+                    ),
+                )
+            )
+    return ContractCensus(
+        sha256=hashlib.sha256(data).hexdigest(), assignments=tuple(assignments)
+    )
 
 
 def _is_letter(value: int) -> bool:
