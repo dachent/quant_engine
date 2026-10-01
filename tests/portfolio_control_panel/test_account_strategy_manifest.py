@@ -13,12 +13,22 @@ import importlib.util
 import inspect
 import json
 import sys
+from datetime import date, timedelta
 from decimal import Decimal, Inexact, ROUND_DOWN, getcontext, setcontext
 from pathlib import Path
 from typing import Any
 
 import pytest
-from quant_engine.core import InputSnapshot
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    InputSnapshot,
+    SourceArtifact,
+    VerificationStatus,
+    hash_file,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +36,7 @@ MODULE_PATH = REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"
 INDEPENDENT_VERIFIER_MODULE_PATH = (
     REPOSITORY_ROOT / "tools" / "verify_account_manifest_generation.py"
 )
+PROVIDER_LEDGER_MODULE_PATH = REPOSITORY_ROOT / "tools" / "provider_ledger.py"
 LEDGER_GENERATION_ID = "1" * 64
 BASELINE_GENERATION_ID = "2" * 64
 
@@ -48,6 +59,20 @@ def independent_verifier_module() -> Any:
     spec = importlib.util.spec_from_file_location(
         "_annualized_ronc_independent_verifier",
         INDEPENDENT_VERIFIER_MODULE_PATH,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def provider_ledger_module() -> Any:
+    """The real provider-ledger builder: the producer of the capital anchors."""
+    spec = importlib.util.spec_from_file_location(
+        "_account_manifest_seam_provider_ledger", PROVIDER_LEDGER_MODULE_PATH
     )
     assert spec is not None
     assert spec.loader is not None
@@ -4389,6 +4414,322 @@ def test_source_bound_mwr_fails_closed_without_an_exact_fill_date(
     assert row["mwr_reason"] == "EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE"
     assert row["mwr_xirr"] is None
     assert row["mwr_cashflows"] == []
+
+
+def _ledger_with_anchors(*anchors: dict[str, Any]) -> dict[str, Any]:
+    return {"accounting_currency": "USD", "capital_anchors": list(anchors)}
+
+
+def _ledger_opening_anchor(**overrides: Any) -> dict[str, Any]:
+    """An opening anchor in the provider-ledger shape (fill timestamp, no date)."""
+    anchor: dict[str, Any] = {
+        "record_id": "quantbase-capital-anchor:opening",
+        "account_id": "synthetic-account",
+        "strategy_id": "synthetic-strategy",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2025-01-01",
+        "nav_recognition_date": "2025-01-02",
+        "economic_fill_timestamp": "2025-01-01T20:30:00.123456+00:00",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+        "source_record_id": "synthetic-opening-capital",
+    }
+    anchor.update(overrides)
+    return anchor
+
+
+def _ledger_allocation_anchor(**overrides: Any) -> dict[str, Any]:
+    """A fund allocation in the provider-ledger shape: event 03-01, fill 03-04
+    (19:47 UTC), recognized 03-05, carrying ``economic_fill_timestamp`` only."""
+    anchor: dict[str, Any] = {
+        "record_id": "quantbase-capital-anchor:fill-1",
+        "account_id": "synthetic-account",
+        "strategy_id": "synthetic-strategy",
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2025-03-01",
+        "nav_recognition_date": "2025-03-05",
+        "economic_fill_timestamp": "2025-03-04T19:47:46.750912+00:00",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "40"},
+        "source_record_id": "fill-1",
+    }
+    anchor.update(overrides)
+    return anchor
+
+
+def test_t5_1_a_ledger_anchor_fill_is_dated_at_the_utc_date_of_its_timestamp(
+    manifest_module: Any,
+) -> None:
+    """N25 / T5-1 (fail-before): the fill date comes from the ledger's own field.
+
+    The ledger schema gives an anchor ``economic_fill_timestamp`` and forbids
+    ``economic_date``; the producer used to read only the latter, so every fund
+    allocation reached the MWR without a fill date (BLOCKED_ADMISSION
+    EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE).  The fill (03-04, 19:47 UTC) is
+    neither the allocation (03-01) nor the recognition (03-05) date.
+    """
+    anchors = manifest_module.parse_capital_anchors(
+        _ledger_with_anchors(_ledger_opening_anchor(), _ledger_allocation_anchor())
+    )
+
+    assert anchors[1]["economic_date"] == "2025-03-04"
+    row = _mwr_row(performance_flow_legs=[_allocation_leg(anchors[1]["economic_date"])])
+    manifest = {"rows": [row]}
+    manifest_module._mwr_payloads_from_governed_inputs(
+        manifest, _mwr_ledger("2025-01-02", "2026-01-02"), [], anchors
+    )
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_cashflows"][1] == {
+        "date": "2025-03-04",
+        "amount": Decimal("-40"),
+        "source_record_ids": ["fill-1"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "fill_date"),
+    [
+        ("2025-03-01T00:00:00+00:00", "2025-03-01"),
+        ("2025-03-04T23:59:59.999999+00:00", "2025-03-04"),
+        ("2025-03-05T12:00:00Z", "2025-03-05"),
+        ("2025-03-04T19:47:46+00:00", "2025-03-04"),
+    ],
+    ids=["event_day_start", "last_microsecond", "zulu_suffix_recognition_day", "plain"],
+)
+def test_t5_1_the_fill_date_is_the_utc_calendar_date_of_the_instant(
+    manifest_module: Any, timestamp: str, fill_date: str
+) -> None:
+    anchors = manifest_module.parse_capital_anchors(
+        _ledger_with_anchors(
+            _ledger_opening_anchor(),
+            _ledger_allocation_anchor(economic_fill_timestamp=timestamp),
+        )
+    )
+
+    assert anchors[1]["economic_date"] == fill_date
+
+
+def test_t5_a_missing_fill_timestamp_leaves_the_fill_date_unavailable(
+    manifest_module: Any,
+) -> None:
+    """No timestamp, no date: the MWR keeps failing closed (R4), never guessing."""
+    allocation = _ledger_allocation_anchor()
+    del allocation["economic_fill_timestamp"]
+
+    anchors = manifest_module.parse_capital_anchors(
+        _ledger_with_anchors(_ledger_opening_anchor(), allocation)
+    )
+
+    assert anchors[1]["economic_date"] is None
+
+
+def test_t5_5_an_opening_anchor_timestamp_is_validated_but_publishes_no_date(
+    manifest_module: Any,
+) -> None:
+    """The opening anchor has no MWR leg, so its parsed economic date stays null."""
+    anchors = manifest_module.parse_capital_anchors(
+        _ledger_with_anchors(_ledger_opening_anchor())
+    )
+
+    assert anchors[0]["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert anchors[0]["economic_date"] is None
+
+
+_BEFORE_THE_EVENT_DATE = "<the instant before the anchor's event date>"
+_AFTER_THE_RECOGNITION_DATE = "<the first instant after its recognition date>"
+_BAD_ANCHOR_FILL_TIMESTAMPS = [
+    pytest.param("2025-03-04T19:47:46", id="naive"),
+    pytest.param("2025-03-04T14:47:46-05:00", id="offset_minus_five"),
+    pytest.param("2025-03-04T20:47:46+01:00", id="offset_plus_one"),
+    pytest.param(_BEFORE_THE_EVENT_DATE, id="before_the_event_date"),
+    pytest.param(_AFTER_THE_RECOGNITION_DATE, id="after_the_recognition_date"),
+    pytest.param("2025-03-04", id="date_only"),
+    pytest.param("late on the fourth", id="not_a_timestamp"),
+    pytest.param("", id="empty"),
+    pytest.param(" 2025-03-04T19:47:46+00:00", id="padded"),
+    pytest.param(5, id="number"),
+    pytest.param(None, id="null"),
+]
+
+
+@pytest.mark.parametrize("timestamp", _BAD_ANCHOR_FILL_TIMESTAMPS)
+@pytest.mark.parametrize("capital_type", ["allocation", "opening"])
+def test_t5_4_a_naive_non_utc_malformed_or_out_of_window_fill_raises(
+    manifest_module: Any, capital_type: str, timestamp: object
+) -> None:
+    """The ledger admits only timezone-aware UTC (``provider_ledger._utc_timestamp``);
+    a fill date off its event/recognition window is also inadmissible.  The same
+    rule applies to an opening anchor, whose date is not published."""
+    anchor = (
+        _ledger_opening_anchor()
+        if capital_type == "opening"
+        else _ledger_allocation_anchor()
+    )
+    event_day = date.fromisoformat(anchor["event_date"])
+    recognition_day = date.fromisoformat(anchor["nav_recognition_date"])
+    if timestamp == _BEFORE_THE_EVENT_DATE:
+        timestamp = f"{event_day - timedelta(days=1)}T23:59:59+00:00"
+    elif timestamp == _AFTER_THE_RECOGNITION_DATE:
+        timestamp = f"{recognition_day + timedelta(days=1)}T00:00:00+00:00"
+    anchor["economic_fill_timestamp"] = timestamp
+    anchors = (
+        [anchor] if capital_type == "opening" else [_ledger_opening_anchor(), anchor]
+    )
+
+    with pytest.raises(
+        manifest_module.ManifestError, match="economic_fill_timestamp|fill date"
+    ):
+        manifest_module.parse_capital_anchors(_ledger_with_anchors(*anchors))
+
+
+@pytest.mark.parametrize("carries_a_date", [True, False], ids=["a_date", "null"])
+@pytest.mark.parametrize("capital_type", ["allocation", "opening"])
+def test_t5_3_an_anchor_carrying_economic_date_raises(
+    manifest_module: Any, capital_type: str, carries_a_date: bool
+) -> None:
+    """The ledger schema forbids ``economic_date`` on an anchor: it is rejected,
+    never read, so a hand-built anchor cannot supply a fill date the ledger
+    never admitted.  A carried date lies inside the anchor's own window, so only
+    the key's presence can reject it."""
+    if capital_type == "allocation":
+        carried = "2025-03-04" if carries_a_date else None
+        anchors = [
+            _ledger_opening_anchor(),
+            _ledger_allocation_anchor(economic_date=carried),
+        ]
+    else:
+        carried = "2025-01-01" if carries_a_date else None
+        anchors = [_ledger_opening_anchor(economic_date=carried)]
+
+    with pytest.raises(
+        manifest_module.ManifestError,
+        match="carries economic_date; the ledger field is economic_fill_timestamp",
+    ):
+        manifest_module.parse_capital_anchors(_ledger_with_anchors(*anchors))
+
+
+def _real_quantbase_ledger_anchors(
+    provider_ledger_module: Any, tmp_path: Path
+) -> list[dict[str, Any]]:
+    """Capital anchors exactly as ``tools/provider_ledger.py`` emits them.
+
+    Volatis' first two real anchors: the opening (fill 2024-10-14T19:46:07 UTC)
+    and the 2024-11-08 allocation (fill 2024-11-13T14:51:35 UTC, recognized on
+    2024-11-14).
+    """
+    run_id = "quantbase-source"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts" / "csv"
+    artifact_root.mkdir(parents=True)
+    price_path = artifact_root / "dashboard_Volatis_Strategy_pricehistory.csv"
+    price_path.write_text(
+        "time,value,cost_basis\n"
+        "10/13/2024,0,0\n"
+        "10/14/2024,0,0\n"
+        "10/15/2024,985.44,1000\n"
+        "11/13/2024,985.44,1000\n"
+        "11/14/2024,1061.44,1076\n",
+        encoding="utf-8-sig",
+    )
+    activity_path = artifact_root / "account_activity.csv"
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
+        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
+        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
+        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
+        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
+        encoding="utf-8-sig",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 8, 16),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="test",
+            fact_types=("nav_observations", "flows"),
+            observed_start=date(2026, 8, 13),
+            observed_end=date(2026, 8, 14),
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hash_file(path)[0],
+                size_bytes=hash_file(path)[1],
+                as_of_date=date(2026, 8, 16),
+                schema_name="test-csv",
+                schema_version="1",
+            )
+            for artifact_id, path in {
+                "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+                "source/csv/account_activity.csv": activity_path,
+            }.items()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    anchors = provider_ledger_module._quantbase_capital_anchors(
+        "gen-1",
+        manifest,
+        {"catalog_schema_version": 1, "legacy_lineage": {"run_id": run_id}},
+        tmp_path,
+        {"account-58e75e8d952fa1b8"},
+        {"volatis-strategy"},
+        {
+            "account-58e75e8d952fa1b8": [
+                {
+                    "effective_start": "2024-10-15",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "volatis-strategy",
+                }
+            ]
+        },
+    )
+    assert isinstance(anchors, list)
+    return anchors
+
+
+def test_t5_manifest_and_verifier_date_the_real_ledger_anchors_alike(
+    manifest_module: Any,
+    independent_verifier_module: Any,
+    provider_ledger_module: Any,
+    tmp_path: Path,
+) -> None:
+    """A1.3 seam: the producer's own output, read by both consumers.
+
+    The anchors come from the real ledger builder, not a hand-written shape, so
+    a rename or re-encoding of ``economic_fill_timestamp`` there breaks this
+    test.  The manifest and the independent verifier (no import between them)
+    derive the same UTC fill date from each real anchor.
+    """
+    anchors = _real_quantbase_ledger_anchors(provider_ledger_module, tmp_path)
+    assert [anchor["capital_type"] for anchor in anchors] == [
+        "OPENING_CAPITAL_ANCHOR",
+        "STRATEGY_CAPITAL_ALLOCATION",
+    ]
+    assert all("economic_date" not in anchor for anchor in anchors)
+
+    parsed = manifest_module.parse_capital_anchors(_ledger_with_anchors(*anchors))
+    verifier_dates = [
+        independent_verifier_module._independent_anchor_fill_date(
+            anchor,
+            date.fromisoformat(anchor["event_date"]),
+            date.fromisoformat(anchor["nav_recognition_date"]),
+        )
+        for anchor in anchors
+    ]
+
+    # The 2024-11-08 allocation is filled on 11-13 and recognized on 11-14.
+    assert parsed[1]["economic_date"] == "2024-11-13"
+    assert parsed[0]["economic_date"] is None
+    assert [item.isoformat() for item in verifier_dates] == [
+        "2024-10-14",
+        "2024-11-13",
+    ]
+    assert parsed[1]["economic_date"] == verifier_dates[1].isoformat()
 
 
 @pytest.mark.parametrize(
