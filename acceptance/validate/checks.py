@@ -468,7 +468,10 @@ def compound_window(
 # (account, strategy, effective_start), and a report row is matched with the manifest row
 # of its own epoch (``manifest_match``, ``report_match``). The one-row-per-key index let
 # a blocked manifest row listed after a funded one stand in for it: the funded row's
-# trace, net capital and panel views left every aggregation and every match.
+# trace, net capital and panel views left every aggregation and every match. A row whose
+# whole identity the other table lacks is still compared with the row of its kind that
+# shares its start (the two tables disagree about the epoch's end, which the comparison
+# surfaces), never with a row of the other kind.
 
 CENSUS_CHECK = "identity.blocked_admission_census"
 _ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
@@ -532,14 +535,26 @@ def _same_epoch(
 
     The entries with ``row``'s whole identity; among those the one that is blocked
     exactly when ``row`` is (a funded and a blocked row can share even the whole
-    identity), else the last. An epoch whose identity no entry has matches nothing.
+    identity), else the last. When no entry has the whole identity, the last entry that
+    is blocked exactly when ``row`` is and shares only its (account, strategy,
+    effective_start) stands in: a table that carries the epoch with another end is a
+    disagreement the comparison has to surface, not a reason to look away; an epoch of
+    the other kind is never its row. Nothing qualifies: ``None``.
     """
 
-    candidates = index.get(epoch_identity(row))
-    if not candidates:
-        return None
-    alike = [entry for entry in candidates if is_blocked(entry[1]) == blocked]
-    return (alike or candidates)[-1]
+    own = index.get(epoch_identity(row))
+    if own:
+        alike = [entry for entry in own if is_blocked(entry[1]) == blocked]
+        return (alike or own)[-1]
+    key = epoch_key(row)
+    sharing = [
+        entry
+        for identity, group in index.items()
+        if identity[:3] == key
+        for entry in group
+        if is_blocked(entry[1]) == blocked
+    ]
+    return max(sharing, key=lambda entry: entry[0]) if sharing else None
 
 
 def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
