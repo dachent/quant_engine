@@ -4767,6 +4767,9 @@ def test_capital_gate_rejects_a_strategy_removed_with_its_assignments() -> None:
     assert accepted is False
     assert evidence["identity_status"] == "FAIL"
     assert evidence["problems"] == ["missing strategy rows: strategy-b"]
+    # Nothing is recomputed over the wrong universe, so no total is reported.
+    assert evidence["recomputed_strategy_count"] == 0
+    assert evidence["systematic_total_usd"] is None
     # The refusal reports the same evidence shape as an accepted block.
     good = materializer._current_capital_identity(_three_strategy_baseline())[1]
     assert set(evidence) == set(good)
@@ -4824,6 +4827,7 @@ def test_capital_gate_rejects_published_rows_the_registry_does_not_name(
     assert accepted is False
     assert evidence["identity_status"] == "FAIL"
     assert evidence["problems"] == problems
+    assert evidence["recomputed_strategy_count"] == 0
 
 
 @pytest.mark.parametrize(

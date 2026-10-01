@@ -3289,23 +3289,27 @@ def _current_capital_identity(
 ) -> tuple[bool, dict[str, Any]]:
     """Verify the baseline's current capital block against its own NAV facts.
 
-    The block is read as a claim.  Every strategy value, every aggregate and the
-    weights are recomputed here from ``nav_observations`` x ``assignments`` (and
-    the reserve's AUTHORITATIVE NAV admissions) without calling the baseline
-    builder.  A lie fails; a component that is honestly NOT_READY is reported as
-    such in the evidence and never counted as PASS.
+    The block is read as a claim.  Its rows must be exactly the strategies the
+    baseline's own registry names (``strategies``).  Every strategy value, every
+    aggregate and the weights are then recomputed here from ``nav_observations``
+    x ``assignments`` (and the reserve's AUTHORITATIVE NAV admissions) without
+    calling the baseline builder.  A lie fails; a component that is honestly
+    NOT_READY is reported as such in the evidence and never counted as PASS.
     """
 
     block = baseline.get("current_capital")
     nav = baseline.get("nav_observations")
     assignments = baseline.get("assignments")
     admissions = baseline.get("provider_admissions", [])
+    registry = baseline.get("strategies")
     rows = block.get("strategies") if isinstance(block, dict) else None
     if not (
         isinstance(block, dict)
         and isinstance(nav, list)
         and isinstance(assignments, list)
         and isinstance(admissions, list)
+        and isinstance(registry, list)
+        and all(isinstance(item, dict) for item in registry)
         and isinstance(rows, list)
         and all(isinstance(row, dict) for row in rows)
     ):
@@ -3316,6 +3320,39 @@ def _current_capital_identity(
     problems: list[str] = []
     if block.get("valuation_date") != valuation.isoformat():
         problems.append("valuation_date")
+
+    # The universe of rows is the baseline's own registry, never the rows the block
+    # happens to publish: the producer publishes one row for every registered
+    # strategy (required or retained-excluded), so the two id sets must be equal.
+    # A universe read from the published rows alone would let a corrupted baseline
+    # drop a strategy with its assignments, lower the systematic total, recompute
+    # the weights and still reconcile.  This is settled before anything is
+    # recomputed: a block over the wrong universe has nothing to recompute.
+    registered = {
+        _text(item.get("strategy_id"), "registry strategy_id") for item in registry
+    }
+    published = {str(row.get("strategy_id")) for row in rows}
+    if registered - published:
+        problems.append(
+            "missing strategy rows: " + ", ".join(sorted(registered - published))
+        )
+    if published - registered:
+        problems.append(
+            "unregistered strategy rows: " + ", ".join(sorted(published - registered))
+        )
+    if registered != published:
+        return False, {
+            "component_mismatches": [],
+            "identity_status": "FAIL",
+            "not_ready_components": [],
+            "problems": problems,
+            "recomputed_strategy_count": 0,
+            "strategy_mismatches": [],
+            "systematic_total_usd": None,
+            "total_liquid_usd": None,
+            "valuation_date": block.get("valuation_date"),
+            "weight_sum": None,
+        }
 
     # Facts: each account's latest AVAILABLE USD NAV on or before the valuation
     # date, and the same restricted to AUTHORITATIVE account-live admission windows.
