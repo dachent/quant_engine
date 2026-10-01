@@ -1317,17 +1317,26 @@ def _verified_value_basis_end(
         raise FinancialOutcomeError(
             f"selected provider ledger generation is not verified: {exc}"
         ) from exc
-    catalogs = [
-        artifact
-        for artifact in manifest.artifacts
-        if artifact.schema_name == "provider-ledger-catalog"
+    # One catalog may be listed under several ids with the same bytes (the synthetic
+    # ledger of the MVP-2 product world lists `provider-ledger.json` beside
+    # `normalized/provider-ledger.json`); two different catalogs are a conflict.
+    catalog_ids: dict[tuple[str, int], list[str]] = {}
+    for artifact in manifest.artifacts:
+        if artifact.schema_name == "provider-ledger-catalog":
+            identity = (artifact.sha256, artifact.size_bytes)
+            catalog_ids.setdefault(identity, []).append(artifact.artifact_id)
+    readable = [
+        artifact_id
+        for ids in catalog_ids.values()
+        for artifact_id in sorted(ids)
+        if artifact_id in payloads
     ]
-    if len(catalogs) != 1 or catalogs[0].artifact_id not in payloads:
+    if len(catalog_ids) != 1 or not readable:
         raise FinancialOutcomeError(
             "selected provider ledger catalog is absent or ambiguous"
         )
     try:
-        catalog = json.loads(payloads[catalogs[0].artifact_id])
+        catalog = json.loads(payloads[readable[0]])
         contract = json.loads(contract_path.read_bytes())
     except ValueError as exc:
         raise FinancialOutcomeError(
