@@ -14,6 +14,12 @@ L6b  the M3 convention: the MWR opening is the performance opening value (the
 L6c  a date before the cutoff that the report's ``value_basis_bounds`` explains
      and the oracle confirms is NOT_READY instead of BLOCKER_AUTHORITY.
 
+Fix round 1 (the lane reviews) closes four ways these gates could hide a real defect:
+the L6a skip is exact (a funded row that shares only part of a blocked row's key stays
+compared, 1a); an M3 manifest row must be whole to be believed (a readable opening
+date, 1b; a readable opening capital, 1d); and an account's early date is explained
+only by a bound of a strategy that owns the account (1c).
+
 Everything here is synthetic and written under ``tmp_path``.  The census is a
 synthetic contract in a throwaway repository root; the oracle rules are the
 test's own expected rows.  The helpers of ``test_validate_generation`` build the
@@ -696,7 +702,7 @@ def test_funded_row_beside_a_confirmed_blocked_row_that_agrees_is_clean(
 def test_funded_row_sharing_account_strategy_and_start_is_still_compared(
     tmp_path: Path, funded_manifest_first: bool
 ) -> None:
-    """L6a fix 1 (fail-before): the funded row's twr contradiction is not hidden.
+    """L6a fix 1a (fail-before): the funded row's twr contradiction is not hidden.
 
     The funded epoch shares (account, strategy, effective_start) with the confirmed
     blocked epoch and ends elsewhere.  Its published twr contradicts the oracle: the
@@ -721,25 +727,27 @@ def test_funded_row_sharing_account_strategy_and_start_is_still_compared(
 def test_only_the_funded_rows_contradiction_is_reported_beside_a_confirmed_blocked_row(
     tmp_path: Path,
 ) -> None:
-    """L6a fix 1 (fail-before): exactly one finding; nothing points at the blocked row."""
+    """L6a fix 1a (fail-before): one finding, the funded row's; none for the blocked row."""
 
     findings = _funded_beside_blocked_world(tmp_path, "0.99")
-    assert _expected_findings(findings) == [
-        ("expected.twr.account", checks.BLOCKER_REGRESSION, "A1|ITD")
-    ]
-    blocked_row = FUNDED_NEXT_TO_BLOCKED_ROW - 1
-    assert not [
-        f
+    assert [
+        (f.check_id, f.klass, f.entity, f.json_path)
         for f in findings
-        if f.json_path.startswith(f"$.twr_mwr[{blocked_row}]")
-        and f.check_id != "returns.flow_lists_agree"
+        if f.check_id.startswith("expected.")
+    ] == [
+        (
+            "expected.twr.account",
+            checks.BLOCKER_REGRESSION,
+            "A1|ITD",
+            f"$.twr_mwr[{FUNDED_NEXT_TO_BLOCKED_ROW}].twr",
+        )
     ]
 
 
 def test_funded_row_sharing_the_whole_key_with_a_blocked_row_is_still_compared(
     tmp_path: Path,
 ) -> None:
-    """L6a fix 1 (fail-before): the skip is of the blocked row, not of its key.
+    """L6a fix 1a (fail-before): the skip is of the blocked row, not of its key.
 
     A row that is not itself a blocked admission is never skipped, even when it
     repeats the blocked row's account, strategy, start and end.  Mutation MA-11 (the
@@ -806,7 +814,7 @@ def _closed_funded_beside_blocked(spec: Spec) -> None:
 def test_multi_epoch_flow_aggregates_keep_a_funded_row_sharing_the_blocked_start(
     tmp_path: Path,
 ) -> None:
-    """L6a fix 1 (fail-before): the aggregates skip the blocked manifest row only.
+    """L6a fix 1a (fail-before): the aggregates skip the blocked manifest row only.
 
     A1's funded epochs hold one 10 deposit (net 10, one trace event), the oracle's
     net flow and count over them.  The funded manifest row shares account, strategy
@@ -834,7 +842,7 @@ def test_multi_epoch_flow_aggregates_keep_a_funded_row_sharing_the_blocked_start
 def test_a_manifest_row_blocked_in_only_one_status_is_not_skipped(
     tmp_path: Path,
 ) -> None:
-    """L6a fix 1 (fail-before): the panel row is skipped only when it says blocked twice.
+    """L6a fix 1a (fail-before): the panel row is skipped only when it says blocked twice.
 
     The report row is a confirmed blocked epoch, but its panel row has a funded
     status: report and panel disagree about the epoch, and the multi-epoch net flow
@@ -1060,12 +1068,13 @@ def _m3_manifest_field(account: str, field: str, value: Any) -> Mutator:
 def test_m3_row_without_a_readable_performance_opening_date_is_a_finding(
     tmp_path: Path, date_value: Any
 ) -> None:
-    """L6b fix 2 (fail-before): the value is there, so the date has to be too.
+    """L6b fix 1b (fail-before): the value is there, so the date has to be too.
 
     The report opens at the performance opening value on the opening date; the
     manifest row gives the value and no usable date.  The date comparison cannot be
     made, which is itself the finding.  Mutation MB-4 (the date clause left out when
-    the manifest date is not a string) turns the first three red.
+    the manifest date is not a string) turns all five red; MB-6 (any string counts as
+    a readable date) turns the last two red.
     """
 
     spec = Spec(
@@ -1091,7 +1100,7 @@ def test_m3_row_without_a_readable_performance_opening_date_is_a_finding(
 def test_an_m3_row_missing_its_date_does_not_taint_another_m3_row(
     tmp_path: Path,
 ) -> None:
-    """L6b fix 2 (fail-before): only the malformed row is a finding."""
+    """L6b fix 1b (fail-before): only the malformed row is a finding."""
 
     spec = Spec(
         report=[_m3_report("A1", M3_OPENING), _m3_report("B2", "2795")],
@@ -1110,7 +1119,7 @@ def test_an_m3_row_missing_its_date_does_not_taint_another_m3_row(
 def test_an_unreadable_manifest_date_beside_a_real_mismatch_keeps_both_reasons(
     tmp_path: Path,
 ) -> None:
-    """L6b fix 2: a shifted opening value and a missing date are one finding, two reasons."""
+    """L6b fix 1b (fail-before): a shifted opening and a missing date, two reasons."""
 
     spec = Spec(
         report=[_m3_report("A1", "990")],
@@ -1135,7 +1144,7 @@ def test_an_unreadable_manifest_date_beside_a_real_mismatch_keeps_both_reasons(
 def test_m3_row_with_an_unreadable_opening_capital_is_a_flow_lists_finding(
     tmp_path: Path, opening_capital: Any
 ) -> None:
-    """L6b fix 4 (fail-before): the M3 clause cannot be made, which is the finding.
+    """L6b fix 1d (fail-before): the M3 clause cannot be made, which is the finding.
 
     A1's MWR opens at the contributed basis, so net_capital agrees with the cash
     flows and the pre-M3 comparison would pass: before the fix the row fell back to
@@ -1165,7 +1174,7 @@ def test_m3_row_with_an_unreadable_opening_capital_is_a_flow_lists_finding(
 def test_m3_row_with_an_unreadable_opening_capital_is_not_compared_with_net_capital(
     tmp_path: Path,
 ) -> None:
-    """L6b fix 4 (fail-before): the finding names the malformed field, not net_capital.
+    """L6b fix 1d (fail-before): the finding names the malformed field, not net_capital.
 
     B2's cash flows sum to 2995 against a net capital of 3000: the pre-M3 fallback
     reported that as a misleading mismatch with an expected net_capital.
@@ -1696,7 +1705,7 @@ def test_a_date_after_the_cutoff_is_never_reclassified(tmp_path: Path) -> None:
 def test_an_account_the_bounded_strategy_does_not_own_keeps_its_blocker(
     tmp_path: Path,
 ) -> None:
-    """L6c fix 3 (fail-before): A1 is bound by alpha while alpha owns only B2.
+    """L6c fix 1c (fail-before): A1 is bound by alpha while alpha owns only B2.
 
     The block is otherwise valid and the oracle confirms alpha's end, so the check
     stays silent about the block; A1's early date is not explained by it.  The lens
@@ -1722,7 +1731,7 @@ def test_an_account_the_bounded_strategy_does_not_own_keeps_its_blocker(
 def test_account_ids_that_do_not_declare_the_account_leave_the_blocker(
     tmp_path: Path, account_ids: Any
 ) -> None:
-    """L6c fix 3 (fail-before): no readable account list, no account to bind.
+    """L6c fix 1c (fail-before): no readable account list, no account to bind.
 
     A bare string or a mapping that merely contains "A1" is not a list of accounts.
     """
@@ -1739,7 +1748,7 @@ def test_account_ids_that_do_not_declare_the_account_leave_the_blocker(
 def test_an_account_owned_by_none_of_two_bounded_strategies_keeps_its_blocker(
     tmp_path: Path,
 ) -> None:
-    """L6c fix 3 (fail-before): the union over bounded_by is what has to hold A1."""
+    """L6c fix 1c (fail-before): the union over bounded_by is what has to hold A1."""
 
     both = ("alpha", "beta")
     block = _bounds_block(
