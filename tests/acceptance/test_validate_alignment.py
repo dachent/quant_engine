@@ -1044,7 +1044,17 @@ RECUT_ENDS = {"closed": "2025-12-31", "one_day": "2025-09-10", "whole": BLOCKED_
 MANIFEST_ORDERS = pytest.mark.parametrize(
     "funded_first", [False, True], ids=["m_b_f", "m_f_b"]
 )
-ROW_CHECKS = ("expected.", "returns.", "flows.", "capital.account_identity")
+ROW_CHECKS = (
+    "expected.flows",
+    "expected.twr",
+    "expected.mwr",
+    "returns.twr_views_agree",
+    "returns.flow_lists_agree",
+    "returns.mwr_opening_matches_first_flow",
+    "returns.implied_unrecorded_flows",
+    "flows.admission_consistency",
+    "capital.account_identity",
+)
 FLOW_ORACLE = {"flows.account.net": "10", "flows.account.count": "1"}
 
 
@@ -1053,19 +1063,23 @@ def _recut_report(
     *,
     twr: str = "0.5",
     flow_count: int | None = None,
-    deposit_day: str = RECUT_DEPOSIT_DAY,
+    days: Sequence[str] = (RECUT_DEPOSIT_DAY,),
+    terminal: str | None = None,
     admitted: bool = True,
 ) -> Mutator:
-    """A1's FUNDED beta epoch from the blocked epoch's own start, with one 10 deposit.
+    """A1's FUNDED beta epoch from the blocked epoch's own start: a 10 deposit per day.
 
-    The row is whole: its MWR flows, flow count, windows and admitted FLOW record agree
+    The row is whole: its MWR flows, flow count, windows and admitted FLOW records agree
     with the manifest row of ``_recut_manifest``, so that nothing but a wrong lookup
-    makes a check fire on it.
+    makes a check fire on it.  It opens at 500 and ends at 500 plus its deposits unless
+    ``terminal`` says otherwise.
     """
 
     def mutate(report: dict[str, Any]) -> None:
         observed_end = end or CUTOFF
-        row = _twr_row("A1", "beta", "500", "510", [(deposit_day, "10")], twr=twr)
+        shown = terminal or str(500 + 10 * len(days))
+        flows = [(day, "10") for day in days]
+        row = _twr_row("A1", "beta", "500", shown, flows, twr=twr)
         row.update(
             {
                 "effective_start": BLOCKED_START,
@@ -1085,12 +1099,13 @@ def _recut_report(
             row["flow_count"] = flow_count
         report["twr_mwr"].append(row)
         if admitted:
-            report["transactions_and_flows"].append(
+            report["transactions_and_flows"].extend(
                 {
                     "account_id": "A1",
                     "record_type": "FLOW",
                     "kind": "TRANSFER:INTERNAL:IN",
                 }
+                for _ in days
             )
 
     return mutate
@@ -1101,22 +1116,31 @@ def _recut_manifest(
     *,
     linked: str = "0.5",
     opening: str = "500",
-    internal_in: str = "10",
-    deposit_day: str = RECUT_DEPOSIT_DAY,
+    internal_in: str | None = None,
+    days: Sequence[str] = (RECUT_DEPOSIT_DAY,),
+    current: str | None = None,
     edit: Mutator | None = None,
 ) -> Mutator:
-    """The panel manifest row of ``_recut_report``'s epoch: one 10 event in its trace."""
+    """The panel manifest row of ``_recut_report``'s epoch: a 10 event per day."""
 
     def mutate(panel: dict[str, Any]) -> None:
         trace = [
             {
                 "amount": "10",
                 "class": "INTERNAL_IN",
-                "event_date": deposit_day,
-                "nav_recognition_date": deposit_day,
+                "event_date": day,
+                "nav_recognition_date": day,
             }
+            for day in days
         ]
-        row = _manifest_row("A1", "beta", opening, internal_in, "510", trace)
+        row = _manifest_row(
+            "A1",
+            "beta",
+            opening,
+            internal_in or str(10 * len(days)),
+            current or str(500 + 10 * len(days)),
+            trace,
+        )
         row.update(
             {
                 "effective_start": BLOCKED_START,
@@ -1404,11 +1428,11 @@ def test_the_flow_recompute_counts_a_funded_rows_trace_in_either_manifest_order(
     recomputed from the traces; the funded epoch's deposit (2025-12-20) is inside it.
     """
 
-    day = "2025-12-20"
+    days = ("2025-12-20",)
     spec = _recut_spec(
         funded_first=funded_first,
-        report=_recut_report(RECUT_ENDS["closed"], deposit_day=day),
-        manifest=_recut_manifest(RECUT_ENDS["closed"], deposit_day=day),
+        report=_recut_report(RECUT_ENDS["closed"], days=days),
+        manifest=_recut_manifest(RECUT_ENDS["closed"], days=days),
     )
     findings = _recut_run(tmp_path, spec, FLOW_ORACLE, window_start="2025-12-15")
     assert _row_findings(findings) == []
@@ -1471,7 +1495,7 @@ def test_the_daily_move_lint_sees_the_funded_rows_flow_dates(
 
     spec = _recut_spec(
         funded_first=funded_first,
-        report=_recut_report(RECUT_ENDS["closed"], deposit_day="2025-11-15"),
+        report=_recut_report(RECUT_ENDS["closed"], days=("2025-11-15",)),
     )
     spec.report.append(returns)
     findings = _run(build(tmp_path / "gen", spec), None)
@@ -1515,10 +1539,18 @@ def _funded_alpha(table: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-def _alpha_run(
+def _run_spec(
     tmp_path: Path, spec: Spec, expected: list[dict[str, Any]] | None = None
 ) -> list[checks.Finding]:
     return _run(build(tmp_path / "gen", spec), expected)
+
+
+def _drifted_terminal(report: dict[str, Any]) -> None:
+    """The open alpha epoch's report row ends at 1200 where its panel row says 1100."""
+
+    row = _funded_alpha(report["twr_mwr"])
+    row["mwr_terminal_value"] = "1200"
+    row["mwr_cashflows"][-1]["amount"] = "1200"
 
 
 @MANIFEST_ORDERS
@@ -1532,14 +1564,9 @@ def test_an_open_epochs_terminal_value_is_read_from_its_own_report_row(
     that fixed alone, the blocked report row would be read for its terminal value).
     """
 
-    def drift(report: dict[str, Any]) -> None:
-        row = _funded_alpha(report["twr_mwr"])
-        row["mwr_terminal_value"] = "1200"
-        row["mwr_cashflows"][-1]["amount"] = "1200"
-
     spec = _alpha_recut_spec(funded_first=funded_first)
-    spec.report.append(drift)
-    findings = _alpha_run(tmp_path, spec)
+    spec.report.append(_drifted_terminal)
+    findings = _run_spec(tmp_path, spec)
     own = 0 if funded_first else 1
     assert [
         (f.entity, f.json_path)
@@ -1581,7 +1608,7 @@ def test_an_open_epochs_recorded_flow_is_read_from_its_own_manifest_row(
     spec = _alpha_recut_spec(funded_first=funded_first)
     spec.report.append(_implied_flow)
     spec.panel.append(_recorded_flow)
-    findings = _alpha_run(tmp_path, spec)
+    findings = _run_spec(tmp_path, spec)
     assert [
         f for f in findings if f.check_id == "returns.implied_unrecorded_flows"
     ] == []
@@ -1594,7 +1621,7 @@ def test_an_open_epoch_whose_nav_implies_an_unrecorded_flow_is_still_named(
 
     spec = _alpha_recut_spec(funded_first=True)
     spec.report.append(_implied_flow)
-    findings = _alpha_run(tmp_path, spec)
+    findings = _run_spec(tmp_path, spec)
     assert [
         (f.entity, f.observed["implied_unrecorded_flow_usd"])
         for f in findings
@@ -1626,7 +1653,7 @@ def test_an_open_epochs_current_value_is_compared_with_the_account_oracle(
             "authority_pointer": [],
         }
     ]
-    findings = _alpha_run(tmp_path, spec, oracle)
+    findings = _run_spec(tmp_path, spec, oracle)
     own = 0 if funded_first else 1
     assert [
         (f.klass, f.json_path, f.observed["value"])
@@ -1658,7 +1685,7 @@ def test_the_invested_capital_lint_counts_the_open_epoch_in_either_manifest_orde
 
     spec = _alpha_recut_spec(funded_first=funded_first)
     spec.report.append(lower)
-    findings = _alpha_run(tmp_path, spec)
+    findings = _run_spec(tmp_path, spec)
     assert [
         f.observed
         for f in findings
@@ -1671,6 +1698,132 @@ def test_the_invested_capital_lint_counts_the_open_epoch_in_either_manifest_orde
             }
         }
     ]
+
+
+# Epochs that share a start tell their rows apart by their end alone.  F1 closes on
+# 2025-12-31 with one deposit; F2 is open with two and carries A1's 1100; the blocked
+# epoch is the third.  Each table lists the three in its own order.  Every report row
+# has to read the manifest row with its own end, and every manifest row the report row
+# with its own end, whichever of the three is listed last: the rows of F1 and F2 agree
+# with one another only when each is matched with its own.
+
+TWO_FUNDED_ORDERS = {
+    "b_f1_f2": ("blocked", "f1", "f2"),
+    "b_f2_f1": ("blocked", "f2", "f1"),
+    "f2_f1_b": ("f2", "f1", "blocked"),
+    "f1_b_f2": ("f1", "blocked", "f2"),
+}
+
+
+def _two_funded_spec(report_order: Sequence[str], panel_order: Sequence[str]) -> Spec:
+    f1_days, f2_days = (RECUT_DEPOSIT_DAY,), (RECUT_DEPOSIT_DAY, "2025-08-01")
+
+    def blocked_report(report: dict[str, Any]) -> None:
+        report["twr_mwr"].append(_blocked_twr_row("A1"))
+
+    def blocked_panel(panel: dict[str, Any]) -> None:
+        panel["account_manifest"]["rows"].append(_blocked_manifest_row("A1"))
+        panel["counts"]["twr_rows"] += 1
+
+    report = {
+        "blocked": blocked_report,
+        "f1": _recut_report(RECUT_ENDS["closed"], days=f1_days),
+        "f2": _recut_report(None, days=f2_days, terminal="1100"),
+    }
+    panel = {
+        "blocked": blocked_panel,
+        "f1": _recut_manifest(RECUT_ENDS["closed"], days=f1_days),
+        "f2": _recut_manifest(None, days=f2_days, current="1100"),
+    }
+    return Spec(
+        report=[report[name] for name in report_order],
+        panel=[panel[name] for name in panel_order],
+    )
+
+
+@pytest.mark.parametrize("panel_order", TWO_FUNDED_ORDERS)
+@pytest.mark.parametrize("report_order", TWO_FUNDED_ORDERS)
+def test_two_funded_epochs_that_share_a_start_each_read_their_own_rows(
+    tmp_path: Path, report_order: str, panel_order: str
+) -> None:
+    """L6a fix 2 (fail-before): the end tells two funded epochs' rows apart.
+
+    Nothing is wrong with any of the three epochs, so nothing may be said about them:
+    F1's flow count of 1 is held to F1's own trace, F2's 2 to F2's, and F2's terminal
+    value to F2's report row.  Mutation MF-2 (rows matched by the three-part key, the
+    last of the same kind) and MF-4 (the same for the report row of a manifest row) turn
+    this red.
+    """
+
+    spec = _two_funded_spec(
+        TWO_FUNDED_ORDERS[report_order], TWO_FUNDED_ORDERS[panel_order]
+    )
+    findings = _run_spec(tmp_path, spec)
+    assert _row_findings(findings) == []
+
+
+# A table that carries an epoch with another end than the other table does: the two
+# disagree about the epoch, and the comparison has to say so.  Matching by the whole
+# identity alone would look away (the rows of the epoch no longer meet); the rows that
+# share the (account, strategy, effective_start) stand in until a row has the identity.
+
+
+@MANIFEST_ORDERS
+def test_a_report_row_whose_panel_row_carries_another_end_is_still_compared_with_it(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): the funded epoch ends 2025-12-31 in the report, not in
+    the panel (2026-01-31); the report counts two flows, the panel row's trace holds one.
+
+    The panel row is still the epoch's own: the comparison names the two flows against
+    one (it did, matched by the three-part key; funded first, the blocked row stood in).
+    Mutation MF-9 (no row stands in for a missing identity) turns this red.
+    """
+
+    def ends_later(row: dict[str, Any]) -> None:
+        row["effective_end"] = "2026-01-31"
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"], flow_count=2),
+        manifest=_recut_manifest(RECUT_ENDS["closed"], edit=ends_later),
+    )
+    findings = _recut_run(tmp_path, spec)
+    assert [
+        (f.json_path, f.observed, f.expected)
+        for f in findings
+        if f.check_id == "returns.flow_lists_agree"
+    ] == [
+        (
+            "$.twr_mwr[4].flow_count",
+            {"twr_flow_count": 2},
+            {"capital_flow_trace_events": 1},
+        )
+    ]
+
+
+@MANIFEST_ORDERS
+def test_a_panel_row_whose_report_row_carries_another_end_is_still_compared_with_it(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): the open alpha epoch is closed in the report only.
+
+    The report row (ending 2026-01-31) says 1200 where the open manifest row and the
+    account summary say 1100: the terminal values still disagree across the views.
+    """
+
+    def closed_in_report(report: dict[str, Any]) -> None:
+        _funded_alpha(report["twr_mwr"])["effective_end"] = "2026-01-31"
+
+    spec = _alpha_recut_spec(funded_first=funded_first)
+    spec.report.extend([_drifted_terminal, closed_in_report])
+    findings = _run_spec(tmp_path, spec)
+    own = 0 if funded_first else 1
+    assert [
+        (f.entity, f.json_path)
+        for f in findings
+        if f.check_id == "capital.account_identity"
+    ] == [(f"A1|alpha|{START}", f"$.account_manifest.rows[{own}].current_value")]
 
 
 # -------------------------------------------------------------- L6b: the M3 opening
