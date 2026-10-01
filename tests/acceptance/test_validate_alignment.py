@@ -20,6 +20,13 @@ compared, 1a); an M3 manifest row must be whole to be believed (a readable openi
 date, 1b; a readable opening capital, 1d); and an account's early date is explained
 only by a bound of a strategy that owns the account (1c).
 
+Fix round 2 keeps the panel manifest rows by their whole identity (account, strategy,
+effective_start, effective_end) in every aggregation and every report-row match.  Fix
+round 3 closes the two ways a pairing could still be silent: a row compared with a
+same-kind stand-in that ends elsewhere is a finding of its own, and an epoch whose
+whole identity the other table holds only as a row of the other kind has no match (and
+is a finding as well).
+
 Everything here is synthetic and written under ``tmp_path``.  The census is a
 synthetic contract in a throwaway repository root; the oracle rules are the
 test's own expected rows.  The helpers of ``test_validate_generation`` build the
@@ -477,7 +484,15 @@ def test_generation_without_blocked_rows_has_no_census_finding(tmp_path: Path) -
 def test_blocked_row_with_a_funded_admission_status_is_never_skipped(
     tmp_path: Path,
 ) -> None:
-    """Guard (green on main): the skip needs both statuses to say blocked."""
+    """Guard (green on main): the skip needs both statuses to say blocked.
+
+    Fix round 3 changed the count, not the guard: the contradictory row is not a blocked
+    admission, so its whole identity is held by the panel's blocked row only as the
+    OTHER kind, and it is no longer read against that row (it used to be: three more
+    ``expected.*`` findings, all pointing at the panel's blocked row, made seven).
+    The four that remain compare the row's own values with the oracle (a skip would
+    leave none), and the epoch identity finding names the admission disagreement.
+    """
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -490,7 +505,16 @@ def test_blocked_row_with_a_funded_admission_status_is_never_skipped(
     spec.report.append(contradict)
     gen_dir = build(tmp_path / "gen", spec)
     findings = _run(gen_dir, _oracle(census_sha=sha), repo)
-    assert len(_expected_findings(findings)) == 7
+    assert len(_expected_findings(findings)) == 4
+    assert {f.json_path for f in findings if f.check_id.startswith("expected.")} == {
+        "$.twr_mwr[3].twr",
+        "$.twr_mwr[3].mwr_xirr",
+        "$.twr_mwr[3].flow_count",
+        "$.account_manifest.rows",
+    }
+    assert [f.json_path for f in _carried_apart(findings)] == [
+        "$.twr_mwr[3].epoch_admission_status"
+    ]
 
 
 def _closed_funded_epoch(report: dict[str, Any]) -> None:
@@ -1835,6 +1859,8 @@ def test_a_panel_row_whose_report_row_carries_another_end_is_still_compared_with
 
     The report row (ending 2026-01-31) says 1200 where the open manifest row and the
     account summary say 1100: the terminal values still disagree across the views.
+    Since fix round 3 the two rows' disagreement about the end is named as well, once
+    (the pair is found from both tables), pointing at the report row.
     """
 
     def closed_in_report(report: dict[str, Any]) -> None:
@@ -1844,11 +1870,14 @@ def test_a_panel_row_whose_report_row_carries_another_end_is_still_compared_with
     spec.report.extend([_drifted_terminal, closed_in_report])
     findings = _run_spec(tmp_path, spec)
     own = 0 if funded_first else 1
-    assert [
+    assert sorted(
         (f.entity, f.json_path)
         for f in findings
         if f.check_id == "capital.account_identity"
-    ] == [(f"A1|alpha|{START}", f"$.account_manifest.rows[{own}].current_value")]
+    ) == [
+        (f"A1|alpha|{START}", f"$.account_manifest.rows[{own}].current_value"),
+        (f"A1|alpha|{START}", f"$.twr_mwr[{own}].effective_end"),
+    ]
 
 
 # ------------------------------------ an epoch the two tables carry apart (fix round 3)
@@ -1996,9 +2025,9 @@ def test_a_second_row_for_the_epoch_in_one_table_is_named_with_both_ends(
     One table lists the funded epoch ending 2025-12-31 and again ending 2026-01-31, the
     other only the first.  The second row has no row of the whole identity beside it, so
     it is compared with the first and named against it; the first is paired exactly and
-    says nothing.  Only the table that has the extra row finds the pair: mutation MG-5
-    (the report rows are not asked) turns the panel case red and MG-6 (the manifest
-    rows are not asked) the report case.
+    says nothing.  Only the table that has the extra row finds the pair, by asking the
+    other table for its row: mutation MG-6 (the manifest rows are not asked) turns the
+    panel case red and MG-5 (the report rows are not asked) the report case.
     """
 
     closed, later = RECUT_ENDS["closed"], CLOSED_LATER
@@ -2084,7 +2113,10 @@ def test_a_blocked_row_whose_only_panel_row_is_funded_is_named_and_never_matched
     no window, so no comparison fired); now the admission disagreement is named.
     """
 
-    spec = Spec(report=[_blocked_report_row], panel=[_recut_manifest(BLOCKED_END)])
+    # no capital trace: the report admits no flow record for this epoch
+    spec = Spec(
+        report=[_blocked_report_row], panel=[_recut_manifest(BLOCKED_END, days=())]
+    )
     gen_dir = build(tmp_path / "gen", spec)
     context = _context(gen_dir)
     blocked = checks.twr_rows(context)[3][1]
