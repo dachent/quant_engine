@@ -988,6 +988,108 @@ def test_m3_leaves_the_twr_flow_count_clause_unchanged(tmp_path: Path) -> None:
     assert findings[0].observed == {"twr_flow_count": 2}
 
 
+# ------------------------------- L6b fix round 1: an M3 row must be whole to be believed
+#
+# A manifest row that carries performance_opening_value is an M3 row: its opening date
+# and its contributed basis are part of the comparison.  Leaving either out of the
+# comparison because the row does not supply it would let a malformed row pass (Codex
+# and Kimi lane-eps-r0): a missing date skipped the MWR opening date clause, and an
+# unreadable opening_capital sent the flow-list clause back to net_capital.
+
+_ABSENT = object()
+OPENING_DATE_CHECK = "returns.mwr_opening_matches_first_flow"
+FLOW_LISTS_CHECK = "returns.flow_lists_agree"
+
+
+def _m3_manifest_field(account: str, field: str, value: Any) -> Mutator:
+    """Replace one field of the account's current manifest row (``_ABSENT``: drop it)."""
+
+    def mutate(panel: dict[str, Any]) -> None:
+        for row in panel["account_manifest"]["rows"]:
+            if row["account_id"] == account and row["effective_end"] is None:
+                if value is _ABSENT:
+                    del row[field]
+                else:
+                    row[field] = value
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "date_value",
+    [_ABSENT, None, 20250910, "", "soon"],
+    ids=["missing", "null", "not_a_string", "empty", "not_a_date"],
+)
+def test_m3_row_without_a_readable_performance_opening_date_is_a_finding(
+    tmp_path: Path, date_value: Any
+) -> None:
+    """L6b fix 2 (fail-before): the value is there, so the date has to be too.
+
+    The report opens at the performance opening value on the opening date; the
+    manifest row gives the value and no usable date.  The date comparison cannot be
+    made, which is itself the finding.  Mutation MB-4 (the date clause left out when
+    the manifest date is not a string) turns the first three red.
+    """
+
+    spec = Spec(
+        report=[_m3_report("A1", M3_OPENING)],
+        panel=[
+            _m3_manifest("A1", M3_OPENING),
+            _m3_manifest_field("A1", "performance_opening_date", date_value),
+        ],
+    )
+    findings = _m3_findings(spec, tmp_path)
+    assert [(f.check_id, f.klass, f.entity) for f in findings] == [
+        (OPENING_DATE_CHECK, checks.BLOCKER_INVARIANT, f"A1|alpha|{START}")
+    ]
+    assert findings[0].observed["manifest_performance_opening_value"] == Decimal(
+        M3_OPENING
+    )
+    assert findings[0].observed["manifest_performance_opening_date"] == (
+        None if date_value is _ABSENT else date_value
+    )
+    assert "performance opening date" in findings[0].message
+
+
+def test_an_m3_row_missing_its_date_does_not_taint_another_m3_row(
+    tmp_path: Path,
+) -> None:
+    """L6b fix 2 (fail-before): only the malformed row is a finding."""
+
+    spec = Spec(
+        report=[_m3_report("A1", M3_OPENING), _m3_report("B2", "2795")],
+        panel=[
+            _m3_manifest("A1", M3_OPENING),
+            _m3_manifest("B2", "2795"),
+            _m3_manifest_field("A1", "performance_opening_date", _ABSENT),
+        ],
+    )
+    findings = [
+        f for f in _m3_findings(spec, tmp_path) if f.check_id == OPENING_DATE_CHECK
+    ]
+    assert [f.entity for f in findings] == [f"A1|alpha|{START}"]
+
+
+def test_an_unreadable_manifest_date_beside_a_real_mismatch_keeps_both_reasons(
+    tmp_path: Path,
+) -> None:
+    """L6b fix 2: a shifted opening value and a missing date are one finding, two reasons."""
+
+    spec = Spec(
+        report=[_m3_report("A1", "990")],
+        panel=[
+            _m3_manifest("A1", M3_OPENING),
+            _m3_manifest_field("A1", "performance_opening_date", _ABSENT),
+        ],
+    )
+    opening = [
+        f for f in _m3_findings(spec, tmp_path) if f.check_id == OPENING_DATE_CHECK
+    ]
+    assert len(opening) == 1
+    assert "opening value and first cash flow disagree" in opening[0].message
+    assert "performance opening date" in opening[0].message
+
+
 # ----------------------------------------------- L6c: verified value-basis bounds
 #
 # A strategy whose admitted FX ends before the cutoff has no USD value past that
