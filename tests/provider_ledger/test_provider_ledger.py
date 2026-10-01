@@ -8753,6 +8753,22 @@ def test_provider_ledger_schema_pins_the_anchor_event_time_fx_shape(
     assert all(list(error.absolute_path)[:1] == ["event_time_fx"] for error in errors)
 
 
+def test_provider_ledger_schema_keeps_the_anchor_valuation_fx_shape() -> None:
+    """``valuation_fx`` shares the FX object definition with ``event_time_fx``;
+    sharing it must not loosen the valuation evidence."""
+
+    validator = _capital_anchor_validator()
+    anchor = _schema_capital_anchor(with_event_time_fx=False)
+    anchor["valuation_fx"] = [{**_usdt_event_time_fx(), "date": "2025-12-06"}]
+    assert not list(validator.iter_errors(anchor))
+
+    anchor["valuation_fx"][0]["unexpected"] = "x"
+    errors = list(validator.iter_errors(anchor))
+
+    assert errors
+    assert all(list(error.absolute_path)[:1] == ["valuation_fx"] for error in errors)
+
+
 def _ibkr_flow(
     account_id: str,
     event_date: str,
