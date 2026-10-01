@@ -1266,15 +1266,16 @@ def _declared_nav_gap_dates_by_strategy(
         )
     result: dict[str, frozenset[date]] = {}
     for strategy_id in sorted({key[1] for key in crosswalk}):
-        providers = {
-            provider_by_account.get(key[0])
-            for key in crosswalk
-            if key[1] == strategy_id
-        }
-        if None in providers:
-            raise SelectedHwmInputError(
-                "parity not derivable: selected account lacks ledger provider identity"
-            )
+        providers: set[str] = set()
+        for key in crosswalk:
+            if key[1] != strategy_id:
+                continue
+            account_provider = provider_by_account.get(key[0])
+            if account_provider is None:
+                raise SelectedHwmInputError(
+                    "parity not derivable: selected account lacks ledger provider identity"
+                )
+            providers.add(account_provider)
         result[strategy_id] = frozenset(
             gap
             for provider_id in providers
