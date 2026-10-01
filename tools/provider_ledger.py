@@ -1463,6 +1463,10 @@ def _matrixport_capital_anchors(
     the strategy's funded amount across currencies, fees, or retained cash.
     The subscription record, by contrast, names the product and its exact
     source-declared subscription amount.
+
+    Given an admitted FX generation, a non-USD anchor also carries
+    ``event_time_fx``, the close of its own event date, which a reader applies
+    once to the native amount.
     """
     account_id = _CSV_FACT_ACCOUNT["matrixport"]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
@@ -1612,13 +1616,14 @@ def _matrixport_capital_anchors(
             row.get("order_id"), "matrixport subscription order_id"
         )
         opening = not anchors
+        subscription_currency = _text(
+            row.get("subscription_currency"),
+            "matrixport subscription currency",
+        )
         anchor: dict[str, Any] = {
             "account_id": account_id,
             "amount": {
-                "currency": _text(
-                    row.get("subscription_currency"),
-                    "matrixport subscription currency",
-                ),
+                "currency": subscription_currency,
                 "status": "AVAILABLE",
                 "value": format(amount.normalize(), "f"),
             },
@@ -1641,10 +1646,6 @@ def _matrixport_capital_anchors(
             "strategy_id": strategy_id,
         }
         if opening and fx_daily_totals is not None:
-            subscription_currency = _text(
-                row.get("subscription_currency"),
-                "matrixport subscription currency",
-            )
             recognition_holdings = native_totals.get(recognition_day, {})
             if set(recognition_holdings) != {subscription_currency}:
                 raise ProviderLedgerError(
@@ -1709,6 +1710,18 @@ def _matrixport_capital_anchors(
                 "value": format(observed_nav.normalize(), "f"),
             }
             anchor["nav_source_artifact_id"] = nav_artifact_id
+        if fx_rates is not None and subscription_currency != "USD":
+            # The contributed amount converts once, at the close of the day the
+            # subscription was made: the contract's INVESTED_CAPITAL rule
+            # ACCEPTED_EVENT_TIME_FX_FOR_NON_USD_FLOWS, under which a missing
+            # rate fails closed (MISSING_FX_IS_INCOMPLETE).  This is the last
+            # step so every earlier check keeps its precedence.  The anchor
+            # keeps its native amount; ``valuation_fx`` and ``opening_nav`` keep
+            # the recognition-day close that values the opening NAV, and a USD
+            # anchor needs no conversion.
+            anchor["event_time_fx"] = _daily_fx_evidence(
+                subscription_currency, event_day, fx_rates
+            )
         anchors.append(anchor)
     return anchors
 
