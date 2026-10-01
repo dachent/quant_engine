@@ -3126,9 +3126,9 @@ def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
             message = (
                 f"the report row {position} of {key[0]} / {key[1]} from {key[2]} ends "
                 f"{row.get('effective_end')} but the panel manifest row {panel_position} "
-                f"that stands in for it ends {panel_row.get('effective_end')}: no row "
-                "of the other table has the whole identity of either, so the two "
-                "tables disagree about when the epoch ends"
+                f"of the same start ends {panel_row.get('effective_end')}: the two are "
+                "paired by account, strategy and start only, because one of them has "
+                "no counterpart with its whole identity in the other table"
             )
         else:
             expected = (

@@ -1958,6 +1958,24 @@ def test_an_epoch_that_ends_elsewhere_in_one_table_is_a_finding_though_numbers_a
         (None, CLOSED_LATER) if changed == "panel" else (CLOSED_LATER, None)
     )
     assert found[0].observed["report"]["row"] == found[0].observed["panel"]["row"] == 0
+    # what the release gate reads: the seven contract keys, no defect id, plain JSON
+    shape = found[0].as_json()
+    assert sorted(shape) == [
+        "check_id",
+        "class",
+        "defect_ids",
+        "entity",
+        "expected",
+        "observed",
+        "pointer",
+    ]
+    assert (shape["check_id"], shape["class"], shape["defect_ids"]) == (
+        IDENTITY_CHECK,
+        checks.BLOCKER_INVARIANT,
+        [],
+    )
+    assert shape["pointer"].endswith("#" + END_POINTER.format(0))
+    assert json.loads(json.dumps(shape)) == shape
 
 
 @MANIFEST_ORDERS
