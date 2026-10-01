@@ -28,7 +28,7 @@ good generation these tests perturb.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import copy
 from datetime import date
 import decimal
@@ -1019,6 +1019,658 @@ def test_the_flow_recompute_never_counts_the_trace_of_a_skipped_blocked_row(
         if row["metric_id"] == "flows.account.count"
     ]
     assert _expected_findings(_run(gen_dir, rows, repo)) == []
+
+
+# ----------- L6a fix round 2: the panel manifest rows keep their whole identity
+#
+# Fix round 1 made the SKIP exact, but every other read of the panel's account manifest
+# still went through one row per (account, strategy, effective_start): of two rows that
+# share it (a funded epoch re-cut from a confirmed blocked epoch's start) the later one
+# replaced the earlier.  Listing the funded manifest row first and the blocked one second
+# made the funded row vanish from every aggregation and every report-row match: a correct
+# flow oracle (net 10, one event) gave four false regressions, the funded row's own
+# contradictions went unseen, and its report row read the blocked epoch's panel row
+# (Codex lane-eps-r1b).  The rows are all kept now and matched by the whole identity
+# (account, strategy, effective_start, effective_end); among rows that share even that,
+# a row is matched with the one that is blocked exactly when it is.
+#
+# Below, m_b_f lists the blocked manifest row first (the order that was always right)
+# and m_f_b the funded one first.  The funded epoch ends elsewhere ("closed"), the day
+# after the blocked one ends ("one_day": the end is the only difference), or the same
+# day ("whole": nothing differs).
+
+RECUT_DEPOSIT_DAY = "2025-07-01"
+RECUT_ENDS = {"closed": "2025-12-31", "one_day": "2025-09-10", "whole": BLOCKED_END}
+MANIFEST_ORDERS = pytest.mark.parametrize(
+    "funded_first", [False, True], ids=["m_b_f", "m_f_b"]
+)
+ROW_CHECKS = ("expected.", "returns.", "flows.", "capital.account_identity")
+FLOW_ORACLE = {"flows.account.net": "10", "flows.account.count": "1"}
+
+
+def _recut_report(
+    end: str | None,
+    *,
+    twr: str = "0.5",
+    flow_count: int | None = None,
+    deposit_day: str = RECUT_DEPOSIT_DAY,
+    admitted: bool = True,
+) -> Mutator:
+    """A1's FUNDED beta epoch from the blocked epoch's own start, with one 10 deposit.
+
+    The row is whole: its MWR flows, flow count, windows and admitted FLOW record agree
+    with the manifest row of ``_recut_manifest``, so that nothing but a wrong lookup
+    makes a check fire on it.
+    """
+
+    def mutate(report: dict[str, Any]) -> None:
+        observed_end = end or CUTOFF
+        row = _twr_row("A1", "beta", "500", "510", [(deposit_day, "10")], twr=twr)
+        row.update(
+            {
+                "effective_start": BLOCKED_START,
+                "effective_end": end,
+                "observed_start": BLOCKED_START,
+                "observed_end": observed_end,
+                "return_path_cumulative_return": twr,
+                "return_path_observed_start": "2025-06-02",
+                "return_path_observed_end": observed_end,
+                "mwr_opening_date": BLOCKED_START,
+                "mwr_terminal_date": observed_end,
+            }
+        )
+        row["mwr_cashflows"][0]["date"] = BLOCKED_START
+        row["mwr_cashflows"][-1]["date"] = observed_end
+        if flow_count is not None:
+            row["flow_count"] = flow_count
+        report["twr_mwr"].append(row)
+        if admitted:
+            report["transactions_and_flows"].append(
+                {
+                    "account_id": "A1",
+                    "record_type": "FLOW",
+                    "kind": "TRANSFER:INTERNAL:IN",
+                }
+            )
+
+    return mutate
+
+
+def _recut_manifest(
+    end: str | None,
+    *,
+    linked: str = "0.5",
+    opening: str = "500",
+    internal_in: str = "10",
+    deposit_day: str = RECUT_DEPOSIT_DAY,
+    edit: Mutator | None = None,
+) -> Mutator:
+    """The panel manifest row of ``_recut_report``'s epoch: one 10 event in its trace."""
+
+    def mutate(panel: dict[str, Any]) -> None:
+        trace = [
+            {
+                "amount": "10",
+                "class": "INTERNAL_IN",
+                "event_date": deposit_day,
+                "nav_recognition_date": deposit_day,
+            }
+        ]
+        row = _manifest_row("A1", "beta", opening, internal_in, "510", trace)
+        row.update(
+            {
+                "effective_start": BLOCKED_START,
+                "effective_end": end,
+                "start": BLOCKED_START,
+                "end": end or CUTOFF,
+                "observation_linked_return": linked,
+            }
+        )
+        if edit is not None:
+            edit(row)
+        panel["account_manifest"]["rows"].append(row)
+        for name in ("twr_rows", "twr_available", "mwr_available"):
+            panel["counts"][name] += 1
+
+    return mutate
+
+
+def _recut_spec(
+    *,
+    funded_first: bool,
+    end: str | None = RECUT_ENDS["closed"],
+    report: Mutator | None = None,
+    manifest: Mutator | None = None,
+) -> Spec:
+    """A1's confirmed blocked beta epoch beside a funded one that shares its start.
+
+    The report lists the blocked row (position 3) before the funded one (4).  The panel
+    does the same, or, with ``funded_first``, lists the funded manifest row (3) first.
+    """
+
+    spec = _blocked_epochs(["A1"])
+    spec.report.append(report or _recut_report(end))
+    funded = manifest or _recut_manifest(end)
+    if funded_first:
+        spec.panel.insert(0, funded)
+    else:
+        spec.panel.append(funded)
+    return spec
+
+
+def _recut_run(
+    tmp_path: Path,
+    spec: Spec,
+    metrics: Mapping[str, str] | None = None,
+    *,
+    confirmed: bool = True,
+    window_start: str | None = None,
+) -> list[checks.Finding]:
+    """Findings for ``spec`` with A1's oracle rows for ``metrics`` and a synthetic census.
+
+    The census confirms the blocked epoch unless ``confirmed`` is false.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    gen_dir = build(tmp_path / "gen", spec)
+    wanted = metrics or {}
+    expected = []
+    for row in _oracle(("A1",), census_sha=sha if confirmed else None):
+        if row["metric_id"] in wanted:
+            row["expected"] = wanted[row["metric_id"]]
+            if window_start is not None:
+                row["window_start"] = window_start
+            expected.append(row)
+    return _run(gen_dir, expected, repo)
+
+
+def _row_findings(findings: list[checks.Finding]) -> list[tuple[str, str, str, str]]:
+    """What the oracle and the row-matching checks said (nothing in a clean world)."""
+
+    return sorted(
+        (f.check_id, f.klass, f.entity, f.json_path)
+        for f in findings
+        if f.check_id.startswith(ROW_CHECKS)
+    )
+
+
+@MANIFEST_ORDERS
+@pytest.mark.parametrize("variant", list(RECUT_ENDS))
+def test_a_funded_epoch_keeps_its_flows_beside_a_blocked_one_in_either_manifest_order(
+    tmp_path: Path, funded_first: bool, variant: str
+) -> None:
+    """L6a fix 2 (fail-before, Codex): the funded row's trace and net are counted.
+
+    A1's funded epoch holds the one 10 deposit, the oracle's net flow and count.  With
+    the funded manifest row listed first, the blocked row replaced it in the one-row-
+    per-three-part-key index: four false regressions, and the funded report row read the
+    blocked row's panel data.  Mutations MF-1 (the aggregations read the collapsed
+    index again) and MF-2 (the match ignores effective_end) turn this red; MF-3 (the
+    match ignores which row is blocked) turns the whole-identity cases red.
+    """
+
+    spec = _recut_spec(funded_first=funded_first, end=RECUT_ENDS[variant])
+    findings = _recut_run(tmp_path, spec, FLOW_ORACLE)
+    assert _row_findings(findings) == []
+    assert _census_findings(findings) == []
+
+
+@MANIFEST_ORDERS
+@pytest.mark.parametrize("variant", list(RECUT_ENDS))
+def test_an_unconfirmed_blocked_epoch_is_compared_with_its_own_panel_row(
+    tmp_path: Path, funded_first: bool, variant: str
+) -> None:
+    """L6a fix 2 (fail-before): the blocked report row reads the blocked panel row.
+
+    Without the census the blocked epoch is an account view like any other: its report
+    row is compared with the oracle beside ITS OWN panel row (empty: no net, no trace),
+    never the funded row's, whichever of the two is listed last.
+    """
+
+    spec = _recut_spec(funded_first=funded_first, end=RECUT_ENDS[variant])
+    findings = _recut_run(tmp_path, spec, FLOW_ORACLE, confirmed=False)
+    blocked = 4 if funded_first else 3
+    paths = {f.json_path for f in findings if f.check_id.startswith("expected.flows")}
+    assert f"$.account_manifest.rows[{blocked}]" in paths
+    assert f"$.account_manifest.rows[{blocked}].capital_flow_trace" in paths
+
+
+@MANIFEST_ORDERS
+def test_the_funded_rows_own_panel_row_is_the_one_compared_with_the_oracle(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): the panel view of a funded row is its own row's.
+
+    The funded epoch's report twr and its own manifest row both contradict the oracle
+    (0.99 against 0.1): two regressions, the second at the funded manifest row's own
+    position.  Funded first, the report row used to read the blocked row (none, at the
+    blocked row's position).
+    """
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        end=None,
+        report=_recut_report(None, twr="0.99"),
+        manifest=_recut_manifest(None, linked="0.99"),
+    )
+    findings = _recut_run(tmp_path, spec, {"twr.account": "0.1"})
+    own = 3 if funded_first else 4
+    assert sorted(
+        (f.json_path, f.observed["value"])
+        for f in findings
+        if f.check_id == "expected.twr.account"
+    ) == [
+        (f"$.account_manifest.rows[{own}].observation_linked_return", "0.99"),
+        ("$.twr_mwr[4].twr", "0.99"),
+    ]
+
+
+@MANIFEST_ORDERS
+def test_a_funded_rows_report_twr_is_compared_with_its_own_panel_return(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): returns.twr_views_agree reads the funded manifest row.
+
+    The report says 0.5 and the funded epoch's own manifest row 0.3 over the same
+    window; funded first, the report row read the blocked row (no window) and the
+    contradiction went unseen.
+    """
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        manifest=_recut_manifest(RECUT_ENDS["closed"], linked="0.3"),
+    )
+    findings = _recut_run(tmp_path, spec)
+    found = [f for f in findings if f.check_id == "returns.twr_views_agree"]
+    own = 3 if funded_first else 4
+    assert [(f.json_path, sorted(f.observed)) for f in found] == [
+        (
+            "$.twr_mwr[4].twr",
+            [
+                f"panel.account_manifest.rows[{own}].observation_linked_return",
+                "report.twr_mwr[4].twr",
+            ],
+        )
+    ]
+
+
+@MANIFEST_ORDERS
+def test_a_funded_rows_flow_count_is_compared_with_its_own_capital_trace(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): returns.flow_lists_agree counts the funded row's trace.
+
+    The report counts two flows, the funded epoch's own trace holds one.  Funded first,
+    the blocked row's empty trace was counted instead (0).
+    """
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"], flow_count=2),
+    )
+    findings = _recut_run(tmp_path, spec)
+    assert [
+        (f.json_path, f.observed, f.expected)
+        for f in findings
+        if f.check_id == "returns.flow_lists_agree"
+    ] == [
+        (
+            "$.twr_mwr[4].flow_count",
+            {"twr_flow_count": 2},
+            {"capital_flow_trace_events": 1},
+        )
+    ]
+
+
+@MANIFEST_ORDERS
+def test_a_funded_rows_mwr_opening_is_compared_with_its_own_opening_capital(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): the MWR opening is held to the funded manifest row's.
+
+    The report opens its MWR at 500, the funded epoch's own row contributed 400.
+    Funded first, the report row read the blocked row (no opening capital) and the
+    comparison was silently dropped.
+    """
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        manifest=_recut_manifest(
+            RECUT_ENDS["closed"], opening="400", internal_in="110"
+        ),
+    )
+    findings = _recut_run(tmp_path, spec)
+    assert [
+        (f.json_path, f.observed["manifest_opening_capital"])
+        for f in findings
+        if f.check_id == "returns.mwr_opening_matches_first_flow"
+    ] == [("$.twr_mwr[4].mwr_cashflows[0]", Decimal("400"))]
+
+
+@MANIFEST_ORDERS
+def test_a_funded_rows_unadmitted_trace_is_counted_in_either_manifest_order(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): flows.admission_consistency sums every manifest row.
+
+    The funded epoch's trace holds one event and the report admits no FLOW record for
+    A1.  Funded first, the blocked row replaced it in the sum and the contradiction
+    disappeared.
+    """
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"], admitted=False),
+    )
+    findings = _recut_run(tmp_path, spec)
+    assert [
+        (f.entity, f.observed)
+        for f in findings
+        if f.check_id == "flows.admission_consistency"
+    ] == [("A1", {"flows_used_by_capital_and_mwr": 1})]
+
+
+@MANIFEST_ORDERS
+def test_a_funded_rows_capital_arithmetic_is_checked_in_either_manifest_order(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): capital.account_identity visits every manifest row."""
+
+    def wrong_gain(row: dict[str, Any]) -> None:
+        row["gain"] = "7"
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        manifest=_recut_manifest(RECUT_ENDS["closed"], edit=wrong_gain),
+    )
+    findings = _recut_run(tmp_path, spec)
+    own = 3 if funded_first else 4
+    assert [
+        (f.entity, f.json_path)
+        for f in findings
+        if f.check_id == "capital.account_identity"
+    ] == [(f"A1|beta|{BLOCKED_START}", f"$.account_manifest.rows[{own}].gain")]
+
+
+@MANIFEST_ORDERS
+def test_the_flow_recompute_counts_a_funded_rows_trace_in_either_manifest_order(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): the window recompute reads every manifest row.
+
+    The oracle's window starts on 2025-12-15, so no view covers it and the flows are
+    recomputed from the traces; the funded epoch's deposit (2025-12-20) is inside it.
+    """
+
+    day = "2025-12-20"
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"], deposit_day=day),
+        manifest=_recut_manifest(RECUT_ENDS["closed"], deposit_day=day),
+    )
+    findings = _recut_run(tmp_path, spec, FLOW_ORACLE, window_start="2025-12-15")
+    assert _row_findings(findings) == []
+
+
+def test_the_extreme_return_lint_names_each_of_two_epochs_that_share_a_start(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 2 (fail-before): lint.extreme_live_return keeps one entry per epoch.
+
+    Two funded epochs from the blocked epoch's start both show a 600% return; each is
+    named, in the report and in the panel (the panel rows are listed before the blocked
+    one, which used to replace them).  The first epoch keeps the plain label.
+    """
+
+    first, second = RECUT_ENDS["closed"], "2026-03-31"
+    spec = _blocked_epochs(["A1"])
+    spec.report.extend(
+        [_recut_report(first, twr="6"), _recut_report(second, twr="6", admitted=False)]
+    )
+    spec.panel[:0] = [
+        _recut_manifest(first, linked="6"),
+        _recut_manifest(second, linked="6"),
+    ]
+    findings = _run(build(tmp_path / "gen", spec), None)
+    found = [f for f in findings if f.check_id == "lint.extreme_live_return"]
+    assert len(found) == 1
+    assert len(found[0].observed) == 6
+    label = f"A1|beta|{BLOCKED_START}"
+    assert f"account_manifest.observation_linked_return:{label}" in found[0].observed
+    assert f"twr_mwr.twr:{label}" in found[0].observed
+
+
+@MANIFEST_ORDERS
+def test_the_daily_move_lint_sees_the_funded_rows_flow_dates(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): lint.daily_move_near_flow reads every manifest trace.
+
+    Beta's daily series has one 50% day, the day after the funded epoch's deposit as
+    its manifest row records it (the report row dates its own flow elsewhere, so only
+    the manifest trace puts a flow near the move).  Funded first, the blocked row
+    replaced the funded one and no flow was near it.
+    """
+
+    def returns(report: dict[str, Any]) -> None:
+        start = date(2025, 8, 1).toordinal()
+        quiet = [
+            {
+                "strategy_id": "beta",
+                "date": date.fromordinal(start + index).isoformat(),
+                "return": "0",
+                "beginning_capital": "5000",
+                "evidence_layer": "ACCOUNT_LIVE",
+            }
+            for index in range(22)
+        ]
+        spike = {**quiet[0], "date": "2025-07-02", "return": "0.5"}
+        report["strategy_returns"].extend([*quiet, spike])
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"], deposit_day="2025-11-15"),
+    )
+    spec.report.append(returns)
+    findings = _run(build(tmp_path / "gen", spec), None)
+    found = [f for f in findings if f.check_id == "lint.daily_move_near_flow"]
+    assert [f.observed["beta:2025-07-02"]["flow_dates"] for f in found] == [
+        [RECUT_DEPOSIT_DAY]
+    ]
+
+
+# The open-epoch cases: A1's open alpha epoch is the good fixture's own row, and a
+# blocked alpha epoch from the same start (ending ALPHA_BLOCKED_END) shares its three-
+# part key.  With funded_first the funded rows keep position 0 and the blocked ones are
+# appended; otherwise the blocked rows move to the front and the funded ones are at 1.
+
+ALPHA_BLOCKED_END = "2025-09-30"
+
+
+def _alpha_recut_spec(*, funded_first: bool) -> Spec:
+    spec = _blocked_epochs(["A1"], "alpha", START, ALPHA_BLOCKED_END)
+    if not funded_first:
+        spec.report.append(
+            lambda report: report["twr_mwr"].insert(0, report["twr_mwr"].pop())
+        )
+        spec.panel.append(
+            lambda panel: panel["account_manifest"]["rows"].insert(
+                0, panel["account_manifest"]["rows"].pop()
+            )
+        )
+    return spec
+
+
+def _funded_alpha(table: list[dict[str, Any]]) -> dict[str, Any]:
+    """A1's open alpha row of a report or panel table."""
+
+    return next(
+        row
+        for row in table
+        if row["account_id"] == "A1"
+        and row["strategy_id"] == "alpha"
+        and row["effective_end"] is None
+    )
+
+
+def _alpha_run(
+    tmp_path: Path, spec: Spec, expected: list[dict[str, Any]] | None = None
+) -> list[checks.Finding]:
+    return _run(build(tmp_path / "gen", spec), expected)
+
+
+@MANIFEST_ORDERS
+def test_an_open_epochs_terminal_value_is_read_from_its_own_report_row(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): capital.account_identity matches rows by whole identity.
+
+    The open alpha epoch's report row says 1200 where its manifest row and the account
+    summary say 1100.  Funded first, the blocked manifest row replaced it (and, were
+    that fixed alone, the blocked report row would be read for its terminal value).
+    """
+
+    def drift(report: dict[str, Any]) -> None:
+        row = _funded_alpha(report["twr_mwr"])
+        row["mwr_terminal_value"] = "1200"
+        row["mwr_cashflows"][-1]["amount"] = "1200"
+
+    spec = _alpha_recut_spec(funded_first=funded_first)
+    spec.report.append(drift)
+    findings = _alpha_run(tmp_path, spec)
+    own = 0 if funded_first else 1
+    assert [
+        (f.entity, f.json_path)
+        for f in findings
+        if f.check_id == "capital.account_identity"
+    ] == [(f"A1|alpha|{START}", f"$.account_manifest.rows[{own}].current_value")]
+
+
+def _implied_flow(report: dict[str, Any]) -> None:
+    """The open alpha epoch's NAV endpoints imply a 50 flow (1150 against 1000 x 1.1)."""
+
+    row = _funded_alpha(report["twr_mwr"])
+    row["mwr_terminal_value"] = "1150"
+    row["mwr_cashflows"][-1]["amount"] = "1150"
+
+
+def _recorded_flow(panel: dict[str, Any]) -> None:
+    _funded_alpha(panel["account_manifest"]["rows"])["capital_flow_trace"] = [
+        {
+            "amount": "50",
+            "class": "DEPOSIT",
+            "event_date": "2026-01-15",
+            "nav_recognition_date": "2026-01-15",
+        }
+    ]
+
+
+@MANIFEST_ORDERS
+def test_an_open_epochs_recorded_flow_is_read_from_its_own_manifest_row(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): returns.implied_unrecorded_flows looks up the open row.
+
+    The 50 flow its NAV endpoints imply is recorded in the open epoch's own trace.
+    Funded first, the report row read the blocked row (no trace) and the check named an
+    unrecorded flow.
+    """
+
+    spec = _alpha_recut_spec(funded_first=funded_first)
+    spec.report.append(_implied_flow)
+    spec.panel.append(_recorded_flow)
+    findings = _alpha_run(tmp_path, spec)
+    assert [
+        f for f in findings if f.check_id == "returns.implied_unrecorded_flows"
+    ] == []
+
+
+def test_an_open_epoch_whose_nav_implies_an_unrecorded_flow_is_still_named(
+    tmp_path: Path,
+) -> None:
+    """Control (green on the head): without the recorded flow the same world fires."""
+
+    spec = _alpha_recut_spec(funded_first=True)
+    spec.report.append(_implied_flow)
+    findings = _alpha_run(tmp_path, spec)
+    assert [
+        (f.entity, f.observed["implied_unrecorded_flow_usd"])
+        for f in findings
+        if f.check_id == "returns.implied_unrecorded_flows"
+    ] == [(f"A1|alpha|{START}", Decimal("50.00"))]
+
+
+@MANIFEST_ORDERS
+def test_an_open_epochs_current_value_is_compared_with_the_account_oracle(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): capital.account.cutoff reads every open manifest row.
+
+    The open alpha epoch's manifest row says 1150 where the oracle says 1100.  Funded
+    first, the blocked row replaced it and the contradiction went unseen.
+    """
+
+    def reprice(panel: dict[str, Any]) -> None:
+        _funded_alpha(panel["account_manifest"]["rows"])["current_value"] = "1150"
+
+    spec = _alpha_recut_spec(funded_first=funded_first)
+    spec.panel.append(reprice)
+    oracle = [
+        {
+            "metric_id": "capital.account.cutoff",
+            "entity": "A1",
+            "as_of": CUTOFF,
+            "expected": "1100",
+            "authority_pointer": [],
+        }
+    ]
+    findings = _alpha_run(tmp_path, spec, oracle)
+    own = 0 if funded_first else 1
+    assert [
+        (f.klass, f.json_path, f.observed["value"])
+        for f in findings
+        if f.check_id == "expected.capital.account.cutoff"
+    ] == [
+        (
+            checks.BLOCKER_REGRESSION,
+            f"$.account_manifest.rows[{own}].current_value",
+            "1150",
+        )
+    ]
+
+
+@MANIFEST_ORDERS
+def test_the_invested_capital_lint_counts_the_open_epoch_in_either_manifest_order(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 2 (fail-before): lint.invested_capital_vs_contributions sums every row.
+
+    Alpha's invested capital is 900 where its open epoch contributed 1000.  Funded
+    first, the blocked row replaced the open one and alpha had no contributions at all.
+    """
+
+    def lower(report: dict[str, Any]) -> None:
+        for row in report["invested_capital"]["current_by_strategy"]:
+            if row["strategy_id"] == "alpha":
+                row["invested_capital_usd"] = "900"
+
+    spec = _alpha_recut_spec(funded_first=funded_first)
+    spec.report.append(lower)
+    findings = _alpha_run(tmp_path, spec)
+    assert [
+        f.observed
+        for f in findings
+        if f.check_id == "lint.invested_capital_vs_contributions"
+    ] == [
+        {
+            "alpha": {
+                "invested_capital_usd": Decimal("900"),
+                "net_contributed_capital": Decimal("1000"),
+            }
+        }
+    ]
 
 
 # -------------------------------------------------------------- L6b: the M3 opening
