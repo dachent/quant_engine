@@ -1300,7 +1300,157 @@ def _generation(
     return generation
 
 
-def _fixture(tmp_path: Path, *, evaluated_on: date | None = None) -> tuple[Path, Path]:
+CURRENT_STRATEGY_NAV = "400000.5"
+CURRENT_RESERVE_NAV = "12189.55"
+
+
+def _cc_amount(value: str | None) -> dict[str, object]:
+    return {
+        "currency": "USD",
+        "status": "AVAILABLE" if value is not None else "UNAVAILABLE",
+        "value": value,
+    }
+
+
+def _current_capital_fixture(*, reserve_ready: bool = False) -> dict[str, object]:
+    """Hand-written ``current_capital`` for the one-strategy synthetic baseline.
+
+    strategy-1 is account-1's NAV 400000.5 @ AS_OF (the audit table below says
+    410272.39, so the two figures can never be confused).  The reserve account's
+    only NAV is a 2026-07-14 legacy row: it is capital authority only when
+    ``reserve_ready`` admits it AUTHORITATIVE, otherwise the reserve is NOT_READY.
+    """
+
+    as_of = AS_OF.isoformat()
+    strategy = {
+        "as_of_date": as_of,
+        "current_value": _cc_amount(CURRENT_STRATEGY_NAV),
+        "current_weight": "1",
+        "members": [
+            {
+                "account_id": "account-1",
+                "as_of_date": as_of,
+                "assignment_ids": ["assignment-1"],
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "nav_record_id": "nav-account-1",
+                "source_key": "provider-ledger",
+                "status": "AVAILABLE",
+                "value": _cc_amount(CURRENT_STRATEGY_NAV),
+            }
+        ],
+        "reason": None,
+        "scope": "SYSTEMATIC",
+        "status": "AVAILABLE",
+        "strategy_id": "strategy-1",
+    }
+    systematic = {
+        "as_of_date": as_of,
+        "components": ["strategy-1"],
+        "current_value": _cc_amount(CURRENT_STRATEGY_NAV),
+        "reason": None,
+        "status": "AVAILABLE",
+    }
+    retained = {
+        "as_of_date": None,
+        "components": [],
+        "current_value": _cc_amount("0"),
+        "reason": None,
+        "status": "AVAILABLE",
+    }
+    reserve_nav_day = "2026-07-14"
+    reserve_member = {
+        "account_id": "account-reserve",
+        "as_of_date": reserve_nav_day,
+        "authority": "AUTHORITATIVE" if reserve_ready else "NAV_NOT_AUTHORITATIVE",
+        "nav_record_id": "nav-account-reserve",
+        "provider": "IBKR",
+        "status": "AVAILABLE" if reserve_ready else "NOT_READY_AT_CUTOFF",
+        "value": _cc_amount(CURRENT_RESERVE_NAV if reserve_ready else None),
+    }
+    if reserve_ready:
+        reserve = {
+            "as_of_date": reserve_nav_day,
+            "components": ["account-reserve"],
+            "current_value": _cc_amount(CURRENT_RESERVE_NAV),
+            "members": [reserve_member],
+            "reason": None,
+            "status": "AVAILABLE",
+        }
+        total_liquid = {
+            "as_of_date": reserve_nav_day,
+            "components": ["systematic", "retained_excluded", "reserve"],
+            "current_value": _cc_amount("412190.05"),
+            "reason": None,
+            "status": "AVAILABLE",
+        }
+    else:
+        reserve = {
+            "as_of_date": None,
+            "components": ["account-reserve"],
+            "current_value": _cc_amount(None),
+            "members": [reserve_member],
+            "reason": "reserve accounts without an authoritative admitted NAV",
+            "status": "NOT_READY_AT_CUTOFF",
+        }
+        total_liquid = {
+            "as_of_date": None,
+            "components": ["systematic", "retained_excluded", "reserve"],
+            "current_value": _cc_amount(None),
+            "reason": "total liquid requires every component to be current",
+            "status": "NOT_READY_AT_CUTOFF",
+        }
+    return {
+        "admissions": [
+            {
+                "account_id": "account-reserve",
+                "account_reconciliation_sha256": None,
+                "disposition": "AUTHORITATIVE" if reserve_ready else "REFERENCE_ONLY",
+                "effective_end": as_of,
+                "effective_start": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "fact_type": "nav_observations",
+                "pool_id": None,
+                "provider_id": "ibkr",
+                "strategy_id": None,
+            }
+        ],
+        "current_capital": {
+            "basis": "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE",
+            "currency": "USD",
+            "retained_excluded": retained,
+            "reserve": reserve,
+            "strategies": [strategy],
+            "systematic": systematic,
+            "total_liquid": total_liquid,
+            "valuation_date": as_of,
+            "weight_basis": "CURRENT_CUTOFF",
+        },
+        "nav_observations": [
+            {
+                "account_id": "account-1",
+                "as_of_date": as_of,
+                "nav": _cc_amount(CURRENT_STRATEGY_NAV),
+                "record_id": "nav-account-1",
+                "source_key": "provider-ledger",
+            },
+            {
+                "account_id": "account-reserve",
+                "as_of_date": reserve_nav_day,
+                "nav": _cc_amount(CURRENT_RESERVE_NAV),
+                "record_id": "nav-account-reserve",
+                "source_key": "provider-ledger" if reserve_ready else "ibkr-ledger",
+            },
+        ],
+    }
+
+
+def _fixture(
+    tmp_path: Path,
+    *,
+    evaluated_on: date | None = None,
+    reserve_ready: bool = False,
+) -> tuple[Path, Path]:
     output_root = tmp_path / "candidate"
     stages = output_root / "stages"
     hwm = {"nav_coverage": "1", "status": "AVAILABLE_GOVERNED_HWM_PERIMETER"}
@@ -1336,30 +1486,49 @@ def _fixture(tmp_path: Path, *, evaluated_on: date | None = None) -> tuple[Path,
     ]
     assignments = [
         {
+            "account_id": "account-1",
+            "assignment_id": "assignment-1",
             "effective_end": None,
+            "effective_start": "2026-01-01",
+            "mapping_status": "MAPPED",
             "pool_id": "systematic-capital",
             "strategy_id": "strategy-1",
             "strategy_mapping_disposition": "MAPPED",
         },
         {
+            "account_id": "account-reserve",
+            "assignment_id": "assignment-reserve",
             "effective_end": None,
+            "effective_start": "2025-09-15",
+            "mapping_status": "UNMAPPED",
             "pool_id": "reserve-capital",
             "strategy_id": None,
             "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
         },
     ]
+    replay = {
+        "reserve_total_usd": "100043.62",
+        "systematic_total_usd": "410272.39",
+        "total_liquid_usd": "510316.01",
+    }
+    capital = _current_capital_fixture(reserve_ready=reserve_ready)
     baseline_payload = {
         "allocations": allocations,
+        "as_of_date": AS_OF.isoformat(),
         "assignments": assignments,
+        "audit_snapshot": {
+            "as_of_date": "2026-07-25",
+            "replay": dict(replay),
+            "status": "HISTORICAL_REFERENCE",
+        },
+        "current_capital": capital["current_capital"],
+        "nav_observations": capital["nav_observations"],
+        "provider_admissions": capital["admissions"],
         "provenance": {
             "catalog_sha256": "e" * 64,
             "generation_id": "f" * 64,
         },
-        "replay": {
-            "reserve_total_usd": "100043.62",
-            "systematic_total_usd": "410272.39",
-            "total_liquid_usd": "510316.01",
-        },
+        "replay": replay,
         "source_artifacts": [
             {
                 "schema_name": "generation-manifest",
@@ -4213,6 +4382,172 @@ def test_semantic_reconciliation_calculates_all_six_bridges(tmp_path: Path) -> N
         "mappings",
     }
     assert {row["status"] for row in details["checks"].values()} == {"PASS"}
+
+
+def _financial_check(output_root: Path) -> dict[str, object]:
+    details = json.loads(
+        (output_root / "evidence" / "semantic-details.json").read_text(encoding="utf-8")
+    )
+    check = details["checks"]["financial_identities"]
+    assert isinstance(check, dict)
+    return check
+
+
+def test_semantic_labels_the_snapshot_historical_and_verifies_current_capital(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
+    check = _financial_check(output_root)
+    assert check["status"] == "PASS"
+    evidence = check["evidence"]
+    assert isinstance(evidence, dict)
+    # The dated audit identity keeps its semantics but is labeled historical.
+    snapshot = evidence["audit_snapshot"]
+    assert snapshot["status"] == "HISTORICAL_REFERENCE"
+    assert snapshot["as_of_date"] == "2026-07-25"
+    assert snapshot["systematic_total_usd"] == "410272.39"
+    assert snapshot["reserve_total_usd"] == "100043.62"
+    assert snapshot["total_liquid_usd"] == "510316.01"
+    # The current block is recomputed from nav_observations x assignments.
+    current = evidence["current_capital"]
+    assert current["valuation_date"] == AS_OF.isoformat()
+    assert current["recomputed_strategy_count"] == 1
+    assert current["strategy_mismatches"] == []
+    assert current["systematic_total_usd"] == CURRENT_STRATEGY_NAV
+    assert current["systematic_total_usd"] != snapshot["systematic_total_usd"]
+    # Reserve and total liquid are not current: reported, never stamped PASS.
+    assert current["identity_status"] == "NOT_READY"
+    assert current["not_ready_components"] == ["reserve", "total_liquid"]
+
+
+def test_semantic_current_identity_passes_when_every_component_is_current(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path, reserve_ready=True)
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
+    evidence = _financial_check(output_root)["evidence"]
+    assert isinstance(evidence, dict)
+    current = evidence["current_capital"]
+    assert current["identity_status"] == "PASS"
+    assert current["not_ready_components"] == []
+    assert current["total_liquid_usd"] == "412190.05"
+
+
+def _corrupt_strategy_value(payload: dict[str, object]) -> None:
+    capital = payload["current_capital"]
+    assert isinstance(capital, dict)
+    row = capital["strategies"][0]
+    row["current_value"]["value"] = "400001.5"
+    capital["systematic"]["current_value"]["value"] = "400001.5"
+
+
+def _drift_a_nav_fact(payload: dict[str, object]) -> None:
+    # The published block is untouched; the NAV fact it claims to sum moved.
+    navs = payload["nav_observations"]
+    assert isinstance(navs, list)
+    navs[0]["nav"]["value"] = "1"
+
+
+def _paint_the_audit_reserve(payload: dict[str, object]) -> None:
+    capital = payload["current_capital"]
+    assert isinstance(capital, dict)
+    capital["reserve"]["status"] = "AVAILABLE"
+    capital["reserve"]["current_value"] = _cc_amount("100043.62")
+    capital["reserve"]["as_of_date"] = "2026-07-25"
+
+
+def _paint_total_liquid(payload: dict[str, object]) -> None:
+    capital = payload["current_capital"]
+    assert isinstance(capital, dict)
+    capital["total_liquid"]["status"] = "AVAILABLE"
+    capital["total_liquid"]["current_value"] = _cc_amount("510316.01")
+    capital["total_liquid"]["as_of_date"] = "2026-07-25"
+
+
+def _relabel_the_snapshot_current(payload: dict[str, object]) -> None:
+    snapshot = payload["audit_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["status"] = "CURRENT"
+
+
+def _stale_valuation_date(payload: dict[str, object]) -> None:
+    capital = payload["current_capital"]
+    assert isinstance(capital, dict)
+    capital["valuation_date"] = "2026-07-25"
+
+
+def _wrong_weight(payload: dict[str, object]) -> None:
+    capital = payload["current_capital"]
+    assert isinstance(capital, dict)
+    capital["strategies"][0]["current_weight"] = "0.5"
+
+
+def _snapshot_replay_drift(payload: dict[str, object]) -> None:
+    snapshot = payload["audit_snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot["replay"] = {**snapshot["replay"], "reserve_total_usd": "1"}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _corrupt_strategy_value,
+        _drift_a_nav_fact,
+        _paint_the_audit_reserve,
+        _paint_total_liquid,
+        _relabel_the_snapshot_current,
+        _stale_valuation_date,
+        _wrong_weight,
+        _snapshot_replay_drift,
+    ],
+)
+def test_semantic_financial_identities_fail_on_a_false_current_capital(
+    tmp_path: Path, mutate: Callable[[dict[str, object]], None]
+) -> None:
+    """Paired with the good run above: each lie about current capital is caught."""
+    recipe, output_root = _fixture(tmp_path)
+    baseline = next((output_root / "stages" / "baseline" / "generations").iterdir())
+    _mutate_json(baseline / "portfolio-baseline.json", mutate)
+
+    with pytest.raises(materializer.MaterializationError, match="financial_identities"):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+    check = _financial_check(output_root)
+    assert check["status"] == "FAIL"
+    assert not (output_root / "evidence" / "post-build-semantic.json").exists()
+
+
+def test_semantic_requires_the_current_capital_and_audit_snapshot_blocks(
+    tmp_path: Path,
+) -> None:
+    for missing in ("current_capital", "audit_snapshot"):
+        recipe, output_root = _fixture(tmp_path / missing)
+        baseline = next((output_root / "stages" / "baseline" / "generations").iterdir())
+
+        def drop(payload: dict[str, object], key: str = missing) -> None:
+            payload.pop(key)
+
+        _mutate_json(baseline / "portfolio-baseline.json", drop)
+
+        with pytest.raises(
+            materializer.MaterializationError, match="baseline current capital differs"
+        ):
+            materializer.semantic(
+                recipe, output_root / "evidence" / "post-build-semantic.json"
+            )
 
 
 Mutator = Callable[[Path], None]
