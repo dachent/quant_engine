@@ -193,8 +193,9 @@
   const CAPITAL_HATCH = "repeating-linear-gradient(135deg, var(--border-strong) 0 4px, transparent 4px 9px)";
   const capitalState = (key) => {
     const value = data.capital?.[key];
-    const ready = data.capital_status?.[key] === "AVAILABLE" && number(value) != null;
-    return { key, value, ready, asOf: ready ? data.capital_as_of?.[key] ?? null : null };
+    const status = data.capital_status?.[key] ?? null;
+    const ready = status === "AVAILABLE" && number(value) != null;
+    return { key, value, status, ready, asOf: ready ? data.capital_as_of?.[key] ?? null : null };
   };
   const capitalAmount = (key) => (capitalState(key).ready ? currency(data.capital[key]) : "Not ready");
   const capitalAsOf = (key) => {
@@ -219,7 +220,7 @@
     const legend = parts.map((part) => {
       const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%` : part.label;
       const dot = part.ready ? `<span class="legend-dot" style="background:${part.color}"></span>` : `<span class="legend-dot is-hatched" style="background:${CAPITAL_HATCH}"></span>`;
-      return `<div class="legend-item" data-capital-component="${part.key}" data-capital-status="${part.ready ? "AVAILABLE" : "NOT_READY_AT_CUTOFF"}">${dot}<span>${safe(label)}</span><strong>${part.ready ? currency(part.value) : "—"}</strong></div>`;
+      return `<div class="legend-item" data-capital-component="${part.key}" data-capital-status="${safe(part.status)}">${dot}<span>${safe(label)}</span><strong>${part.ready ? currency(part.value) : "—"}</strong></div>`;
     }).join("");
     return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span></div></div><div class="legend-list">${legend}</div>`;
   };

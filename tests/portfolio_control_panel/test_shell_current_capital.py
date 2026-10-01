@@ -20,11 +20,16 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from acceptance.validate.shell import hard_coded_statuses  # noqa: E402
+
 PANEL_ROOT = REPOSITORY_ROOT / "apps" / "portfolio-control-panel"
 HARNESS = Path(__file__).with_name("shell_harness.mjs")
 
@@ -203,6 +208,19 @@ def test_ring_stays_unsized_when_a_payload_total_outruns_a_component(
     assert legend["reserve"]["status"] == "NOT_READY_AT_CUTOFF"
     assert "%" not in legend["systematic"]["body"]
     assert "%" not in legend["retained_excluded"]["body"]
+
+
+def test_the_capital_legend_renders_the_payload_status_never_a_literal() -> None:
+    """The attended validator lints every positive status the shell renders from a
+    literal (defect D8).  The capital legend renders the payload's own status, so it
+    adds none to the one the shell already carried.
+    """
+
+    text = (PANEL_ROOT / "app.js").read_text(encoding="utf-8")
+
+    found = hard_coded_statuses("app.js", text)
+
+    assert {item.literal for item in found} <= {"PUBLISHED"}, found
 
 
 def test_capital_view_kpi_does_not_call_a_missing_total_an_accepted_baseline(
