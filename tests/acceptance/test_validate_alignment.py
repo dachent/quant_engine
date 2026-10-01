@@ -24,15 +24,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import copy
+from datetime import date
+import decimal
 from decimal import Decimal
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
 from test_validate_generation import (
     CUTOFF,
+    REPOSITORY_ROOT,
     START,
     Spec,
     _manifest_row,
@@ -705,3 +710,545 @@ def test_m3_leaves_the_twr_flow_count_clause_unchanged(tmp_path: Path) -> None:
         ("returns.flow_lists_agree", f"B2|beta|{START}")
     ]
     assert findings[0].observed == {"twr_flow_count": 2}
+
+
+# ----------------------------------------------- L6c: verified value-basis bounds
+#
+# A strategy whose admitted FX ends before the cutoff has no USD value past that
+# end (FXB-1), so published dates before the cutoff can be right.  The report says
+# so in its top-level value_basis_bounds block (lane gamma).  The validator
+# reclassifies a date finding from BLOCKER_AUTHORITY to NOT_READY only for a date
+# that block explains AND the oracle confirms: the entry's (section, entity, date)
+# equals the finding's, its bounded_by is not empty, and every bounded strategy has
+# an expected capital.strategy.cutoff row whose as_of is that date.  The block is
+# itself checked (dates.value_basis_bound, N28) against the oracle and the cutoff.
+
+BOUND_DAY = "2026-09-03"
+BOUNDS_CHECK = "dates.value_basis_bound"
+LENS_ENTITY = "decomposition:ECONOMIC_FACTOR:LIVE_ONLY"
+BLOCK = "value_basis_bounds"
+
+
+def _bound_strategy(strategy: str, end: str = BOUND_DAY) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy,
+        "effective_end": end,
+        "bound_kind": "ADMITTED_FX_END",
+        "provider_ids": ["matrixport"],
+        "account_ids": ["A1"],
+        "fx_source_id": "portfolio-fx-rates",
+        "fx_generation_id": "9" * 64,
+        "fx_observed_end": end,
+        "unconverted_native_observations": {
+            "count": 14,
+            "first_date": "2026-09-04",
+            "last_date": CUTOFF,
+        },
+    }
+
+
+def _bound_entry(
+    section: str,
+    entity: str,
+    field: str,
+    bounded_by: Sequence[str] = ("alpha",),
+    day: str = BOUND_DAY,
+) -> dict[str, Any]:
+    return {
+        "section": section,
+        "entity": entity,
+        "field": field,
+        "date": day,
+        "bounded_by": list(bounded_by),
+    }
+
+
+ACCOUNT_ENTRY = _bound_entry("account_summary", "A1", "as_of_date")
+LENS_ENTRY = _bound_entry(
+    "decomposition_lenses", "ECONOMIC_FACTOR:LIVE_ONLY", "as_of_date"
+)
+
+
+def _bounds_block(
+    strategies: Sequence[dict[str, Any]],
+    entries: Sequence[dict[str, Any]],
+    *,
+    cutoff: str = CUTOFF,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "rule": "FXB-1",
+        "calculation_cutoff_date": cutoff,
+        "common_complete_date": BOUND_DAY,
+        "strategies": list(strategies),
+        "bounded_sections": list(entries),
+    }
+
+
+def _early_account(report: dict[str, Any]) -> None:
+    for row in report["account_summary"]:
+        if row["account_id"] == "A1":
+            row["as_of_date"] = BOUND_DAY
+
+
+def _early_lens(report: dict[str, Any]) -> None:
+    report["decomposition_lenses"]["lenses"][0]["as_of_date"] = BOUND_DAY
+
+
+def _bounded_world(block: Any = None) -> Spec:
+    """A1's value and the ECONOMIC_FACTOR lens are dated at the bound; the block rides along."""
+
+    def attach(report: dict[str, Any]) -> None:
+        report[BLOCK] = copy.deepcopy(block)
+
+    spec = Spec(report=[_early_account, _early_lens])
+    if block is not None:
+        spec.report.append(attach)
+    return spec
+
+
+def _strategy_cutoff(
+    strategy: str, as_of: str | None = BOUND_DAY, value: str = "1100"
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "metric_id": "capital.strategy.cutoff",
+        "entity": strategy,
+        "expected": value,
+    }
+    if as_of is not None:
+        row["as_of"] = as_of
+    return row
+
+
+def _l6c(findings: list[checks.Finding]) -> dict[str, Any]:
+    """What the three date-bound checks say about A1, the lens and the block."""
+
+    return {
+        "account": sorted(
+            f.klass
+            for f in findings
+            if f.check_id == "capital.as_of_cutoff" and f.entity == "A1"
+        ),
+        "lens": sorted(
+            f.klass
+            for f in findings
+            if f.check_id == "dates.section_as_of_vs_cutoff" and f.entity == LENS_ENTITY
+        ),
+        "bound": sorted(
+            (f.klass, f.entity) for f in findings if f.check_id == BOUNDS_CHECK
+        ),
+    }
+
+
+def _l6c_run(
+    tmp_path: Path, block: Any, oracle: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    gen_dir = build(tmp_path, _bounded_world(block))
+    return _l6c(_run(gen_dir, oracle))
+
+
+BLOCKERS = [checks.BLOCKER_AUTHORITY]
+NOT_READY_ONLY = [checks.NOT_READY]
+CONSISTENT = _bounds_block([_bound_strategy("alpha")], [ACCOUNT_ENTRY, LENS_ENTRY])
+ACCOUNT_POINTER = "downloads/portfolio-report-data.json#$.account_summary[0].as_of_date"
+LENS_POINTER = (
+    "downloads/portfolio-report-data.json#$.decomposition_lenses.lenses[0].as_of_date"
+)
+
+
+def test_without_a_block_the_early_dates_are_blockers_and_the_check_is_silent(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): no value_basis_bounds key, today's findings."""
+
+    assert _l6c_run(tmp_path, None, [_strategy_cutoff("alpha")]) == {
+        "account": BLOCKERS,
+        "lens": BLOCKERS,
+        "bound": [],
+    }
+
+
+def test_a_verified_bound_makes_the_account_and_lens_dates_not_ready(
+    tmp_path: Path,
+) -> None:
+    """L6c (fail-before): entry + oracle as_of = the date -> NOT_READY, block clean."""
+
+    assert _l6c_run(tmp_path, CONSISTENT, [_strategy_cutoff("alpha")]) == {
+        "account": NOT_READY_ONLY,
+        "lens": NOT_READY_ONLY,
+        "bound": [],
+    }
+
+
+def test_a_reclassified_finding_keeps_its_identity(tmp_path: Path) -> None:
+    """L6c (fail-before): the same check id, entity and pointer, only the class moves."""
+
+    bounded = _run(
+        build(tmp_path / "bounded", _bounded_world(CONSISTENT)),
+        [_strategy_cutoff("alpha")],
+    )
+    plain = _run(build(tmp_path / "plain", _bounded_world(None)), None)
+
+    def keyed(findings: list[checks.Finding]) -> dict[tuple[str, str, str], str]:
+        return {
+            (f.check_id, f.entity, f.pointer): f.klass
+            for f in findings
+            if f.check_id in ("capital.as_of_cutoff", "dates.section_as_of_vs_cutoff")
+        }
+
+    before, after = keyed(plain), keyed(bounded)
+    assert set(before) == set(after)
+    moved = {
+        key: (before[key], after[key]) for key in before if before[key] != after[key]
+    }
+    assert moved == {
+        ("capital.as_of_cutoff", "A1", ACCOUNT_POINTER): (
+            checks.BLOCKER_AUTHORITY,
+            checks.NOT_READY,
+        ),
+        ("dates.section_as_of_vs_cutoff", LENS_ENTITY, LENS_POINTER): (
+            checks.BLOCKER_AUTHORITY,
+            checks.NOT_READY,
+        ),
+    }
+
+
+def test_a_block_with_no_entry_for_the_date_leaves_the_blockers(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): the block names no entry for these entities."""
+
+    block = _bounds_block(
+        [_bound_strategy("alpha")],
+        [
+            _bound_entry("account_summary", "B1", "as_of_date"),
+            _bound_entry("decomposition_lenses", "ETF_STYLE:LIVE_ONLY", "as_of_date"),
+            _bound_entry("strategy_summary", "alpha", "account_live_observed_end"),
+        ],
+    )
+    assert _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")]) == {
+        "account": BLOCKERS,
+        "lens": BLOCKERS,
+        "bound": [],
+    }
+
+
+def test_an_entry_dated_otherwise_than_the_finding_leaves_the_blockers(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): the entry's date has to equal the finding's date."""
+
+    block = _bounds_block(
+        [_bound_strategy("alpha", "2026-09-02")],
+        [
+            _bound_entry("account_summary", "A1", "as_of_date", day="2026-09-02"),
+            _bound_entry(
+                "decomposition_lenses",
+                "ECONOMIC_FACTOR:LIVE_ONLY",
+                "as_of_date",
+                day="2026-09-02",
+            ),
+        ],
+    )
+    oracle = [_strategy_cutoff("alpha", "2026-09-02")]
+    assert _l6c_run(tmp_path, block, oracle) == {
+        "account": BLOCKERS,
+        "lens": BLOCKERS,
+        "bound": [],
+    }
+
+
+def test_an_entry_the_oracle_does_not_confirm_leaves_the_blockers_and_is_flagged(
+    tmp_path: Path,
+) -> None:
+    """L6c (fail-before): ME-3 (no oracle cross-check) turns this negative red."""
+
+    oracle = [_strategy_cutoff("alpha", "2026-09-02")]
+    assert _l6c_run(tmp_path, CONSISTENT, oracle) == {
+        "account": BLOCKERS,
+        "lens": BLOCKERS,
+        "bound": [(checks.BLOCKER_AUTHORITY, "alpha")],
+    }
+
+
+@pytest.mark.parametrize(
+    "oracle",
+    [
+        [_strategy_cutoff("alpha")],
+        [_strategy_cutoff("alpha"), _strategy_cutoff("beta", "2026-09-04")],
+        [_strategy_cutoff("alpha"), _strategy_cutoff("beta", None)],
+    ],
+    ids=["no_beta_row", "beta_other_date", "beta_row_without_as_of"],
+)
+def test_every_bounded_strategy_needs_its_own_oracle_confirmation(
+    tmp_path: Path, oracle: list[dict[str, Any]]
+) -> None:
+    """L6c (fail-before): a bound over two strategies is verified for both."""
+
+    both = ("alpha", "beta")
+    block = _bounds_block(
+        [_bound_strategy("alpha"), _bound_strategy("beta")],
+        [
+            _bound_entry("account_summary", "A1", "as_of_date", both),
+            _bound_entry(
+                "decomposition_lenses", "ECONOMIC_FACTOR:LIVE_ONLY", "as_of_date", both
+            ),
+        ],
+    )
+    assert _l6c_run(tmp_path, block, oracle) == {
+        "account": BLOCKERS,
+        "lens": BLOCKERS,
+        "bound": [(checks.BLOCKER_AUTHORITY, "beta")],
+    }
+
+
+def test_both_bounded_strategies_confirmed_is_not_ready(tmp_path: Path) -> None:
+    """L6c (fail-before): the positive twin of the two-strategy negatives."""
+
+    both = ("alpha", "beta")
+    block = _bounds_block(
+        [_bound_strategy("alpha"), _bound_strategy("beta")],
+        [_bound_entry("account_summary", "A1", "as_of_date", both)],
+    )
+    oracle = [_strategy_cutoff("alpha"), _strategy_cutoff("beta")]
+    result = _l6c_run(tmp_path, block, oracle)
+    assert result["account"] == NOT_READY_ONLY
+    assert result["bound"] == []
+
+
+def test_a_forged_effective_end_is_a_blocker_authority(tmp_path: Path) -> None:
+    """L6c (fail-before): ME-4 (drop dates.value_basis_bound) turns this red."""
+
+    block = _bounds_block([_bound_strategy("alpha", "2026-09-10")], [])
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["bound"] == [(checks.BLOCKER_AUTHORITY, "alpha")]
+    assert result["account"] == BLOCKERS
+
+
+def test_the_bound_findings_carry_the_defect_id_and_the_pointer(tmp_path: Path) -> None:
+    """L6c (fail-before): N28, one finding per offending strategy entry."""
+
+    block = _bounds_block([_bound_strategy("alpha", "2026-09-10")], [])
+    findings = _run(build(tmp_path, _bounded_world(block)), [_strategy_cutoff("alpha")])
+    (bound,) = [f for f in findings if f.check_id == BOUNDS_CHECK]
+    assert bound.defect_ids == ("N28",)
+    assert bound.pointer == (
+        "downloads/portfolio-report-data.json#$.value_basis_bounds.strategies[0]"
+    )
+    assert bound.observed["effective_end"] == "2026-09-10"
+    assert bound.expected["effective_end"] == BOUND_DAY
+
+
+def test_a_block_cutoff_that_differs_from_the_validator_cutoff_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """L6c (fail-before): calculation_cutoff_date is the declared cutoff."""
+
+    block = _bounds_block(
+        [_bound_strategy("alpha")], [ACCOUNT_ENTRY], cutoff="2026-09-18"
+    )
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["bound"] == [(checks.BLOCKER_AUTHORITY, "alpha")]
+
+
+def test_an_entry_dated_otherwise_than_the_earliest_bound_is_an_invariant_blocker(
+    tmp_path: Path,
+) -> None:
+    """L6c (fail-before): the entry date is min(effective_end over bounded_by)."""
+
+    both = ("alpha", "beta")
+    block = _bounds_block(
+        [_bound_strategy("alpha"), _bound_strategy("beta", "2026-09-01")],
+        [_bound_entry("account_summary", "A1", "as_of_date", both)],
+    )
+    oracle = [_strategy_cutoff("alpha"), _strategy_cutoff("beta", "2026-09-01")]
+    result = _l6c_run(tmp_path, block, oracle)
+    assert result["bound"] == [(checks.BLOCKER_INVARIANT, "account_summary|A1")]
+    assert result["account"] == BLOCKERS
+
+
+@pytest.mark.parametrize(
+    "bounded_by",
+    [[], ["gamma"], ["alpha", "gamma"]],
+    ids=["empty", "unknown_strategy", "one_unknown_strategy"],
+)
+def test_an_entry_whose_bounded_by_cannot_give_a_date_is_an_invariant_blocker(
+    tmp_path: Path, bounded_by: list[str]
+) -> None:
+    """L6c (fail-before): no bound, or a bound of a strategy the block does not list."""
+
+    block = _bounds_block(
+        [_bound_strategy("alpha")],
+        [_bound_entry("account_summary", "A1", "as_of_date", bounded_by)],
+    )
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["bound"] == [(checks.BLOCKER_INVARIANT, "account_summary|A1")]
+    assert result["account"] == BLOCKERS
+
+
+def test_without_an_expected_baseline_nothing_is_reclassified(tmp_path: Path) -> None:
+    """L6c (fail-before): the oracle is the authority; the block is still checked."""
+
+    consistent = _l6c_run(tmp_path / "consistent", CONSISTENT, None)
+    assert consistent == {"account": BLOCKERS, "lens": BLOCKERS, "bound": []}
+    inconsistent = _bounds_block(
+        [_bound_strategy("alpha")],
+        [_bound_entry("account_summary", "A1", "as_of_date", day="2026-09-02")],
+        cutoff="2026-09-18",
+    )
+    result = _l6c_run(tmp_path / "inconsistent", inconsistent, None)
+    assert result["bound"] == [
+        (checks.BLOCKER_AUTHORITY, "alpha"),
+        (checks.BLOCKER_INVARIANT, "account_summary|A1"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "not an object",
+        {**CONSISTENT, "strategies": "nope"},
+        {**CONSISTENT, "bounded_sections": {"a": 1}},
+        {**CONSISTENT, "bounded_sections": ["nope"]},
+        {**CONSISTENT, "calculation_cutoff_date": "soon"},
+        {
+            **CONSISTENT,
+            "bounded_sections": [{**ACCOUNT_ENTRY, "bounded_by": "alpha"}],
+        },
+        {
+            **CONSISTENT,
+            "strategies": [_bound_strategy("alpha"), _bound_strategy("alpha")],
+        },
+        {
+            **CONSISTENT,
+            "strategies": [{**_bound_strategy("alpha"), "effective_end": "later"}],
+        },
+    ],
+    ids=[
+        "not_an_object",
+        "strategies_not_a_list",
+        "sections_not_a_list",
+        "section_not_an_object",
+        "cutoff_not_a_date",
+        "bounded_by_not_a_list",
+        "duplicate_strategy",
+        "unreadable_effective_end",
+    ],
+)
+def test_a_malformed_block_is_a_blocker_and_never_reclassifies(
+    tmp_path: Path, block: Any
+) -> None:
+    """L6c (fail-before): a block the check cannot read is never trusted."""
+
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert (checks.BLOCKER_INVARIANT, BLOCK) in result["bound"]
+    assert result["account"] == BLOCKERS
+    assert result["lens"] == BLOCKERS
+
+
+def test_a_date_after_the_cutoff_is_never_reclassified(tmp_path: Path) -> None:
+    """Guard (green on main): only a date before the cutoff can be explained."""
+
+    def late_lens(report: dict[str, Any]) -> None:
+        report["decomposition_lenses"]["lenses"][0]["as_of_date"] = "2026-09-18"
+
+    block = _bounds_block(
+        [_bound_strategy("alpha", "2026-09-18")],
+        [
+            _bound_entry(
+                "decomposition_lenses",
+                "ECONOMIC_FACTOR:LIVE_ONLY",
+                "as_of_date",
+                day="2026-09-18",
+            )
+        ],
+    )
+    spec = Spec(report=[late_lens, lambda report: report.update({BLOCK: block})])
+    oracle = [_strategy_cutoff("alpha", "2026-09-18")]
+    findings = _run(build(tmp_path, spec), oracle)
+    assert [
+        f.klass
+        for f in findings
+        if f.check_id == "dates.section_as_of_vs_cutoff" and f.entity == LENS_ENTITY
+    ] == BLOCKERS
+
+
+# --------------------------------------------- L6c seam: the real producer's block
+#
+# AGENTS.md A1.3: a consumer suite that mocks the producer does not satisfy the
+# seam.  The block below is built by the report tool's own disclosure builder
+# (lane gamma, tools/portfolio_report.py _value_basis_bounds_disclosure) over the
+# ledger module's own bound dataclasses, from the report sections of the
+# generation under test, and handed to the validator unchanged.
+
+
+def _load_report_tool() -> Any:
+    """The report tool, loaded under a private name; the module registry and the
+    ambient decimal context are left as they were found."""
+
+    name = "portfolio_report_l6c_seam"
+    spec = importlib.util.spec_from_file_location(
+        name, REPOSITORY_ROOT / "tools" / "portfolio_report.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    saved = decimal.getcontext().copy()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(name, None)
+        decimal.setcontext(saved)
+    return module
+
+
+def test_the_report_producers_own_block_is_verified_by_the_validator(
+    tmp_path: Path,
+) -> None:
+    """L6c seam (fail-before): producer block in, NOT_READY out, nothing flagged."""
+
+    from quant_engine.portfolio_ledger.value_basis_bounds import (
+        ADMITTED_FX_END,
+        FX_SOURCE_ID,
+        StrategyValueBound,
+        ValueBasisBounds,
+    )
+
+    reporter = _load_report_tool()
+    seed = load_generation(build(tmp_path / "seed", _bounded_world(None))).report
+    end = date.fromisoformat(BOUND_DAY)
+    bounds = ValueBasisBounds(
+        calculation_cutoff=date.fromisoformat(CUTOFF),
+        strategies={
+            "alpha": StrategyValueBound(
+                strategy_id="alpha",
+                effective_end=end,
+                bound_kind=ADMITTED_FX_END,
+                provider_ids=("matrixport",),
+                account_ids=("A1",),
+                fx_source_id=FX_SOURCE_ID,
+                fx_generation_id="9" * 64,
+                fx_observed_end=end,
+                unconverted_count=14,
+                first_unconverted=date(2026, 9, 4),
+                last_unconverted=date.fromisoformat(CUTOFF),
+            )
+        },
+    )
+    block = reporter._value_basis_bounds_disclosure(
+        bounds,
+        seed,
+        required_strategy_ids=("alpha", "beta"),
+        history_end=None,
+        hwm_end=None,
+    )
+    assert block is not None
+    assert [(e["section"], e["entity"]) for e in block["bounded_sections"]] == [
+        ("account_summary", "A1"),
+        ("decomposition_lenses", "ECONOMIC_FACTOR:LIVE_ONLY"),
+    ]
+    assert _l6c_run(tmp_path / "gen", block, [_strategy_cutoff("alpha")]) == {
+        "account": NOT_READY_ONLY,
+        "lens": NOT_READY_ONLY,
+        "bound": [],
+    }
