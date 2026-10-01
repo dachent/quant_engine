@@ -13,7 +13,7 @@ import sys
 from typing import Any
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -4287,6 +4287,68 @@ def test_audit_snapshot_records_reserve_observation_dates_and_later_flows() -> N
         ("ibkr:flow-1", "2026-08-03", "-6901"),
         ("ibkr:flow-2", "2026-08-03", "-5309.52"),
     ]
+
+
+def _cc_schema_validator(definition: str) -> Draft202012Validator:
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    return Draft202012Validator(
+        {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            "$ref": f"#/$defs/{definition}",
+        }
+    )
+
+
+def test_catalog_schema_requires_and_closes_the_current_capital_blocks(
+    tmp_path: Path,
+) -> None:
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert {"current_capital", "audit_snapshot"} <= set(schema["required"])
+    assert schema["properties"]["current_capital"] == {
+        "$ref": "#/$defs/current_capital"
+    }
+    assert schema["properties"]["audit_snapshot"] == {"$ref": "#/$defs/audit_snapshot"}
+
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    validator = _cc_schema_validator("current_capital")
+    validator.validate(catalog["current_capital"])
+    validator.validate(_cc_build(_cc_case()))
+    _cc_schema_validator("audit_snapshot").validate(catalog["audit_snapshot"])
+
+    # Paired bad cases: false availability and unknown keys are structurally refused.
+    painted = copy.deepcopy(catalog["current_capital"])
+    painted["strategies"][0]["current_value"] = {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": "20",
+    }
+    with pytest.raises(ValidationError):
+        validator.validate(painted)
+
+    mismatched = copy.deepcopy(catalog["current_capital"])
+    mismatched["strategies"][0]["status"] = "NOT_READY_AT_CUTOFF"
+    with pytest.raises(ValidationError):
+        validator.validate(mismatched)
+
+    unknown = copy.deepcopy(catalog["current_capital"])
+    unknown["audit_reserve_usd"] = "100043.62"
+    with pytest.raises(ValidationError, match="Additional properties"):
+        validator.validate(unknown)
+
+    snapshot = copy.deepcopy(catalog["audit_snapshot"])
+    snapshot["status"] = "CURRENT"
+    with pytest.raises(ValidationError, match="HISTORICAL_REFERENCE"):
+        _cc_schema_validator("audit_snapshot").validate(snapshot)
 
 
 def test_excluded_registry_strategy_is_a_retained_row_in_a_built_baseline(
