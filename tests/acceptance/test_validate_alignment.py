@@ -2616,7 +2616,12 @@ def _early_account(report: dict[str, Any]) -> None:
 
 
 def _early_lens(report: dict[str, Any]) -> None:
-    report["decomposition_lenses"]["lenses"][0]["as_of_date"] = BOUND_DAY
+    lenses = report["decomposition_lenses"]
+    lenses["lenses"][0]["as_of_date"] = BOUND_DAY
+    # The producer's `lenses` is the alias of modes[default evidence mode]: keep the alias consistent
+    # (lane FU lists the lens rows of EVERY mode from `modes`, so a fixture that dated only the alias
+    # would no longer be what the real producer emits).
+    lenses["modes"]["LIVE_ONLY"][0]["as_of_date"] = BOUND_DAY
 
 
 def _bounded_world(block: Any = None) -> Spec:
