@@ -1851,6 +1851,288 @@ def test_a_panel_row_whose_report_row_carries_another_end_is_still_compared_with
     ] == [(f"A1|alpha|{START}", f"$.account_manifest.rows[{own}].current_value")]
 
 
+# ------------------------------------ an epoch the two tables carry apart (fix round 3)
+#
+# Fix round 2 pairs a row with the row of its own epoch: the one with its whole identity
+# (account, strategy, effective_start, effective_end), among those the one of its kind
+# (blocked or not); and, when the other table has no row with the whole identity, the
+# row of its kind that shares the start.  That left two holes (Codex lane-eps-r2, both
+# executed):
+#
+#  1. the stand-in was compared on its numbers alone: a report row that ends 2025-12-31
+#     and a panel row that ends 2026-01-31, every number equal, produced no finding,
+#     although the stand-in exists to keep exactly that disagreement visible;
+#  2. an epoch whose whole identity the other table holds only as a row of the OTHER
+#     kind was matched with that row all the same (``(alike or own)[-1]``): a funded
+#     report row was read against a blocked panel row, and a funded/blocked admission
+#     disagreement was treated as a match.
+#
+# Both are now said out loud, as ``capital.account_identity`` BLOCKER_INVARIANT pointing
+# at the report row (no check id says "epoch identity"; this is the one whose subject is
+# the account's epoch row across the report and the panel, and no defect id is
+# attached): the stand-in with the two ends, an epoch held only as the other kind with
+# the two admission statuses.  A row of the other kind is never a row's match.
+
+IDENTITY_CHECK = "capital.account_identity"
+END_POINTER = "$.twr_mwr[{}].effective_end"
+ADMISSION_POINTER = "$.twr_mwr[{}].epoch_admission_status"
+CLOSED_LATER = "2026-01-31"
+
+
+def _carried_apart(findings: list[checks.Finding]) -> list[checks.Finding]:
+    """The identity findings about two rows of one epoch (they point into the report)."""
+
+    return [
+        f for f in findings if f.check_id == IDENTITY_CHECK and f.file == checks.REPORT
+    ]
+
+
+def _context(gen_dir: Path) -> checks.Context:
+    return checks.Context(
+        gen=load_generation(gen_dir),
+        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
+        cutoff_source="test",
+    )
+
+
+@pytest.mark.parametrize("changed", ["panel", "report"])
+def test_an_epoch_that_ends_elsewhere_in_one_table_is_a_finding_though_numbers_agree(
+    tmp_path: Path, changed: str
+) -> None:
+    """L6a fix 3 (fail-before, Codex): the end-only disagreement is no longer silent.
+
+    A1's alpha epoch is open in one table and ends 2026-01-31 in the other; every
+    number agrees.  The row of the other table is still its stand-in, and the finding
+    names the account, the strategy, the start and both ends.  Mutation MG-1 (the
+    stand-in is used without a finding) turns this red; MG-5 / MG-6 (only one table's
+    rows are asked) do not, the pair being found from both sides.
+    """
+
+    def ends_later(document: dict[str, Any]) -> None:
+        table = (
+            document["account_manifest"]["rows"]
+            if changed == "panel"
+            else document["twr_mwr"]
+        )
+        table[0]["effective_end"] = CLOSED_LATER
+
+    spec = Spec(**{changed: [ends_later]})
+    found = _carried_apart(_run_spec(tmp_path, spec))
+    assert [(f.klass, f.entity, f.json_path, f.defect_ids) for f in found] == [
+        (checks.BLOCKER_INVARIANT, f"A1|alpha|{START}", END_POINTER.format(0), ())
+    ]
+    ends = (
+        found[0].observed["report"]["effective_end"],
+        found[0].observed["panel"]["effective_end"],
+    )
+    assert ends == (
+        (None, CLOSED_LATER) if changed == "panel" else (CLOSED_LATER, None)
+    )
+    assert found[0].observed["report"]["row"] == found[0].observed["panel"]["row"] == 0
+
+
+@MANIFEST_ORDERS
+def test_a_funded_epoch_the_panel_ends_elsewhere_is_named_beside_a_blocked_one(
+    tmp_path: Path, funded_first: bool
+) -> None:
+    """L6a fix 3 (fail-before, Codex): Codex's end-only repro, in the re-cut world.
+
+    The funded epoch ends 2025-12-31 in the report and 2026-01-31 in the panel, every
+    compared number equal, beside a blocked epoch that agrees in both tables.  Nothing
+    but the one identity finding is said, whichever order the panel lists its rows in
+    (the blocked row never stands in for the funded one).  Mutation MG-1 turns this red.
+    """
+
+    def ends_later(row: dict[str, Any]) -> None:
+        row["effective_end"] = CLOSED_LATER
+
+    spec = _recut_spec(
+        funded_first=funded_first,
+        report=_recut_report(RECUT_ENDS["closed"]),
+        manifest=_recut_manifest(RECUT_ENDS["closed"], edit=ends_later),
+    )
+    findings = _recut_run(tmp_path, spec)
+    entity = f"A1|beta|{BLOCKED_START}"
+    assert _row_findings(findings) == [
+        (IDENTITY_CHECK, checks.BLOCKER_INVARIANT, entity, END_POINTER.format(4))
+    ]
+    (found,) = _carried_apart(findings)
+    assert found.observed["report"] == {
+        "row": 4,
+        "effective_end": RECUT_ENDS["closed"],
+        "twr_status": "AVAILABLE",
+        "epoch_admission_status": None,
+    }
+    assert found.observed["panel"]["row"] == (3 if funded_first else 4)
+    assert found.observed["panel"]["effective_end"] == CLOSED_LATER
+
+
+def test_a_blocked_epoch_the_panel_ends_elsewhere_is_named(tmp_path: Path) -> None:
+    """L6a fix 3 (fail-before): the same for a blocked epoch (an unconfirmed one here).
+
+    The report's blocked row ends 2025-09-09 and the panel's 2025-09-10; a blocked row
+    carries no number, so the two ends are all there is to compare.
+    """
+
+    def ends_later(panel: dict[str, Any]) -> None:
+        panel["account_manifest"]["rows"][3]["effective_end"] = "2025-09-10"
+
+    spec = _blocked_epochs(["A1"])
+    spec.panel.append(ends_later)
+    found = _carried_apart(_run_spec(tmp_path, spec))
+    assert [(f.entity, f.json_path) for f in found] == [
+        (f"A1|beta|{BLOCKED_START}", END_POINTER.format(3))
+    ]
+    assert found[0].observed["report"]["effective_end"] == BLOCKED_END
+    assert found[0].observed["panel"]["effective_end"] == "2025-09-10"
+
+
+@pytest.mark.parametrize("extra", ["panel", "report"])
+def test_a_second_row_for_the_epoch_in_one_table_is_named_with_both_ends(
+    tmp_path: Path, extra: str
+) -> None:
+    """L6a fix 3 (fail-before): a row that only one table carries is a stand-in too.
+
+    One table lists the funded epoch ending 2025-12-31 and again ending 2026-01-31, the
+    other only the first.  The second row has no row of the whole identity beside it, so
+    it is compared with the first and named against it; the first is paired exactly and
+    says nothing.  Only the table that has the extra row finds the pair: mutation MG-5
+    (the report rows are not asked) turns the panel case red and MG-6 (the manifest
+    rows are not asked) the report case.
+    """
+
+    closed, later = RECUT_ENDS["closed"], CLOSED_LATER
+    if extra == "panel":
+        spec = Spec(
+            report=[_recut_report(closed)],
+            panel=[_recut_manifest(closed), _recut_manifest(later)],
+        )
+    else:
+        spec = Spec(
+            report=[_recut_report(closed), _recut_report(later, admitted=False)],
+            panel=[_recut_manifest(closed)],
+        )
+    found = _carried_apart(_run_spec(tmp_path, spec))
+    report_row = 3 if extra == "panel" else 4
+    assert [(f.entity, f.json_path) for f in found] == [
+        (f"A1|beta|{BLOCKED_START}", END_POINTER.format(report_row))
+    ]
+    shown = found[0].observed
+    assert (shown["report"]["effective_end"], shown["panel"]["effective_end"]) == (
+        (closed, later) if extra == "panel" else (later, closed)
+    )
+
+
+def _funded_report_row(report: dict[str, Any]) -> None:
+    _recut_report(BLOCKED_END)(report)
+
+
+def _blocked_report_row(report: dict[str, Any]) -> None:
+    report["twr_mwr"].append(_blocked_twr_row("A1"))
+
+
+def _blocked_manifest_row_only(panel: dict[str, Any]) -> None:
+    panel["account_manifest"]["rows"].append(_blocked_manifest_row("A1"))
+    panel["counts"]["twr_rows"] += 1
+
+
+def test_a_funded_row_whose_only_panel_row_is_blocked_is_named_and_never_matched(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 3 (fail-before, Codex): an exact identity held only as the other kind.
+
+    The funded report row has the whole identity of the panel's BLOCKED row and no
+    funded panel row at all.  That is an admission disagreement, named with both
+    statuses; it is not a match, so the funded row is not read against the blocked row
+    (it used to be: the blocked row has no capital trace, and the flow lists were
+    said to disagree for the wrong reason).  Mutation MG-2 (``(alike or own)[-1]``)
+    and MG-3 (the disagreement is not said) turn this red.
+    """
+
+    spec = Spec(report=[_funded_report_row], panel=[_blocked_manifest_row_only])
+    gen_dir = build(tmp_path / "gen", spec)
+    context = _context(gen_dir)
+    funded = checks.twr_rows(context)[3][1]
+    blocked = checks.manifest_rows(context)[3][1]
+    assert checks.manifest_match(context, funded) is None
+    assert checks.report_match(context, blocked) is None
+    findings = _run(gen_dir, None)
+    assert [f for f in findings if f.check_id == "returns.flow_lists_agree"] == []
+    assert _row_findings(findings) == [
+        (
+            IDENTITY_CHECK,
+            checks.BLOCKER_INVARIANT,
+            f"A1|beta|{BLOCKED_START}",
+            ADMISSION_POINTER.format(3),
+        )
+    ]
+    (found,) = _carried_apart(findings)
+    assert found.observed["report"]["twr_status"] == "AVAILABLE"
+    assert found.observed["panel"]["status"] == "BLOCKED_ADMISSION"
+    assert found.observed["panel"]["admission_status"] == "BLOCKED"
+    assert found.observed["report"]["effective_end"] == BLOCKED_END
+    assert found.observed["panel"]["effective_end"] == BLOCKED_END
+
+
+def test_a_blocked_row_whose_only_panel_row_is_funded_is_named_and_never_matched(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 3 (fail-before, Codex): the same the other way round.
+
+    The blocked report row has the whole identity of a funded panel row and no blocked
+    one.  It used to be matched with the funded row without a word (a blocked row has
+    no window, so no comparison fired); now the admission disagreement is named.
+    """
+
+    spec = Spec(report=[_blocked_report_row], panel=[_recut_manifest(BLOCKED_END)])
+    gen_dir = build(tmp_path / "gen", spec)
+    context = _context(gen_dir)
+    blocked = checks.twr_rows(context)[3][1]
+    funded = checks.manifest_rows(context)[3][1]
+    assert checks.manifest_match(context, blocked) is None
+    assert checks.report_match(context, funded) is None
+    findings = _run(gen_dir, None)
+    assert _row_findings(findings) == [
+        (
+            IDENTITY_CHECK,
+            checks.BLOCKER_INVARIANT,
+            f"A1|beta|{BLOCKED_START}",
+            ADMISSION_POINTER.format(3),
+        )
+    ]
+    (found,) = _carried_apart(findings)
+    assert found.observed["report"]["twr_status"] == "BLOCKED_ADMISSION"
+    assert found.observed["report"]["epoch_admission_status"] == "BLOCKED"
+    assert found.observed["panel"]["status"] is None
+
+
+def test_an_epoch_held_only_as_the_other_kind_is_not_read_against_a_sibling(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 3 (fail-before): no stand-in is looked for once the identity is held.
+
+    The funded report row (two flows counted, one flow listed) has the whole identity
+    of the panel's blocked row; the panel also lists a funded epoch from the same start
+    that ends elsewhere, with one trace event.  The report row is not read against that
+    sibling (two against one would fire): its disagreement is the admission one.  The
+    sibling, which has no row of its identity in the report, is named against the
+    report row as a stand-in.  Mutation MG-4 (a sibling stands in once the identity is
+    held as the other kind) turns this red.
+    """
+
+    spec = Spec(
+        report=[_recut_report(BLOCKED_END, flow_count=2)],
+        panel=[_blocked_manifest_row_only, _recut_manifest(RECUT_ENDS["closed"])],
+    )
+    findings = _run_spec(tmp_path, spec)
+    assert [f for f in findings if f.check_id == "returns.flow_lists_agree"] == []
+    entity = f"A1|beta|{BLOCKED_START}"
+    assert sorted((f.entity, f.json_path) for f in _carried_apart(findings)) == [
+        (entity, END_POINTER.format(3)),
+        (entity, ADMISSION_POINTER.format(3)),
+    ]
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
