@@ -7,6 +7,7 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import date
 import hashlib
 from itertools import product
 import json
@@ -1262,6 +1263,103 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _verified_value_basis_end(
+    spec: Any,
+    contract_path: Path,
+    controls: Mapping[str, Mapping[str, Any]],
+    calculation_cutoff_date: object,
+) -> str | None:
+    """The end of the required strategies' value basis, when it precedes the cutoff.
+
+    The dependence analysis spans the REQUIRED strategies, so it may end before the
+    calculation cutoff only where their common value basis ends (FXB-1): a strategy
+    whose native NAV days after the admitted FX end the provider ledger recorded as
+    ``OUTSIDE_ADMITTED_FX_BOUNDARY`` findings has no USD value past that end.  The
+    end is derived here from verified inputs alone: the provider-ledger catalog of the
+    generation this candidate selected, read through its manifest identity, and the
+    contract authority it carries.  It is never read from the report or from the
+    dependence generation under verification, so a report that merely claims an early
+    end cannot explain it.
+
+    ``None`` is the strict end-at-the-cutoff check: no cutoff, no REQUIRED strategy
+    bounded (a ledger that records no finding, or only findings of a strategy the
+    product excludes, bounds nothing), or an end that is not before the cutoff.  A
+    shortfall without a qualifying finding therefore still fails closed, and a ledger
+    and contract that do not support one consistent bound do too.
+    """
+
+    if calculation_cutoff_date is None:
+        return None
+    invalid_cutoff = FinancialOutcomeError(
+        "report calculation cutoff date is not an ISO date"
+    )
+    if not isinstance(calculation_cutoff_date, str):
+        raise invalid_cutoff
+    try:
+        cutoff = date.fromisoformat(calculation_cutoff_date)
+    except ValueError as exc:
+        raise invalid_cutoff from exc
+    if cutoff.isoformat() != calculation_cutoff_date:
+        raise invalid_cutoff
+
+    from portfolio_hwm_selected_inputs import _source_generation_from_path
+    from quant_engine.portfolio_ledger.value_basis_bounds import (
+        ValueBasisBoundError,
+        derive_value_basis_bounds,
+    )
+
+    ledger_path = selected_hwm_source_paths(spec)["provider_ledger_generation_path"]
+    try:
+        manifest, payloads, _manifest_bytes = _source_generation_from_path(
+            ledger_path, "provider-ledger"
+        )
+    except (OSError, ValueError, GenerationConflictError) as exc:
+        raise FinancialOutcomeError(
+            f"selected provider ledger generation is not verified: {exc}"
+        ) from exc
+    catalogs = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.schema_name == "provider-ledger-catalog"
+    ]
+    if len(catalogs) != 1 or catalogs[0].artifact_id not in payloads:
+        raise FinancialOutcomeError(
+            "selected provider ledger catalog is absent or ambiguous"
+        )
+    try:
+        catalog = json.loads(payloads[catalogs[0].artifact_id])
+        contract = json.loads(contract_path.read_bytes())
+    except ValueError as exc:
+        raise FinancialOutcomeError(
+            "selected provider ledger catalog or contract is not JSON"
+        ) from exc
+    if not isinstance(catalog, dict) or not isinstance(contract, dict):
+        raise FinancialOutcomeError(
+            "selected provider ledger catalog and contract must be objects"
+        )
+    if "quality_findings" not in catalog:
+        # A catalog that records no quality findings has none to bound anything with.
+        # The report reads it the same way (`_report_value_basis_bounds`), and the
+        # synthetic ledger of the MVP-2 product world is such a catalog.  A present but
+        # malformed value is not absence: it still fails closed in the derivation.
+        catalog = {**catalog, "quality_findings": []}
+    required = sorted(
+        strategy_id
+        for strategy_id, control in controls.items()
+        if control.get("product_requirement") == "REQUIRED"
+    )
+    try:
+        bounds = derive_value_basis_bounds(catalog, contract, cutoff)
+        end = (
+            bounds.common_complete_date(required)
+            if bounds.strategies and required
+            else cutoff
+        )
+    except ValueBasisBoundError as exc:
+        raise FinancialOutcomeError(f"value-basis bound differs: {exc}") from exc
+    return end.isoformat() if end < cutoff else None
+
+
 def _verify_consumers(
     spec: Any,
     contract_path: Path,
@@ -1367,10 +1465,17 @@ def _verify_consumers(
     correlation_node = nodes["financial-outcome-dependence-live-only"]
     correlation_generation = _generation(spec, correlation_node)
     correlation = replays[("DEPENDENCE", correlation_node.path.resolve())]
+    cutoff = report.get("calculation_cutoff_date")
     dependence, rows, _identity, _path = report_producer._dependence_report(
         None,
         generation_dir=correlation_generation.source_dir,
-        calculation_cutoff_date=report.get("calculation_cutoff_date"),
+        calculation_cutoff_date=cutoff,
+        # FXB-1: the dependence may end before the cutoff only where the value basis
+        # of the required strategies ends.  That end comes from the verified ledger
+        # and contract, never from the report this verifier is verifying.
+        bounded_complete_through=_verified_value_basis_end(
+            spec, contract_path, controls, cutoff
+        ),
     )
     if (
         report.get("dependence_analysis") != dependence
