@@ -32,6 +32,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1252,3 +1253,59 @@ def test_the_report_producers_own_block_is_verified_by_the_validator(
         "lens": NOT_READY_ONLY,
         "bound": [],
     }
+
+
+# ---------------------------------- the real census and the real baseline (seam)
+#
+# L6a and L6c are conditional on two pieces of upstream authority being the very
+# ones the repository carries: the contract census must hash to the digest the
+# expected baseline pins (otherwise the skip silently turns itself off), and the
+# baseline must hold the oracle rows the bound verification reads.
+
+
+def _real_context() -> checks.Context:
+    baseline = json.loads(
+        (REPOSITORY_ROOT / "acceptance" / "expected-baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return checks.Context(
+        SimpleNamespace(report={}, panel={}),  # type: ignore[arg-type]
+        date.fromisoformat(CUTOFF),
+        "test",
+        expected=baseline["metrics"],
+    )
+
+
+def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
+    """Guard: contract bytes == the baseline's authority pointer, and the qsi tuple."""
+
+    state = checks.census_state(_real_context())
+    assert state.problem is None, state.problem
+    assert state.census is not None
+    assert state.census.sha256 == (
+        "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
+    )
+    tuples = [
+        (a.strategy_id, a.status, a.effective_start, a.effective_end)
+        for a in state.census.assignments
+        if a.strategy_id == "tt-portfolio"
+    ]
+    # schwab-qsi-01 and schwab-qsi-02 hold the assignment-only tt interval; no
+    # sleeve holds a funded membership with that tuple
+    assert (
+        tuples.count(("tt-portfolio", "ASSIGNMENT_ONLY", "2025-11-25", "2026-01-04"))
+        == 2
+    )
+    assert not [t for t in tuples if t[1] == "FUNDED_MEMBERSHIP" and t[3] is not None]
+
+
+def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None:
+    """Guard: Robuxio's value basis ends 2026-09-03 in the oracle, the rest at the cutoff."""
+
+    oracle = checks._oracle_cutoff_dates(_real_context())
+    assert oracle is not None
+    assert oracle["robuxio-crypto"] == frozenset({date(2026, 9, 3)})
+    others = {name: days for name, days in oracle.items() if name != "robuxio-crypto"}
+    assert len(others) == 6
+    assert set(others.values()) == {frozenset({date(2026, 9, 17)})}
