@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, getcontext, setcontext
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,14 @@ def load_derivation_module():
     spec = importlib.util.spec_from_file_location("derive_b", MODULE_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # derive.py sets the decimal precision to 50 at import, and the context is per
+    # thread: restore the ambient one so the load does not change the arithmetic of
+    # every later test in the session (W20).
+    ambient = getcontext().copy()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        setcontext(ambient)
     return module
 
 
