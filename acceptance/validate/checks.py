@@ -2474,9 +2474,11 @@ def check_reconciliation_recompute(ctx: Context) -> Iterator[Finding]:
 # ``BLOCKER_AUTHORITY`` only when an entry of the block has the finding's
 # (section, entity, date) and a non-empty ``bounded_by``, and the oracle confirms it
 # -- every bounded strategy has an expected ``capital.strategy.cutoff`` row whose
-# ``as_of`` is that date. ``dates.value_basis_bound`` then checks the block itself
-# against the oracle and the validator's cutoff. Without an expected baseline
-# nothing is reclassified and only the oracle-free clauses of the block check run.
+# ``as_of`` is that date -- and, for an account entry, the account is one the block
+# declares for a ``bounded_by`` strategy (lens entries name no account and are
+# exempt). ``dates.value_basis_bound`` then checks the block itself against the
+# oracle and the validator's cutoff. Without an expected baseline nothing is
+# reclassified and only the oracle-free clauses of the block check run.
 
 BOUNDS_CHECK = "dates.value_basis_bound"
 _BOUNDS_BLOCK = "value_basis_bounds"
@@ -2489,6 +2491,9 @@ class BoundStrategy:
     strategy_id: str
     effective_end: date
     raw_end: Any
+    # The accounts the block declares for the strategy; empty when ``account_ids`` is
+    # not a list of strings, so that an unreadable list binds no account.
+    account_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2543,7 +2548,16 @@ def _read_value_basis_disclosure(block: Any) -> ValueBasisDisclosure:
             if end is None:
                 problems.append(f"strategies[{position}].effective_end is not a date")
                 continue
-            strategies.append(BoundStrategy(position, strategy_id, end, raw_end))
+            raw_accounts = item.get("account_ids")
+            account_ids = (
+                tuple(raw_accounts)
+                if isinstance(raw_accounts, list)
+                and all(isinstance(account, str) for account in raw_accounts)
+                else ()
+            )
+            strategies.append(
+                BoundStrategy(position, strategy_id, end, raw_end, account_ids)
+            )
     sections: list[BoundedSection] = []
     raw_sections = block.get("bounded_sections")
     if not isinstance(raw_sections, list):
@@ -2622,18 +2636,30 @@ def verified_value_basis_bound(
     The entry has the same (section, entity, date) and a non-empty ``bounded_by``,
     the date precedes the cutoff, the block has no structural problem, and every
     bounded strategy has an expected ``capital.strategy.cutoff`` row whose only
-    ``as_of`` is that date. ``None`` means the finding is unchanged.
+    ``as_of`` is that date. An ``account_summary`` entry also has to name an account
+    the block itself declares (``strategies[*].account_ids``) for at least one of its
+    ``bounded_by`` strategies: published view against published view, the oracle
+    holding no account-to-strategy map. Without that the date could belong to an
+    account the bound says nothing about, and a real freshness blocker would be
+    relabelled. A ``decomposition_lenses`` entry is exempt: its entity is
+    ``{lens_id}:{evidence_mode}``, not an account id, and only the oracle check above
+    ties it to its strategies. ``None`` means the finding is unchanged.
     """
 
     disclosure = value_basis_disclosure(ctx)
     oracle = _oracle_cutoff_dates(ctx)
     if disclosure is None or disclosure.problems or oracle is None or day >= ctx.cutoff:
         return None
+    declared = {item.strategy_id: item.account_ids for item in disclosure.strategies}
     for entry in disclosure.sections:
         if (
             (entry.section, entry.entity, entry.day) == (section, entity, day)
             and entry.bounded_by
             and all(oracle.get(name) == frozenset({day}) for name in entry.bounded_by)
+            and (
+                section != "account_summary"
+                or any(entity in declared.get(name, ()) for name in entry.bounded_by)
+            )
         ):
             return entry
     return None
