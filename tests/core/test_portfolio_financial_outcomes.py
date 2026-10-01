@@ -1445,14 +1445,25 @@ def test_a_bundled_ledger_generation_without_an_alias_is_read(tmp_path, monkeypa
     )
 
 
-def test_two_different_catalogs_in_one_generation_are_ambiguous(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "second_catalog",
+    [
+        # another size, and the same size with other bytes (one id letter differs)
+        _ledger_catalog(finding_days=()),
+        _ledger_catalog(strategy_id="robuxio-cryptx"),
+    ],
+    ids=["another-size", "the-same-size"],
+)
+def test_two_different_catalogs_in_one_generation_are_ambiguous(
+    tmp_path, monkeypatch, second_catalog
+):
     """Aliases carry the same bytes; a second catalog with other bytes is a conflict."""
 
     world = _consumer_world(
         tmp_path,
         monkeypatch,
         end=FX_END,
-        ledger_bundle={"second_catalog": _ledger_catalog(finding_days=())},
+        ledger_bundle={"second_catalog": second_catalog},
     )
 
     with pytest.raises(
