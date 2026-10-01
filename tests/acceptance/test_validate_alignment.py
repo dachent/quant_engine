@@ -556,6 +556,55 @@ def test_sum_over_epochs_aggregate_leaves_out_a_skipped_blocked_row(
     ]
 
 
+def test_count_aggregate_never_counts_the_flow_trace_of_a_skipped_blocked_row(
+    tmp_path: Path,
+) -> None:
+    """L6a: R2 keeps assignment-only intervals out of the flows, trace or not.
+
+    The product's blocked manifest row carries no trace.  Were one to carry three
+    events, the multi-epoch computed:sum_over_epochs count still leaves them out
+    (the mutation that keeps the blocked row in that aggregate survives every test
+    without this one).
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+
+    def traced(panel: dict[str, Any]) -> None:
+        blocked = next(
+            row
+            for row in panel["account_manifest"]["rows"]
+            if row.get("admission_status") == "BLOCKED"
+        )
+        blocked["capital_flow_trace"] = [
+            {
+                "amount": "10",
+                "class": "DEPOSIT",
+                "event_date": "2025-07-01",
+                "nav_recognition_date": "2025-07-01",
+            }
+        ] * 3
+
+    spec = _blocked_epochs(["A1"])
+    spec.report.insert(0, _closed_funded_epoch)
+    spec.panel.extend([_closed_funded_manifest_row, traced])
+    gen_dir = build(tmp_path / "gen", spec)
+    expected = [
+        row
+        for row in _oracle(census_sha=sha)
+        if row["metric_id"] == "flows.account.count"
+    ]
+    assert _expected_findings(_run(gen_dir, expected, repo)) == []
+    # the control: unconfirmed, the blocked row's trace is counted and compared
+    unconfirmed = _run(gen_dir, [dict(row, authority_pointer=[]) for row in expected])
+    assert (
+        "expected.flows.account.count",
+        checks.BLOCKER_REGRESSION,
+        "A1|ITD",
+    ) in _expected_findings(unconfirmed)
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
