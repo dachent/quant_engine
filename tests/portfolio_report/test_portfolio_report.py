@@ -1666,7 +1666,9 @@ def _published_baseline(
         # fixture that does not care about capital arithmetic gets the block its own
         # allocations imply (value for value), scoped by the product contract that
         # is bound for this publication, so the report's consumers see a well-formed,
-        # internally consistent block.  Tests that exercise capital build their own.
+        # internally consistent block.  Every strategy stands on a member account
+        # (the report refuses a strategy value no account backs), which the catalog
+        # then carries with its NAV.  Tests that exercise capital build their own.
         contract = json.loads(
             Path(reporter._PORTABLE_HWM_PRODUCT_CONTRACT).read_text(encoding="utf-8")
         )
