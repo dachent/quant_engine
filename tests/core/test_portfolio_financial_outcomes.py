@@ -884,11 +884,13 @@ def _ledger_catalog(
     finding_days=("2026-09-04", CUTOFF),
     findings=True,
     fx_generation_id=FX_GENERATION_ID,
+    fx_boundary=FX_END,
 ):
     """A provider-ledger catalog whose native NAV days after ``FX_END`` are findings.
 
     ``findings=False`` drops the ``quality_findings`` key, like the synthetic ledger of
     the MVP-2 product world: a ledger that records none bounds nothing.
+    ``fx_boundary`` is the boundary each finding records itself against.
     """
 
     catalog = {
@@ -908,7 +910,7 @@ def _ledger_catalog(
         catalog["quality_findings"] = [
             {
                 "fact_type": "nav_observations",
-                "fx_boundary": FX_END,
+                "fx_boundary": fx_boundary,
                 "original_source_date": day,
                 "provider_id": "matrixport",
                 "status": "OUTSIDE_ADMITTED_FX_BOUNDARY",
@@ -1281,7 +1283,7 @@ def test_a_report_and_correlation_that_both_end_early_without_a_qualifying_findi
     assert world.report["strategy_history_contract"]["as_of_date"] == end
     assert world.report["dependence_analysis"]["complete_through"] == end
     with pytest.raises(
-        world.report_error, match="dependence calculation cutoff differs"
+        outcomes.FinancialOutcomeError, match="dependence calculation cutoff differs"
     ):
         world.call()
 
@@ -1317,15 +1319,20 @@ def test_a_published_end_that_differs_from_the_verified_bound_fails_closed(
     """The verified bound is exactly F: one day either side, or the cutoff, raises.
 
     The ledger bounds the required strategy at 2026-09-03, so a composite that ends at
-    the cutoff was not truncated where the value basis ends.
+    the cutoff was not truncated where the value basis ends.  The producer's rejection
+    reaches the caller as this verifier's own error class, with the producer's message,
+    and stays attached as the cause.
     """
 
     world = _consumer_world(tmp_path, monkeypatch, end=end)
 
     with pytest.raises(
-        world.report_error, match="dependence calculation cutoff differs"
-    ):
+        outcomes.FinancialOutcomeError, match="dependence calculation cutoff differs"
+    ) as rejected:
         world.call()
+
+    assert isinstance(rejected.value.__cause__, world.report_error)
+    assert str(rejected.value) == str(rejected.value.__cause__)
 
 
 def test_a_ledger_the_contract_does_not_support_fails_closed_as_a_financial_outcome(
@@ -1339,6 +1346,28 @@ def test_a_ledger_the_contract_does_not_support_fails_closed_as_a_financial_outc
 
     with pytest.raises(
         outcomes.FinancialOutcomeError, match="value-basis bound differs"
+    ):
+        world.call()
+
+
+def test_a_finding_recorded_against_another_fx_end_than_the_contracts_fails_closed(
+    tmp_path, monkeypatch
+):
+    """The findings must be recorded against the contract's own FX end.
+
+    The ledger recorded its boundary findings against 2026-09-02 while the contract's FX
+    segment ends 2026-09-03, so they do not describe this contract's boundary and no
+    bound is derived from them.  The derivation itself is covered by
+    ``test_b3_a_finding_whose_boundary_is_not_the_contract_fx_end_raises``.
+    """
+
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=FX_END, ledger={"fx_boundary": "2026-09-02"}
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match=r"value-basis bound differs: .*differs from the contract FX end",
     ):
         world.call()
 
