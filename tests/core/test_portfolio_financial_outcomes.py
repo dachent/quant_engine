@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 import ast
+import importlib
 import json
 import hashlib
 from pathlib import Path
@@ -22,7 +23,7 @@ from quant_engine.core import (
 )
 from quant_engine.core import pipeline
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.publication import stage_generation_bundle
+from quant_engine.core.publication import stage_generation, stage_generation_bundle
 
 
 def test_consumer_uses_exact_root_file_when_normalized_alias_also_exists(tmp_path):
@@ -727,3 +728,596 @@ def test_decomposition_replay_hands_the_producer_its_own_arguments():
     }
     assert "retained_public_factor_capture" in named
     assert any("_history_authorities" in item for item in expanded)
+
+
+# -- N34: the release-path verifier re-reads the FX-bounded dependence end ---------------
+#
+# `_verify_consumers` re-derives the report's dependence analysis from the selected
+# correlation generation and requires it to equal what the report published.  The
+# admitted FX generation ends at F (2026-09-03), before the calculation cutoff K
+# (2026-09-17): a strategy whose native NAV days after F the provider ledger recorded as
+# OUTSIDE_ADMITTED_FX_BOUNDARY findings has no USD value past F, so the composite of the
+# required strategies ends at F and the report publishes that true end.  The verifier
+# must accept exactly that end, and it must derive it from the verified ledger and the
+# contract (FXB-1), never from the report it is verifying.
+
+FX_END = "2026-09-03"
+CUTOFF = "2026-09-17"
+FX_GENERATION_ID = "9812f2536a16da1b1e64f9030cca1bef22519333a4a8e19f3cb11ab32d39bc6e"
+FX_STRATEGY = "robuxio-crypto"  # REQUIRED in the repository contract
+EXCLUDED_STRATEGY = "composer-holy-grail"  # EXCLUDED in the repository contract
+HWM_MARKER = {"synthetic": "governed HWM proof"}
+PANEL_MARKER = {"synthetic": "panel dependence projection"}
+
+
+def _fx_contract_file(directory):
+    """The repository contract with exactly one FX segment, ending at ``FX_END``."""
+
+    contract = _contract()
+    contract["source_segments"] = [
+        {
+            "current_generation": {"as_of": FX_END, "generation_id": FX_GENERATION_ID},
+            "interval": {"observed_end": FX_END},
+            "source_id": "portfolio-fx-rates",
+        }
+    ]
+    directory.mkdir(parents=True)
+    path = directory / "financial-mvp-fx.json"
+    path.write_bytes(canonical_json_bytes(contract))
+    return path
+
+
+def _correlation_generation(root, end):
+    """A verified correlation generation whose every layer ends at ``end``."""
+
+    series_ids = [f"Current Strategy {index}" for index in range(1, 8)]
+    pairs = [
+        (left, right)
+        for index, left in enumerate(series_ids)
+        for right in series_ids[index + 1 :]
+    ]
+
+    def mode_payload():
+        return {
+            "series_ids": series_ids,
+            "observed_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "status": "AVAILABLE",
+                    "coverage": {
+                        "common_observations": 2,
+                        "observed_start": "2026-08-01",
+                        "observed_end": end,
+                    },
+                    "pearson": "0.1",
+                    "spearman": "0.2",
+                    "horizons": {},
+                    "rolling_pearson": {},
+                    "downside": {},
+                    "drawdown_regimes": {},
+                    "joint_tail": {},
+                }
+                for left, right in pairs
+            ],
+            "blend_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "decision_correlation": "0.3",
+                    "decision_status": "POSTERIOR_STRESS_PSD",
+                }
+                for left, right in pairs
+            ],
+            "implementation_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "mapping_scope": "CENSUS_PROVIDER_LANE_ONLY",
+                    "shared_providers": [],
+                    "status": "AVAILABLE_PROVIDER_LANE_CONCENTRATION",
+                    "unassessed_dimensions": ["INSTRUMENT", "VENUE"],
+                }
+                for left, right in pairs
+            ],
+            "central_case": {},
+            "correlation_one": {"loss": "0.31"},
+            "drawdown_matrices": {},
+            "horizon_matrices": {},
+            "matrices": {},
+            "performance": {
+                series_id: {"observed_end": end} for series_id in series_ids
+            },
+            "series_composition": {
+                series_id: {"observed_end": end} for series_id in series_ids
+            },
+        }
+
+    live = mode_payload()
+    correlation = {
+        "analytics_hash": "a" * 64,
+        "analytics_schema_version": 2,
+        "as_of_date": end,
+        "builder_version": "1.6.0",
+        "complete_through": end,
+        "default_evidence_mode": "LIVE_ONLY",
+        "dependence": live,
+        "dependence_modes": {"LIVE_ONLY": live, "LIVE_PLUS_BACKTEST": mode_payload()},
+        "source": {
+            "artifact_id": "current-dependence/returns.csv",
+            "sha256": "b" * 64,
+            "size_bytes": 100,
+        },
+    }
+    content = canonical_json_bytes(correlation)
+    day = date.fromisoformat(end)
+    manifest = GenerationManifest.build(
+        as_of_date=day,
+        adapter=AdapterIdentity("portfolio-correlation", "1.6.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic current dependence",
+            fact_types=("dependence",),
+            observed_start=date(2026, 8, 1),
+            observed_end=day,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/correlation.json",
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=day,
+                schema_name="portfolio-correlation-analysis",
+                schema_version="2",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "correlation.json").write_bytes(content)
+    return manifest_path.parent
+
+
+def _ledger_catalog(
+    *,
+    strategy_id=FX_STRATEGY,
+    finding_days=("2026-09-04", CUTOFF),
+    findings=True,
+    fx_generation_id=FX_GENERATION_ID,
+):
+    """A provider-ledger catalog whose native NAV days after ``FX_END`` are findings.
+
+    ``findings=False`` drops the ``quality_findings`` key, like the synthetic ledger of
+    the MVP-2 product world: a ledger that records none bounds nothing.
+    """
+
+    catalog = {
+        "nav_observations": [
+            {
+                "account_id": "account-fx",
+                "as_of_date": day,
+                "mapping_status": "MAPPED",
+                "provider_id": "matrixport",
+                "strategy_id": strategy_id,
+            }
+            for day in ("2026-09-02", FX_END)
+        ],
+        "portfolio_fx_generation": {"generation_id": fx_generation_id},
+    }
+    if findings:
+        catalog["quality_findings"] = [
+            {
+                "fact_type": "nav_observations",
+                "fx_boundary": FX_END,
+                "original_source_date": day,
+                "provider_id": "matrixport",
+                "status": "OUTSIDE_ADMITTED_FX_BOUNDARY",
+            }
+            for day in finding_days
+        ]
+    return catalog
+
+
+def _ledger_generation(root, **catalog_options):
+    """Stage a verified provider-ledger generation in the governed route's layout."""
+
+    catalog_bytes = canonical_json_bytes(_ledger_catalog(**catalog_options))
+    receipt_bytes = canonical_json_bytes({"synthetic": "admission receipt"})
+    day = date(2026, 9, 17)
+    manifest = GenerationManifest.build(
+        as_of_date=day,
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "5"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic provider ledger",
+            fact_types=("nav_observations",),
+            observed_start=date(2026, 8, 1),
+            observed_end=day,
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=f"normalized/{name}",
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=day,
+                schema_name=schema_name,
+                schema_version=schema_version,
+            )
+            for name, content, schema_name, schema_version in (
+                (
+                    "admit-or-declare-receipt.json",
+                    receipt_bytes,
+                    "provider-admission-receipt",
+                    "1",
+                ),
+                (
+                    "provider-ledger.json",
+                    catalog_bytes,
+                    "provider-ledger-catalog",
+                    "2",
+                ),
+            )
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation_path = stage_generation(root, manifest)
+    (generation_path.parent / "admit-or-declare-receipt.json").write_bytes(
+        receipt_bytes
+    )
+    catalog_path = generation_path.parent / "provider-ledger.json"
+    catalog_path.write_bytes(catalog_bytes)
+    return generation_path, catalog_path
+
+
+def _node_with_files(node_id, root_id, directory, files):
+    expectations = []
+    for name, content in files.items():
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        expectations.append(
+            pipeline.FileExpectation(
+                name, hashlib.sha256(content).hexdigest(), len(content)
+            )
+        )
+    return pipeline.GenerationNode(
+        node_id, (), root_id, "a" * 64, "b" * 64, tuple(expectations), directory, False
+    )
+
+
+def _consumer_world(
+    tmp_path,
+    monkeypatch,
+    *,
+    end,
+    ledger=None,
+    with_ledger=True,
+    cutoff=True,
+    report_edit=None,
+):
+    """One report, its correlation generation and the selected ledger, ending at ``end``.
+
+    The report and the correlation both end at ``end`` (the report's history contract
+    says so too); ``ledger`` holds the options of the staged provider-ledger catalog.
+    ``_verify_consumers``, the dependence re-read (``_dependence_report``), the FXB-1
+    derivation, the product controls and the ledger and contract reads are the real code;
+    only the seams that verify other outcomes (the governed HWM projection, the epoch
+    crosswalk and manifest validation, the panel projections and the decomposition
+    consumers) are replaced by constants that agree with the synthetic report.
+    """
+
+    report_producer = importlib.import_module("portfolio_report")
+    panel_producer = importlib.import_module("portfolio_control_panel")
+    contract_path = _fx_contract_file(tmp_path / "contract")
+    contract = json.loads(contract_path.read_bytes())
+    baseline = {
+        "strategies": [
+            {"strategy_id": row["strategy_id"]} for row in contract["strategies"]
+        ]
+    }
+    correlation_dir = _correlation_generation(tmp_path / "correlation", end)
+    projection, rows, _identity, _path = report_producer._dependence_report(
+        None,
+        generation_dir=correlation_dir,
+        calculation_cutoff_date=CUTOFF if cutoff else None,
+        bounded_complete_through=end if cutoff and end != CUTOFF else None,
+    )
+    capital = {"required_epochs": []}
+    epoch_manifest = {"rows": []}
+    report = {
+        "dependence_analysis": projection,
+        "dependence_rows": rows,
+        "hwm_governed_proof": HWM_MARKER,
+        "invested_capital": capital,
+        "strategy_history_contract": {"as_of_date": end},
+    }
+    if cutoff:
+        report["calculation_cutoff_date"] = CUTOFF
+    if report_edit is not None:
+        report_edit(report)
+    report_bytes = canonical_json_bytes(report)
+    report_generation = _node_with_files(
+        "report-generation",
+        "report",
+        tmp_path / "report",
+        {
+            "portfolio-report-data.json": report_bytes,
+            "account-strategy-manifest.json": canonical_json_bytes(epoch_manifest),
+            "account-strategy-current-epoch-crosswalk.json": canonical_json_bytes({}),
+        },
+    )
+    baseline_generation = _node_with_files(
+        "baseline-generation",
+        "baseline",
+        tmp_path / "baseline",
+        {"portfolio-baseline.json": canonical_json_bytes(baseline)},
+    )
+    panel_generation = _node_with_files(
+        "panel-generation",
+        "control-panel",
+        tmp_path / "panel",
+        {"downloads/portfolio-report-data.json": report_bytes},
+    )
+    correlation_generation = pipeline.GenerationNode(
+        "correlation-generation",
+        (),
+        "correlation",
+        correlation_dir.name,
+        "b" * 64,
+        (),
+        correlation_dir,
+        False,
+    )
+    correlation_path = correlation_dir / "correlation.json"
+    correlation_node = pipeline.ArtifactNode(
+        "financial-outcome-dependence-live-only",
+        ("correlation-generation",),
+        correlation_path,
+        hashlib.sha256(correlation_path.read_bytes()).hexdigest(),
+        correlation_path.stat().st_size,
+    )
+    spec = SimpleNamespace(nodes=(report_generation, correlation_generation))
+    epochs = {
+        "dashboard": {
+            "invested_capital": capital,
+            "hwm_governed_proof": HWM_MARKER,
+            "dependence_modes": {
+                "LIVE_ONLY": PANEL_MARKER,
+                "LIVE_PLUS_BACKTEST": PANEL_MARKER,
+            },
+        },
+        "manifest": epoch_manifest,
+        "baseline_generation": baseline_generation,
+        "panel_generation": panel_generation,
+    }
+    hwm_bytes = {
+        key: b"{}"
+        for key in (
+            "governed_result",
+            "input_generation",
+            "calendar_authority",
+            "provider_admission_receipt",
+        )
+    }
+    ledger_path = None
+    catalog_path = None
+    if with_ledger:
+        ledger_path, catalog_path = _ledger_generation(
+            tmp_path / "ledger", **(ledger or {})
+        )
+    monkeypatch.setattr(
+        outcomes,
+        "selected_hwm_source_paths",
+        lambda _spec: (
+            {"provider_ledger_generation_path": ledger_path}
+            if ledger_path is not None
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        report_producer, "_report_governed_hwm_proof", lambda *a, **k: HWM_MARKER
+    )
+    monkeypatch.setattr(
+        report_producer, "_validate_current_epoch_crosswalk", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        report_producer, "_validate_report_account_manifest", lambda *a, **k: set()
+    )
+    monkeypatch.setattr(
+        panel_producer,
+        "_current_product_correlation_projection",
+        lambda *a, **k: {
+            "dependence_modes": {"LIVE_ONLY": {}, "LIVE_PLUS_BACKTEST": {}}
+        },
+    )
+    monkeypatch.setattr(
+        panel_producer, "_dependence_analysis", lambda *a, **k: PANEL_MARKER
+    )
+    monkeypatch.setattr(outcomes, "_verify_decomposition_consumers", lambda *a, **k: {})
+
+    def call():
+        return outcomes._verify_consumers(
+            spec,
+            contract_path,
+            epochs,
+            capital,
+            hwm_bytes,
+            {"financial-outcome-dependence-live-only": correlation_node},
+            {("DEPENDENCE", correlation_node.path.resolve()): {}},
+            {},
+            {},
+            {},
+            {},
+        )
+
+    return SimpleNamespace(
+        call=call,
+        report=report,
+        report_bytes=report_bytes,
+        report_error=report_producer.ReportValidationError,
+        ledger_catalog_path=catalog_path,
+    )
+
+
+# A ledger that records no finding the FXB-1 rule can use for a REQUIRED strategy: an
+# empty list, no `quality_findings` at all (the synthetic ledger of the MVP-2 product
+# world), and findings that bound a strategy the product excludes.
+_NO_REQUIRED_BOUND = {
+    "an-empty-findings-list": {"finding_days": ()},
+    "no-findings-key": {"findings": False},
+    "findings-of-an-excluded-strategy": {"strategy_id": EXCLUDED_STRATEGY},
+}
+
+
+def test_fx_bounded_dependence_end_is_accepted_at_the_verified_bound(
+    tmp_path, monkeypatch
+):
+    """The real FX-bounded shape: findings after F, report and correlation end at F.
+
+    Fail-before: the release path re-read the dependence strictly, so a report that
+    publishes the true end 2026-09-03 failed with ``dependence calculation cutoff
+    differs`` and blocked publication of the corrected release.
+    """
+
+    world = _consumer_world(tmp_path, monkeypatch, end=FX_END)
+
+    result = world.call()
+
+    assert world.report["calculation_cutoff_date"] == CUTOFF
+    assert world.report["dependence_analysis"]["complete_through"] == FX_END
+    assert result["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "end", [FX_END, "2026-08-27"], ids=["at-the-contract-fx-end", "a-week-earlier"]
+)
+@pytest.mark.parametrize(
+    "ledger", list(_NO_REQUIRED_BOUND.values()), ids=list(_NO_REQUIRED_BOUND)
+)
+def test_a_report_and_correlation_that_both_end_early_without_a_qualifying_finding_fail(
+    tmp_path, monkeypatch, ledger, end
+):
+    """The bound comes from the ledger and the contract, never from the report.
+
+    The report itself claims the early end, in its history contract and in its published
+    dependence, and the correlation agrees: a bound taken from the report would accept
+    any early end whatever the ledger says.
+    """
+
+    world = _consumer_world(tmp_path, monkeypatch, end=end, ledger=ledger)
+
+    assert world.report["strategy_history_contract"]["as_of_date"] == end
+    assert world.report["dependence_analysis"]["complete_through"] == end
+    with pytest.raises(
+        world.report_error, match="dependence calculation cutoff differs"
+    ):
+        world.call()
+
+
+@pytest.mark.parametrize(
+    "ledger", list(_NO_REQUIRED_BOUND.values()), ids=list(_NO_REQUIRED_BOUND)
+)
+def test_the_strict_cutoff_equality_is_unchanged_when_no_required_strategy_is_bounded(
+    tmp_path, monkeypatch, ledger
+):
+    """A dependence that ends at the cutoff is accepted, bound or no bound.
+
+    A bound that is not on a REQUIRED strategy does not shorten the dependence, which
+    spans the required strategies only.
+    """
+
+    world = _consumer_world(tmp_path, monkeypatch, end=CUTOFF, ledger=ledger)
+
+    result = world.call()
+
+    assert world.report["dependence_analysis"]["complete_through"] == CUTOFF
+    assert result["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "end",
+    ["2026-09-02", "2026-09-04", "2026-09-16", CUTOFF],
+    ids=["a-day-before", "a-day-after", "the-day-before-the-cutoff", "the-cutoff"],
+)
+def test_a_published_end_that_differs_from_the_verified_bound_fails_closed(
+    tmp_path, monkeypatch, end
+):
+    """The verified bound is exactly F: one day either side, or the cutoff, raises.
+
+    The ledger bounds the required strategy at 2026-09-03, so a composite that ends at
+    the cutoff was not truncated where the value basis ends.
+    """
+
+    world = _consumer_world(tmp_path, monkeypatch, end=end)
+
+    with pytest.raises(
+        world.report_error, match="dependence calculation cutoff differs"
+    ):
+        world.call()
+
+
+def test_a_ledger_the_contract_does_not_support_fails_closed_as_a_financial_outcome(
+    tmp_path, monkeypatch
+):
+    """A boundary finding under an FX generation the contract does not pin."""
+
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=FX_END, ledger={"fx_generation_id": "f" * 64}
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="value-basis bound differs"
+    ):
+        world.call()
+
+
+def test_the_ledger_catalog_must_match_its_generation_manifest(tmp_path, monkeypatch):
+    """The catalog is read through the selected generation's manifest identity.
+
+    The staged catalog records no finding.  Swapping in one that does would bound the
+    dependence at F, but the manifest binds the other bytes.
+    """
+
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=FX_END, ledger={"finding_days": ()}
+    )
+    world.ledger_catalog_path.write_bytes(canonical_json_bytes(_ledger_catalog()))
+
+    with pytest.raises(outcomes.FinancialOutcomeError, match="identity differs"):
+        world.call()
+
+
+def test_the_published_dependence_must_state_the_true_bounded_end(
+    tmp_path, monkeypatch
+):
+    """A report that claims the cutoff for a composite that ends at F is rejected."""
+
+    world = _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=FX_END,
+        report_edit=lambda report: report["dependence_analysis"].update(
+            complete_through=CUTOFF
+        ),
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match="report dependence values differ from verified result",
+    ):
+        world.call()
+
+
+def test_a_report_without_a_calculation_cutoff_keeps_the_unbounded_read(
+    tmp_path, monkeypatch
+):
+    """No cutoff, nothing to bound: the ledger is not consulted and the read is as before."""
+
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=CUTOFF, with_ledger=False, cutoff=False
+    )
+
+    assert "calculation_cutoff_date" not in world.report
+    assert (
+        world.call()["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+    )
