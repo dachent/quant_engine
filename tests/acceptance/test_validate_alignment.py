@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import copy
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Any
 import pytest
 from test_validate_generation import (
     CUTOFF,
+    START,
     Spec,
     _manifest_row,
     _twr_row,
@@ -546,3 +548,160 @@ def test_sum_over_epochs_aggregate_leaves_out_a_skipped_blocked_row(
         "expected.flows.account.net",
         "expected.flows.account.net",
     ]
+
+
+# -------------------------------------------------------------- L6b: the M3 opening
+#
+# The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
+# opening value, the NAV at the boundary, and the contributed basis
+# (opening_capital) is split from it.  The panel manifest row carries
+# performance_opening_value / performance_opening_date; the report's MWR opening
+# and its first cash flow carry the same value and date.
+
+M3_OPENING = "998.5"
+M3_CHECKS = ("returns.flow_lists_agree", "returns.mwr_opening_matches_first_flow")
+
+
+def _m3_report(account: str, opening: str, *, opening_date: str = START) -> Mutator:
+    """The account's current report row opens its MWR at ``opening`` on ``opening_date``."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        for row in report["twr_mwr"]:
+            if row["account_id"] == account and row["effective_end"] is None:
+                flows = row["mwr_cashflows"]
+                flows[0] = {**flows[0], "amount": f"-{opening}", "date": opening_date}
+                row["mwr_opening_value"] = opening
+                row["mwr_opening_date"] = opening_date
+
+    return mutate
+
+
+def _m3_manifest(account: str, opening: str, *, opening_date: str = START) -> Mutator:
+    """The account's current manifest row carries the performance opening."""
+
+    def mutate(panel: dict[str, Any]) -> None:
+        for row in panel["account_manifest"]["rows"]:
+            if row["account_id"] == account and row["effective_end"] is None:
+                row["performance_opening_value"] = opening
+                row["performance_opening_date"] = opening_date
+
+    return mutate
+
+
+def _m3_findings(spec: Spec, tmp_path: Path) -> list[checks.Finding]:
+    return [f for f in _run(build(tmp_path, spec), None) if f.check_id in M3_CHECKS]
+
+
+def test_m3_mwr_opening_equal_to_the_performance_opening_value_is_clean(
+    tmp_path: Path,
+) -> None:
+    """L6b (fail-before): the NAV opening is not a finding against opening_capital."""
+
+    spec = Spec(
+        report=[_m3_report("A1", M3_OPENING)], panel=[_m3_manifest("A1", M3_OPENING)]
+    )
+    assert _m3_findings(spec, tmp_path) == []
+
+
+def test_m3_flow_lists_clause_nets_the_performance_opening_for_the_contributed_one(
+    tmp_path: Path,
+) -> None:
+    """L6b (fail-before): net_capital - opening_capital + performance_opening_value.
+
+    B2 also carries a 200 interior deposit: invested is 2795 + 200 = 2995 =
+    3000 - 2800 + 2795, not net_capital (3000).
+    """
+
+    spec = Spec(report=[_m3_report("B2", "2795")], panel=[_m3_manifest("B2", "2795")])
+    assert _m3_findings(spec, tmp_path) == []
+
+
+def test_m3_opening_that_is_still_the_contributed_basis_is_a_finding(
+    tmp_path: Path,
+) -> None:
+    """L6b (fail-before): the manifest says NAV opening, the MWR still opens at the basis."""
+
+    spec = Spec(panel=[_m3_manifest("A1", M3_OPENING)])
+    findings = _m3_findings(spec, tmp_path)
+    assert sorted((f.check_id, f.klass, f.entity) for f in findings) == [
+        (
+            "returns.flow_lists_agree",
+            checks.BLOCKER_INVARIANT,
+            f"A1|alpha|{START}",
+        ),
+        (
+            "returns.mwr_opening_matches_first_flow",
+            checks.BLOCKER_INVARIANT,
+            f"A1|alpha|{START}",
+        ),
+    ]
+    opening = next(
+        f for f in findings if f.check_id == "returns.mwr_opening_matches_first_flow"
+    )
+    assert opening.observed["manifest_performance_opening_value"] == Decimal(M3_OPENING)
+    assert opening.observed["mwr_opening_value"] == Decimal("1000")
+    assert "manifest_opening_capital" not in opening.observed
+
+
+def test_m3_shifted_opening_value_is_a_finding(tmp_path: Path) -> None:
+    """L6b: an opening that matches neither the NAV nor the basis is a finding."""
+
+    spec = Spec(
+        report=[_m3_report("A1", "990")], panel=[_m3_manifest("A1", M3_OPENING)]
+    )
+    assert {f.check_id for f in _m3_findings(spec, tmp_path)} == set(M3_CHECKS)
+
+
+def test_m3_mwr_opening_date_must_be_the_performance_opening_date(
+    tmp_path: Path,
+) -> None:
+    """L6b (fail-before): mwr_opening_date is compared with performance_opening_date."""
+
+    spec = Spec(
+        report=[_m3_report("A1", M3_OPENING, opening_date="2025-09-11")],
+        panel=[_m3_manifest("A1", M3_OPENING, opening_date=START)],
+    )
+    findings = _m3_findings(spec, tmp_path)
+    assert [(f.check_id, f.klass) for f in findings] == [
+        ("returns.mwr_opening_matches_first_flow", checks.BLOCKER_INVARIANT)
+    ]
+    assert findings[0].observed["manifest_performance_opening_date"] == START
+    assert findings[0].observed["mwr_opening_date"] == "2025-09-11"
+
+
+def test_pre_m3_rows_without_a_performance_opening_keep_todays_semantics(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): no performance_opening_value, opening_capital rules."""
+
+    assert _m3_findings(Spec(), tmp_path / "clean") == []
+    spec = Spec(report=[_m3_report("A1", M3_OPENING)])
+    findings = _m3_findings(spec, tmp_path / "shifted")
+    assert {f.check_id for f in findings} == set(M3_CHECKS)
+    opening = next(
+        f for f in findings if f.check_id == "returns.mwr_opening_matches_first_flow"
+    )
+    assert opening.observed["manifest_opening_capital"] == Decimal("1000")
+    assert "manifest_performance_opening_value" not in opening.observed
+    flow_lists = next(f for f in findings if f.check_id == "returns.flow_lists_agree")
+    assert flow_lists.expected == {"net_capital": Decimal("1000")}
+
+
+def test_m3_leaves_the_twr_flow_count_clause_unchanged(tmp_path: Path) -> None:
+    """L6b (fail-before): only the TWR flow_count clause fires on an M3 row.
+
+    On main the MWR clause fires beside it, because it compares with net_capital.
+    """
+
+    def miscount(report: dict[str, Any]) -> None:
+        report["twr_mwr"][2]["flow_count"] = 2
+
+    spec = Spec(
+        report=[_m3_report("B2", "2795"), miscount],
+        panel=[_m3_manifest("B2", "2795")],
+    )
+    findings = _m3_findings(spec, tmp_path)
+    assert [(f.check_id, f.entity) for f in findings] == [
+        ("returns.flow_lists_agree", f"B2|beta|{START}")
+    ]
+    assert findings[0].observed == {"twr_flow_count": 2}
