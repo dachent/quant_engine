@@ -51,7 +51,9 @@ def _row(source_key: str, **values: str) -> dict[str, str]:
     return {field: values.get(field, "") for field in baseline._CSV_FIELDS[source_key]}
 
 
-def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
+def _published_provenance(
+    tmp_path: Path, *, reserve_accounts: tuple[str, ...] = ()
+) -> tuple[Path, str, str]:
     root = tmp_path / "private-provenance"
     strategies = []
     for index in range(1, 10):
@@ -140,6 +142,23 @@ def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
                 "strategy_id": f"strategy-{index}",
             }
         )
+    for index, reserve_account_id in enumerate(reserve_accounts, start=1):
+        assignments.append(
+            {
+                "account_id": reserve_account_id,
+                "assignment_id": f"assignment-reserve-{index}",
+                "effective_end": None,
+                "effective_start": "2025-01-01",
+                "mapping_status": "UNMAPPED",
+                "observed_label": "General",
+                "pool_id": "reserve-capital",
+                "pool_mapping_status": "MAPPED",
+                "source_classification": "SYNTHETIC",
+                "source_id": "synthetic-source",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            }
+        )
     assignments.append(
         {
             "account_id": "account-composer",
@@ -195,7 +214,9 @@ def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
     return root, manifest.generation_id, catalog_hash
 
 
-def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def _spec(
+    tmp_path: Path, *, reserve_accounts: tuple[str, ...] = ()
+) -> tuple[Path, dict[str, Any]]:
     source_root = tmp_path / "private-source"
     source_root.mkdir(parents=True)
     values = ["20", "15", "10", "10", "5", "10", "10", "10", "10"]
@@ -506,7 +527,9 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     sources["component-decision-table"]["as_of_date"] = "2026-07-25"
     sources["current-portfolio-summary"]["as_of_date"] = "2026-07-25"
 
-    provenance_root, generation_id, catalog_hash = _published_provenance(tmp_path)
+    provenance_root, generation_id, catalog_hash = _published_provenance(
+        tmp_path, reserve_accounts=reserve_accounts
+    )
     spec: dict[str, Any] = {
         "as_of_date": "2026-07-30",
         "policy_version": "PORT-PERF-1",
@@ -681,6 +704,9 @@ def _provider_ledger_generation(
     manifest_catalog_schema_version: int | None = None,
     manifest_as_of_date: date = date(2026, 7, 30),
     retained_source_as_of_date: date | None = None,
+    nav_observations: list[dict[str, Any]] | None = None,
+    flows: list[dict[str, Any]] | None = None,
+    admissions: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, dict[str, str]]:
     provider_ids = (
         "alpaca",
@@ -699,7 +725,7 @@ def _provider_ledger_generation(
         "transactions",
     )
     catalog = {
-        "admissions": [],
+        "admissions": admissions or [],
         "as_of_date": catalog_as_of_date.isoformat(),
         "catalog_schema_version": catalog_schema_version,
         "corporate_actions": [],
@@ -712,8 +738,8 @@ def _provider_ledger_generation(
             }
             for fact_type in zero_fact_types
         ],
-        "flows": [],
-        "nav_observations": [],
+        "flows": flows or [],
+        "nav_observations": nav_observations or [],
         "positions": [],
         "provider_coverage": [
             {
@@ -4288,3 +4314,261 @@ def test_excluded_registry_strategy_is_a_retained_row_in_a_built_baseline(
     assert catalog["current_capital"]["retained_excluded"]["components"] == [
         "strategy-9"
     ]
+
+
+def _load_materializer() -> Any:
+    materializer_spec = importlib.util.spec_from_file_location(
+        "portfolio_pipeline_materialize_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py",
+    )
+    assert materializer_spec is not None and materializer_spec.loader is not None
+    module = importlib.util.module_from_spec(materializer_spec)
+    materializer_spec.loader.exec_module(module)
+    return module
+
+
+def test_materializer_verifies_the_catalog_the_real_builder_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1.3 seam regression: producer output -> consumer, no mocked producer.
+
+    ``build_catalog`` runs for real over the synthetic sources; the materializer's
+    ``financial_identities`` verification then recomputes the block it published
+    from the catalog's own NAV facts and assignments, and rejects it once the
+    published bytes are corrupted.
+    """
+
+    materializer = _load_materializer()
+    spec_path, _spec_data = _spec(tmp_path)
+    # Strategies 4-9 are retained-excluded, so strategies 1-3 are the whole required
+    # set and the producer publishes real current values and weights.
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+    )
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+
+    block = catalog["current_capital"]
+    assert block["systematic"]["status"] == "AVAILABLE"
+    assert block["systematic"]["current_value"]["value"] == "61"  # 11 + 20 + 30
+    weights = {
+        row["strategy_id"]: Decimal(row["current_weight"])
+        for row in block["strategies"]
+        if row["scope"] == "SYSTEMATIC"
+    }
+    with localcontext() as context:
+        context.prec = 60
+        assert sum(weights.values(), Decimal(0)) == 1
+        for strategy_id, value in (
+            ("strategy-1", 11),
+            ("strategy-2", 20),
+            ("strategy-3", 30),
+        ):
+            assert abs(weights[strategy_id] - Decimal(value) / Decimal(61)) < Decimal(
+                "1e-32"
+            )
+
+    accepted, evidence = materializer._current_capital_identity(catalog)
+
+    assert accepted is True
+    assert evidence["strategy_mismatches"] == []
+    assert evidence["component_mismatches"] == []
+    assert evidence["problems"] == []
+    assert evidence["systematic_total_usd"] == "61"
+    # The excluded strategies have no account, and there is no reserve account:
+    # reported as not current, never stamped PASS.
+    assert evidence["identity_status"] == "NOT_READY"
+    assert evidence["not_ready_components"] == [
+        "reserve",
+        "retained_excluded",
+        "total_liquid",
+    ]
+
+    corrupted = copy.deepcopy(catalog)
+    _cc_rows(corrupted["current_capital"])["strategy-1"]["current_value"]["value"] = (
+        "12"
+    )
+    rejected, evidence = materializer._current_capital_identity(corrupted)
+
+    assert rejected is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["strategy_mismatches"] == ["strategy-1"]
+
+
+def _ledger_admission(
+    account_id: str, provider_id: str, disposition: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "account_reconciliation_sha256": hashlib.sha256(
+            account_id.encode()
+        ).hexdigest(),
+        "disposition": disposition,
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-07-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "nav_observations",
+        "pool_id": None,
+        "provider_id": provider_id,
+        "strategy_id": None,
+    }
+
+
+def _ledger_nav(
+    account_id: str, provider_id: str, day: str, value: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "as_of_date": day,
+        "mapping_status": "MAPPED",
+        "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        "provider_id": provider_id,
+        "record_id": f"{provider_id}:nav-{account_id}-{day}",
+    }
+
+
+def _provider_ledger_catalog_for_current_capital(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reserve_disposition: str,
+) -> dict[str, Any]:
+    """Build a baseline through the production path (spec v3 + provider ledger v2).
+
+    Strategies 1-3 are valued by AUTHORITATIVE provider NAVs dated 2026-07-29 (newer
+    than their legacy CSV rows); account-schwab-b is a reserve-pool account whose
+    2026-07-29 provider NAV carries ``reserve_disposition``; strategies 4-9 are
+    retained-excluded by policy and have no account.
+    """
+
+    spec_path, spec = _spec(tmp_path, reserve_accounts=("account-schwab-b",))
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=[
+            _ledger_nav("account-schwab-a", "schwab", "2026-07-29", "12"),
+            _ledger_nav("account-ibkr", "ibkr", "2026-07-29", "22"),
+            _ledger_nav("account-alpaca", "alpaca", "2026-07-29", "33"),
+            _ledger_nav("account-schwab-b", "schwab", "2026-07-29", "45"),
+        ],
+        flows=[
+            {
+                "account_id": "account-schwab-b",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-3"},
+                "event_date": "2026-07-10",
+                "flow_type": "TRANSFER:INTERNAL:OUT",
+                "mapping_status": "UNMAPPED",
+                "provider_id": "schwab",
+                "record_id": "schwab:flow-1",
+            }
+        ],
+        admissions=[
+            _ledger_admission("account-schwab-a", "schwab", "AUTHORITATIVE"),
+            _ledger_admission("account-ibkr", "ibkr", "AUTHORITATIVE"),
+            _ledger_admission("account-alpaca", "alpaca", "AUTHORITATIVE"),
+            _ledger_admission("account-schwab-b", "schwab", reserve_disposition),
+        ],
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+    )
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    assert isinstance(catalog, dict)
+    return catalog
+
+
+def test_provider_ledger_path_values_current_capital_and_gates_the_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production (spec v3) path: newer admitted NAVs win; REFERENCE_ONLY is not authority."""
+
+    materializer = _load_materializer()
+    catalog = _provider_ledger_catalog_for_current_capital(
+        tmp_path, monkeypatch, reserve_disposition="REFERENCE_ONLY"
+    )
+
+    block = catalog["current_capital"]
+    rows = _cc_rows(block)
+    assert {
+        strategy_id: (_cc_value(rows[strategy_id]), rows[strategy_id]["as_of_date"])
+        for strategy_id in ("strategy-1", "strategy-2", "strategy-3")
+    } == {
+        "strategy-1": ("12", "2026-07-29"),
+        "strategy-2": ("22", "2026-07-29"),
+        "strategy-3": ("33", "2026-07-29"),
+    }
+    assert [member["source_key"] for member in rows["strategy-1"]["members"]] == [
+        "provider-ledger"
+    ]
+    assert block["systematic"]["current_value"]["value"] == "67"
+    assert block["systematic"]["as_of_date"] == "2026-07-29"
+    assert block["retained_excluded"]["status"] == "NOT_READY_AT_CUTOFF"
+    # The reserve account's provider NAV is admitted REFERENCE_ONLY: not capital authority.
+    reserve = block["reserve"]
+    assert reserve["status"] == "NOT_READY_AT_CUTOFF"
+    assert reserve["current_value"]["value"] is None
+    assert [
+        (member["account_id"], member["authority"]) for member in reserve["members"]
+    ] == [("account-schwab-b", "NAV_NOT_AUTHORITATIVE")]
+    assert "SCHWAB" in reserve["reason"] and "REFERENCE_ONLY" in reserve["reason"]
+    checks = {row["check_id"]: row for row in catalog["reconciliation_checks"]}
+    assert checks["strategy-capital-to-cutoff-account-values"]["status"] == "PASS"
+    assert (
+        checks["strategy-capital-to-cutoff-account-values"]["systematic_total_usd"]
+        == "67"
+    )
+    assert checks["capital-identity-at-cutoff"]["status"] == "NOT_READY"
+    # The dated audit snapshot still carries the audit reserve, with the observation
+    # dates and the reserve-account flow booked after them (from the ledger's flows).
+    snapshot = catalog["audit_snapshot"]
+    assert snapshot["reserve"]["value_usd"] == "25"
+    assert snapshot["reserve"]["account_observations"] == [
+        {
+            "account_id": "account-schwab-b",
+            "as_of_date": "2026-07-06",
+            "value_usd": "41",
+        }
+    ]
+    assert snapshot["reserve"]["unexplained_difference_usd"] == "-16"
+    assert [
+        row["record_id"] for row in snapshot["reserve"]["post_observation_flows"]
+    ] == ["schwab:flow-1"]
+    # The independent consumer agrees with what the producer published.
+    accepted, evidence = materializer._current_capital_identity(catalog)
+    assert accepted is True
+    assert evidence["strategy_mismatches"] == [] == evidence["component_mismatches"]
+
+
+def test_provider_ledger_path_publishes_an_authoritatively_admitted_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materializer = _load_materializer()
+    catalog = _provider_ledger_catalog_for_current_capital(
+        tmp_path, monkeypatch, reserve_disposition="AUTHORITATIVE"
+    )
+
+    reserve = catalog["current_capital"]["reserve"]
+    assert reserve["status"] == "AVAILABLE"
+    assert reserve["current_value"]["value"] == "45"
+    assert reserve["as_of_date"] == "2026-07-29"
+    assert [
+        (member["account_id"], member["authority"], member["as_of_date"])
+        for member in reserve["members"]
+    ] == [("account-schwab-b", "AUTHORITATIVE", "2026-07-29")]
+    # Retained-excluded is still not current, so the identity cannot pass yet.
+    identity = {row["check_id"]: row for row in catalog["reconciliation_checks"]}[
+        "capital-identity-at-cutoff"
+    ]
+    assert identity["status"] == "NOT_READY"
+    assert identity["not_ready_components"] == ["retained_excluded", "total_liquid"]
+    accepted, evidence = materializer._current_capital_identity(catalog)
+    assert accepted is True
+    assert evidence["component_mismatches"] == []
+    assert evidence["not_ready_components"] == ["retained_excluded", "total_liquid"]
