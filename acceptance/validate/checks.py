@@ -3806,7 +3806,9 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
     L6b (M3, N27): the report's MWR opening value and date are the manifest's
     ``performance_opening_value`` and ``performance_opening_date`` (the NAV at the
     boundary). A manifest row without ``performance_opening_value`` (a pre-M3
-    generation) keeps the original comparison with ``opening_capital``.
+    generation) keeps the original comparison with ``opening_capital``. A row that
+    carries the value but no readable ``performance_opening_date`` cannot have its
+    opening date compared, and is itself the finding (fix round 1).
     """
 
     manifest = manifest_rows(ctx)
@@ -3831,13 +3833,18 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             else None
         )
         manifest_date: str | None = None
+        date_unreadable = False
         if performance_opening is not None and matched is not None:
             manifest_opening: Decimal | None = performance_opening
             observed["manifest_performance_opening_value"] = performance_opening
             raw_date = matched[1].get("performance_opening_date")
-            if isinstance(raw_date, str):
+            observed["manifest_performance_opening_date"] = raw_date
+            if isinstance(raw_date, str) and to_date(raw_date) is not None:
                 manifest_date = raw_date
-                observed["manifest_performance_opening_date"] = raw_date
+            else:
+                # the value is there, so the date has to be: a row that does not
+                # supply one must not pass the date clause by omission
+                date_unreadable = True
         else:
             manifest_opening = (
                 to_decimal(matched[1].get("opening_capital"))
@@ -3846,7 +3853,7 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             )
             if manifest_opening is not None:
                 observed["manifest_opening_capital"] = manifest_opening
-        bad = (
+        disagree = (
             flows[0].get("date") != row.get("mwr_opening_date")
             or first_amount is None
             or abs(-first_amount - opening) > USD_TOLERANCE
@@ -3859,7 +3866,19 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
                 and row.get("mwr_opening_date") != manifest_date
             )
         )
-        if bad:
+        if disagree or date_unreadable:
+            reasons: list[str] = []
+            if disagree:
+                reasons.append(
+                    "opening value and first cash flow disagree (flow merged into "
+                    "or shifted from the opening)"
+                )
+            if date_unreadable:
+                reasons.append(
+                    "the manifest row carries a performance opening value but no "
+                    "readable performance opening date, so the MWR opening date "
+                    "cannot be compared with it"
+                )
             yield _finding(
                 "returns.mwr_opening_matches_first_flow",
                 BLOCKER_INVARIANT,
@@ -3869,8 +3888,7 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
                 REPORT,
                 f"$.twr_mwr[{position}].mwr_cashflows[0]",
                 ("B8",),
-                "opening value and first cash flow disagree (flow merged into or "
-                "shifted from the opening)",
+                "; ".join(reasons),
             )
 
 
