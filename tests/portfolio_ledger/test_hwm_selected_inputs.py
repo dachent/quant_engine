@@ -1800,6 +1800,51 @@ def test_reconciles_declared_gap_spanning_hwm_link_from_admitted_inputs() -> Non
     )
 
 
+def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
+    """The MVP-2 ledger declares the same Matrixport NAV outage as the producer."""
+    module_path = REPO / "tests/core/mvp2_financial_fixture.py"
+    spec = importlib.util.spec_from_file_location(
+        "mvp2_financial_fixture_coverage_unit", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    fixture_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture_module
+    spec.loader.exec_module(fixture_module)
+    ledger = {
+        "provider_coverage": [
+            {"provider_id": "matrixport", "coverage": {"status": "AVAILABLE"}}
+        ]
+    }
+
+    fixture_module._declare_matrixport_nav_gap_coverage(ledger, ["2026-04-25"])
+
+    assert ledger["provider_coverage"] == [
+        {
+            "provider_id": "matrixport",
+            "coverage": {
+                "status": "AVAILABLE",
+                "declared_exclusions": [
+                    {
+                        "item": "fx_missing_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                    {
+                        "item": "nav_missing_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                    {
+                        "item": "reconciliation_incomplete_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                ],
+            },
+        }
+    ]
+
+
 def test_rejects_hwm_only_interval_without_declared_gap() -> None:
     """Accepting an unexplained HWM-only interval would hide missing coverage."""
     hwm_rows, ledger_rows = _robuxio_gap_parity_rows()

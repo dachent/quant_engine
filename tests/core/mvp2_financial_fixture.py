@@ -197,6 +197,21 @@ def project_account_source(baseline: dict[str, Any], ledger: dict[str, Any]) -> 
     ledger["reconciliation_checks"] = []
 
 
+def _declare_matrixport_nav_gap_coverage(
+    ledger: dict[str, Any], missing_dates: list[str]
+) -> None:
+    """Bind Matrixport's declared NAV outage to its synthetic ledger coverage."""
+    history = plan_tests.history_tests
+    matrixport_coverage = next(
+        row
+        for row in ledger["provider_coverage"]
+        if row["provider_id"] == "matrixport"
+    )
+    matrixport_coverage["coverage"]["declared_exclusions"] = (
+        history._matrixport_exclusions(*missing_dates)
+    )
+
+
 def build_capital_vertical(
     root: Path, paths: dict[str, Path], *, registry_path: Path | None = None
 ) -> dict[str, Path]:
@@ -682,6 +697,9 @@ def build_shared_history_source(
                 "source_segments"
             ]
             if row["source_id"] == "matrixport-account-generation"
+        )
+        _declare_matrixport_nav_gap_coverage(
+            ledger, matrixport_gap_policy["declared_missing_source_dates"]
         )
         unavailable_return_dates = frozenset(
             matrixport_gap_policy["unavailable_return_dates"]
