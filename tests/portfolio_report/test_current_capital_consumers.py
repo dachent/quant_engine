@@ -505,6 +505,194 @@ def test_report_rejects_an_inconsistent_current_capital_block(
         reporter._portfolio_summary(catalog, strategy_product_controls=_controls())
 
 
+# ---- an AVAILABLE strategy row stands on at least one member -------------------
+#
+# A strategy value is the sum of its members' admitted NAVs.  A row that listed no
+# member skipped both the member-total check and the oldest-member-date check, so the
+# report accepted and published whatever value the block carried, with no account
+# behind it (Codex review of T2, Important).  The producer never emits such a row:
+# a strategy with no member is NOT_READY.  The consumer requires what the producer
+# guarantees, in every scope that carries a value.
+
+
+def _strategy_row(catalog: dict[str, Any], strategy_id: str) -> dict[str, Any]:
+    return next(
+        row
+        for row in catalog["current_capital"]["strategies"]
+        if row["strategy_id"] == strategy_id
+    )
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        lambda catalog: _strategy_rows(catalog),
+        lambda catalog: reporter._portfolio_summary(
+            catalog, strategy_product_controls=_controls()
+        ),
+        lambda catalog: reporter._accounts(catalog),
+        lambda catalog: reporter._current_capital(catalog),
+    ],
+    ids=["strategies", "portfolio_summary", "accounts", "block"],
+)
+@pytest.mark.parametrize(
+    "strategy_id",
+    ["s-alpha", "s-retired"],
+    ids=["systematic", "retained-excluded"],
+)
+def test_an_available_strategy_without_members_is_refused_in_every_scope(
+    strategy_id: str, consumer: Any
+) -> None:
+    catalog = _world()
+    # Everything else stays consistent: the status, the value, the date and every
+    # aggregate still reconcile, so only the missing member evidence can refuse.
+    _strategy_row(catalog, strategy_id)["members"] = []
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=f"current capital strategy has no member evidence: {strategy_id}",
+    ):
+        consumer(catalog)
+
+
+def test_a_not_ready_strategy_may_have_no_members() -> None:
+    """The good side: no member means no value, and a row with no value is honest."""
+
+    catalog = _world()
+    rows = [dict(row) for row in catalog["current_capital"]["strategies"]]
+    for index, row in enumerate(rows):
+        if row["strategy_id"] == "s-retired":
+            rows[index] = fx.strategy("s-retired", [], scope="RETAINED_EXCLUDED")
+    catalog["current_capital"] = fx.block(rows, valuation_date="2026-01-06")
+    retired = _strategy_row(catalog, "s-retired")
+    assert (retired["status"], retired["members"]) == ("NOT_READY_AT_CUTOFF", [])
+
+    summary = reporter._portfolio_summary(
+        catalog, strategy_product_controls=_controls()
+    )
+
+    retained = _summary(summary, "Retained excluded systematic balance")
+    assert (retained["value"], retained["status"], retained["as_of_date"]) == (
+        None,
+        "NOT_READY_AT_CUTOFF",
+        None,
+    )
+    assert _summary(summary, "Systematic capital")["value"] == "500"
+
+
+@pytest.mark.parametrize(
+    "strategy_id",
+    ["strategy-3", "strategy-8"],
+    ids=["systematic", "retained-excluded"],
+)
+def test_published_report_refuses_an_arbitrary_strategy_value_without_members(
+    tmp_path: Path, full: Any, strategy_id: str
+) -> None:
+    catalog = full._baseline_catalog()
+    mirrored = fx.mirror_allocations(
+        catalog, [f"strategy-{index}" for index in range(1, 8)]
+    )
+    rows = [dict(row) for row in mirrored["strategies"]]
+    forged = next(row for row in rows if row["strategy_id"] == strategy_id)
+    # An arbitrary value that no account stands behind.  `block` derives the
+    # aggregates and the weights from the rows, so the block reconciles on its own
+    # terms and the member evidence is the only thing left to refuse it.
+    forged.update(current_value=fx.amount("123456.78"), members=[])
+    reserve = {
+        key: value for key, value in mirrored["reserve"].items() if key != "members"
+    }
+    catalog["current_capital"] = fx.block(
+        rows, valuation_date=mirrored["valuation_date"], reserve=reserve
+    )
+    baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
+
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match=f"current capital strategy has no member evidence: {strategy_id}",
+    ):
+        full.reporter.build_report_data(baseline_root)
+
+
+def test_the_real_builder_publishes_members_for_every_available_strategy() -> None:
+    """The invariant the consumer now relies on, read from the producer's own bytes."""
+
+    produced = _real_builder_block(_world())
+
+    available = [row for row in produced["strategies"] if row["status"] == "AVAILABLE"]
+    assert {row["strategy_id"] for row in available} == {
+        "s-alpha",
+        "s-beta",
+        "s-gamma",
+        "s-retired",
+    }
+    assert all(row["members"] for row in available)
+
+
+def test_the_real_builders_block_is_refused_once_a_strategy_loses_its_members() -> None:
+    catalog = _world()
+    catalog["current_capital"] = _real_builder_block(catalog)
+    reporter._current_capital(catalog)  # as produced: accepted
+
+    # The value (200) and the date stay; only the account evidence is gone.
+    _strategy_row(catalog, "s-beta")["members"] = []
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="current capital strategy has no member evidence: s-beta",
+    ):
+        reporter._current_capital(catalog)
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="current capital strategy has no member evidence: s-beta",
+    ):
+        _strategy_rows(catalog)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda block: block["systematic"].update(as_of_date="2026-01-06"),
+            "current systematic capital is not dated at its oldest strategy",
+        ),
+        (
+            lambda block: block["systematic"].update(as_of_date=None),
+            "current systematic capital is not dated at its oldest strategy",
+        ),
+        (
+            lambda block: block["retained_excluded"].update(as_of_date="2025-12-01"),
+            "current retained excluded capital is not dated at its oldest strategy",
+        ),
+        (
+            lambda block: block["retained_excluded"].update(as_of_date=None),
+            "current retained excluded capital is not dated at its oldest strategy",
+        ),
+    ],
+    ids=[
+        "systematic-newer",
+        "systematic-undated",
+        "retained-newer",
+        "retained-undated",
+    ],
+)
+def test_report_rejects_an_aggregate_not_dated_at_its_oldest_strategy(
+    mutate: Any, message: str
+) -> None:
+    """An aggregate is as old as the oldest strategy under it (Kimi minor, T2)."""
+
+    catalog = _world()
+    summary = reporter._portfolio_summary(
+        catalog, strategy_product_controls=_controls()
+    )
+    assert _summary(summary, "Systematic capital")["as_of_date"] == "2026-01-02"
+    assert _summary(summary, "Retained excluded systematic balance")["as_of_date"] == (
+        "2025-11-24"
+    )
+
+    mutate(catalog["current_capital"])
+    with pytest.raises(reporter.ReportValidationError, match=message):
+        reporter._portfolio_summary(catalog, strategy_product_controls=_controls())
+
+
 # ---- B6: the capital identity includes retained and never paints NOT_READY -----
 
 
@@ -787,8 +975,8 @@ def test_published_report_refuses_a_block_that_counts_an_excluded_strategy(
         full.reporter.build_report_data(baseline_root)
 
 
-def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
-    """Producer to consumer seam: the baseline's own block through the report."""
+def _real_builder_block(catalog: dict[str, Any]) -> dict[str, Any]:
+    """The baseline's own block for the facts of ``_world`` (the producer itself)."""
 
     baseline = _load(
         "portfolio_baseline_for_current_capital_consumers",
@@ -796,7 +984,6 @@ def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
     )
     from datetime import date
 
-    catalog = _world()
     strategies = [
         {"strategy_id": strategy_id}
         for strategy_id in ("s-alpha", "s-beta", "s-gamma", "s-retired")
@@ -818,7 +1005,7 @@ def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
             ("acct-r", "s-retired"),
         )
     ]
-    produced = baseline._build_current_capital(
+    produced: dict[str, Any] = baseline._build_current_capital(
         valuation_date=date(2026, 1, 6),
         strategies=strategies,
         accounts=[],
@@ -827,6 +1014,14 @@ def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
         provider_admissions=[],
         policy_exclusions={"s-retired": date(2025, 12, 1)},
     )
+    return produced
+
+
+def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
+    """Producer to consumer seam: the baseline's own block through the report."""
+
+    catalog = _world()
+    produced = _real_builder_block(catalog)
     catalog["current_capital"] = produced
     accounts = reporter._accounts(catalog)
     reporter._verify_current_capital_accounts(
