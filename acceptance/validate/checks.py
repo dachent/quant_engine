@@ -3382,7 +3382,14 @@ def _interior_cashflows(row: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def check_flow_lists(ctx: Context) -> Iterator[Finding]:
-    """B1: the TWR flow list, the MWR cash flows and the capital trace are one list."""
+    """B1: the TWR flow list, the MWR cash flows and the capital trace are one list.
+
+    L6b (M3, N27): the MWR opens at the manifest's ``performance_opening_value`` (the
+    NAV at the boundary), not at the contributed ``opening_capital``, so the
+    non-terminal MWR cash flows sum to ``net_capital - opening_capital +
+    performance_opening_value``. A row without ``performance_opening_value`` (a
+    pre-M3 generation) keeps the original comparison with ``net_capital``.
+    """
 
     manifest = manifest_rows(ctx)
     for position, row in twr_rows(ctx):
@@ -3416,7 +3423,33 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
             invested = -sum(
                 (to_decimal(item.get("amount")) or Decimal(0)) for item in flows[:-1]
             )
-            if abs(invested - net) > USD_TOLERANCE:
+            contributed = to_decimal(matched[1].get("opening_capital"))
+            performance_opening = to_decimal(
+                matched[1].get("performance_opening_value")
+            )
+            if contributed is not None and performance_opening is not None:
+                expected_invested = net - contributed + performance_opening
+                if abs(invested - expected_invested) > USD_TOLERANCE:
+                    yield _finding(
+                        "returns.flow_lists_agree",
+                        BLOCKER_INVARIANT,
+                        "|".join(key),
+                        {"minus_sum_of_non_terminal_mwr_cashflows": invested},
+                        {
+                            "net_capital_less_opening_capital_plus_performance_"
+                            "opening_value": expected_invested,
+                            "net_capital": net,
+                            "opening_capital": contributed,
+                            "performance_opening_value": performance_opening,
+                        },
+                        REPORT,
+                        f"$.twr_mwr[{position}].mwr_cashflows",
+                        ("B1",),
+                        "MWR cash flows do not sum to the account's net capital with "
+                        "the performance opening value in place of the contributed "
+                        "opening capital",
+                    )
+            elif abs(invested - net) > USD_TOLERANCE:
                 yield _finding(
                     "returns.flow_lists_agree",
                     BLOCKER_INVARIANT,
@@ -3431,7 +3464,13 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
 
 
 def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
-    """B8: opening value, first cash flow and first-flow timing agree."""
+    """B8: opening value, first cash flow and first-flow timing agree.
+
+    L6b (M3, N27): the report's MWR opening value and date are the manifest's
+    ``performance_opening_value`` and ``performance_opening_date`` (the NAV at the
+    boundary). A manifest row without ``performance_opening_value`` (a pre-M3
+    generation) keeps the original comparison with ``opening_capital``.
+    """
 
     manifest = manifest_rows(ctx)
     for position, row in twr_rows(ctx):
@@ -3449,13 +3488,27 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             "first_cashflow_amount": first_amount,
         }
         matched = manifest.get(epoch_key(row))
-        manifest_opening = (
-            to_decimal(matched[1].get("opening_capital"))
+        performance_opening = (
+            to_decimal(matched[1].get("performance_opening_value"))
             if matched is not None
             else None
         )
-        if manifest_opening is not None:
-            observed["manifest_opening_capital"] = manifest_opening
+        manifest_date: str | None = None
+        if performance_opening is not None and matched is not None:
+            manifest_opening: Decimal | None = performance_opening
+            observed["manifest_performance_opening_value"] = performance_opening
+            raw_date = matched[1].get("performance_opening_date")
+            if isinstance(raw_date, str):
+                manifest_date = raw_date
+                observed["manifest_performance_opening_date"] = raw_date
+        else:
+            manifest_opening = (
+                to_decimal(matched[1].get("opening_capital"))
+                if matched is not None
+                else None
+            )
+            if manifest_opening is not None:
+                observed["manifest_opening_capital"] = manifest_opening
         bad = (
             flows[0].get("date") != row.get("mwr_opening_date")
             or first_amount is None
@@ -3463,6 +3516,10 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             or (
                 manifest_opening is not None
                 and abs(manifest_opening - opening) > USD_TOLERANCE
+            )
+            or (
+                manifest_date is not None
+                and row.get("mwr_opening_date") != manifest_date
             )
         )
         if bad:
