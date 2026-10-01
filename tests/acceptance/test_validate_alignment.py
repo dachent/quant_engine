@@ -876,6 +876,112 @@ def test_a_manifest_row_blocked_in_only_one_status_is_not_skipped(
     ) in _expected_findings(findings)
 
 
+# --------------- L6a fix round 1: the window recompute is not stopped by a blocked row
+#
+# When no view of an account covers the oracle's ITD window (a closed funded epoch
+# beside the current one), the expected value is recomputed from the account's own
+# epochs (recompute_metric).  A confirmed blocked epoch publishes null dates and
+# values, so the recompute declined beside it and left the expectation NOT_READY:
+# with the skip exact, the funded epoch's contradiction with the oracle was visible
+# but did not block, in Kimi's own probe world.  R2 keeps the assignment-only interval
+# out of the account's TWR and MWR, so the recompute leaves it out too.  The skip stays
+# account-level (l0-design 5.1): the strategy-level recompute is as it was.
+
+
+def _closed_funded_world(
+    tmp_path: Path, *, metric: str | None = None, expected: str | None = None
+) -> list[checks.Finding]:
+    """A1's confirmed blocked epoch beside a closed FUNDED one from the same start.
+
+    The oracle rows are A1's five (or just ``metric``), with ``expected`` as the value.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    spec = _blocked_epochs(["A1"])
+    _closed_funded_beside_blocked(spec)
+    gen_dir = build(tmp_path / "gen", spec)
+    rows = [
+        row
+        for row in _oracle(("A1",), census_sha=sha)
+        if metric in (None, row["metric_id"])
+    ]
+    if expected is not None:
+        for row in rows:
+            row["expected"] = expected
+    return _run(gen_dir, rows, repo)
+
+
+def test_a_closed_funded_epoch_beside_a_confirmed_blocked_row_is_compared(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1a (fail-before): Kimi's world, where the funded epoch is closed.
+
+    No single view is the oracle's ITD window, so TWR and MWR are recomputed from the
+    account's epochs with the confirmed blocked epoch left out, and the funded
+    epoch's contradictions are blockers, like the flow aggregates'.  Before the
+    window recompute skipped the blocked epoch they were NOT_READY, and on fc96fd6
+    the confirmed census hid all four.  Mutation MY-1 turns this red.
+    """
+
+    findings = _closed_funded_world(tmp_path)
+    found = [f for f in findings if f.check_id.startswith("expected.")]
+    assert sorted((f.check_id, f.klass) for f in found) == [
+        ("expected.flows.account.count", checks.BLOCKER_REGRESSION),
+        ("expected.flows.account.net", checks.BLOCKER_REGRESSION),
+        ("expected.mwr.account", checks.BLOCKER_REGRESSION),
+        ("expected.twr.account", checks.BLOCKER_REGRESSION),
+    ]
+    for finding in found:
+        if finding.check_id in ("expected.twr.account", "expected.mwr.account"):
+            assert finding.observed["view"].startswith("recomputed:")
+    # the chain is the closed funded epoch (row 4) and the current one (row 0)
+    twr = next(f for f in found if f.check_id == "expected.twr.account")
+    assert twr.observed["view"] == "recomputed:twr_mwr[4].twr x twr_mwr[0].twr"
+
+
+def test_a_confirmed_blocked_epoch_does_not_stop_the_twr_recompute(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1a (fail-before): the funded epochs' chain is the account's ITD.
+
+    1.5 (the closed funded epoch) x 1.1 (the current one) - 1 = 0.65.  The recompute
+    used to decline beside the blocked epoch: NOT_READY, not a clean comparison.
+    """
+
+    findings = _closed_funded_world(tmp_path, metric="twr.account", expected="0.65")
+    assert _expected_findings(findings) == []
+
+
+def test_the_strategy_level_recompute_is_still_declined_beside_a_confirmed_blocked_row(
+    tmp_path: Path,
+) -> None:
+    """Boundary (green on main): the skip is for account-level metrics only.
+
+    A strategy's MWR is recomputed from every epoch of that strategy, and the blocked
+    epoch has no cash flows, so the recompute still declines (l0-design 5.1 skips
+    account-level views only).  Mutation MY-2 (the skip applied to strategy-level
+    recomputes too) turns this red.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    gen_dir = build(tmp_path / "gen", _blocked_epochs(["A1"]))
+    row = {
+        "metric_id": "mwr.strategy",
+        "entity": "beta",
+        "window": "ITD",
+        "as_of": CUTOFF,
+        "expected": "0.09",
+        "authority_pointer": [{"path": CENSUS_CONTRACT, "sha256": sha}],
+    }
+    assert _expected_findings(_run(gen_dir, [row], repo)) == [
+        ("expected.mwr.strategy", checks.NOT_READY, "beta|ITD")
+    ]
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
