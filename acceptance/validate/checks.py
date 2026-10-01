@@ -470,8 +470,19 @@ def compound_window(
 # a blocked manifest row listed after a funded one stand in for it: the funded row's
 # trace, net capital and panel views left every aggregation and every match. A row whose
 # whole identity the other table lacks is still compared with the row of its kind that
-# shares its start (the two tables disagree about the epoch's end, which the comparison
-# surfaces), never with a row of the other kind.
+# shares its start, never with a row of the other kind.
+#
+# Fix round 3 (Codex lane-eps-r2) closes the two ways that left a disagreement unsaid.
+# The stand-in was compared on its numbers alone, so two tables that differed only in an
+# epoch's end produced no finding at all: every use of a stand-in is now a finding of its
+# own (``epoch_disagreements``, said by ``check_epoch_identity``). And a row whose whole
+# identity the other table holds only as a row of the OTHER kind used to be matched with
+# that row all the same, a funded row read against a blocked one: it has no row now (no
+# sibling stands in either, its epoch is there as something else) and the admission
+# disagreement is the finding. Declining the match without a finding would have left the
+# end-only case silent: no existing finding compares the report's ``twr_mwr`` rows with
+# the panel's ``account_manifest`` rows (``preservation.report_to_panel`` maps
+# ``twr_mwr`` to the panel's ``performance`` table).
 
 CENSUS_CHECK = "identity.blocked_admission_census"
 _ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
@@ -525,27 +536,57 @@ def _identity_index(
     return index
 
 
+# What a pair of rows that carry one epoch apart disagree about; also the field of the
+# report row the finding points at.
+END_DISAGREEMENT = "effective_end"
+ADMISSION_DISAGREEMENT = "epoch_admission_status"
+
+
+@dataclass(frozen=True)
+class EpochMatch:
+    """What the other table holds for one row's epoch.
+
+    ``row`` is the row the comparisons read, ``None`` when there is none. ``disagreement``
+    is ``None`` for an exact match (the row of the whole identity and of the row's
+    kind), ``END_DISAGREEMENT`` when ``row`` is a stand-in that shares only the start,
+    ``ADMISSION_DISAGREEMENT`` when the whole identity is held only by rows of the other
+    kind (``row`` is ``None``: nothing is read across kinds). ``partners`` are the rows
+    a disagreement is with.
+    """
+
+    row: TableRow | None
+    disagreement: str | None = None
+    partners: tuple[TableRow, ...] = ()
+
+
 def _same_epoch(
     index: Mapping[EpochIdentity, Sequence[TableRow]],
     row: Mapping[str, Any],
     blocked: bool,
     is_blocked: Callable[[Mapping[str, Any]], bool],
-) -> TableRow | None:
-    """The entry of ``index`` that is ``row``'s own epoch, or ``None``.
+) -> EpochMatch:
+    """What ``index`` holds for ``row``'s own epoch.
 
-    The entries with ``row``'s whole identity; among those the one that is blocked
+    The entries with ``row``'s whole identity; among those the last one that is blocked
     exactly when ``row`` is (a funded and a blocked row can share even the whole
-    identity), else the last. When no entry has the whole identity, the last entry that
-    is blocked exactly when ``row`` is and shares only its (account, strategy,
-    effective_start) stands in: a table that carries the epoch with another end is a
-    disagreement the comparison has to surface, not a reason to look away; an epoch of
-    the other kind is never its row. Nothing qualifies: ``None``.
+    identity): an exact match. Entries with the whole identity but none of ``row``'s
+    kind: no row at all, and an ``ADMISSION_DISAGREEMENT`` with every one of them. The
+    epoch of the other kind is never ``row``'s row, and no sibling stands in for it
+    either: its own epoch is there, as something else (fix round 3: this used to fall
+    back to the entries of the other kind, so a funded row was read against a blocked
+    one). When no entry has the whole identity, the last entry that is blocked exactly
+    when ``row`` is and shares only its (account, strategy, effective_start) stands in,
+    with an ``END_DISAGREEMENT``: a table that carries the epoch with another end
+    contradicts the other table, which a comparison of numbers alone would never say
+    (fix round 3). Nothing qualifies: no row, no disagreement.
     """
 
     own = index.get(epoch_identity(row))
     if own:
         alike = [entry for entry in own if is_blocked(entry[1]) == blocked]
-        return (alike or own)[-1]
+        if alike:
+            return EpochMatch(alike[-1])
+        return EpochMatch(None, ADMISSION_DISAGREEMENT, tuple(own))
     key = epoch_key(row)
     sharing = [
         entry
@@ -554,12 +595,13 @@ def _same_epoch(
         for entry in group
         if is_blocked(entry[1]) == blocked
     ]
-    return max(sharing, key=lambda entry: entry[0]) if sharing else None
+    if not sharing:
+        return EpochMatch(None)
+    stand_in = max(sharing, key=lambda entry: entry[0])
+    return EpochMatch(stand_in, END_DISAGREEMENT, (stand_in,))
 
 
-def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
-    """The panel manifest row of one ``twr_mwr`` row: the row of its own epoch."""
-
+def _manifest_epoch(ctx: Context, row: Mapping[str, Any]) -> EpochMatch:
     index = ctx._cache.get("manifest_by_identity")
     if not isinstance(index, dict):
         index = _identity_index(manifest_rows(ctx))
@@ -567,14 +609,70 @@ def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
     return _same_epoch(index, row, is_blocked_admission(row), is_blocked_manifest_row)
 
 
-def report_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
-    """The ``twr_mwr`` row of one panel manifest row: the same match, the other way."""
-
+def _report_epoch(ctx: Context, row: Mapping[str, Any]) -> EpochMatch:
     index = ctx._cache.get("twr_by_identity")
     if not isinstance(index, dict):
         index = _identity_index(twr_rows(ctx))
         ctx._cache["twr_by_identity"] = index
     return _same_epoch(index, row, is_blocked_manifest_row(row), is_blocked_admission)
+
+
+def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The panel manifest row of one ``twr_mwr`` row: the row of its own epoch."""
+
+    return _manifest_epoch(ctx, row).row
+
+
+def report_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The ``twr_mwr`` row of one panel manifest row: the same match, the other way."""
+
+    return _report_epoch(ctx, row).row
+
+
+@dataclass(frozen=True)
+class EpochDisagreement:
+    """One ``twr_mwr`` row and one panel manifest row that carry one epoch apart.
+
+    ``kind`` is ``END_DISAGREEMENT`` (they share account, strategy and start, and no
+    row of either table has the other's whole identity: one stands in for the other)
+    or ``ADMISSION_DISAGREEMENT`` (they share the whole identity and only one of them is
+    a blocked admission).
+    """
+
+    kind: str
+    report: TableRow
+    panel: TableRow
+
+
+def epoch_disagreements(ctx: Context) -> list[EpochDisagreement]:
+    """Every pair of rows, one per table, that carry one epoch apart.
+
+    Each report row asks the panel and each panel row asks the report, so a row that only
+    one table carries (a second end for the epoch) is found from the table that has it;
+    a pair that both sides find is one pair. Ordered by report row, then panel row.
+    """
+
+    cached = ctx._cache.get("epoch_disagreements")
+    if isinstance(cached, list):
+        return cached
+    pairs: dict[tuple[int, int], EpochDisagreement] = {}
+    for entry in twr_rows(ctx):
+        match = _manifest_epoch(ctx, entry[1])
+        if match.disagreement is not None:
+            for partner in match.partners:
+                pairs[(entry[0], partner[0])] = EpochDisagreement(
+                    match.disagreement, entry, partner
+                )
+    for entry in manifest_rows(ctx):
+        match = _report_epoch(ctx, entry[1])
+        if match.disagreement is not None:
+            for partner in match.partners:
+                pairs[(partner[0], entry[0])] = EpochDisagreement(
+                    match.disagreement, partner, entry
+                )
+    found = [pairs[key] for key in sorted(pairs)]
+    ctx._cache["epoch_disagreements"] = found
+    return found
 
 
 def _day_text(value: Any) -> str | None:
@@ -2989,9 +3087,80 @@ def check_strategy_vs_cutoff_accounts(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def check_account_identity(ctx: Context) -> Iterator[Finding]:
-    """Account-row capital arithmetic and terminal values agree across views."""
+def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
+    """The report and the panel carry each account epoch alike (fix round 3).
 
+    One ``BLOCKER_INVARIANT`` per pair of a ``twr_mwr`` row and a panel manifest row
+    that carry one epoch apart (``epoch_disagreements``), pointing at the report row:
+    the two ends when one row stands in for the other, the two admission statuses when
+    the epoch's whole identity is held only as a row of the other kind. They are
+    published as ``capital.account_identity`` because no check id names an epoch
+    identity; this is the one whose subject is the account's epoch row across the report
+    and the panel, entity ``account|strategy|effective_start`` like its siblings. No
+    defect id is attached: none describes it.
+    """
+
+    for item in epoch_disagreements(ctx):
+        position, row = item.report
+        panel_position, panel_row = item.panel
+        shown = {
+            "report": {
+                "row": position,
+                "effective_end": row.get("effective_end"),
+                "twr_status": row.get("twr_status"),
+                "epoch_admission_status": row.get("epoch_admission_status"),
+            },
+            "panel": {
+                "row": panel_position,
+                "effective_end": panel_row.get("effective_end"),
+                "status": panel_row.get("status"),
+                "admission_status": panel_row.get("admission_status"),
+            },
+        }
+        key = epoch_key(row)
+        if item.kind == END_DISAGREEMENT:
+            expected = (
+                "the same effective_end in the report's twr_mwr row and the panel's "
+                "account_manifest row of one epoch"
+            )
+            message = (
+                f"the report row {position} of {key[0]} / {key[1]} from {key[2]} ends "
+                f"{row.get('effective_end')} but the panel manifest row {panel_position} "
+                f"that stands in for it ends {panel_row.get('effective_end')}: no row "
+                "of the other table has the whole identity of either, so the two "
+                "tables disagree about when the epoch ends"
+            )
+        else:
+            expected = (
+                "one admission kind for an epoch, blocked or not, in the report's "
+                "twr_mwr row and the panel's account_manifest row"
+            )
+            message = (
+                f"the report row {position} and the panel manifest row "
+                f"{panel_position} of {key[0]} / {key[1]} from {key[2]} (effective_end "
+                f"{row.get('effective_end')}) carry the same epoch but only one of "
+                "them is a blocked admission"
+            )
+        yield _finding(
+            "capital.account_identity",
+            BLOCKER_INVARIANT,
+            "|".join(key),
+            shown,
+            expected,
+            REPORT,
+            f"$.twr_mwr[{position}].{item.kind}",
+            (),
+            message,
+        )
+
+
+def check_account_identity(ctx: Context) -> Iterator[Finding]:
+    """Account-row capital arithmetic and terminal values agree across views.
+
+    And the two tables carry each account epoch alike (``check_epoch_identity``).
+    """
+
+    yield from check_epoch_identity(ctx)
     summary = {
         str(row.get("account_id")): (position, row)
         for position, row in enumerate(rows(ctx.report, "account_summary"))
