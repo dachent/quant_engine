@@ -353,6 +353,34 @@ def test_a_member_account_missing_from_the_account_rows_is_refused() -> None:
         reporter._verify_current_capital_accounts(catalog["current_capital"], accounts)
 
 
+def test_keys_the_report_does_not_know_are_ignored_in_every_part_of_the_block() -> None:
+    """Lane T1b adds a strategy cash line and reserve rows to this same block.
+
+    The consumers read the keys they know; an added key anywhere in the block (the
+    block, an aggregate, a strategy row, a member) must change no published figure.
+    """
+
+    plain = _world(reserve_value="1000")
+    extended = deepcopy(plain)
+    block = extended["current_capital"]
+    block["strategy_cash_lines"] = [{"strategy_id": "s-alpha", "cash": "1"}]
+    block["future_note"] = "not read"
+    for name in ("systematic", "reserve", "retained_excluded", "total_liquid"):
+        block[name]["future_field"] = {"anything": True}
+    for row in block["strategies"]:
+        row["cash_line"] = {"status": "AVAILABLE", "value": "5"}
+        row["reserve_rows"] = [{"account_id": "acct-hold"}]
+        for member in row["members"]:
+            member["future_field"] = 1
+
+    assert _strategy_rows(extended) == _strategy_rows(plain)
+    assert reporter._portfolio_summary(
+        extended, strategy_product_controls=_controls()
+    ) == reporter._portfolio_summary(plain, strategy_product_controls=_controls())
+    assert reporter._accounts(extended) == reporter._accounts(plain)
+    reporter._verify_current_capital_accounts(block, reporter._accounts(extended))
+
+
 # ---- the block is required and is checked at the consumption boundary ----------
 
 

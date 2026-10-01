@@ -271,3 +271,25 @@ def test_the_report_capital_must_equal_the_governed_baseline_block() -> None:
         match="baseline catalog lacks current_capital",
     ):
         panel._reconcile_capital_with_baseline(parts, {})
+
+
+def test_keys_the_panel_does_not_know_are_ignored_in_the_report_and_the_block() -> None:
+    """Lane T1b adds a strategy cash line and reserve rows to the baseline block."""
+
+    block = _baseline_capital()
+    extended = deepcopy(block)
+    extended["strategy_cash_lines"] = [{"strategy_id": "s-alpha", "cash": "1"}]
+    for name in ("systematic", "reserve", "retained_excluded", "total_liquid"):
+        extended[name]["future_field"] = {"anything": True}
+    for row in extended["strategies"]:
+        row["cash_line"] = {"status": "AVAILABLE", "value": "5"}
+        for member in row["members"]:
+            member["future_field"] = 1
+    summary = _summary()
+    for row in summary.values():
+        row["future_field"] = "not read"
+
+    parts = panel._capital_summary(summary)
+
+    assert parts == panel._capital_summary(_summary())
+    panel._reconcile_capital_with_baseline(parts, {"current_capital": extended})
