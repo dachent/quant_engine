@@ -48,7 +48,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Context, Decimal, localcontext
 from functools import wraps
 from pathlib import Path
@@ -173,6 +173,28 @@ def _iso_date(value: object, field: str) -> str:
     if parsed.isoformat() != text:
         raise ManifestError(f"{field} must be a canonical ISO date")
     return text
+
+
+def _utc_fill_date(value: object, field: str) -> str:
+    """The UTC calendar date of one ledger ``economic_fill_timestamp``.
+
+    The ledger admits only a timezone-aware UTC instant (ISO-8601, offset zero,
+    spelled ``Z`` or ``+00:00``) and takes its date as the fill day
+    (``tools/provider_ledger.py``: ``_utc_timestamp`` and ``fill_day``).  This
+    restates that rule; it is neither imported from the ledger nor shared with
+    the independent verifier.  A naive or non-UTC instant is rejected, never
+    converted.
+    """
+
+    if type(value) is not str or not value or value != value.strip():
+        raise ManifestError(f"{field} must be a non-empty ISO-8601 timestamp")
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ManifestError(f"{field} must be an ISO-8601 timestamp") from exc
+    if instant.tzinfo is None or instant.utcoffset() != timedelta(0):
+        raise ManifestError(f"{field} must be timezone-aware UTC")
+    return instant.date().isoformat()
 
 
 def _canonical_digest(value: object) -> str:
@@ -1844,16 +1866,24 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
             basis_amount = source_amount
             opening_nav_amount = None
         # A provider fund allocation is an exact-timestamp fill.  Its money-
-        # weighted cash date is the economic fill date the ledger admits; the
-        # allocation (event) date is not that date, so without it the MWR fails
-        # closed instead of silently dating the fill (R4).
-        economic_date_raw = raw.get("economic_date")
-        economic_date = (
-            None
-            if economic_date_raw is None
-            else _iso_date(
-                economic_date_raw, f"capital anchor {record_id}.economic_date"
+        # weighted cash date is the UTC date of the ``economic_fill_timestamp``
+        # the ledger admits (the ledger's own fill day); the allocation (event)
+        # date is not that date, so without it the MWR fails closed instead of
+        # silently dating the fill (R4).  The ledger schema forbids an
+        # ``economic_date`` on an anchor, so one is rejected here, never read
+        # (N25: reading that field left every Quantbase fill without a date).
+        if "economic_date" in raw:
+            raise ManifestError(
+                f"capital anchor {record_id} carries economic_date; the ledger "
+                "field is economic_fill_timestamp"
             )
+        economic_date = (
+            _utc_fill_date(
+                raw["economic_fill_timestamp"],
+                f"capital anchor {record_id}.economic_fill_timestamp",
+            )
+            if "economic_fill_timestamp" in raw
+            else None
         )
         anchors.append(
             {
@@ -1895,8 +1925,8 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
             <= anchors[-1]["nav_recognition_date"]
         ):
             raise ManifestError(
-                f"capital anchor {record_id} economic date is outside its event"
-                " and recognition dates"
+                f"capital anchor {record_id} economic fill date {economic_date} "
+                "is outside its event and recognition dates"
             )
     return anchors
 

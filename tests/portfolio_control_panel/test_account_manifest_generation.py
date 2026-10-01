@@ -14492,7 +14492,10 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
             ("__future__", 0, (("annotations", None),)),
             ("collections.abc", 0, (("Mapping", None),)),
             ("dataclasses", 0, (("dataclass", None),)),
-            ("datetime", 0, (("date", None), ("timedelta", None))),
+            # ``datetime`` is the pure stdlib value type behind
+            # ``datetime.fromisoformat``: the verifier restates the ledger's
+            # economic_fill_timestamp rule (N25) with the parser the ledger uses.
+            ("datetime", 0, (("date", None), ("datetime", None), ("timedelta", None))),
             (
                 "decimal",
                 0,

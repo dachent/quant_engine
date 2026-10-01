@@ -11,7 +11,7 @@ import base64
 import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 import json
@@ -830,6 +830,39 @@ def _parse_canonical_date(value: object) -> date:
 
 def _date_value(value: object) -> date:
     return _parse_canonical_date(value)
+
+
+def _independent_anchor_fill_date(
+    anchor: Mapping[str, object], event_day: date, recognition_day: date
+) -> date | None:
+    """The UTC fill date one raw ledger capital anchor admits, or None.
+
+    The ledger schema gives a capital anchor ``economic_fill_timestamp`` (a
+    timezone-aware UTC instant) and forbids ``economic_date``.  This restates
+    the ledger's rule independently of the manifest producer (no import between
+    them): the date is the UTC calendar date of the instant, a naive or
+    non-UTC instant is rejected rather than converted, and the date must lie in
+    ``[event, recognition]``.  An anchor without a timestamp has no fill date; a
+    raw anchor that carries ``economic_date`` is invalid.
+    """
+
+    if "economic_date" in anchor:
+        _fail()
+    if "economic_fill_timestamp" not in anchor:
+        return None
+    raw = anchor["economic_fill_timestamp"]
+    if type(raw) is not str or not raw or raw != raw.strip():
+        _fail()
+    try:
+        instant = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        _fail()
+    if instant.tzinfo is None or instant.utcoffset() != timedelta(0):
+        _fail()
+    fill_day = instant.date()
+    if not event_day <= fill_day <= recognition_day:
+        _fail()
+    return fill_day
 
 
 def _reject_provider_fact_after_ledger_date(
@@ -2307,19 +2340,17 @@ def _derive_independent_mwr_projection(
         event_date = _parse_canonical_date(anchor.get("event_date"))
         recognition_date = _parse_canonical_date(anchor.get("nav_recognition_date"))
         source_id = _fact_text(anchor.get("source_record_id"))
+        # Every anchor's own fill field is validated here (an opening anchor's
+        # included, though it dates no MWR leg); the ledger writes
+        # ``economic_fill_timestamp`` and never ``economic_date``.
+        economic_date = _independent_anchor_fill_date(
+            anchor, event_date, recognition_date
+        )
         if anchor_type == "STRATEGY_CAPITAL_ALLOCATION":
             money = anchor.get("amount")
             if not isinstance(money, Mapping):
                 _fail()
-            raw_economic = anchor.get("economic_date")
-            economic_date = (
-                None if raw_economic is None else _parse_canonical_date(raw_economic)
-            )
-            if economic_date is not None and not (
-                event_date <= economic_date <= recognition_date
-            ):
-                _fail()
-            # The raw anchor economic date is part of the allocation identity:
+            # The raw anchor's fill date is part of the allocation identity:
             # an exact-timestamp fill binds its MWR cash date to this source
             # value, never to a published flow leg's own economic date.
             allocation_economics.setdefault(
@@ -5949,9 +5980,14 @@ def _mixed_numeric_facts(
             or opening_nav.get("currency") != currency
         ):
             _fail()
+        opening_event = _date_value(raw_opening.get("event_date"))
+        opening_recognition = _date_value(raw_opening.get("nav_recognition_date"))
+        # The opening anchor dates no MWR leg, but its own fill field is
+        # validated like every other anchor's.
+        _independent_anchor_fill_date(raw_opening, opening_event, opening_recognition)
         opening_anchor = _IndependentCapitalAnchorFact(
-            _date_value(raw_opening.get("event_date")),
-            _date_value(raw_opening.get("nav_recognition_date")),
+            opening_event,
+            opening_recognition,
             currency,
             _parse_retained_source_decimal(
                 raw_opening.get("amount", {}).get("value")
@@ -5977,14 +6013,9 @@ def _mixed_numeric_facts(
         allocation_recognition = _date_value(allocation.get("nav_recognition_date"))
         if allocation_recognition < allocation_event:
             _fail()
-        raw_economic = allocation.get("economic_date")
-        allocation_economic = (
-            None if raw_economic is None else _date_value(raw_economic)
+        allocation_economic = _independent_anchor_fill_date(
+            allocation, allocation_event, allocation_recognition
         )
-        if allocation_economic is not None and not (
-            allocation_event <= allocation_economic <= allocation_recognition
-        ):
-            _fail()
         # A provider fund allocation is an exact-timestamp fill.
         allocation_facts.append(
             _IndependentFlowFact(
