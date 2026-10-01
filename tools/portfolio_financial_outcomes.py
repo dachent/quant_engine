@@ -1471,17 +1471,21 @@ def _verify_consumers(
     correlation_generation = _generation(spec, correlation_node)
     correlation = replays[("DEPENDENCE", correlation_node.path.resolve())]
     cutoff = report.get("calculation_cutoff_date")
-    dependence, rows, _identity, _path = report_producer._dependence_report(
-        None,
-        generation_dir=correlation_generation.source_dir,
-        calculation_cutoff_date=cutoff,
-        # FXB-1: the dependence may end before the cutoff only where the value basis
-        # of the required strategies ends.  That end comes from the verified ledger
-        # and contract, never from the report this verifier is verifying.
-        bounded_complete_through=_verified_value_basis_end(
-            spec, contract_path, controls, cutoff
-        ),
-    )
+    # FXB-1: the dependence may end before the cutoff only where the value basis of
+    # the required strategies ends.  That end comes from the verified ledger and
+    # contract, never from the report this verifier is verifying.
+    bounded_end = _verified_value_basis_end(spec, contract_path, controls, cutoff)
+    try:
+        dependence, rows, _identity, _path = report_producer._dependence_report(
+            None,
+            generation_dir=correlation_generation.source_dir,
+            calculation_cutoff_date=cutoff,
+            bounded_complete_through=bounded_end,
+        )
+    except report_producer.ReportValidationError as exc:
+        # The producer's rejection of the dependence generation reaches the caller as
+        # this verifier's own error, with the producer's message.
+        raise FinancialOutcomeError(str(exc)) from exc
     if (
         report.get("dependence_analysis") != dependence
         or report.get("dependence_rows") != rows
