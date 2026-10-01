@@ -572,6 +572,21 @@ def _selected_inputs(
         mutate_ledger(ledger_doc)
     if mutate_baseline is not None:
         mutate_baseline(baseline_doc, ledger_doc)
+    if daily:
+        # The admission policy is an epoch/ledger seam: a fixture mutation
+        # that removes a raw NAV observation must also remove its citation.
+        # Rebind from the serialized ledger after the caller's producer-shaped
+        # projection rather than retaining the pre-projection daily grid.
+        epoch_nav_ids = {
+            epoch_key: [
+                str(observation["record_id"])
+                for observation in ledger_doc["nav_observations"]
+                if observation["account_id"] == epoch_key[0]
+                and epoch_key[2] <= observation["as_of_date"]
+                and (epoch_key[3] is None or observation["as_of_date"] <= epoch_key[3])
+            ]
+            for epoch_key in epoch_nav_ids
+        }
     provider_ledger = fixture.InputSnapshot.from_bytes(
         "HWM synthetic provider ledger", canonical_json_bytes(ledger_doc)
     )
@@ -1580,6 +1595,403 @@ def test_aggregates_native_daily_nav_before_division_for_zero_value_sleeve() -> 
         Decimal("105"),
         Decimal("120"),
     ]
+
+
+def _timed_flow_strategy_rows(
+    *, internal_transfer: bool = False
+) -> tuple[
+    dict[tuple[str, str, str, str | None], dict[str, Any]],
+    dict[tuple[str, str, str, str | None], dict[str, Any]],
+    dict[tuple[str, str, str, str | None], dict[str, Any]],
+]:
+    strategy_id = (
+        "tt-internal-transfer" if internal_transfer else "volatis-bod-allocation"
+    )
+    start = "2026-07-13"
+    end = "2026-07-14"
+    keys = [
+        ("account-first", strategy_id, start, None),
+        ("account-second", strategy_id, start, None),
+    ]
+
+    def nav(account_id: str, observed_on: str, value: str) -> dict[str, Any]:
+        return {
+            "account_id": account_id,
+            "as_of_date": observed_on,
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    def link(
+        *,
+        base: str,
+        beginning_flow: str,
+        ending: str,
+        ending_flow: str,
+    ) -> dict[str, str]:
+        with localcontext() as context:
+            context.prec = 40
+            context.rounding = ROUND_HALF_EVEN
+            factor = (Decimal(ending) - Decimal(ending_flow)) / (
+                Decimal(base) + Decimal(beginning_flow)
+            )
+        return {
+            "start_date": start,
+            "end_date": end,
+            "base_nav": base,
+            "beginning_flow": beginning_flow,
+            "ending_nav": ending,
+            "ending_flow": ending_flow,
+            "net_flow": str(Decimal(beginning_flow) + Decimal(ending_flow)),
+            "factor": str(factor),
+        }
+
+    if internal_transfer:
+        first_ending, first_bod, first_eod = "60", "0", "-50"
+        second_ending, second_bod, second_eod = "160", "50", "0"
+    else:
+        first_ending, first_bod, first_eod = "210", "100", "0"
+        second_ending, second_bod, second_eod = "110", "0", "0"
+
+    def anchor(account_id: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account_id,
+            "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+            "event_date": end,
+            "nav_recognition_date": end,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    def classified_flow(account_id: str, amount: str) -> dict[str, Any]:
+        return {
+            "account_id": account_id,
+            "event_id": f"internal-transfer-{account_id}",
+            "classification_status": "CLASSIFIED",
+            "disposition": "INTERNAL",
+            "event_date": end,
+            "nav_recognition_date": end,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
+
+    crosswalk = {key: {"assignment_id": f"assignment-{key[0]}"} for key in keys}
+    calculation = {
+        keys[0]: {
+            "nav_observations": [
+                nav(keys[0][0], start, "100"),
+                nav(keys[0][0], end, first_ending),
+            ],
+            "capital_anchors": [anchor(keys[0][0], first_bod)]
+            if first_bod != "0"
+            else [],
+            "classified_flows": [classified_flow(keys[0][0], first_eod)]
+            if first_eod != "0"
+            else [],
+        },
+        keys[1]: {
+            "nav_observations": [
+                nav(keys[1][0], start, "100"),
+                nav(keys[1][0], end, second_ending),
+            ],
+            "capital_anchors": [anchor(keys[1][0], second_bod)]
+            if second_bod != "0"
+            else [],
+            "classified_flows": [classified_flow(keys[1][0], second_eod)]
+            if second_eod != "0"
+            else [],
+        },
+    }
+    output = {
+        keys[0]: {
+            "observation_trace": {
+                "links": [
+                    link(
+                        base="100",
+                        beginning_flow=first_bod,
+                        ending=first_ending,
+                        ending_flow=first_eod,
+                    )
+                ]
+            }
+        },
+        keys[1]: {
+            "observation_trace": {
+                "links": [
+                    link(
+                        base="100",
+                        beginning_flow=second_bod,
+                        ending=second_ending,
+                        ending_flow=second_eod,
+                    )
+                ]
+            }
+        },
+    }
+    return crosswalk, calculation, output
+
+
+def test_uses_kernel_bod_leg_for_volatis_like_allocation() -> None:
+    crosswalk, calculation, output = _timed_flow_strategy_rows()
+
+    _memberships, _capital, returns = _derive_zero_nav_strategy_rows(
+        crosswalk, calculation, output
+    )
+
+    with localcontext() as context:
+        context.prec = 34
+        context.rounding = ROUND_HALF_EVEN
+        assert Decimal(returns[0]["net_return"]) == Decimal(1) / Decimal(15)
+    assert Decimal(returns[0]["net_return"]) != Decimal("0.1")
+
+
+def test_nets_tt_like_internal_transfer_only_after_preserving_timing_legs() -> None:
+    crosswalk, calculation, output = _timed_flow_strategy_rows(internal_transfer=True)
+
+    _memberships, _capital, returns = _derive_zero_nav_strategy_rows(
+        crosswalk, calculation, output
+    )
+
+    assert Decimal(returns[0]["net_return"]) == Decimal("0.08")
+
+
+def test_rejects_hwm_compound_residual_above_strict_parity_tolerance() -> None:
+    with pytest.raises(SelectedHwmInputError, match="HWM return parity"):
+        selected_hwm._validate_hwm_return_parity(
+            [
+                {
+                    "strategy_id": "volatis",
+                    "interval_start": "2026-07-13",
+                    "interval_end": "2026-07-14",
+                    "net_return": "0.1",
+                }
+            ],
+            [
+                {
+                    "strategy_id": "volatis",
+                    "date": "2026-07-14",
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "return": "0.100000000002",
+                }
+            ],
+        )
+
+
+def _robuxio_gap_parity_rows() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    return (
+        [
+            {
+                "strategy_id": "robuxio-crypto",
+                "interval_start": "2026-01-01",
+                "interval_end": "2026-01-02",
+                "net_return": "0.1",
+            },
+            {
+                "strategy_id": "robuxio-crypto",
+                "interval_start": "2026-01-02",
+                "interval_end": "2026-01-04",
+                "net_return": "0.2",
+            },
+        ],
+        [
+            {
+                "strategy_id": "robuxio-crypto",
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": "0.1",
+            }
+        ],
+    )
+
+
+def test_reconciles_declared_gap_spanning_hwm_link_from_admitted_inputs() -> None:
+    """Removing the declared-gap branch makes this Robuxio-shaped coverage fail."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    selected_hwm._validate_hwm_return_parity(
+        hwm_rows,
+        ledger_rows,
+        declared_nav_gap_dates_by_strategy={
+            "robuxio-crypto": frozenset({date(2026, 1, 3)})
+        },
+        recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+    )
+
+
+def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
+    """The MVP-2 ledger declares the same Matrixport NAV outage as the producer."""
+    module_path = REPO / "tests/core/mvp2_financial_fixture.py"
+    spec = importlib.util.spec_from_file_location(
+        "mvp2_financial_fixture_coverage_unit", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    fixture_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture_module
+    spec.loader.exec_module(fixture_module)
+    ledger = {
+        "provider_coverage": [
+            {"provider_id": "matrixport", "coverage": {"status": "AVAILABLE"}}
+        ]
+    }
+
+    fixture_module._declare_matrixport_nav_gap_coverage(ledger, ["2026-04-25"])
+
+    assert ledger["provider_coverage"] == [
+        {
+            "provider_id": "matrixport",
+            "coverage": {
+                "status": "AVAILABLE",
+                "declared_exclusions": [
+                    {
+                        "item": "fx_missing_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                    {
+                        "item": "nav_missing_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                    {
+                        "item": "reconciliation_incomplete_date:2026-04-25",
+                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "reason": "provider NAV endpoint returned no data for this date",
+                    },
+                ],
+            },
+        }
+    ]
+
+
+def test_mvp2_matrixport_declared_nav_gap_omits_observation_and_spans_hwm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared Matrixport outage must remove its NAV before HWM links form."""
+    module_path = REPO / "tests/core/mvp2_financial_fixture.py"
+    spec = importlib.util.spec_from_file_location(
+        "mvp2_financial_fixture_gap_topology_unit", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    fixture_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture_module
+    spec.loader.exec_module(fixture_module)
+
+    prepared, selected = fixture_module.build_shared_history_source(
+        tmp_path / "mvp2", monkeypatch
+    )
+    ledger = json.loads(
+        (
+            selected["provider_generation"].parent / "normalized/provider-ledger.json"
+        ).read_bytes()
+    )
+    assert not [
+        row
+        for row in ledger["nav_observations"]
+        if row["strategy_id"] == "robuxio-crypto" and row["as_of_date"] == "2026-04-25"
+    ]
+
+    decomposition = fixture_module.build_decomposition_vertical(
+        tmp_path / "decomposition",
+        monkeypatch,
+        prepared_history_fixture=prepared,
+    )
+    fixture_module.bind_final_hwm_contract(selected, decomposition.contract_path)
+    fixture_module.install_synthetic_financial_authority(
+        monkeypatch,
+        [
+            selected["contract"],
+            decomposition.contract_path,
+            *(
+                bundle / "inputs/history/financial-mvp-contract.json"
+                for bundle in decomposition.plan_bundles.values()
+            ),
+        ],
+        source_period_fixture=prepared,
+    )
+    generation = _build(selected)
+    robuxio_intervals = [
+        (row["interval_start"], row["interval_end"])
+        for row in generation["component_periods"]
+        if row["strategy_id"] == "robuxio-crypto"
+    ]
+    assert ("2026-04-24", "2026-04-26") in robuxio_intervals
+    assert ("2026-04-24", "2026-04-25") not in robuxio_intervals
+    assert ("2026-04-25", "2026-04-26") not in robuxio_intervals
+
+
+def test_rejects_hwm_only_interval_without_declared_gap() -> None:
+    """Accepting an unexplained HWM-only interval would hide missing coverage."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="unexplained HWM interval"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={"robuxio-crypto": frozenset()},
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+        )
+
+
+def test_rejects_account_live_endpoint_without_hwm_interval() -> None:
+    """Dropping the ledger-only coverage branch would accept stale projected rows."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+    ledger_rows.append(
+        {
+            "strategy_id": "robuxio-crypto",
+            "date": "2026-01-03",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+        }
+    )
+
+    with pytest.raises(
+        SelectedHwmInputError, match="ledger endpoint has no HWM interval"
+    ):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 3)})
+            },
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.2"),
+        )
+
+
+def test_rejects_wrong_recomputed_gap_link_return() -> None:
+    """Skipping the link_epoch recomputation must not allow an asserted gap value."""
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="gap link differs"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 3)})
+            },
+            recompute_gap_interval=lambda _strategy_id, _start, _end: Decimal("0.19"),
+        )
+
+
+def test_parity_gate_is_called_when_account_live_ledger_rows_are_present(
+    tmp_path: Path,
+) -> None:
+    def mutate(ledger: dict[str, Any]) -> None:
+        for nav in ledger["nav_observations"]:
+            nav["provider_id"] = "synthetic"
+        ledger["provider_coverage"] = [
+            {
+                "provider_id": "synthetic",
+                "coverage": {"declared_exclusions": []},
+            }
+        ]
+        ledger["strategy_returns"] = [
+            {
+                "strategy_id": "grizzlybears-vtma",
+                "date": DAY.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": "0.999999",
+            }
+        ]
+
+    with pytest.raises(SelectedHwmInputError, match="HWM return parity"):
+        _build(_fixture(tmp_path, mutate_ledger=mutate))
 
 
 def test_rejects_daily_strategy_interval_with_missing_member_nav_boundary() -> None:
