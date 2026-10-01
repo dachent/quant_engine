@@ -1090,6 +1090,89 @@ def test_an_unreadable_manifest_date_beside_a_real_mismatch_keeps_both_reasons(
     assert "performance opening date" in opening[0].message
 
 
+@pytest.mark.parametrize(
+    "opening_capital",
+    [_ABSENT, None, "junk", True],
+    ids=["missing", "null", "not_a_number", "bool"],
+)
+def test_m3_row_with_an_unreadable_opening_capital_is_a_flow_lists_finding(
+    tmp_path: Path, opening_capital: Any
+) -> None:
+    """L6b fix 4 (fail-before): the M3 clause cannot be made, which is the finding.
+
+    A1's MWR opens at the contributed basis, so net_capital agrees with the cash
+    flows and the pre-M3 comparison would pass: before the fix the row fell back to
+    it silently.  Mutation MB-5 (the M3 clause engaged only when opening_capital is
+    readable) turns this red.
+    """
+
+    spec = Spec(
+        report=[_m3_report("A1", "1000")],
+        panel=[
+            _m3_manifest("A1", "1000"),
+            _m3_manifest_field("A1", "opening_capital", opening_capital),
+        ],
+    )
+    findings = _m3_findings(spec, tmp_path)
+    assert [(f.check_id, f.klass, f.entity) for f in findings] == [
+        (FLOW_LISTS_CHECK, checks.BLOCKER_INVARIANT, f"A1|alpha|{START}")
+    ]
+    assert findings[0].defect_ids == ("B1",)
+    assert findings[0].observed["performance_opening_value"] == Decimal("1000")
+    assert findings[0].observed["opening_capital"] == (
+        None if opening_capital is _ABSENT else opening_capital
+    )
+    assert "opening capital" in findings[0].message
+
+
+def test_m3_row_with_an_unreadable_opening_capital_is_not_compared_with_net_capital(
+    tmp_path: Path,
+) -> None:
+    """L6b fix 4 (fail-before): the finding names the malformed field, not net_capital.
+
+    B2's cash flows sum to 2995 against a net capital of 3000: the pre-M3 fallback
+    reported that as a misleading mismatch with an expected net_capital.
+    """
+
+    spec = Spec(
+        report=[_m3_report("B2", "2795")],
+        panel=[
+            _m3_manifest("B2", "2795"),
+            _m3_manifest_field("B2", "opening_capital", _ABSENT),
+        ],
+    )
+    (finding,) = _m3_findings(spec, tmp_path)
+    assert (finding.check_id, finding.entity) == (FLOW_LISTS_CHECK, f"B2|beta|{START}")
+    assert "net_capital" not in finding.expected
+    assert "opening_capital" in finding.expected
+    assert finding.observed["minus_sum_of_non_terminal_mwr_cashflows"] == Decimal(
+        "2995"
+    )
+
+
+def test_pre_m3_row_with_an_unreadable_opening_capital_keeps_todays_comparison(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): without performance_opening_value, net_capital rules.
+
+    The row keeps its observed key, its expected side and its message, so the FV-1
+    re-score stays byte-identical.
+    """
+
+    clean = Spec(panel=[_m3_manifest_field("B2", "opening_capital", _ABSENT)])
+    assert _m3_findings(clean, tmp_path / "clean") == []
+    shifted = Spec(
+        report=[_m3_report("A1", "990")],
+        panel=[_m3_manifest_field("A1", "opening_capital", _ABSENT)],
+    )
+    findings = _m3_findings(shifted, tmp_path / "shifted")
+    flow_lists = [f for f in findings if f.check_id == FLOW_LISTS_CHECK]
+    assert [f.expected for f in flow_lists] == [{"net_capital": Decimal("1000")}]
+    assert [f.observed for f in flow_lists] == [
+        {"minus_sum_of_non_terminal_mwr_cashflows": Decimal("990")}
+    ]
+
+
 # ----------------------------------------------- L6c: verified value-basis bounds
 #
 # A strategy whose admitted FX ends before the cutoff has no USD value past that
