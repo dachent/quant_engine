@@ -1020,6 +1020,70 @@ def _real_builder_block(catalog: dict[str, Any]) -> dict[str, Any]:
     return produced
 
 
+def _baseline_test_fixture() -> Any:
+    """Load the baseline test's compact public-builder synthetic world."""
+
+    return _load(
+        "portfolio_baseline_public_catalog_fixture",
+        REPOSITORY_ROOT / "tests" / "portfolio_baseline" / "test_portfolio_baseline.py",
+    )
+
+
+def _t1_strategy_product_controls() -> dict[str, dict[str, str]]:
+    """T1's required perimeter: strategies 1--3; 4--9 are retained exclusions."""
+
+    return {
+        f"strategy-{index}": {
+            "product_requirement": "REQUIRED" if index <= 3 else "EXCLUDED"
+        }
+        for index in range(1, 10)
+    }
+
+
+def test_the_public_baseline_catalog_is_what_the_report_consumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer-to-consumer seam: public baseline catalog through report consumers."""
+
+    baseline_test = _baseline_test_fixture()
+    spec_path, _spec_data = baseline_test._spec(tmp_path)
+    monkeypatch.setattr(
+        baseline_test.baseline,
+        "_hwm_policy_exclusions",
+        lambda: {
+            f"strategy-{index}": baseline_test.date(2026, 1, 1)
+            for index in range(4, 10)
+        },
+    )
+    catalog, _manifest, _bytes = baseline_test.baseline.build_catalog(spec_path)
+
+    current_capital = reporter._current_capital(catalog)
+    accounts = reporter._accounts(catalog)
+    reporter._verify_current_capital_accounts(current_capital, accounts)
+    controls = _t1_strategy_product_controls()
+    rows = {
+        str(row["strategy_id"]): row
+        for row in reporter._strategies(
+            catalog,
+            [],
+            strategy_product_controls=controls,
+            strategy_provider_evidence=[],
+        )
+    }
+    assert {
+        key: rows[key]["current_value_usd"]
+        for key in ("strategy-1", "strategy-2", "strategy-3")
+    } == {
+        "strategy-1": "11",
+        "strategy-2": "20",
+        "strategy-3": "30",
+    }
+    summary = reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+    assert _summary(summary, "Systematic capital")["value"] == "61"
+    assert _summary(summary, "Reserve")["status"] == "NOT_READY_AT_CUTOFF"
+    assert _summary(summary, "Total liquid")["status"] == "NOT_READY_AT_CUTOFF"
+
+
 def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
     """Producer to consumer seam: the baseline's own block through the report."""
 
