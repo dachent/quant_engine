@@ -1802,6 +1802,26 @@ def test_a_report_row_whose_panel_row_carries_another_end_is_still_compared_with
     ]
 
 
+def test_a_funded_row_is_never_compared_with_a_blocked_epochs_panel_row(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 2 (fail-before): an epoch of the other kind is never a row's panel row.
+
+    The funded epoch has no panel row at all; the only row that shares its start is the
+    confirmed blocked epoch's, with another end and an empty trace, and that is not the
+    funded epoch's capital trace (it used to be read as if it were).  Mutation MF-10
+    (the stand-in may be a row of the other kind) turns this red.
+    """
+
+    spec = _recut_spec(
+        funded_first=False,
+        report=_recut_report(RECUT_ENDS["closed"], flow_count=2),
+        manifest=lambda panel: None,
+    )
+    findings = _recut_run(tmp_path, spec)
+    assert [f for f in findings if f.check_id == "returns.flow_lists_agree"] == []
+
+
 @MANIFEST_ORDERS
 def test_a_panel_row_whose_report_row_carries_another_end_is_still_compared_with_it(
     tmp_path: Path, funded_first: bool
