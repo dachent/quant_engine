@@ -3751,7 +3751,9 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
     NAV at the boundary), not at the contributed ``opening_capital``, so the
     non-terminal MWR cash flows sum to ``net_capital - opening_capital +
     performance_opening_value``. A row without ``performance_opening_value`` (a
-    pre-M3 generation) keeps the original comparison with ``net_capital``.
+    pre-M3 generation) keeps the original comparison with ``net_capital``. A row that
+    carries the value but no readable ``opening_capital`` is itself the finding: it
+    never falls back to the pre-M3 comparison (fix round 1).
     """
 
     manifest = manifest_rows(ctx)
@@ -3790,28 +3792,54 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
             performance_opening = to_decimal(
                 matched[1].get("performance_opening_value")
             )
-            if contributed is not None and performance_opening is not None:
-                expected_invested = net - contributed + performance_opening
-                if abs(invested - expected_invested) > USD_TOLERANCE:
+            if performance_opening is not None:
+                if contributed is None:
+                    # An M3 row without a readable contributed basis cannot be tied
+                    # to its net capital; falling back to the pre-M3 comparison would
+                    # pass it, or blame net_capital, instead of naming the field.
                     yield _finding(
                         "returns.flow_lists_agree",
                         BLOCKER_INVARIANT,
                         "|".join(key),
-                        {"minus_sum_of_non_terminal_mwr_cashflows": invested},
                         {
-                            "net_capital_less_opening_capital_plus_performance_"
-                            "opening_value": expected_invested,
+                            "minus_sum_of_non_terminal_mwr_cashflows": invested,
                             "net_capital": net,
-                            "opening_capital": contributed,
                             "performance_opening_value": performance_opening,
+                            "opening_capital": matched[1].get("opening_capital"),
+                        },
+                        {
+                            "opening_capital": "a readable amount beside the "
+                            "performance_opening_value"
                         },
                         REPORT,
                         f"$.twr_mwr[{position}].mwr_cashflows",
                         ("B1",),
-                        "MWR cash flows do not sum to the account's net capital with "
-                        "the performance opening value in place of the contributed "
-                        "opening capital",
+                        "the manifest row carries a performance opening value but no "
+                        "readable opening capital, so the MWR cash flows cannot be "
+                        "tied to its net capital",
                     )
+                else:
+                    expected_invested = net - contributed + performance_opening
+                    if abs(invested - expected_invested) > USD_TOLERANCE:
+                        yield _finding(
+                            "returns.flow_lists_agree",
+                            BLOCKER_INVARIANT,
+                            "|".join(key),
+                            {"minus_sum_of_non_terminal_mwr_cashflows": invested},
+                            {
+                                "net_capital_less_opening_capital_plus_performance_"
+                                "opening_value": expected_invested,
+                                "net_capital": net,
+                                "opening_capital": contributed,
+                                "performance_opening_value": performance_opening,
+                            },
+                            REPORT,
+                            f"$.twr_mwr[{position}].mwr_cashflows",
+                            ("B1",),
+                            "MWR cash flows do not sum to the account's net capital "
+                            "with the performance opening value in place of the "
+                            "contributed opening capital",
+                        )
             elif abs(invested - net) > USD_TOLERANCE:
                 yield _finding(
                     "returns.flow_lists_agree",
