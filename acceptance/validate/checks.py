@@ -452,7 +452,9 @@ def compound_window(
 # identity (account, strategy, effective_start, effective_end) of a confirmed blocked
 # row. The coarser ``epoch_key`` (no ``effective_end``) is only how views are matched:
 # a funded epoch re-cut from the same start shares it, and keying the skip by it hid
-# that funded row's contradiction with the oracle (lane epsilon fix round 1, a).
+# that funded row's contradiction with the oracle (lane epsilon fix round 1, a). The
+# account-level window recompute (``recompute_metric``) leaves a confirmed blocked
+# epoch out the same way; the strategy-level recompute is unchanged.
 
 CENSUS_CHECK = "identity.blocked_admission_census"
 _ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
@@ -5931,11 +5933,17 @@ def recompute_metric(
     if end is None:
         return []
     strategy_level = metric_id in ("twr.strategy", "mwr.strategy")
+    # L6a: a blocked epoch the census confirms is outside the account's TWR and MWR
+    # (R2) and publishes no dates or cash flows, so it would only make the account
+    # recompute decline. The strategy-level recompute is not changed (l0-design 5.1
+    # skips account-level views only).
+    blocked = blocked_epochs(ctx)
     epochs = sorted(
         (
             (position, row)
             for position, row in twr_rows(ctx)
             if str(row.get("strategy_id" if strategy_level else "account_id")) == entity
+            and (strategy_level or not blocked.skips_report_row(row))
         ),
         key=lambda item: str(item[1].get("effective_start")),
     )
@@ -6024,7 +6032,7 @@ def recompute_metric(
     if metric_id in ("flows.account.net", "flows.account.count"):
         events = []
         for key, (_, row) in manifest_rows(ctx).items():
-            if key[0] != entity:
+            if key[0] != entity or blocked.skips_manifest_row(row):
                 continue
             for item in row.get("capital_flow_trace") or []:
                 day = _flow_day(item) if isinstance(item, dict) else None
