@@ -969,6 +969,71 @@ def _ledger_generation(root, **catalog_options):
     return generation_path, catalog_path
 
 
+def _bundle_ledger_generation(
+    root,
+    *,
+    aliases=("provider-ledger.json",),
+    second_catalog=None,
+    with_catalog=True,
+    **catalog_options,
+):
+    """Stage a provider-ledger generation as a bundle, as the MVP-2 product world does.
+
+    The manifest lists the catalog as ``normalized/provider-ledger.json`` and, for each
+    alias, once more under another id with the same bytes (the synthetic ledger of the
+    MVP-2 product world carries ``provider-ledger.json`` that way).  ``second_catalog``
+    adds a DIFFERENT catalog under a third id; ``with_catalog=False`` stages a
+    generation that holds no catalog at all.
+    """
+
+    day = date(2026, 9, 17)
+    catalog_bytes = canonical_json_bytes(_ledger_catalog(**catalog_options))
+    catalogs = {}
+    if with_catalog:
+        catalogs["normalized/provider-ledger.json"] = catalog_bytes
+        catalogs.update({alias: catalog_bytes for alias in aliases})
+    if second_catalog is not None:
+        catalogs["second/provider-ledger.json"] = canonical_json_bytes(second_catalog)
+    payloads = {
+        **catalogs,
+        "verification/independent-verification.json": canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "status": "VERIFIED",
+                "subject_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+            }
+        ),
+    }
+    manifest = GenerationManifest.build(
+        as_of_date=day,
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "SYNTHETIC"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic provider ledger",
+            fact_types=("nav_observations",),
+            observed_start=date(2026, 8, 1),
+            observed_end=day,
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=day,
+                schema_name=(
+                    "synthetic-source-independent-verification"
+                    if artifact_id.startswith("verification/")
+                    else "provider-ledger-catalog"
+                ),
+                schema_version="1",
+            )
+            for artifact_id, content in payloads.items()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return stage_generation_bundle(root, manifest, payloads) / "generation.json"
+
+
 def _node_with_files(node_id, root_id, directory, files):
     expectations = []
     for name, content in files.items():
@@ -991,6 +1056,7 @@ def _consumer_world(
     *,
     end,
     ledger=None,
+    ledger_bundle=None,
     with_ledger=True,
     cutoff=True,
     report_edit=None,
@@ -998,7 +1064,9 @@ def _consumer_world(
     """One report, its correlation generation and the selected ledger, ending at ``end``.
 
     The report and the correlation both end at ``end`` (the report's history contract
-    says so too); ``ledger`` holds the options of the staged provider-ledger catalog.
+    says so too); ``ledger`` holds the options of the staged provider-ledger catalog and
+    ``ledger_bundle`` (options of ``_bundle_ledger_generation``) stages the generation as
+    a bundle instead of the governed route's layout.
     ``_verify_consumers``, the dependence re-read (``_dependence_report``), the FXB-1
     derivation, the product controls and the ledger and contract reads are the real code;
     only the seams that verify other outcomes (the governed HWM projection, the epoch
@@ -1101,7 +1169,11 @@ def _consumer_world(
     }
     ledger_path = None
     catalog_path = None
-    if with_ledger:
+    if with_ledger and ledger_bundle is not None:
+        ledger_path = _bundle_ledger_generation(
+            tmp_path / "ledger", **ledger_bundle, **(ledger or {})
+        )
+    elif with_ledger:
         ledger_path, catalog_path = _ledger_generation(
             tmp_path / "ledger", **(ledger or {})
         )
@@ -1341,4 +1413,60 @@ def test_a_report_cutoff_that_is_not_a_canonical_date_fails_closed(
     )
 
     with pytest.raises(outcomes.FinancialOutcomeError, match="not an ISO date"):
+        world.call()
+
+
+def test_a_catalog_listed_under_two_ids_of_one_generation_is_one_catalog(
+    tmp_path, monkeypatch
+):
+    """The MVP-2 product world's ledger generation lists its catalog twice.
+
+    Fail-before: the selected generation is a bundle whose manifest carries the catalog as
+    ``normalized/provider-ledger.json`` and again as ``provider-ledger.json`` (the same
+    bytes).  Counting the artifacts of the catalog schema called that ambiguous and the
+    172-outcome producer-to-consumer test failed with ``selected provider ledger catalog
+    is absent or ambiguous``.  Two ids of the same bytes are one catalog.
+    """
+
+    world = _consumer_world(tmp_path, monkeypatch, end=FX_END, ledger_bundle={})
+
+    result = world.call()
+
+    assert result["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+
+
+def test_a_bundled_ledger_generation_without_an_alias_is_read(tmp_path, monkeypatch):
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=FX_END, ledger_bundle={"aliases": ()}
+    )
+
+    assert (
+        world.call()["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+    )
+
+
+def test_two_different_catalogs_in_one_generation_are_ambiguous(tmp_path, monkeypatch):
+    """Aliases carry the same bytes; a second catalog with other bytes is a conflict."""
+
+    world = _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=FX_END,
+        ledger_bundle={"second_catalog": _ledger_catalog(finding_days=())},
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="catalog is absent or ambiguous"
+    ):
+        world.call()
+
+
+def test_a_ledger_generation_without_a_catalog_is_absent(tmp_path, monkeypatch):
+    world = _consumer_world(
+        tmp_path, monkeypatch, end=FX_END, ledger_bundle={"with_catalog": False}
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="catalog is absent or ambiguous"
+    ):
         world.call()
