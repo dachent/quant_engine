@@ -1302,20 +1302,24 @@ def _value_basis_bounds_disclosure(
     required = sorted(required_strategy_ids)
     common = bounds.common_complete_date(required) if required else cutoff
     lenses = report.get("decomposition_lenses")
-    lens_rows = lenses.get("lenses") if isinstance(lenses, Mapping) else None
-    if common < cutoff and isinstance(lens_rows, list):
-        for lens in lens_rows:
-            if (
-                isinstance(lens, Mapping)
-                and lens.get("as_of_date") == common.isoformat()
-            ):
-                add(
-                    "decomposition_lenses",
-                    f"{lens.get('lens_id')}:{lens.get('evidence_mode')}",
-                    "as_of_date",
-                    common.isoformat(),
-                    bounds.bounded_by(required, common),
-                )
+    lens_modes = lenses.get("modes") if isinstance(lenses, Mapping) else None
+    if common < cutoff and isinstance(lens_modes, Mapping):
+        # Every evidence mode's rows are explained by the same bound: ``modes``
+        # holds them all, and ``lenses`` only repeats ``modes[default mode]``, so
+        # reading ``modes`` alone lists each row once.
+        for mode_rows in lens_modes.values():
+            for lens in mode_rows if isinstance(mode_rows, list) else ():
+                if (
+                    isinstance(lens, Mapping)
+                    and lens.get("as_of_date") == common.isoformat()
+                ):
+                    add(
+                        "decomposition_lenses",
+                        f"{lens.get('lens_id')}:{lens.get('evidence_mode')}",
+                        "as_of_date",
+                        common.isoformat(),
+                        bounds.bounded_by(required, common),
+                    )
     for row in _objects(report.get("account_summary", []), "account_summary"):
         account_id = row.get("account_id")
         bounded = [

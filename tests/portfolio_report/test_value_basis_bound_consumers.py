@@ -1459,6 +1459,17 @@ def _shadow_report() -> dict[str, Any]:
         ("RETURN_SECTOR", "2026-09-03"),
         ("RETURN_INDUSTRY", "2026-07-31"),
     )
+
+    def lens_rows(evidence_mode: str) -> list[dict[str, str]]:
+        return [
+            {
+                "as_of_date": as_of,
+                "evidence_mode": evidence_mode,
+                "lens_id": lens_id,
+            }
+            for lens_id, as_of in lens_dates
+        ]
+
     epochs: tuple[tuple[str, str, str, str | None, str | None], ...] = (
         (SHADOW_ACCOUNT, "robuxio-crypto", "2025-12-06", None, "2026-09-03"),
         ("account-702c", "tt-portfolio", "2025-11-25", None, "2026-09-17"),
@@ -1471,24 +1482,14 @@ def _shadow_report() -> dict[str, Any]:
             {"account_id": SHADOW_ACCOUNT, "as_of_date": "2026-09-03"},
             {"account_id": "reserve-classification", "as_of_date": "2026-08-16"},
         ],
+        # The control panel's own shape: ``lenses`` is the default-mode alias of
+        # ``modes["LIVE_ONLY"]``, and the hybrid rows sit beside it in ``modes``.
         "decomposition_lenses": {
-            "lenses": [
-                {
-                    "as_of_date": as_of,
-                    "evidence_mode": "LIVE_ONLY",
-                    "lens_id": lens_id,
-                }
-                for lens_id, as_of in lens_dates
-            ],
+            "default_evidence_mode": "LIVE_ONLY",
+            "lenses": lens_rows("LIVE_ONLY"),
             "modes": {
-                "LIVE_PLUS_BACKTEST": [
-                    {
-                        "as_of_date": as_of,
-                        "evidence_mode": "LIVE_PLUS_BACKTEST",
-                        "lens_id": lens_id,
-                    }
-                    for lens_id, as_of in lens_dates
-                ]
+                "LIVE_ONLY": lens_rows("LIVE_ONLY"),
+                "LIVE_PLUS_BACKTEST": lens_rows("LIVE_PLUS_BACKTEST"),
             },
         },
         "dependence_analysis": {"complete_through": "2026-09-03"},
@@ -1557,7 +1558,13 @@ SHADOW_BLOCK: dict[str, Any] = {
     "bounded_sections": [
         _robuxio_entry("account_summary", SHADOW_ACCOUNT, "as_of_date"),
         _robuxio_entry("decomposition_lenses", "ETF_STYLE:LIVE_ONLY", "as_of_date"),
+        _robuxio_entry(
+            "decomposition_lenses", "ETF_STYLE:LIVE_PLUS_BACKTEST", "as_of_date"
+        ),
         _robuxio_entry("decomposition_lenses", "RETURN_SECTOR:LIVE_ONLY", "as_of_date"),
+        _robuxio_entry(
+            "decomposition_lenses", "RETURN_SECTOR:LIVE_PLUS_BACKTEST", "as_of_date"
+        ),
         _robuxio_entry("dependence_analysis", "portfolio", "complete_through"),
         _robuxio_entry("hwm_governed_proof", "portfolio", "complete_through"),
         _robuxio_entry("strategy_history_contract", "portfolio", "as_of_date"),
@@ -1590,9 +1597,89 @@ def _disclosure(
 
 
 def test_disclosure_states_every_date_that_the_bound_explains() -> None:
-    """Paired (fail-before): the exact block of the real run inputs (design 1.7)."""
+    """Paired (fail-before): the exact block of the real run inputs (design 1.7).
+
+    The block lists 10 entries since N35: the 8 of the design's block and the
+    two LIVE_PLUS_BACKTEST lens rows that the same bound explains.
+    """
 
     assert _disclosure() == SHADOW_BLOCK
+    block = _disclosure()
+    assert block is not None
+    assert len(block["bounded_sections"]) == 10
+
+
+def _lens_entries(block: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in block["bounded_sections"]
+        if row["section"] == "decomposition_lenses"
+    ]
+
+
+def test_disclosure_lens_rule_covers_every_evidence_mode() -> None:
+    """N35 (fail-before): a lens row of any evidence mode is explained by the bound.
+
+    On the real head report the LIVE_PLUS_BACKTEST ETF_STYLE and RETURN_SECTOR
+    rows end at 2026-09-03 like their LIVE_ONLY twins and for the same reason:
+    the common complete date of the REQUIRED strategies.  The design's exact
+    block omitted them although its rule (entity ``{lens_id}:{evidence_mode}``)
+    names every mode.  Merge base: only the two LIVE_ONLY rows are listed.
+    """
+
+    block = _disclosure()
+
+    assert block is not None
+    assert [
+        (row["entity"], row["field"], row["date"], row["bounded_by"])
+        for row in _lens_entries(block)
+    ] == [
+        (entity, "as_of_date", "2026-09-03", ["robuxio-crypto"])
+        for entity in (
+            "ETF_STYLE:LIVE_ONLY",
+            "ETF_STYLE:LIVE_PLUS_BACKTEST",
+            "RETURN_SECTOR:LIVE_ONLY",
+            "RETURN_SECTOR:LIVE_PLUS_BACKTEST",
+        )
+    ]
+
+
+def test_disclosure_lens_rule_is_not_tied_to_the_two_known_modes() -> None:
+    """The rule's domain is every ``modes`` entry, whatever the mode is called."""
+
+    report = _shadow_report()
+    report["decomposition_lenses"]["modes"]["SYNTHETIC_MODE"] = [
+        {
+            "as_of_date": as_of,
+            "evidence_mode": "SYNTHETIC_MODE",
+            "lens_id": lens_id,
+        }
+        for lens_id, as_of in (
+            ("ETF_STYLE", "2026-09-03"),
+            ("RETURN_SECTOR", "2026-07-31"),
+        )
+    ]
+
+    block = _disclosure(report)
+
+    assert block is not None
+    entities = {row["entity"] for row in _lens_entries(block)}
+    assert "ETF_STYLE:SYNTHETIC_MODE" in entities
+    assert "RETURN_SECTOR:SYNTHETIC_MODE" not in entities
+
+
+def test_disclosure_lists_each_lens_row_once() -> None:
+    """``lenses`` repeats ``modes["LIVE_ONLY"]``: one source of rows, no duplicate."""
+
+    report = _shadow_report()
+    lenses = report["decomposition_lenses"]
+    assert lenses["lenses"] == lenses["modes"]["LIVE_ONLY"]
+
+    block = _disclosure(report)
+
+    assert block is not None
+    keys = [(row["section"], row["entity"]) for row in block["bounded_sections"]]
+    assert len(keys) == len(set(keys))
 
 
 def test_disclosure_is_absent_when_nothing_is_bounded() -> None:
@@ -1622,14 +1709,20 @@ def test_disclosure_lists_only_what_the_bound_explains() -> None:
             "strategy_id": "robuxio-crypto",
         }
     )
-    # A lens whose date is not the common complete date.
-    report["decomposition_lenses"]["lenses"][1]["as_of_date"] = "2026-09-02"
+    # A lens whose date is not the common complete date, in either mode:
+    # ETF_STYLE of the default mode (its ``lenses`` alias moves with it) and
+    # RETURN_SECTOR of the hybrid mode.
+    lenses = report["decomposition_lenses"]
+    lenses["lenses"][1]["as_of_date"] = "2026-09-02"
+    lenses["modes"]["LIVE_ONLY"][1]["as_of_date"] = "2026-09-02"
+    lenses["modes"]["LIVE_PLUS_BACKTEST"][2]["as_of_date"] = "2026-09-02"
 
     block = _disclosure(report)
 
     assert block is not None
     entries = {(row["section"], row["entity"]) for row in block["bounded_sections"]}
     assert entries == {
+        ("decomposition_lenses", "ETF_STYLE:LIVE_PLUS_BACKTEST"),
         ("decomposition_lenses", "RETURN_SECTOR:LIVE_ONLY"),
         ("dependence_analysis", "portfolio"),
         ("hwm_governed_proof", "portfolio"),
@@ -1668,6 +1761,66 @@ def test_disclosure_common_date_follows_the_required_strategies() -> None:
     assert block["common_complete_date"] == "2026-09-17"
     assert all(
         row["section"] != "decomposition_lenses" for row in block["bounded_sections"]
+    )
+
+
+def _date_every_lens_row(report: dict[str, Any], day: str) -> None:
+    """Date every lens row the report publishes, whichever collection holds it."""
+
+    lenses = report["decomposition_lenses"]
+    rows = [
+        *lenses["lenses"],
+        *(row for mode_rows in lenses["modes"].values() for row in mode_rows),
+    ]
+    assert rows, "the fixture must carry lens rows"
+    for row in rows:
+        row["as_of_date"] = day
+
+
+@pytest.mark.parametrize(
+    "required",
+    (
+        pytest.param(
+            tuple(item for item in SHADOW_REQUIRED if item != "robuxio-crypto"),
+            id="a_bounded_strategy_that_is_not_required",
+        ),
+        pytest.param((), id="no_required_strategy"),
+    ),
+)
+def test_disclosure_lists_no_lens_row_dated_at_the_cutoff(
+    required: tuple[str, ...],
+) -> None:
+    """W21 (seat mutation M-A13-1): the lens rule needs a date before the cutoff.
+
+    Robuxio is bounded, so the block exists, but it is not REQUIRED here: the
+    common complete date of the REQUIRED strategies is the cutoff itself, and a
+    lens row dated then is current rather than bounded.  The ``common < cutoff``
+    guard keeps the rule silent.  Without it every such row would be listed with
+    an empty ``bounded_by``, claiming that a bound explains a date that is not
+    before the cutoff.  The paired good case is
+    ``test_disclosure_states_every_date_that_the_bound_explains``, where a
+    bounded REQUIRED strategy puts the common date before the cutoff and the
+    lens rows dated then are listed.
+    """
+
+    report = _shadow_report()
+    _date_every_lens_row(report, "2026-09-17")
+
+    block = _disclosure(report, required=required)
+
+    assert block is not None
+    assert block["common_complete_date"] == "2026-09-17"
+    assert [row["strategy_id"] for row in block["strategies"]] == ["robuxio-crypto"]
+    assert [
+        row
+        for row in block["bounded_sections"]
+        if row["section"] == "decomposition_lenses"
+    ] == []
+    # Every entry that remains names a bound and a date before the cutoff.
+    assert block["bounded_sections"]
+    assert all(
+        row["bounded_by"] and row["date"] < block["calculation_cutoff_date"]
+        for row in block["bounded_sections"]
     )
 
 
@@ -1719,6 +1872,64 @@ def test_public_builder_publishes_the_value_basis_bounds_disclosure(
             entry("twr_mwr", f"{FX_ACCOUNT}|{FX_STRATEGY}|2026-07-01", "observed_end"),
         ],
     }
+
+
+def test_public_builder_lists_the_lens_rows_of_every_mode_the_panel_publishes(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N35 seam (fail-before): the disclosure reads the lens rows the panel hands over.
+
+    The control panel's ``_decomposition_lenses`` is replaced by a value of the
+    shape it returns: ``lenses`` repeats ``modes["LIVE_ONLY"]`` and the hybrid
+    rows sit beside it.  The builder, the bound derivation and the disclosure are
+    the real code.  Merge base: only the ``LIVE_ONLY`` row is listed.
+    """
+
+    import portfolio_control_panel as panel
+
+    arguments = _fx_world(full, tmp_path, monkeypatch)
+
+    def lens_rows(evidence_mode: str) -> list[dict[str, str]]:
+        return [
+            {
+                "as_of_date": as_of,
+                "evidence_mode": evidence_mode,
+                "lens_id": lens_id,
+            }
+            for lens_id, as_of in (
+                ("ECONOMIC_FACTOR", "2026-07-01"),
+                ("ETF_STYLE", FX_END),
+            )
+        ]
+
+    produced = {
+        "default_evidence_mode": "LIVE_ONLY",
+        "evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+        "lenses": lens_rows("LIVE_ONLY"),
+        "modes": {
+            "LIVE_ONLY": lens_rows("LIVE_ONLY"),
+            "LIVE_PLUS_BACKTEST": lens_rows("LIVE_PLUS_BACKTEST"),
+        },
+    }
+    monkeypatch.setattr(
+        panel, "_decomposition_lenses", lambda *_a, **_k: (produced, ())
+    )
+    arguments.update(
+        decomposition_lenses_root=tmp_path / "lenses",
+        decomposition_plan_bundle=tmp_path / "plan",
+    )
+
+    report, _content, _path = full.reporter.build_report_data(**arguments)
+
+    assert report["decomposition_lenses"]["modes"] == produced["modes"]
+    assert [
+        (row["entity"], row["date"], row["bounded_by"])
+        for row in report["value_basis_bounds"]["bounded_sections"]
+        if row["section"] == "decomposition_lenses"
+    ] == [
+        ("ETF_STYLE:LIVE_ONLY", FX_END, [FX_STRATEGY]),
+        ("ETF_STYLE:LIVE_PLUS_BACKTEST", FX_END, [FX_STRATEGY]),
+    ]
 
 
 def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged(
