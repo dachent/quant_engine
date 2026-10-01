@@ -78,6 +78,42 @@ def project_coverage_metadata(
     )
 
 
+def project_current_capital(
+    baseline_doc: dict[str, Any], policy_exclusions: Mapping[str, date]
+) -> None:
+    """Add the current capital block and the labeled audit snapshot.
+
+    Both come from the production builders over the document's own NAV facts,
+    assignments and admissions, so the synthetic vertical carries the same
+    catalog shape a real baseline does (cluster 2, T1).  The dated ``allocations``
+    and ``replay`` above stay what the synthetic source recorded; the block is
+    the NAV-derived current view next to them.
+    """
+    import portfolio_baseline as baseline
+
+    as_of = date.fromisoformat(baseline_doc["as_of_date"])
+    replay = baseline_doc["replay"]
+    baseline_doc["current_capital"] = baseline._build_current_capital(
+        valuation_date=as_of,
+        strategies=baseline_doc["strategies"],
+        accounts=baseline_doc["accounts"],
+        assignments=baseline_doc["assignments"],
+        nav=baseline_doc["nav_observations"],
+        provider_admissions=baseline_doc["provider_admissions"],
+        policy_exclusions=policy_exclusions,
+    )
+    baseline_doc["audit_snapshot"] = baseline._build_audit_snapshot(
+        as_of_date=as_of,
+        replay=replay,
+        systematic_total=Decimal(str(replay["systematic_total_usd"])),
+        reserve_value=Decimal(str(replay["reserve_total_usd"])),
+        reserve_source_date=as_of,
+        assignments=baseline_doc["assignments"],
+        nav=baseline_doc["nav_observations"],
+        reference_flows=[],
+    )
+
+
 def _common_daily_suffix(
     returns: list[dict[str, Any]], strategy_ids: list[str]
 ) -> list[str]:
@@ -862,6 +898,7 @@ def mutate_baseline(baseline_doc: dict[str, Any], ledger_doc: dict[str, Any]) ->
     )
 
     project_coverage_metadata(baseline_doc, ledger_doc)
+    project_current_capital(baseline_doc, policy_exclusions)
     expected_payloads, expected_links, pre_start_keys = _engine_epoch_payloads(
         baseline_doc
     )

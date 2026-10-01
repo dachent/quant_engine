@@ -12,7 +12,7 @@ import argparse
 from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import json
@@ -20,7 +20,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import sys
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Iterable, Mapping, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
@@ -58,9 +58,12 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION: Final = 3
 SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2, 3})
 CATALOG_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.3.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
-CURRENT_STRATEGY_COUNT: Final = 9
+# The provenance registry binds nine strategy identities (including the retained
+# excluded ones).  It is a registry fact, never the count of current strategies:
+# `current_capital` makes no count assumption.
+RETAINED_REGISTRY_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _PROVIDER_LEDGER_CATALOG_SCHEMA_VERSIONS: Final = frozenset({1, 2})
@@ -937,7 +940,7 @@ def _strategy_index(
     catalog: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     strategies = _objects(catalog.get("strategies"), "provenance.strategies")
-    if len(strategies) != CURRENT_STRATEGY_COUNT:
+    if len(strategies) != RETAINED_REGISTRY_STRATEGY_COUNT:
         raise BaselineValidationError("provenance must contain exactly 9 strategies")
     aliases: dict[str, str] = {}
     for strategy in strategies:
@@ -1921,7 +1924,7 @@ def _allocations_and_coverage(
         allocations.append(
             {"allocation_id": _record_id("allocation", payload), **payload}
         )
-    if len(by_strategy) != CURRENT_STRATEGY_COUNT:
+    if len(by_strategy) != RETAINED_REGISTRY_STRATEGY_COUNT:
         raise BaselineValidationError(
             "allocation snapshot must map exactly 9 strategies"
         )
@@ -2148,6 +2151,1075 @@ def _replay(
             rendered[key] = actual
     rendered["status"] = "PASS"
     return rendered, reserve
+
+
+# ── Current capital (cluster 2, T1; design state/c2-design.md v3, M1/M2) ─────
+#
+# The allocation table and the audit replay above are one dated snapshot (the
+# 2026-08-16 audit, the owner-approved dependence policy input).  The functions
+# below publish the CURRENT capital view next to it, from facts only:
+#
+#   member value   = the member account's latest AVAILABLE USD NAV on or before
+#                    the valuation date (each member keeps its own as-of date,
+#                    so a provider boundary such as Matrixport's FX cutoff shows
+#                    as an older member date, never as a repainted cutoff date)
+#   strategy value = the sum of its current members (all members must be valued)
+#   weight         = strategy value / the sum over the required strategies
+#
+# A component with no admitted source is NOT_READY_AT_CUTOFF with a null value.
+# A dated audit value is never substituted for it.
+
+_CURRENT_CAPITAL_BASIS: Final = "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE"
+_CAPITAL_AVAILABLE: Final = "AVAILABLE"
+_CAPITAL_NOT_READY: Final = "NOT_READY_AT_CUTOFF"
+_SCOPE_SYSTEMATIC: Final = "SYSTEMATIC"
+_SCOPE_RETAINED_EXCLUDED: Final = "RETAINED_EXCLUDED"
+_RESERVE_POOL_ID: Final = "reserve-capital"
+_WEIGHT_PRECISION: Final = 34
+_EXACT_PRECISION: Final = 100
+_CAPITAL_STRATEGY_CHECK_ID: Final = "strategy-capital-to-cutoff-account-values"
+_CAPITAL_IDENTITY_CHECK_ID: Final = "capital-identity-at-cutoff"
+_AGGREGATE_COMPONENTS: Final = ("reserve", "retained_excluded", "systematic")
+
+
+class _Membership(NamedTuple):
+    strategy_id: str
+    account_id: str
+    assignment_id: str
+    start: date
+    end: date | None
+
+
+class _NavPoint(NamedTuple):
+    day: date
+    value: Decimal
+    record_id: str | None
+    source_key: str | None
+
+
+def _capital_amount(value: Decimal | None) -> dict[str, Any]:
+    if value is None:
+        return {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+    return {"currency": "USD", "status": "AVAILABLE", "value": decimal_text(value)}
+
+
+def _exact_sum(values: Iterable[Decimal]) -> Decimal:
+    """Add money exactly: the default 28-digit context would round long sums."""
+
+    with localcontext() as context:
+        context.prec = _EXACT_PRECISION
+        return sum(values, Decimal(0))
+
+
+def _in_window(day: date, start: date | None, end: date | None) -> bool:
+    return (start is None or start <= day) and (end is None or day <= end)
+
+
+def _optional_date(value: object, field_name: str) -> date | None:
+    return None if value is None else _date(value, field_name)
+
+
+def _mapped_memberships(
+    assignments: Sequence[Mapping[str, Any]],
+) -> list[_Membership]:
+    memberships: list[_Membership] = []
+    for item in assignments:
+        if item.get("mapping_status") != "MAPPED":
+            continue
+        start_value = item.get("effective_start")
+        if start_value is None:
+            raise BaselineValidationError(
+                "mapped assignment requires an explicit effective_start"
+            )
+        if item.get("strategy_id") is None:
+            raise BaselineValidationError("mapped assignment requires a strategy_id")
+        memberships.append(
+            _Membership(
+                strategy_id=_text(item.get("strategy_id"), "assignment.strategy_id"),
+                account_id=_text(item.get("account_id"), "assignment.account_id"),
+                assignment_id=_text(
+                    item.get("assignment_id"), "assignment.assignment_id"
+                ),
+                start=_date(start_value, "assignment.effective_start"),
+                end=_optional_date(
+                    item.get("effective_end"), "assignment.effective_end"
+                ),
+            )
+        )
+    return memberships
+
+
+def _latest_usd_navs(
+    nav: Sequence[Mapping[str, Any]],
+    valuation_date: date,
+    *,
+    admitted: Callable[[str, date], bool] | None = None,
+) -> dict[str, _NavPoint]:
+    """Each account's latest AVAILABLE USD NAV dated on or before the valuation date."""
+
+    latest: dict[str, _NavPoint] = {}
+    for item in nav:
+        amount = item.get("nav")
+        if (
+            not isinstance(amount, Mapping)
+            or amount.get("status") != "AVAILABLE"
+            or amount.get("currency") != "USD"
+        ):
+            continue
+        day = _date(item.get("as_of_date"), "nav.as_of_date")
+        if day > valuation_date:
+            continue
+        account_id = _text(item.get("account_id"), "nav.account_id")
+        if admitted is not None and not admitted(account_id, day):
+            continue
+        value = _decimal(amount.get("value"), "nav.value")
+        assert value is not None
+        record_id = item.get("record_id")
+        source_key = item.get("source_key")
+        point = _NavPoint(
+            day,
+            value,
+            record_id if isinstance(record_id, str) else None,
+            source_key if isinstance(source_key, str) else None,
+        )
+        prior = latest.get(account_id)
+        if prior is None or day > prior.day:
+            latest[account_id] = point
+        elif day == prior.day and value != prior.value:
+            raise BaselineValidationError("conflicting NAV observation")
+    return latest
+
+
+def _authoritative_nav_windows(
+    provider_admissions: Sequence[Mapping[str, Any]],
+) -> dict[str, list[tuple[date, date]]]:
+    """Effective windows in which an account's NAV is AUTHORITATIVE account-live."""
+
+    windows: dict[str, list[tuple[date, date]]] = defaultdict(list)
+    for item in provider_admissions:
+        if (
+            item.get("fact_type") != "nav_observations"
+            or item.get("disposition") != "AUTHORITATIVE"
+            or item.get("evidence_layer") != "ACCOUNT_LIVE"
+            or item.get("account_id") is None
+            or item.get("pool_id") is not None
+            or item.get("strategy_id") is not None
+        ):
+            continue
+        windows[_text(item.get("account_id"), "admission.account_id")].append(
+            (
+                _date(item.get("effective_start"), "admission.effective_start"),
+                _date(item.get("effective_end"), "admission.effective_end"),
+            )
+        )
+    return windows
+
+
+def _reserve_accounts(
+    assignments: Sequence[Mapping[str, Any]], valuation_date: date
+) -> list[str]:
+    accounts: set[str] = set()
+    for item in assignments:
+        if item.get("pool_id") != _RESERVE_POOL_ID:
+            continue
+        if _in_window(
+            valuation_date,
+            _optional_date(item.get("effective_start"), "assignment.effective_start"),
+            _optional_date(item.get("effective_end"), "assignment.effective_end"),
+        ):
+            accounts.add(_text(item.get("account_id"), "assignment.account_id"))
+    return sorted(accounts)
+
+
+def _closed_weights(values: Mapping[str, Decimal]) -> dict[str, Decimal]:
+    """Shares of the total at precision 34, with the residual on the last row.
+
+    The last share is ``1 - sum(others)`` computed exactly, so the published
+    weights sum to exactly one whatever the division rounded.
+    """
+
+    ids = sorted(values)
+    total = _exact_sum(values.values())
+    weights: dict[str, Decimal] = {}
+    with localcontext() as context:
+        context.prec = _WEIGHT_PRECISION
+        for strategy_id in ids[:-1]:
+            weights[strategy_id] = values[strategy_id] / total
+    with localcontext() as context:
+        context.prec = _EXACT_PRECISION
+        weights[ids[-1]] = Decimal(1) - sum(weights.values(), Decimal(0))
+    return weights
+
+
+def _aggregate(
+    status: str,
+    value: Decimal | None,
+    as_of: date | None,
+    components: Sequence[str],
+    reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "as_of_date": as_of.isoformat() if as_of is not None else None,
+        "components": list(components),
+        "current_value": _capital_amount(value),
+        "reason": reason,
+        "status": status,
+    }
+
+
+def _not_ready(components: Sequence[str], reason: str) -> dict[str, Any]:
+    return _aggregate(_CAPITAL_NOT_READY, None, None, components, reason)
+
+
+def _strategy_members(
+    strategy_id: str,
+    scope: str,
+    valuation_date: date,
+    memberships: Sequence[_Membership],
+    current_owner: Mapping[str, str],
+) -> dict[str, list[_Membership]]:
+    """The accounts whose NAVs make up one strategy, with their assignments.
+
+    A required strategy owns the accounts its MAPPED assignments put in effect on
+    the valuation date.  A retained-excluded strategy keeps every account it was
+    ever MAPPED to (the balance is retained even after the assignment ended), but
+    never an account another strategy currently owns.
+    """
+
+    members: dict[str, list[_Membership]] = defaultdict(list)
+    for item in memberships:
+        if item.strategy_id != strategy_id:
+            continue
+        if scope == _SCOPE_SYSTEMATIC:
+            if not _in_window(valuation_date, item.start, item.end):
+                continue
+        elif current_owner.get(item.account_id, strategy_id) != strategy_id:
+            continue
+        members[item.account_id].append(item)
+    return members
+
+
+def _build_current_capital(
+    *,
+    valuation_date: date,
+    strategies: Sequence[Mapping[str, Any]],
+    accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+    policy_exclusions: Mapping[str, date],
+) -> dict[str, Any]:
+    """Publish the current capital view from NAV facts at ``valuation_date``."""
+
+    strategy_ids = sorted(
+        {_text(item.get("strategy_id"), "strategy.strategy_id") for item in strategies}
+    )
+    scopes = {
+        strategy_id: (
+            _SCOPE_RETAINED_EXCLUDED
+            if strategy_id in policy_exclusions
+            and policy_exclusions[strategy_id] <= valuation_date
+            else _SCOPE_SYSTEMATIC
+        )
+        for strategy_id in strategy_ids
+    }
+    memberships = _mapped_memberships(assignments)
+    if any(item.strategy_id not in scopes for item in memberships):
+        raise BaselineValidationError("assignment references an unregistered strategy")
+    current_owner: dict[str, str] = {}
+    for item in memberships:
+        if _in_window(valuation_date, item.start, item.end):
+            prior = current_owner.setdefault(item.account_id, item.strategy_id)
+            if prior != item.strategy_id:
+                raise BaselineValidationError(
+                    "account is a current member of more than one strategy"
+                )
+    latest = _latest_usd_navs(nav, valuation_date)
+    vd = valuation_date.isoformat()
+
+    rows: list[dict[str, Any]] = []
+    claimed: dict[str, str] = {}
+    for strategy_id in strategy_ids:
+        scope = scopes[strategy_id]
+        by_account = _strategy_members(
+            strategy_id, scope, valuation_date, memberships, current_owner
+        )
+        members: list[dict[str, Any]] = []
+        values: list[Decimal] = []
+        days: list[date] = []
+        missing: list[str] = []
+        for account_id in sorted(by_account):
+            if claimed.setdefault(account_id, strategy_id) != strategy_id:
+                raise BaselineValidationError(
+                    "account is a member of more than one strategy component"
+                )
+            held = by_account[account_id]
+            point = latest.get(account_id)
+            if point is None:
+                missing.append(account_id)
+            else:
+                values.append(point.value)
+                days.append(point.day)
+            end_days = [item.end for item in held]
+            members.append(
+                {
+                    "account_id": account_id,
+                    "as_of_date": point.day.isoformat() if point else None,
+                    "assignment_ids": sorted(item.assignment_id for item in held),
+                    "effective_end": (
+                        None
+                        if any(day is None for day in end_days)
+                        else max(day for day in end_days if day is not None).isoformat()
+                    ),
+                    "effective_start": min(item.start for item in held).isoformat(),
+                    "nav_record_id": point.record_id if point else None,
+                    "source_key": point.source_key if point else None,
+                    "status": _CAPITAL_AVAILABLE if point else _CAPITAL_NOT_READY,
+                    "value": _capital_amount(point.value if point else None),
+                }
+            )
+        value: Decimal | None = None
+        as_of: date | None = None
+        reason: str | None = None
+        if not members:
+            reason = (
+                f"no MAPPED account assignment is in effect on {vd}"
+                if scope == _SCOPE_SYSTEMATIC
+                else "no MAPPED account assignment is retained for this strategy"
+            )
+        elif missing:
+            reason = (
+                f"no admitted USD NAV on or before {vd} for member account(s): "
+                + ", ".join(missing)
+            )
+        else:
+            value = _exact_sum(values)
+            as_of = min(days)
+        rows.append(
+            {
+                "as_of_date": as_of.isoformat() if as_of is not None else None,
+                "current_value": _capital_amount(value),
+                "current_weight": None,
+                "members": members,
+                "reason": reason,
+                "scope": scope,
+                "status": (
+                    _CAPITAL_AVAILABLE if value is not None else _CAPITAL_NOT_READY
+                ),
+                "strategy_id": strategy_id,
+            }
+        )
+
+    def component(scope: str) -> list[dict[str, Any]]:
+        return [row for row in rows if row["scope"] == scope]
+
+    def total_of(group: Sequence[Mapping[str, Any]]) -> Decimal:
+        return _exact_sum(
+            _decimal(row["current_value"]["value"], "current_value.value") or Decimal(0)
+            for row in group
+        )
+
+    def oldest(group: Sequence[Mapping[str, Any]]) -> date | None:
+        days = [
+            _date(row["as_of_date"], "as_of_date")
+            for row in group
+            if row["as_of_date"] is not None
+        ]
+        return min(days) if days else None
+
+    required = component(_SCOPE_SYSTEMATIC)
+    required_ids = [row["strategy_id"] for row in required]
+    not_ready_required = [
+        row["strategy_id"] for row in required if row["status"] != _CAPITAL_AVAILABLE
+    ]
+    if not required:
+        systematic = _not_ready([], "no required strategy is registered")
+    elif not_ready_required:
+        systematic = _not_ready(
+            required_ids,
+            "required strategies without a current value: "
+            + ", ".join(not_ready_required),
+        )
+    elif total_of(required) <= 0:
+        systematic = _not_ready(
+            required_ids, "systematic total is not positive; weights are undefined"
+        )
+    else:
+        systematic_total = total_of(required)
+        systematic = _aggregate(
+            _CAPITAL_AVAILABLE,
+            systematic_total,
+            oldest(required),
+            required_ids,
+            None,
+        )
+        weights = _closed_weights(
+            {
+                row["strategy_id"]: _decimal(
+                    row["current_value"]["value"], "current_value.value"
+                )
+                or Decimal(0)
+                for row in required
+            }
+        )
+        for row in required:
+            row["current_weight"] = decimal_text(weights[row["strategy_id"]])
+
+    excluded = component(_SCOPE_RETAINED_EXCLUDED)
+    excluded_ids = [row["strategy_id"] for row in excluded]
+    not_ready_excluded = [
+        row["strategy_id"] for row in excluded if row["status"] != _CAPITAL_AVAILABLE
+    ]
+    if not_ready_excluded:
+        retained = _not_ready(
+            excluded_ids,
+            "retained excluded components without an admitted USD NAV on or "
+            f"before {vd}: " + ", ".join(not_ready_excluded),
+        )
+    else:
+        retained = _aggregate(
+            _CAPITAL_AVAILABLE,
+            total_of(excluded),
+            oldest(excluded),
+            excluded_ids,
+            None,
+        )
+
+    reserve = _current_reserve(
+        valuation_date=valuation_date,
+        accounts=accounts,
+        assignments=assignments,
+        nav=nav,
+        provider_admissions=provider_admissions,
+        latest=latest,
+    )
+
+    parts = {
+        "reserve": reserve,
+        "retained_excluded": retained,
+        "systematic": systematic,
+    }
+    waiting = sorted(
+        name for name, part in parts.items() if part["status"] != _CAPITAL_AVAILABLE
+    )
+    if waiting:
+        total_liquid = _not_ready(
+            list(_AGGREGATE_COMPONENTS),
+            "total liquid requires systematic, retained excluded and reserve "
+            "capital to be current; not current: " + ", ".join(waiting),
+        )
+    else:
+        total_liquid = _aggregate(
+            _CAPITAL_AVAILABLE,
+            _exact_sum(
+                _decimal(part["current_value"]["value"], "current_value.value")
+                or Decimal(0)
+                for part in parts.values()
+            ),
+            min(
+                _date(part["as_of_date"], "as_of_date")
+                for part in parts.values()
+                if part["as_of_date"] is not None
+            ),
+            list(_AGGREGATE_COMPONENTS),
+            None,
+        )
+
+    return {
+        "basis": _CURRENT_CAPITAL_BASIS,
+        "currency": "USD",
+        "retained_excluded": retained,
+        "reserve": reserve,
+        "strategies": sorted(
+            rows,
+            key=lambda row: (
+                row["scope"] != _SCOPE_SYSTEMATIC,
+                str(row["strategy_id"]),
+            ),
+        ),
+        "systematic": systematic,
+        "total_liquid": total_liquid,
+        "valuation_date": vd,
+        "weight_basis": "CURRENT_CUTOFF",
+    }
+
+
+def _current_reserve(
+    *,
+    valuation_date: date,
+    accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+    latest: Mapping[str, _NavPoint],
+) -> dict[str, Any]:
+    """Reserve capital, published only when every reserve account is admitted.
+
+    A reserve sleeve is capital authority only through an AUTHORITATIVE
+    account-live NAV admission.  Reserve NAVs admitted REFERENCE_ONLY (or present
+    only as legacy rows) and accounts with no source at all leave the reserve
+    NOT_READY: the dated audit reserve is never a stand-in.
+    """
+
+    vd = valuation_date.isoformat()
+    reserve_accounts = _reserve_accounts(assignments, valuation_date)
+    if not reserve_accounts:
+        reserve = _not_ready([], f"no account is assigned to the reserve pool on {vd}")
+        reserve["members"] = []
+        return reserve
+    windows = _authoritative_nav_windows(provider_admissions)
+
+    def admitted(account_id: str, day: date) -> bool:
+        return any(start <= day <= end for start, end in windows.get(account_id, ()))
+
+    authoritative = _latest_usd_navs(nav, valuation_date, admitted=admitted)
+    provider_by_account = {
+        str(item.get("account_id")): item.get("provider") for item in accounts
+    }
+    members: list[dict[str, Any]] = []
+    values: list[Decimal] = []
+    days: list[date] = []
+    no_source: list[str] = []
+    not_authoritative: list[str] = []
+    for account_id in reserve_accounts:
+        point = authoritative.get(account_id)
+        provider = provider_by_account.get(account_id)
+        label = str(provider) if provider is not None else account_id
+        if point is not None:
+            authority = "AUTHORITATIVE"
+            values.append(point.value)
+            days.append(point.day)
+        elif account_id in latest:
+            authority = "NAV_NOT_AUTHORITATIVE"
+            not_authoritative.append(label)
+        else:
+            authority = "NO_NAV"
+            no_source.append(label)
+        members.append(
+            {
+                "account_id": account_id,
+                "as_of_date": point.day.isoformat() if point else None,
+                "authority": authority,
+                "nav_record_id": point.record_id if point else None,
+                "provider": str(provider) if provider is not None else None,
+                "status": _CAPITAL_AVAILABLE if point else _CAPITAL_NOT_READY,
+                "value": _capital_amount(point.value if point else None),
+            }
+        )
+    if no_source or not_authoritative:
+        parts: list[str] = []
+        if no_source:
+            parts.append("no NAV source: " + ", ".join(sorted(no_source)))
+        if not_authoritative:
+            parts.append(
+                "NAV not authoritative (REFERENCE_ONLY or unadmitted): "
+                + ", ".join(sorted(not_authoritative))
+            )
+        reserve = _not_ready(
+            reserve_accounts,
+            "reserve accounts without an authoritative admitted NAV on or before "
+            f"{vd}: " + "; ".join(parts),
+        )
+    else:
+        reserve = _aggregate(
+            _CAPITAL_AVAILABLE,
+            _exact_sum(values),
+            min(days),
+            reserve_accounts,
+            None,
+        )
+    reserve["members"] = members
+    return reserve
+
+
+def _recompute_strategy_capital(
+    *,
+    scopes: Mapping[str, str],
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    valuation_date: date,
+) -> dict[str, tuple[Decimal | None, date | None, tuple[str, ...]]]:
+    """Recompute each strategy's capital from ``nav`` x ``assignments`` alone.
+
+    This is deliberately a second, account-first implementation: it never reads
+    the published block, only the facts the block claims to sum.  The result per
+    strategy is ``(value, oldest member date, member accounts)``, with ``None``
+    value/date whenever any member has no admitted USD NAV.
+    """
+
+    best: dict[str, tuple[date, Decimal]] = {}
+    for item in nav:
+        amount = item.get("nav")
+        if not (
+            isinstance(amount, Mapping)
+            and amount.get("status") == "AVAILABLE"
+            and amount.get("currency") == "USD"
+        ):
+            continue
+        day = _date(item.get("as_of_date"), "nav.as_of_date")
+        if day > valuation_date:
+            continue
+        account_id = _text(item.get("account_id"), "nav.account_id")
+        value = _decimal(amount.get("value"), "nav.value")
+        assert value is not None
+        if account_id not in best or day > best[account_id][0]:
+            best[account_id] = (day, value)
+
+    mapped = _mapped_memberships(assignments)
+    owner: dict[str, str] = {}
+    for member in mapped:
+        if member.start <= valuation_date and (
+            member.end is None or valuation_date <= member.end
+        ):
+            if owner.setdefault(member.account_id, member.strategy_id) != (
+                member.strategy_id
+            ):
+                raise BaselineValidationError(
+                    "account is a current member of more than one strategy"
+                )
+    accounts_of: dict[str, set[str]] = {strategy_id: set() for strategy_id in scopes}
+    for member in mapped:
+        scope = scopes.get(member.strategy_id)
+        if scope is None:
+            raise BaselineValidationError(
+                "assignment references an unregistered strategy"
+            )
+        current = member.start <= valuation_date and (
+            member.end is None or valuation_date <= member.end
+        )
+        if scope == _SCOPE_SYSTEMATIC and current:
+            accounts_of[member.strategy_id].add(member.account_id)
+        elif (
+            scope == _SCOPE_RETAINED_EXCLUDED
+            and owner.get(member.account_id, member.strategy_id) == member.strategy_id
+        ):
+            accounts_of[member.strategy_id].add(member.account_id)
+
+    result: dict[str, tuple[Decimal | None, date | None, tuple[str, ...]]] = {}
+    for strategy_id, members in accounts_of.items():
+        ordered = tuple(sorted(members))
+        if not ordered or any(account not in best for account in ordered):
+            result[strategy_id] = (None, None, ordered)
+            continue
+        result[strategy_id] = (
+            _exact_sum(best[account][1] for account in ordered),
+            min(best[account][0] for account in ordered),
+            ordered,
+        )
+    return result
+
+
+def _recompute_reserve(
+    *,
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+    valuation_date: date,
+) -> tuple[Decimal | None, date | None, tuple[str, ...]]:
+    accounts = tuple(_reserve_accounts(assignments, valuation_date))
+    windows = _authoritative_nav_windows(provider_admissions)
+    best: dict[str, tuple[date, Decimal]] = {}
+    for item in nav:
+        amount = item.get("nav")
+        if not (
+            isinstance(amount, Mapping)
+            and amount.get("status") == "AVAILABLE"
+            and amount.get("currency") == "USD"
+        ):
+            continue
+        day = _date(item.get("as_of_date"), "nav.as_of_date")
+        account_id = _text(item.get("account_id"), "nav.account_id")
+        if day > valuation_date or not any(
+            start <= day <= end for start, end in windows.get(account_id, ())
+        ):
+            continue
+        value = _decimal(amount.get("value"), "nav.value")
+        assert value is not None
+        if account_id not in best or day > best[account_id][0]:
+            best[account_id] = (day, value)
+    if not accounts or any(account not in best for account in accounts):
+        return None, None, accounts
+    return (
+        _exact_sum(best[account][1] for account in accounts),
+        min(best[account][0] for account in accounts),
+        accounts,
+    )
+
+
+def _published_amount(value: object, field_name: str) -> Decimal | None:
+    """A published amount: ``None`` when UNAVAILABLE, else its exact Decimal."""
+
+    amount = _object(value, field_name)
+    if amount.get("currency") != "USD":
+        raise BaselineValidationError(f"{field_name} must be USD")
+    if amount.get("status") == "UNAVAILABLE":
+        if amount.get("value") is not None:
+            raise BaselineValidationError(f"{field_name} is unavailable with a value")
+        return None
+    if amount.get("status") != "AVAILABLE":
+        raise BaselineValidationError(f"{field_name} status is invalid")
+    return _decimal(amount.get("value"), f"{field_name}.value")
+
+
+def _current_capital_checks(
+    current_capital: Mapping[str, Any],
+    *,
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconcile the published block with an independent recompute.
+
+    The checks read the published block as the claim and ``nav`` x
+    ``assignments`` (and the reserve admissions) as the evidence.  They can FAIL,
+    and a NOT_READY component yields NOT_READY, never PASS.
+    """
+
+    valuation_date = _date(
+        current_capital.get("valuation_date"), "current_capital.valuation_date"
+    )
+    try:
+        return _reconcile_current_capital(
+            current_capital,
+            valuation_date,
+            assignments,
+            nav,
+            provider_admissions,
+        )
+    except BaselineValidationError as exc:
+        return [
+            {
+                "check_id": check_id,
+                "error": str(exc),
+                "status": "FAIL",
+                "valuation_date": valuation_date.isoformat(),
+            }
+            for check_id in (_CAPITAL_STRATEGY_CHECK_ID, _CAPITAL_IDENTITY_CHECK_ID)
+        ]
+
+
+def _reconcile_current_capital(
+    current_capital: Mapping[str, Any],
+    valuation_date: date,
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = _objects(current_capital.get("strategies"), "current_capital.strategies")
+    scopes = {
+        _text(row.get("strategy_id"), "strategy_id"): _text(row.get("scope"), "scope")
+        for row in rows
+    }
+    recomputed = _recompute_strategy_capital(
+        scopes=scopes,
+        assignments=assignments,
+        nav=nav,
+        valuation_date=valuation_date,
+    )
+    capital_check = _strategy_capital_check(rows, scopes, recomputed, valuation_date)
+    identity_check = _capital_identity_check(
+        current_capital,
+        rows,
+        scopes,
+        recomputed,
+        _recompute_reserve(
+            assignments=assignments,
+            nav=nav,
+            provider_admissions=provider_admissions,
+            valuation_date=valuation_date,
+        ),
+        valuation_date,
+    )
+    return [capital_check, identity_check]
+
+
+def _strategy_capital_check(
+    rows: Sequence[Mapping[str, Any]],
+    scopes: Mapping[str, str],
+    recomputed: Mapping[str, tuple[Decimal | None, date | None, tuple[str, ...]]],
+    valuation_date: date,
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    not_ready_ids: list[str] = []
+    for row in rows:
+        strategy_id = str(row["strategy_id"])
+        value, as_of, accounts = recomputed[strategy_id]
+        published = _published_amount(row.get("current_value"), "current_value")
+        published_as_of = _optional_date(row.get("as_of_date"), "as_of_date")
+        published_accounts = tuple(
+            sorted(
+                _text(member.get("account_id"), "member.account_id")
+                for member in _objects(row.get("members"), "members")
+            )
+        )
+        if row.get("status") != (
+            _CAPITAL_AVAILABLE if published is not None else _CAPITAL_NOT_READY
+        ):
+            mismatches.append({"reason": "status", "strategy_id": strategy_id})
+        elif (
+            published != value
+            or published_as_of != as_of
+            or published_accounts != accounts
+        ):
+            mismatches.append(
+                {
+                    "published_as_of_date": (
+                        published_as_of.isoformat() if published_as_of else None
+                    ),
+                    "published_usd": (
+                        decimal_text(published) if published is not None else None
+                    ),
+                    "reason": "value",
+                    "recomputed_as_of_date": as_of.isoformat() if as_of else None,
+                    "recomputed_usd": (
+                        decimal_text(value) if value is not None else None
+                    ),
+                    "strategy_id": strategy_id,
+                }
+            )
+        if value is None and scopes[strategy_id] == _SCOPE_SYSTEMATIC:
+            not_ready_ids.append(strategy_id)
+    check: dict[str, Any] = {
+        "check_id": _CAPITAL_STRATEGY_CHECK_ID,
+        "matched_count": len(rows) - len(mismatches),
+        "mismatches": mismatches,
+        "not_ready_strategy_ids": sorted(not_ready_ids),
+        "status": "FAIL" if mismatches else "NOT_READY" if not_ready_ids else "PASS",
+        "strategy_count": len(rows),
+        "valuation_date": valuation_date.isoformat(),
+    }
+    required = [
+        recomputed[strategy_id][0]
+        for strategy_id in recomputed
+        if scopes[strategy_id] == _SCOPE_SYSTEMATIC
+    ]
+    if check["status"] == "PASS" and required:
+        check["systematic_total_usd"] = decimal_text(
+            _exact_sum(value for value in required if value is not None)
+        )
+    return check
+
+
+def _expected_aggregates(
+    scopes: Mapping[str, str],
+    recomputed: Mapping[str, tuple[Decimal | None, date | None, tuple[str, ...]]],
+    reserve: tuple[Decimal | None, date | None, tuple[str, ...]],
+) -> dict[str, tuple[Decimal | None, date | None]]:
+    """What each aggregate must be, given the recomputed members."""
+
+    def settled(
+        scope: str,
+    ) -> list[tuple[Decimal | None, date | None, tuple[str, ...]]]:
+        return [recomputed[sid] for sid in sorted(recomputed) if scopes[sid] == scope]
+
+    def total(
+        group: Sequence[tuple[Decimal | None, date | None, tuple[str, ...]]],
+    ) -> tuple[Decimal | None, date | None]:
+        if any(value is None for value, _, _ in group):
+            return None, None
+        days = [day for _, day, _ in group if day is not None]
+        return (
+            _exact_sum(value for value, _, _ in group if value is not None),
+            min(days) if days else None,
+        )
+
+    required = settled(_SCOPE_SYSTEMATIC)
+    systematic = total(required) if required else (None, None)
+    if systematic[0] is not None and systematic[0] <= 0:
+        systematic = (None, None)
+    expected: dict[str, tuple[Decimal | None, date | None]] = {
+        "reserve": (reserve[0], reserve[1]),
+        "retained_excluded": total(settled(_SCOPE_RETAINED_EXCLUDED)),
+        "systematic": systematic,
+    }
+    if all(value is not None for value, _ in expected.values()):
+        days = [day for _, day in expected.values() if day is not None]
+        expected["total_liquid"] = (
+            _exact_sum(value for value, _ in expected.values() if value is not None),
+            min(days),
+        )
+    else:
+        expected["total_liquid"] = (None, None)
+    return expected
+
+
+def _capital_identity_check(
+    current_capital: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    scopes: Mapping[str, str],
+    recomputed: Mapping[str, tuple[Decimal | None, date | None, tuple[str, ...]]],
+    reserve: tuple[Decimal | None, date | None, tuple[str, ...]],
+    valuation_date: date,
+) -> dict[str, Any]:
+    expected = _expected_aggregates(scopes, recomputed, reserve)
+    mismatches: list[dict[str, Any]] = []
+    statuses: dict[str, str] = {}
+    for name in (*_AGGREGATE_COMPONENTS, "total_liquid"):
+        part = _object(current_capital.get(name), f"current_capital.{name}")
+        published = _published_amount(
+            part.get("current_value"), f"{name}.current_value"
+        )
+        published_day = _optional_date(part.get("as_of_date"), f"{name}.as_of_date")
+        want, want_day = expected[name]
+        statuses[name] = str(part.get("status"))
+        if (
+            part.get("status")
+            != (_CAPITAL_AVAILABLE if published is not None else _CAPITAL_NOT_READY)
+            or published != want
+            or published_day != want_day
+        ):
+            mismatches.append(
+                {
+                    "component": name,
+                    "published_as_of_date": (
+                        published_day.isoformat() if published_day else None
+                    ),
+                    "published_usd": (
+                        decimal_text(published) if published is not None else None
+                    ),
+                    "recomputed_as_of_date": (
+                        want_day.isoformat() if want_day else None
+                    ),
+                    "recomputed_usd": decimal_text(want) if want is not None else None,
+                }
+            )
+    # Shares: every required strategy's value over the systematic total, closing
+    # to exactly one; none while the systematic total is not current.
+    published_weights = {
+        str(row["strategy_id"]): row.get("current_weight")
+        for row in rows
+        if scopes[str(row["strategy_id"])] == _SCOPE_SYSTEMATIC
+    }
+    wanted: dict[str, str | None] = {}
+    if expected["systematic"][0] is not None:
+        for strategy_id, share in _closed_weights(
+            {
+                strategy_id: value
+                for strategy_id, (value, _, _) in recomputed.items()
+                if scopes[strategy_id] == _SCOPE_SYSTEMATIC and value is not None
+            }
+        ).items():
+            wanted[strategy_id] = decimal_text(share)
+    else:
+        wanted = dict.fromkeys(published_weights)
+    weighted_outside = [
+        str(row["strategy_id"])
+        for row in rows
+        if scopes[str(row["strategy_id"])] != _SCOPE_SYSTEMATIC
+        and row.get("current_weight") is not None
+    ]
+    if published_weights != wanted or weighted_outside:
+        mismatches.append({"component": "current_weight"})
+    not_ready = sorted(
+        name for name, status in statuses.items() if status != _CAPITAL_AVAILABLE
+    )
+    check: dict[str, Any] = {
+        "check_id": _CAPITAL_IDENTITY_CHECK_ID,
+        "components": dict(sorted(statuses.items())),
+        "mismatches": mismatches,
+        "not_ready_components": not_ready,
+        "status": "FAIL" if mismatches else "NOT_READY" if not_ready else "PASS",
+        "valuation_date": valuation_date.isoformat(),
+    }
+    total_liquid = expected["total_liquid"][0]
+    if check["status"] == "PASS" and total_liquid is not None:
+        check["total_liquid_usd"] = decimal_text(total_liquid)
+    return check
+
+
+def _build_audit_snapshot(
+    *,
+    as_of_date: date,
+    replay: Mapping[str, Any],
+    systematic_total: Decimal,
+    reserve_value: Decimal,
+    reserve_source_date: date,
+    assignments: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    reference_flows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The dated audit snapshot, labeled so no consumer reads it as current.
+
+    It carries the audit replay and its two identity checks (moved out of the
+    current reconciliations) and records the audit reserve with the dates its
+    components were observed, plus the reserve-account flows booked after those
+    dates, so the staleness of the audit reserve is visible instead of implied.
+    """
+
+    latest = _latest_usd_navs(nav, as_of_date)
+    observations: list[dict[str, str]] = []
+    without_observation: list[str] = []
+    observed_days: dict[str, date] = {}
+    for account_id in _reserve_accounts(assignments, as_of_date):
+        point = latest.get(account_id)
+        if point is None:
+            without_observation.append(account_id)
+            continue
+        observed_days[account_id] = point.day
+        observations.append(
+            {
+                "account_id": account_id,
+                "as_of_date": point.day.isoformat(),
+                "value_usd": decimal_text(point.value),
+            }
+        )
+    observed_total = _exact_sum(Decimal(row["value_usd"]) for row in observations)
+    with localcontext() as context:
+        context.prec = _EXACT_PRECISION
+        difference = reserve_value - observed_total
+    later_flows: list[dict[str, Any]] = []
+    for flow in reference_flows:
+        flow_account = flow.get("account_id")
+        if not isinstance(flow_account, str) or flow_account not in observed_days:
+            continue
+        event_date = _date(flow.get("event_date"), "flow.event_date")
+        if not observed_days[flow_account] < event_date <= as_of_date:
+            continue
+        amount = flow.get("amount")
+        later_flows.append(
+            {
+                "account_id": flow_account,
+                "amount": dict(amount) if isinstance(amount, Mapping) else None,
+                "event_date": event_date.isoformat(),
+                "flow_type": flow.get("flow_type"),
+                "record_id": flow.get("record_id"),
+            }
+        )
+    later_flows.sort(key=lambda row: (row["event_date"], str(row["record_id"] or "")))
+    return {
+        "allocation_source_keys": {
+            "reserve": "current-portfolio-summary",
+            "systematic": "component-decision-table",
+        },
+        "as_of_date": as_of_date.isoformat(),
+        "checks": [
+            {
+                "check_id": "allocation-to-audit-systematic-total",
+                "status": "PASS",
+                "value_usd": decimal_text(systematic_total),
+            },
+            {
+                "check_id": "allocation-plus-reserve-to-liquid-total",
+                "status": "PASS",
+                "value_usd": replay["total_liquid_usd"],
+            },
+        ],
+        "current_view": "current_capital",
+        "replay": dict(replay),
+        "reserve": {
+            "account_observations": observations,
+            "account_observations_total_usd": decimal_text(observed_total),
+            "accounts_without_observation": without_observation,
+            "post_observation_flows": later_flows,
+            "source_effective_date": reserve_source_date.isoformat(),
+            "source_key": "current-portfolio-summary",
+            "unexplained_difference_usd": decimal_text(difference),
+            "value_usd": decimal_text(reserve_value),
+        },
+        "status": "HISTORICAL_REFERENCE",
+        "systematic_total_usd": decimal_text(systematic_total),
+        "total_liquid_usd": replay["total_liquid_usd"],
+    }
 
 
 def _fact_coverage(
@@ -3543,6 +4615,9 @@ def build_catalog(
     strategy_provider_evidence: list[dict[str, Any]] = []
     strategy_returns: list[dict[str, Any]] = []
     provider_strategy_returns: list[dict[str, Any]] = []
+    # Every provider-ledger flow, admitted or not: used only to annotate the dated
+    # audit reserve with what moved after it was observed, never as a capital fact.
+    reference_flows: list[dict[str, Any]] = []
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -3597,6 +4672,9 @@ def build_catalog(
         )
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
+        )
+        reference_flows = _objects(
+            provider_catalog.get("flows"), "provider-ledger.flows"
         )
         provider_coverage = _objects(
             provider_catalog.get("provider_coverage"),
@@ -3702,6 +4780,39 @@ def build_catalog(
     allocations.sort(
         key=lambda item: (str(item["scope"]), str(item.get("strategy_id") or ""))
     )
+    # The allocation table above is the dated audit snapshot and stays as it was
+    # (dependence and attribution consume it unchanged).  The current capital view
+    # is built from NAV facts, reconciled by an independent recompute, and a
+    # failed reconciliation is never published.
+    current_capital = _build_current_capital(
+        valuation_date=as_of,
+        strategies=strategies,
+        accounts=accounts,
+        assignments=assignments,
+        nav=nav,
+        provider_admissions=provider_admissions,
+        policy_exclusions=_hwm_policy_exclusions(),
+    )
+    current_checks = _current_capital_checks(
+        current_capital,
+        assignments=assignments,
+        nav=nav,
+        provider_admissions=provider_admissions,
+    )
+    if any(check["status"] == "FAIL" for check in current_checks):
+        raise BaselineValidationError(
+            "current capital does not reconcile to cutoff account values"
+        )
+    audit_snapshot = _build_audit_snapshot(
+        as_of_date=source_dates["component-decision-table"],
+        replay=replay,
+        systematic_total=systematic_total,
+        reserve_value=reserve,
+        reserve_source_date=source_dates["current-portfolio-summary"],
+        assignments=assignments,
+        nav=nav,
+        reference_flows=reference_flows,
+    )
     missing_strategy_nav_count = sum(
         1 for item in strategy_nav_coverage if item["status"] == "UNAVAILABLE"
     )
@@ -3757,6 +4868,7 @@ def build_catalog(
             assignments, key=lambda item: str(item.get("assignment_id"))
         ),
         "assumptions": provenance.get("assumptions", []),
+        "audit_snapshot": audit_snapshot,
         "baseline_schema_version": CATALOG_SCHEMA_VERSION,
         "calendar_coverage": calendar,
         "capital_pools": provenance.get("capital_pools")
@@ -3776,6 +4888,7 @@ def build_catalog(
         ],
         "corrections": provenance.get("corrections", []),
         "costs": costs,
+        "current_capital": current_capital,
         "evidence_layer_metrics": layer_metrics,
         "evidence_links": sorted(
             evidence_links,
@@ -3799,16 +4912,7 @@ def build_catalog(
         "provenance": provenance_ref,
         "reconciliation_checks": [
             nav_reconciliation,
-            {
-                "check_id": "allocation-to-audit-systematic-total",
-                "status": "PASS",
-                "value_usd": decimal_text(systematic_total),
-            },
-            {
-                "check_id": "allocation-plus-reserve-to-liquid-total",
-                "status": "PASS",
-                "value_usd": replay["total_liquid_usd"],
-            },
+            *current_checks,
             *([schwab_reconciliation] if schwab_reconciliation is not None else []),
             *([position_reconciliation] if position_reconciliation is not None else []),
         ],

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import csv
 from datetime import date, timedelta
+from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
 import json
@@ -11,7 +13,7 @@ import sys
 from typing import Any
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -49,7 +51,9 @@ def _row(source_key: str, **values: str) -> dict[str, str]:
     return {field: values.get(field, "") for field in baseline._CSV_FIELDS[source_key]}
 
 
-def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
+def _published_provenance(
+    tmp_path: Path, *, reserve_accounts: tuple[str, ...] = ()
+) -> tuple[Path, str, str]:
     root = tmp_path / "private-provenance"
     strategies = []
     for index in range(1, 10):
@@ -138,6 +142,23 @@ def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
                 "strategy_id": f"strategy-{index}",
             }
         )
+    for index, reserve_account_id in enumerate(reserve_accounts, start=1):
+        assignments.append(
+            {
+                "account_id": reserve_account_id,
+                "assignment_id": f"assignment-reserve-{index}",
+                "effective_end": None,
+                "effective_start": "2025-01-01",
+                "mapping_status": "UNMAPPED",
+                "observed_label": "General",
+                "pool_id": "reserve-capital",
+                "pool_mapping_status": "MAPPED",
+                "source_classification": "SYNTHETIC",
+                "source_id": "synthetic-source",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            }
+        )
     assignments.append(
         {
             "account_id": "account-composer",
@@ -193,7 +214,9 @@ def _published_provenance(tmp_path: Path) -> tuple[Path, str, str]:
     return root, manifest.generation_id, catalog_hash
 
 
-def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def _spec(
+    tmp_path: Path, *, reserve_accounts: tuple[str, ...] = ()
+) -> tuple[Path, dict[str, Any]]:
     source_root = tmp_path / "private-source"
     source_root.mkdir(parents=True)
     values = ["20", "15", "10", "10", "5", "10", "10", "10", "10"]
@@ -504,7 +527,9 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     sources["component-decision-table"]["as_of_date"] = "2026-07-25"
     sources["current-portfolio-summary"]["as_of_date"] = "2026-07-25"
 
-    provenance_root, generation_id, catalog_hash = _published_provenance(tmp_path)
+    provenance_root, generation_id, catalog_hash = _published_provenance(
+        tmp_path, reserve_accounts=reserve_accounts
+    )
     spec: dict[str, Any] = {
         "as_of_date": "2026-07-30",
         "policy_version": "PORT-PERF-1",
@@ -679,6 +704,9 @@ def _provider_ledger_generation(
     manifest_catalog_schema_version: int | None = None,
     manifest_as_of_date: date = date(2026, 7, 30),
     retained_source_as_of_date: date | None = None,
+    nav_observations: list[dict[str, Any]] | None = None,
+    flows: list[dict[str, Any]] | None = None,
+    admissions: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, dict[str, str]]:
     provider_ids = (
         "alpaca",
@@ -697,7 +725,7 @@ def _provider_ledger_generation(
         "transactions",
     )
     catalog = {
-        "admissions": [],
+        "admissions": admissions or [],
         "as_of_date": catalog_as_of_date.isoformat(),
         "catalog_schema_version": catalog_schema_version,
         "corporate_actions": [],
@@ -710,8 +738,8 @@ def _provider_ledger_generation(
             }
             for fact_type in zero_fact_types
         ],
-        "flows": [],
-        "nav_observations": [],
+        "flows": flows or [],
+        "nav_observations": nav_observations or [],
         "positions": [],
         "provider_coverage": [
             {
@@ -2518,8 +2546,14 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     tmp_path: Path,
 ) -> None:
     """Golden byte-identity regression: a spec without the hwm-inputs source
-    must produce a catalog and generation manifest byte-identical to the
-    pre-envelope builder (hashes captured from the pre-envelope code path)."""
+    must produce a catalog and generation manifest with exactly these hashes.
+
+    The pins moved once, with cluster 2 task T1 (the catalog gained the
+    ``current_capital`` and ``audit_snapshot`` blocks and the two audit checks
+    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0).
+    ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
+    that nothing else moved: undoing exactly those changes reproduces the
+    previous catalog hash ``fde46f73...``."""
     spec_path, _spec_data = _spec(tmp_path)
     output_root = tmp_path / "private-output"
     evidence = baseline.stage_baseline(spec_path, output_root)
@@ -2529,11 +2563,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "fde46f735538e0cce5246e32e9ce15e9e071ed0d0d992507c954969f8f8e61ce"
+        == "d8a5654f54a3049bccee3aba1c7c513904a431331ac0024036a1a6b8ce044488"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "58a0fcf30bc5b21a09444b1fbdd19cc5d9c7f10a4f42d382472cbd8cfc8f8b39"
+        == "655ea8426e8788bb71e02e24cecc0fa95b5ccd0fe3d2dc0e49348b44897f031f"
     )
 
 
@@ -3347,3 +3381,1256 @@ def test_load_json_preserves_sub_cent_precision(tmp_path: Path) -> None:
 
     default = baseline._load_json(path, "summary")
     assert isinstance(default["systematic_total"], float)
+
+
+# ── C2-T1: current_capital, audit_snapshot and the current reconciliations ──
+#
+# Cluster 2 design (state/c2-design.md v3, T1, M1/M2): every current capital
+# figure is the sum of its members' latest admitted USD NAV on or before the
+# cutoff; the dated 2026-08-16 audit table stays byte-identical in
+# ``allocations`` and its replay moves under the labeled ``audit_snapshot``.
+
+CUTOFF = date(2026, 9, 17)
+# sha256 of the catalog / allocations bytes the merge base builds for the
+# synthetic ``_spec`` fixture (captured before the C2-T1 change).
+LEGACY_CATALOG_SHA256 = (
+    "fde46f735538e0cce5246e32e9ce15e9e071ed0d0d992507c954969f8f8e61ce"
+)
+LEGACY_ALLOCATIONS_SHA256 = (
+    "22dab8643f6f8f1ccf75b05e6e6759476f31a9dec204865da3eda61df2d7e044"
+)
+
+
+def _cc_nav(
+    account_id: str,
+    day: str,
+    value: str | None,
+    *,
+    status: str = "AVAILABLE",
+    currency: str = "USD",
+    source_key: str = "provider-ledger",
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "as_of_date": day,
+        "nav": {"currency": currency, "status": status, "value": value},
+        "provider": "SYNTHETIC",
+        "record_id": f"nav-{account_id}-{day}",
+        "source_key": source_key,
+    }
+
+
+def _cc_assignment(
+    account_id: str,
+    strategy_id: str | None,
+    start: str | None,
+    end: str | None = None,
+    *,
+    pool: str = "systematic-capital",
+    mapped: bool = True,
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "assignment_id": f"assignment-{account_id}-{strategy_id or pool}-{start}",
+        "effective_end": end,
+        "effective_start": start,
+        "mapping_status": "MAPPED" if mapped else "UNMAPPED",
+        "pool_id": pool,
+        "strategy_id": strategy_id,
+        "strategy_mapping_disposition": (
+            "STRATEGY_MAPPED" if mapped else "RESERVE_NOT_APPLICABLE"
+        ),
+    }
+
+
+def _cc_admission(
+    account_id: str,
+    disposition: str,
+    start: str = "2025-11-03",
+    end: str = "2026-09-17",
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "account_reconciliation_sha256": None,
+        "disposition": disposition,
+        "effective_end": end,
+        "effective_start": start,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "nav_observations",
+        "pool_id": None,
+        "provider_id": "synthetic",
+        "strategy_id": None,
+    }
+
+
+def _cc_case() -> dict[str, Any]:
+    """Three required strategies, two retained-excluded, a two-account reserve.
+
+    alpha   = a1 100 + a2 50 (both @ cutoff)           -> 150 @ 2026-09-17
+    bravo   = b1 200 @ 2026-09-03 (provider boundary)  -> 200 @ 2026-09-03
+    charlie = c1 150 @ cutoff                          -> 150 @ 2026-09-17
+    echo-x  = e1 5 @ 2025-11-24 (ended membership, retained)
+    zulu-x  = z1, an account that no source has ever valued
+    reserve = r1 (legacy NAV, admitted REFERENCE_ONLY) + r2 (no source)
+    """
+
+    providers = {
+        "acct-a1": "SCHWAB",
+        "acct-a2": "SCHWAB",
+        "acct-b1": "MATRIXPORT",
+        "acct-c1": "IBKR",
+        "acct-e1": "ALPACA",
+        "acct-z1": "COMPOSER",
+        "acct-r1": "IBKR",
+        "acct-r2": "JOHN HANCOCK",
+    }
+    return {
+        "valuation_date": CUTOFF,
+        "strategies": [
+            {"strategy_id": strategy_id}
+            for strategy_id in ("alpha", "bravo", "charlie", "echo-x", "zulu-x")
+        ],
+        "accounts": [
+            {
+                "account_id": account_id,
+                "base_currency": "USD",
+                "provider": provider,
+                "role": "INVESTMENT",
+            }
+            for account_id, provider in providers.items()
+        ],
+        "assignments": [
+            _cc_assignment("acct-a1", "alpha", "2026-01-01"),
+            _cc_assignment("acct-a2", "alpha", "2026-01-01"),
+            _cc_assignment("acct-b1", "bravo", "2026-01-01"),
+            _cc_assignment("acct-c1", "charlie", "2026-01-01"),
+            # An ended membership never counts toward the current set.
+            _cc_assignment("acct-a2", "charlie", "2025-06-01", "2025-12-31"),
+            _cc_assignment("acct-e1", "echo-x", "2025-09-27", "2025-11-24"),
+            _cc_assignment("acct-z1", "zulu-x", "2025-09-22"),
+            _cc_assignment(
+                "acct-r1", None, "2025-09-15", pool="reserve-capital", mapped=False
+            ),
+            _cc_assignment("acct-r2", None, None, pool="reserve-capital", mapped=False),
+        ],
+        "nav": [
+            _cc_nav("acct-a1", "2026-09-16", "99"),
+            _cc_nav("acct-a1", "2026-09-17", "100"),
+            _cc_nav("acct-a2", "2026-09-17", "50"),
+            # A later observation is not on or before the cutoff.
+            _cc_nav("acct-a2", "2026-09-18", "777"),
+            _cc_nav("acct-b1", "2026-09-02", "190"),
+            _cc_nav("acct-b1", "2026-09-03", "200"),
+            _cc_nav("acct-c1", "2026-09-17", "150"),
+            _cc_nav("acct-e1", "2025-11-24", "5", source_key="alpaca-nav"),
+            _cc_nav("acct-r1", "2026-07-14", "1000", source_key="ibkr-ledger"),
+        ],
+        "provider_admissions": [
+            _cc_admission("acct-a1", "AUTHORITATIVE"),
+            _cc_admission("acct-a2", "AUTHORITATIVE"),
+            _cc_admission("acct-b1", "AUTHORITATIVE", end="2026-09-03"),
+            _cc_admission("acct-c1", "AUTHORITATIVE"),
+            _cc_admission("acct-r1", "REFERENCE_ONLY"),
+        ],
+        "policy_exclusions": {
+            "echo-x": date(2025, 11, 25),
+            "zulu-x": date(2026, 8, 1),
+        },
+    }
+
+
+def _cc_build(case: dict[str, Any]) -> dict[str, Any]:
+    return baseline._build_current_capital(**case)
+
+
+def _cc_rows(block: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["strategy_id"]: row for row in block["strategies"]}
+
+
+def _cc_checks(
+    block: dict[str, Any], case: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    rows = baseline._current_capital_checks(
+        block,
+        assignments=case["assignments"],
+        nav=case["nav"],
+        provider_admissions=case["provider_admissions"],
+    )
+    return {row["check_id"]: row for row in rows}
+
+
+def _cc_value(row: dict[str, Any]) -> str | None:
+    value: str | None = row["current_value"]["value"]
+    return value
+
+
+def test_current_capital_is_the_sum_of_member_navs_not_the_audit_table(
+    tmp_path: Path,
+) -> None:
+    """(a) The audit table says 20/15/10; the member NAVs say 11/20/30."""
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+
+    table = {
+        row["strategy_id"]: row["current_value"]["value"]
+        for row in catalog["allocations"]
+        if row["scope"] == "SYSTEMATIC"
+    }
+    assert [table[f"strategy-{index}"] for index in (1, 2, 3)] == ["20", "15", "10"]
+
+    block = catalog["current_capital"]
+    assert block["valuation_date"] == "2026-07-30"
+    rows = _cc_rows(block)
+    assert {
+        strategy_id: (_cc_value(rows[strategy_id]), rows[strategy_id]["as_of_date"])
+        for strategy_id in ("strategy-1", "strategy-2", "strategy-3")
+    } == {
+        "strategy-1": ("11", "2026-07-06"),
+        "strategy-2": ("20", "2026-07-01"),
+        "strategy-3": ("30", "2026-07-01"),
+    }
+    assert [member["account_id"] for member in rows["strategy-1"]["members"]] == [
+        "account-schwab-a"
+    ]
+    # Registry strategies with no MAPPED member publish nothing, never the table.
+    assert rows["strategy-4"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert _cc_value(rows["strategy-4"]) is None
+    assert block["systematic"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert {row["current_weight"] for row in block["strategies"]} == {None}
+
+
+def test_current_capital_sums_members_with_own_dates_and_exact_weights() -> None:
+    case = _cc_case()
+    block = _cc_build(case)
+
+    assert block["valuation_date"] == "2026-09-17"
+    assert block["currency"] == "USD"
+    assert block["weight_basis"] == "CURRENT_CUTOFF"
+    rows = _cc_rows(block)
+    assert [(row["strategy_id"], row["scope"]) for row in block["strategies"]] == [
+        ("alpha", "SYSTEMATIC"),
+        ("bravo", "SYSTEMATIC"),
+        ("charlie", "SYSTEMATIC"),
+        ("echo-x", "RETAINED_EXCLUDED"),
+        ("zulu-x", "RETAINED_EXCLUDED"),
+    ]
+    assert _cc_value(rows["alpha"]) == "150"
+    assert rows["alpha"]["as_of_date"] == "2026-09-17"
+    assert [
+        (member["account_id"], member["as_of_date"], member["value"]["value"])
+        for member in rows["alpha"]["members"]
+    ] == [("acct-a1", "2026-09-17", "100"), ("acct-a2", "2026-09-17", "50")]
+    # The 2026-09-18 observation and the ended charlie/a2 membership are out.
+    assert _cc_value(rows["charlie"]) == "150"
+    assert [member["account_id"] for member in rows["charlie"]["members"]] == [
+        "acct-c1"
+    ]
+    assert [rows[name]["current_weight"] for name in ("alpha", "bravo", "charlie")] == [
+        "0.3",
+        "0.4",
+        "0.3",
+    ]
+    systematic = block["systematic"]
+    assert systematic["status"] == "AVAILABLE"
+    assert systematic["current_value"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "500",
+    }
+    assert systematic["components"] == ["alpha", "bravo", "charlie"]
+    # Retained-excluded rows carry no systematic weight.
+    assert rows["echo-x"]["current_weight"] is None
+    assert rows["zulu-x"]["current_weight"] is None
+
+
+def test_member_as_of_is_its_own_provider_boundary_not_the_valuation_date() -> None:
+    """(c) An FX-boundary member keeps its own 2026-09-03 observation date."""
+    block = _cc_build(_cc_case())
+    rows = _cc_rows(block)
+
+    assert _cc_value(rows["bravo"]) == "200"
+    assert rows["bravo"]["as_of_date"] == "2026-09-03"
+    assert rows["bravo"]["members"][0]["as_of_date"] == "2026-09-03"
+    assert rows["alpha"]["as_of_date"] == "2026-09-17"
+    # The systematic total is dated by its oldest member.
+    assert block["systematic"]["as_of_date"] == "2026-09-03"
+
+
+def test_strategy_as_of_is_the_oldest_member_date() -> None:
+    case = _cc_case()
+    case["nav"] = [
+        row for row in case["nav"] if not (row["account_id"] == "acct-a2")
+    ] + [_cc_nav("acct-a2", "2026-09-10", "50")]
+
+    rows = _cc_rows(_cc_build(case))
+
+    assert _cc_value(rows["alpha"]) == "150"
+    assert rows["alpha"]["as_of_date"] == "2026-09-10"
+
+
+def test_only_available_usd_navs_on_or_before_the_valuation_date_count() -> None:
+    case = _cc_case()
+    case["nav"] = [
+        _cc_nav("acct-a1", "2026-09-15", "90"),
+        # The newest on-or-before row is unavailable: fall back to the last good one.
+        _cc_nav("acct-a1", "2026-09-17", None, status="UNAVAILABLE"),
+        # A non-USD amount is never summed as USD.
+        _cc_nav("acct-a2", "2026-09-16", "40"),
+        _cc_nav("acct-a2", "2026-09-17", "9999", currency="EUR"),
+        # A row after the cutoff is ignored.
+        _cc_nav("acct-b1", "2026-09-03", "200"),
+        _cc_nav("acct-b1", "2026-09-18", "5000"),
+        _cc_nav("acct-c1", "2026-09-17", "150"),
+    ]
+
+    rows = _cc_rows(_cc_build(case))
+
+    assert _cc_value(rows["alpha"]) == "130"
+    assert rows["alpha"]["as_of_date"] == "2026-09-15"
+    assert _cc_value(rows["bravo"]) == "200"
+
+
+def test_required_member_without_a_nav_makes_the_strategy_and_weights_not_ready() -> (
+    None
+):
+    case = _cc_case()
+    case["nav"] = [row for row in case["nav"] if row["account_id"] != "acct-a2"]
+
+    block = _cc_build(case)
+    rows = _cc_rows(block)
+
+    assert rows["alpha"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert rows["alpha"]["current_value"]["status"] == "UNAVAILABLE"
+    assert _cc_value(rows["alpha"]) is None
+    assert rows["alpha"]["as_of_date"] is None
+    assert "acct-a2" in rows["alpha"]["reason"]
+    # A partial sum is never published, and the shares become undefined.
+    assert block["systematic"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert "alpha" in block["systematic"]["reason"]
+    assert [rows[name]["current_weight"] for name in ("alpha", "bravo", "charlie")] == [
+        None,
+        None,
+        None,
+    ]
+    # Strategies that are ready keep their own value.
+    assert _cc_value(rows["bravo"]) == "200"
+
+
+def test_weights_close_to_exactly_one_with_the_residual_on_the_last_row() -> None:
+    strategies = ("s1", "s2", "s3")
+    case = {
+        "valuation_date": CUTOFF,
+        "strategies": [{"strategy_id": strategy_id} for strategy_id in strategies],
+        "accounts": [],
+        "assignments": [
+            _cc_assignment(f"acct-{strategy_id}", strategy_id, "2026-01-01")
+            for strategy_id in strategies
+        ],
+        "nav": [
+            _cc_nav(f"acct-{strategy_id}", "2026-09-17", "100")
+            for strategy_id in strategies
+        ],
+        "provider_admissions": [],
+        "policy_exclusions": {},
+    }
+
+    block = _cc_build(case)
+    weights = [row["current_weight"] for row in block["strategies"]]
+
+    assert weights == [
+        "0.3333333333333333333333333333333333",
+        "0.3333333333333333333333333333333333",
+        "0.3333333333333333333333333333333334",
+    ]
+    with localcontext() as context:
+        context.prec = 80
+        assert sum((Decimal(weight) for weight in weights), Decimal(0)) == 1
+
+
+def test_current_capital_makes_no_strategy_count_assumption() -> None:
+    """D9: the registry count is a registry fact; current capital is not 9 or 7."""
+    assert baseline.RETAINED_REGISTRY_STRATEGY_COUNT == 9
+    assert not hasattr(baseline, "CURRENT_STRATEGY_COUNT")
+    for count in (1, 2, 8):
+        strategies = [f"s{index}" for index in range(1, count + 1)]
+        case = {
+            "valuation_date": CUTOFF,
+            "strategies": [{"strategy_id": strategy_id} for strategy_id in strategies],
+            "accounts": [],
+            "assignments": [
+                _cc_assignment(f"acct-{strategy_id}", strategy_id, "2026-01-01")
+                for strategy_id in strategies
+            ],
+            "nav": [
+                _cc_nav(f"acct-{strategy_id}", "2026-09-17", "100")
+                for strategy_id in strategies
+            ],
+            "provider_admissions": [],
+            "policy_exclusions": {},
+        }
+
+        block = _cc_build(case)
+
+        assert len(block["strategies"]) == count
+        assert block["systematic"]["current_value"]["value"] == str(100 * count)
+        with localcontext() as context:
+            context.prec = 80
+            assert (
+                sum(
+                    (Decimal(row["current_weight"]) for row in block["strategies"]),
+                    Decimal(0),
+                )
+                == 1
+            )
+
+
+def test_retained_excluded_without_any_source_is_null_not_ready_never_the_audit_value() -> (
+    None
+):
+    """(e) zulu-x's account has no NAV: null + NOT_READY, whatever the table says."""
+    case = _cc_case()
+    block = _cc_build(case)
+    rows = _cc_rows(block)
+
+    assert rows["zulu-x"]["scope"] == "RETAINED_EXCLUDED"
+    assert rows["zulu-x"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert rows["zulu-x"]["current_value"] == {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+    assert rows["zulu-x"]["as_of_date"] is None
+    assert "acct-z1" in rows["zulu-x"]["reason"]
+    # A dated audit value for that account (the 2026-08-16 table said 1068.45)
+    # must not leak into the current block under any key.
+    assert "1068.45" not in json.dumps(block)
+    # echo-x keeps the NAV that exists, with the date it was observed.
+    assert rows["echo-x"]["status"] == "AVAILABLE"
+    assert _cc_value(rows["echo-x"]) == "5"
+    assert rows["echo-x"]["as_of_date"] == "2025-11-24"
+    # One missing component makes the aggregate not ready.
+    retained = block["retained_excluded"]
+    assert retained["status"] == "NOT_READY_AT_CUTOFF"
+    assert retained["current_value"]["value"] is None
+    assert "zulu-x" in retained["reason"]
+    assert retained["components"] == ["echo-x", "zulu-x"]
+
+
+def test_retained_excluded_is_available_when_every_component_has_a_nav() -> None:
+    case = _cc_case()
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "2.5", source_key="manual"))
+
+    block = _cc_build(case)
+
+    assert block["retained_excluded"]["status"] == "AVAILABLE"
+    assert block["retained_excluded"]["current_value"]["value"] == "7.5"
+    assert block["retained_excluded"]["as_of_date"] == "2025-11-24"
+
+
+def test_excluded_strategy_never_claims_an_account_a_current_strategy_owns() -> None:
+    case = _cc_case()
+    # echo-x also held a1 in the past; a1 is alpha's current member.
+    case["assignments"].append(
+        _cc_assignment("acct-a1", "echo-x", "2025-01-01", "2025-09-26")
+    )
+
+    block = _cc_build(case)
+    rows = _cc_rows(block)
+
+    assert [member["account_id"] for member in rows["echo-x"]["members"]] == ["acct-e1"]
+    assert _cc_value(rows["echo-x"]) == "5"
+    assert _cc_value(rows["alpha"]) == "150"
+
+
+def test_reserve_without_an_authoritative_admitted_nav_is_not_ready_never_the_audit_reserve() -> (
+    None
+):
+    """(d) r1 is admitted REFERENCE_ONLY, r2 has no source: no reserve is published."""
+    case = _cc_case()
+    block = _cc_build(case)
+    reserve = block["reserve"]
+
+    assert reserve["status"] == "NOT_READY_AT_CUTOFF"
+    assert reserve["current_value"] == {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+    assert reserve["as_of_date"] is None
+    assert reserve["components"] == ["acct-r1", "acct-r2"]
+    assert [
+        (
+            member["account_id"],
+            member["provider"],
+            member["status"],
+            member["authority"],
+        )
+        for member in reserve["members"]
+    ] == [
+        ("acct-r1", "IBKR", "NOT_READY_AT_CUTOFF", "NAV_NOT_AUTHORITATIVE"),
+        ("acct-r2", "JOHN HANCOCK", "NOT_READY_AT_CUTOFF", "NO_NAV"),
+    ]
+    assert "JOHN HANCOCK" in reserve["reason"]
+    assert "REFERENCE_ONLY" in reserve["reason"]
+    # The legacy 1000 @ 2026-07-14 observation is not capital authority.
+    assert "1000" not in json.dumps(reserve["current_value"])
+    assert block["total_liquid"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert block["total_liquid"]["current_value"]["value"] is None
+    assert "reserve" in block["total_liquid"]["reason"]
+
+
+def test_reserve_and_total_liquid_are_available_once_every_reserve_account_is_admitted() -> (
+    None
+):
+    case = _cc_case()
+    case["provider_admissions"] = [
+        row for row in case["provider_admissions"] if row["account_id"] != "acct-r1"
+    ] + [
+        _cc_admission("acct-r1", "AUTHORITATIVE"),
+        _cc_admission("acct-r2", "AUTHORITATIVE"),
+    ]
+    case["nav"].append(_cc_nav("acct-r2", "2026-09-17", "10"))
+    case["nav"].append(_cc_nav("acct-z1", "2026-09-01", "2.5", source_key="manual"))
+
+    block = _cc_build(case)
+
+    assert block["reserve"]["status"] == "AVAILABLE"
+    assert block["reserve"]["current_value"]["value"] == "1010"
+    assert block["reserve"]["as_of_date"] == "2026-07-14"
+    assert block["retained_excluded"]["status"] == "AVAILABLE"
+    assert block["total_liquid"]["status"] == "AVAILABLE"
+    # systematic 500 + retained 7.5 + reserve 1010
+    assert block["total_liquid"]["current_value"]["value"] == "1517.5"
+    # The total is dated by its oldest component: echo-x's 2025-11-24 observation.
+    assert block["retained_excluded"]["as_of_date"] == "2025-11-24"
+    assert block["total_liquid"]["as_of_date"] == "2025-11-24"
+    checks = _cc_checks(block, case)
+    assert checks["capital-identity-at-cutoff"]["status"] == "PASS"
+    assert checks["capital-identity-at-cutoff"]["total_liquid_usd"] == "1517.5"
+
+
+def test_reserve_is_not_ready_when_no_account_is_assigned_to_the_reserve_pool() -> None:
+    case = _cc_case()
+    case["assignments"] = [
+        row for row in case["assignments"] if row["pool_id"] != "reserve-capital"
+    ]
+
+    reserve = _cc_build(case)["reserve"]
+
+    assert reserve["status"] == "NOT_READY_AT_CUTOFF"
+    assert reserve["components"] == []
+    assert "no account" in reserve["reason"]
+
+
+def test_membership_honours_assignment_windows_inclusively_and_fails_closed() -> None:
+    base = _cc_case()
+    base["assignments"] = [
+        _cc_assignment("acct-a1", "alpha", "2026-09-17"),  # starts on the cutoff
+        _cc_assignment("acct-a2", "alpha", "2026-01-01", "2026-09-17"),  # ends on it
+        _cc_assignment("acct-b1", "bravo", "2026-09-18"),  # starts after it
+        _cc_assignment("acct-c1", "charlie", "2026-01-01", "2026-09-16"),  # ended
+    ]
+    rows = _cc_rows(_cc_build(base))
+    assert [member["account_id"] for member in rows["alpha"]["members"]] == [
+        "acct-a1",
+        "acct-a2",
+    ]
+    assert rows["bravo"]["members"] == []
+    assert rows["charlie"]["members"] == []
+    assert rows["bravo"]["status"] == "NOT_READY_AT_CUTOFF"
+
+    missing_start = _cc_case()
+    missing_start["assignments"].append(_cc_assignment("acct-c1", "charlie", None))
+    with pytest.raises(
+        baseline.BaselineValidationError, match="explicit effective_start"
+    ):
+        _cc_build(missing_start)
+
+    unregistered = _cc_case()
+    unregistered["assignments"].append(_cc_assignment("acct-c1", "delta", "2026-01-01"))
+    with pytest.raises(baseline.BaselineValidationError, match="unregistered strategy"):
+        _cc_build(unregistered)
+
+    double_owner = _cc_case()
+    double_owner["assignments"].append(
+        _cc_assignment("acct-a1", "charlie", "2026-02-01")
+    )
+    with pytest.raises(
+        baseline.BaselineValidationError, match="more than one strategy"
+    ):
+        _cc_build(double_owner)
+
+
+def test_independent_recompute_agrees_with_the_published_block() -> None:
+    case = _cc_case()
+    block = _cc_build(case)
+    scopes = {row["strategy_id"]: row["scope"] for row in block["strategies"]}
+
+    recomputed = baseline._recompute_strategy_capital(
+        scopes=scopes,
+        assignments=case["assignments"],
+        nav=case["nav"],
+        valuation_date=CUTOFF,
+    )
+
+    assert recomputed == {
+        "alpha": (Decimal("150"), date(2026, 9, 17), ("acct-a1", "acct-a2")),
+        "bravo": (Decimal("200"), date(2026, 9, 3), ("acct-b1",)),
+        "charlie": (Decimal("150"), date(2026, 9, 17), ("acct-c1",)),
+        "echo-x": (Decimal("5"), date(2025, 11, 24), ("acct-e1",)),
+        "zulu-x": (None, None, ("acct-z1",)),
+    }
+
+
+def test_current_reconciliations_pass_not_ready_and_fail_from_an_independent_recompute() -> (
+    None
+):
+    """(b) A corrupted current value must FAIL; a literal PASS cannot survive."""
+    case = _cc_case()
+    block = _cc_build(case)
+    checks = _cc_checks(block, case)
+
+    assert set(checks) == {
+        "strategy-capital-to-cutoff-account-values",
+        "capital-identity-at-cutoff",
+    }
+    capital = checks["strategy-capital-to-cutoff-account-values"]
+    assert capital["status"] == "PASS"
+    assert capital["systematic_total_usd"] == "500"
+    assert capital["mismatches"] == []
+    # Reserve, retained-excluded and total liquid are not current: NOT_READY, never PASS.
+    identity = checks["capital-identity-at-cutoff"]
+    assert identity["status"] == "NOT_READY"
+    assert identity["not_ready_components"] == [
+        "reserve",
+        "retained_excluded",
+        "total_liquid",
+    ]
+    assert "total_liquid_usd" not in identity
+
+    corrupted = copy.deepcopy(block)
+    _cc_rows(corrupted)["alpha"]["current_value"]["value"] = "151"
+    failed = _cc_checks(corrupted, case)["strategy-capital-to-cutoff-account-values"]
+    assert failed["status"] == "FAIL"
+    assert [row["strategy_id"] for row in failed["mismatches"]] == ["alpha"]
+    assert failed["mismatches"][0]["recomputed_usd"] == "150"
+    assert failed["mismatches"][0]["published_usd"] == "151"
+
+    stale_date = copy.deepcopy(block)
+    _cc_rows(stale_date)["bravo"]["as_of_date"] = "2026-09-17"
+    assert (
+        _cc_checks(stale_date, case)["strategy-capital-to-cutoff-account-values"][
+            "status"
+        ]
+        == "FAIL"
+    )
+
+    drifted_members = copy.deepcopy(block)
+    _cc_rows(drifted_members)["alpha"]["members"].pop()
+    assert (
+        _cc_checks(drifted_members, case)["strategy-capital-to-cutoff-account-values"][
+            "status"
+        ]
+        == "FAIL"
+    )
+
+    wrong_total = copy.deepcopy(block)
+    wrong_total["systematic"]["current_value"]["value"] = "501"
+    assert (
+        _cc_checks(wrong_total, case)["capital-identity-at-cutoff"]["status"] == "FAIL"
+    )
+
+    wrong_weight = copy.deepcopy(block)
+    _cc_rows(wrong_weight)["alpha"]["current_weight"] = "0.31"
+    assert (
+        _cc_checks(wrong_weight, case)["capital-identity-at-cutoff"]["status"] == "FAIL"
+    )
+
+
+def test_current_reconciliation_rejects_false_availability_of_a_not_ready_component() -> (
+    None
+):
+    case = _cc_case()
+    block = _cc_build(case)
+
+    audit_reserve = copy.deepcopy(block)
+    audit_reserve["reserve"]["status"] = "AVAILABLE"
+    audit_reserve["reserve"]["current_value"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "100043.62",
+    }
+    assert (
+        _cc_checks(audit_reserve, case)["capital-identity-at-cutoff"]["status"]
+        == "FAIL"
+    )
+
+    painted_total = copy.deepcopy(block)
+    painted_total["total_liquid"]["status"] = "AVAILABLE"
+    painted_total["total_liquid"]["current_value"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "505",
+    }
+    assert (
+        _cc_checks(painted_total, case)["capital-identity-at-cutoff"]["status"]
+        == "FAIL"
+    )
+
+    audit_excluded = copy.deepcopy(block)
+    zulu = _cc_rows(audit_excluded)["zulu-x"]
+    zulu["status"] = "AVAILABLE"
+    zulu["current_value"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "1068.45",
+    }
+    zulu["as_of_date"] = "2026-08-16"
+    assert (
+        _cc_checks(audit_excluded, case)["strategy-capital-to-cutoff-account-values"][
+            "status"
+        ]
+        == "FAIL"
+    )
+
+
+def test_a_required_strategy_that_is_not_ready_keeps_the_capital_check_not_ready() -> (
+    None
+):
+    case = _cc_case()
+    case["nav"] = [row for row in case["nav"] if row["account_id"] != "acct-a2"]
+    block = _cc_build(case)
+
+    check = _cc_checks(block, case)["strategy-capital-to-cutoff-account-values"]
+
+    assert check["status"] == "NOT_READY"
+    assert check["not_ready_strategy_ids"] == ["alpha"]
+    assert check["mismatches"] == []
+    assert "systematic_total_usd" not in check
+
+
+def test_builder_refuses_to_publish_a_failed_current_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path, _spec_data = _spec(tmp_path)
+    original = baseline._build_current_capital
+
+    def corrupted(**kwargs: Any) -> dict[str, Any]:
+        block: dict[str, Any] = original(**kwargs)
+        row = next(
+            item for item in block["strategies"] if item["status"] == "AVAILABLE"
+        )
+        row["current_value"]["value"] = "123456"
+        return block
+
+    monkeypatch.setattr(baseline, "_build_current_capital", corrupted)
+
+    with pytest.raises(baseline.BaselineValidationError, match="does not reconcile"):
+        baseline.build_catalog(spec_path)
+
+
+def test_baseline_publishes_current_checks_and_moves_the_audit_checks(
+    tmp_path: Path,
+) -> None:
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+
+    check_ids = [row["check_id"] for row in catalog["reconciliation_checks"]]
+    assert check_ids == [
+        "raw-nav-to-attribution-diagnostic",
+        "strategy-capital-to-cutoff-account-values",
+        "capital-identity-at-cutoff",
+    ]
+    statuses = {
+        row["check_id"]: row["status"] for row in catalog["reconciliation_checks"]
+    }
+    # Six synthetic strategies have no member, so nothing here may claim PASS.
+    assert statuses["strategy-capital-to-cutoff-account-values"] == "NOT_READY"
+    assert statuses["capital-identity-at-cutoff"] == "NOT_READY"
+
+    snapshot = catalog["audit_snapshot"]
+    assert snapshot["status"] == "HISTORICAL_REFERENCE"
+    assert snapshot["as_of_date"] == "2026-07-25"
+    assert snapshot["replay"] == catalog["replay"]
+    assert [row["check_id"] for row in snapshot["checks"]] == [
+        "allocation-to-audit-systematic-total",
+        "allocation-plus-reserve-to-liquid-total",
+    ]
+    assert {row["status"] for row in snapshot["checks"]} == {"PASS"}
+    assert snapshot["reserve"]["value_usd"] == "25"
+    assert snapshot["reserve"]["source_key"] == "current-portfolio-summary"
+    assert snapshot["reserve"]["source_effective_date"] == "2026-07-25"
+    assert snapshot["systematic_total_usd"] == "100"
+    assert snapshot["total_liquid_usd"] == "125"
+    # The dated reserve is never promoted into the current block.
+    reserve = catalog["current_capital"]["reserve"]
+    assert reserve["status"] == "NOT_READY_AT_CUTOFF"
+    assert reserve["current_value"]["value"] is None
+
+
+def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
+    tmp_path: Path,
+) -> None:
+    """(f) Dependence and attribution still consume the 2026-08-16 snapshot."""
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+
+    assert "current_capital" in catalog
+    assert (
+        hashlib.sha256(canonical_json_bytes(catalog["allocations"])).hexdigest()
+        == LEGACY_ALLOCATIONS_SHA256
+    )
+    # Nothing but the new blocks and the two moved checks differs from the
+    # merge-base catalog: restoring them reproduces its exact bytes.
+    legacy = {
+        key: value
+        for key, value in catalog.items()
+        if key not in {"current_capital", "audit_snapshot"}
+    }
+    legacy["reconciliation_checks"] = [
+        catalog["reconciliation_checks"][0],
+        *catalog["audit_snapshot"]["checks"],
+    ]
+    assert (
+        hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
+        == LEGACY_CATALOG_SHA256
+    )
+
+
+def test_audit_snapshot_records_reserve_observation_dates_and_later_flows() -> None:
+    case = _cc_case()
+    replay = {
+        "reserve_total_usd": "100043.62",
+        "status": "PASS",
+        "systematic_total_usd": "446546.09",
+        "total_liquid_usd": "546589.71",
+    }
+    flows = [
+        {  # after r1's 2026-07-14 observation, inside the snapshot window
+            "account_id": "acct-r1",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-6901"},
+            "event_date": "2026-08-03",
+            "flow_type": "TRANSFER:INTERNAL:OUT",
+            "record_id": "ibkr:flow-1",
+        },
+        {
+            "account_id": "acct-r1",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-5309.52"},
+            "event_date": "2026-08-03",
+            "flow_type": "TRANSFER:INTERNAL:OUT",
+            "record_id": "ibkr:flow-2",
+        },
+        {  # on the observation date: already inside the observed balance
+            "account_id": "acct-r1",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-5000"},
+            "event_date": "2026-07-14",
+            "flow_type": "TRANSFER:INTERNAL:OUT",
+            "record_id": "ibkr:flow-3",
+        },
+        {  # after the snapshot date
+            "account_id": "acct-r1",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+            "event_date": "2026-08-17",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "record_id": "ibkr:flow-4",
+        },
+        {  # not a reserve account
+            "account_id": "acct-a1",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "9"},
+            "event_date": "2026-08-03",
+            "flow_type": "TRANSFER:INTERNAL:IN",
+            "record_id": "schwab:flow-5",
+        },
+    ]
+
+    snapshot = baseline._build_audit_snapshot(
+        as_of_date=date(2026, 8, 16),
+        replay=replay,
+        systematic_total=Decimal("446546.09"),
+        reserve_value=Decimal("100043.62"),
+        reserve_source_date=date(2026, 8, 16),
+        assignments=case["assignments"],
+        nav=case["nav"],
+        reference_flows=flows,
+    )
+
+    assert snapshot["status"] == "HISTORICAL_REFERENCE"
+    assert snapshot["as_of_date"] == "2026-08-16"
+    assert snapshot["replay"] == replay
+    assert snapshot["systematic_total_usd"] == "446546.09"
+    assert snapshot["total_liquid_usd"] == "546589.71"
+    assert snapshot["checks"] == [
+        {
+            "check_id": "allocation-to-audit-systematic-total",
+            "status": "PASS",
+            "value_usd": "446546.09",
+        },
+        {
+            "check_id": "allocation-plus-reserve-to-liquid-total",
+            "status": "PASS",
+            "value_usd": "546589.71",
+        },
+    ]
+    reserve = snapshot["reserve"]
+    assert reserve["value_usd"] == "100043.62"
+    assert reserve["source_effective_date"] == "2026-08-16"
+    assert reserve["account_observations"] == [
+        {"account_id": "acct-r1", "as_of_date": "2026-07-14", "value_usd": "1000"}
+    ]
+    assert reserve["accounts_without_observation"] == ["acct-r2"]
+    assert reserve["account_observations_total_usd"] == "1000"
+    assert reserve["unexplained_difference_usd"] == "99043.62"
+    assert [
+        (row["record_id"], row["event_date"], row["amount"]["value"])
+        for row in reserve["post_observation_flows"]
+    ] == [
+        ("ibkr:flow-1", "2026-08-03", "-6901"),
+        ("ibkr:flow-2", "2026-08-03", "-5309.52"),
+    ]
+
+
+def _cc_schema_validator(definition: str) -> Draft202012Validator:
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    return Draft202012Validator(
+        {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            "$ref": f"#/$defs/{definition}",
+        }
+    )
+
+
+def test_catalog_schema_requires_and_closes_the_current_capital_blocks(
+    tmp_path: Path,
+) -> None:
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert {"current_capital", "audit_snapshot"} <= set(schema["required"])
+    assert schema["properties"]["current_capital"] == {
+        "$ref": "#/$defs/current_capital"
+    }
+    assert schema["properties"]["audit_snapshot"] == {"$ref": "#/$defs/audit_snapshot"}
+
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    validator = _cc_schema_validator("current_capital")
+    validator.validate(catalog["current_capital"])
+    validator.validate(_cc_build(_cc_case()))
+    _cc_schema_validator("audit_snapshot").validate(catalog["audit_snapshot"])
+
+    # Paired bad cases: false availability and unknown keys are structurally refused.
+    painted = copy.deepcopy(catalog["current_capital"])
+    painted["strategies"][0]["current_value"] = {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": "20",
+    }
+    with pytest.raises(ValidationError):
+        validator.validate(painted)
+
+    mismatched = copy.deepcopy(catalog["current_capital"])
+    mismatched["strategies"][0]["status"] = "NOT_READY_AT_CUTOFF"
+    with pytest.raises(ValidationError):
+        validator.validate(mismatched)
+
+    unknown = copy.deepcopy(catalog["current_capital"])
+    unknown["audit_reserve_usd"] = "100043.62"
+    with pytest.raises(ValidationError, match="Additional properties"):
+        validator.validate(unknown)
+
+    snapshot = copy.deepcopy(catalog["audit_snapshot"])
+    snapshot["status"] = "CURRENT"
+    with pytest.raises(ValidationError, match="HISTORICAL_REFERENCE"):
+        _cc_schema_validator("audit_snapshot").validate(snapshot)
+
+
+def test_excluded_registry_strategy_is_a_retained_row_in_a_built_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path, _spec_data = _spec(tmp_path)
+    monkeypatch.setattr(
+        baseline, "_hwm_policy_exclusions", lambda: {"strategy-9": date(2026, 7, 1)}
+    )
+
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    rows = _cc_rows(catalog["current_capital"])
+
+    assert rows["strategy-9"]["scope"] == "RETAINED_EXCLUDED"
+    assert rows["strategy-9"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert _cc_value(rows["strategy-9"]) is None
+    # The audit table still says 10 for it, only in the dated allocations.
+    audit = {
+        row["strategy_id"]: row["current_value"]["value"]
+        for row in catalog["allocations"]
+        if row["scope"] == "SYSTEMATIC"
+    }
+    assert audit["strategy-9"] == "10"
+    assert "strategy-9" not in catalog["current_capital"]["systematic"]["components"]
+    assert catalog["current_capital"]["retained_excluded"]["components"] == [
+        "strategy-9"
+    ]
+
+
+def _load_materializer() -> Any:
+    materializer_spec = importlib.util.spec_from_file_location(
+        "portfolio_pipeline_materialize_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py",
+    )
+    assert materializer_spec is not None and materializer_spec.loader is not None
+    module = importlib.util.module_from_spec(materializer_spec)
+    materializer_spec.loader.exec_module(module)
+    return module
+
+
+def test_materializer_verifies_the_catalog_the_real_builder_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1.3 seam regression: producer output -> consumer, no mocked producer.
+
+    ``build_catalog`` runs for real over the synthetic sources; the materializer's
+    ``financial_identities`` verification then recomputes the block it published
+    from the catalog's own NAV facts and assignments, and rejects it once the
+    published bytes are corrupted.
+    """
+
+    materializer = _load_materializer()
+    spec_path, _spec_data = _spec(tmp_path)
+    # Strategies 4-9 are retained-excluded, so strategies 1-3 are the whole required
+    # set and the producer publishes real current values and weights.
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+    )
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+
+    block = catalog["current_capital"]
+    assert block["systematic"]["status"] == "AVAILABLE"
+    assert block["systematic"]["current_value"]["value"] == "61"  # 11 + 20 + 30
+    weights = {
+        row["strategy_id"]: Decimal(row["current_weight"])
+        for row in block["strategies"]
+        if row["scope"] == "SYSTEMATIC"
+    }
+    with localcontext() as context:
+        context.prec = 60
+        assert sum(weights.values(), Decimal(0)) == 1
+        for strategy_id, value in (
+            ("strategy-1", 11),
+            ("strategy-2", 20),
+            ("strategy-3", 30),
+        ):
+            assert abs(weights[strategy_id] - Decimal(value) / Decimal(61)) < Decimal(
+                "1e-32"
+            )
+
+    accepted, evidence = materializer._current_capital_identity(catalog)
+
+    assert accepted is True
+    assert evidence["strategy_mismatches"] == []
+    assert evidence["component_mismatches"] == []
+    assert evidence["problems"] == []
+    assert evidence["systematic_total_usd"] == "61"
+    # The excluded strategies have no account, and there is no reserve account:
+    # reported as not current, never stamped PASS.
+    assert evidence["identity_status"] == "NOT_READY"
+    assert evidence["not_ready_components"] == [
+        "reserve",
+        "retained_excluded",
+        "total_liquid",
+    ]
+
+    corrupted = copy.deepcopy(catalog)
+    _cc_rows(corrupted["current_capital"])["strategy-1"]["current_value"]["value"] = (
+        "12"
+    )
+    rejected, evidence = materializer._current_capital_identity(corrupted)
+
+    assert rejected is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["strategy_mismatches"] == ["strategy-1"]
+
+
+def _ledger_admission(
+    account_id: str, provider_id: str, disposition: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "account_reconciliation_sha256": hashlib.sha256(
+            account_id.encode()
+        ).hexdigest(),
+        "disposition": disposition,
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-07-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "nav_observations",
+        "pool_id": None,
+        "provider_id": provider_id,
+        "strategy_id": None,
+    }
+
+
+def _ledger_nav(
+    account_id: str, provider_id: str, day: str, value: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "as_of_date": day,
+        "mapping_status": "MAPPED",
+        "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        "provider_id": provider_id,
+        "record_id": f"{provider_id}:nav-{account_id}-{day}",
+    }
+
+
+def _provider_ledger_catalog_for_current_capital(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reserve_disposition: str,
+) -> dict[str, Any]:
+    """Build a baseline through the production path (spec v3 + provider ledger v2).
+
+    Strategies 1-3 are valued by AUTHORITATIVE provider NAVs dated 2026-07-29 (newer
+    than their legacy CSV rows); account-schwab-b is a reserve-pool account whose
+    2026-07-29 provider NAV carries ``reserve_disposition``; strategies 4-9 are
+    retained-excluded by policy and have no account.
+    """
+
+    spec_path, spec = _spec(tmp_path, reserve_accounts=("account-schwab-b",))
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=[
+            _ledger_nav("account-schwab-a", "schwab", "2026-07-29", "12"),
+            _ledger_nav("account-ibkr", "ibkr", "2026-07-29", "22"),
+            _ledger_nav("account-alpaca", "alpaca", "2026-07-29", "33"),
+            _ledger_nav("account-schwab-b", "schwab", "2026-07-29", "45"),
+        ],
+        flows=[
+            {
+                "account_id": "account-schwab-b",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-3"},
+                "event_date": "2026-07-10",
+                "flow_type": "TRANSFER:INTERNAL:OUT",
+                "mapping_status": "UNMAPPED",
+                "provider_id": "schwab",
+                "record_id": "schwab:flow-1",
+            }
+        ],
+        admissions=[
+            _ledger_admission("account-schwab-a", "schwab", "AUTHORITATIVE"),
+            _ledger_admission("account-ibkr", "ibkr", "AUTHORITATIVE"),
+            _ledger_admission("account-alpaca", "alpaca", "AUTHORITATIVE"),
+            _ledger_admission("account-schwab-b", "schwab", reserve_disposition),
+        ],
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+    )
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    assert isinstance(catalog, dict)
+    return catalog
+
+
+def test_provider_ledger_path_values_current_capital_and_gates_the_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production (spec v3) path: newer admitted NAVs win; REFERENCE_ONLY is not authority."""
+
+    materializer = _load_materializer()
+    catalog = _provider_ledger_catalog_for_current_capital(
+        tmp_path, monkeypatch, reserve_disposition="REFERENCE_ONLY"
+    )
+
+    block = catalog["current_capital"]
+    rows = _cc_rows(block)
+    assert {
+        strategy_id: (_cc_value(rows[strategy_id]), rows[strategy_id]["as_of_date"])
+        for strategy_id in ("strategy-1", "strategy-2", "strategy-3")
+    } == {
+        "strategy-1": ("12", "2026-07-29"),
+        "strategy-2": ("22", "2026-07-29"),
+        "strategy-3": ("33", "2026-07-29"),
+    }
+    assert [member["source_key"] for member in rows["strategy-1"]["members"]] == [
+        "provider-ledger"
+    ]
+    assert block["systematic"]["current_value"]["value"] == "67"
+    assert block["systematic"]["as_of_date"] == "2026-07-29"
+    assert block["retained_excluded"]["status"] == "NOT_READY_AT_CUTOFF"
+    # The reserve account's provider NAV is admitted REFERENCE_ONLY: not capital authority.
+    reserve = block["reserve"]
+    assert reserve["status"] == "NOT_READY_AT_CUTOFF"
+    assert reserve["current_value"]["value"] is None
+    assert [
+        (member["account_id"], member["authority"]) for member in reserve["members"]
+    ] == [("account-schwab-b", "NAV_NOT_AUTHORITATIVE")]
+    assert "SCHWAB" in reserve["reason"] and "REFERENCE_ONLY" in reserve["reason"]
+    checks = {row["check_id"]: row for row in catalog["reconciliation_checks"]}
+    assert checks["strategy-capital-to-cutoff-account-values"]["status"] == "PASS"
+    assert (
+        checks["strategy-capital-to-cutoff-account-values"]["systematic_total_usd"]
+        == "67"
+    )
+    assert checks["capital-identity-at-cutoff"]["status"] == "NOT_READY"
+    # The dated audit snapshot still carries the audit reserve, with the observation
+    # dates and the reserve-account flow booked after them (from the ledger's flows).
+    snapshot = catalog["audit_snapshot"]
+    assert snapshot["reserve"]["value_usd"] == "25"
+    assert snapshot["reserve"]["account_observations"] == [
+        {
+            "account_id": "account-schwab-b",
+            "as_of_date": "2026-07-06",
+            "value_usd": "41",
+        }
+    ]
+    assert snapshot["reserve"]["unexplained_difference_usd"] == "-16"
+    assert [
+        row["record_id"] for row in snapshot["reserve"]["post_observation_flows"]
+    ] == ["schwab:flow-1"]
+    # The independent consumer agrees with what the producer published.
+    accepted, evidence = materializer._current_capital_identity(catalog)
+    assert accepted is True
+    assert evidence["strategy_mismatches"] == [] == evidence["component_mismatches"]
+
+
+def test_provider_ledger_path_publishes_an_authoritatively_admitted_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materializer = _load_materializer()
+    catalog = _provider_ledger_catalog_for_current_capital(
+        tmp_path, monkeypatch, reserve_disposition="AUTHORITATIVE"
+    )
+
+    reserve = catalog["current_capital"]["reserve"]
+    assert reserve["status"] == "AVAILABLE"
+    assert reserve["current_value"]["value"] == "45"
+    assert reserve["as_of_date"] == "2026-07-29"
+    assert [
+        (member["account_id"], member["authority"], member["as_of_date"])
+        for member in reserve["members"]
+    ] == [("account-schwab-b", "AUTHORITATIVE", "2026-07-29")]
+    # Retained-excluded is still not current, so the identity cannot pass yet.
+    identity = {row["check_id"]: row for row in catalog["reconciliation_checks"]}[
+        "capital-identity-at-cutoff"
+    ]
+    assert identity["status"] == "NOT_READY"
+    assert identity["not_ready_components"] == ["retained_excluded", "total_liquid"]
+    accepted, evidence = materializer._current_capital_identity(catalog)
+    assert accepted is True
+    assert evidence["component_mismatches"] == []
+    assert evidence["not_ready_components"] == ["retained_excluded", "total_liquid"]

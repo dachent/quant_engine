@@ -398,8 +398,16 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
     },
     {
         "id": "baseline-generation",
-        "source_paths": (_BASELINE, _RELEASE, _PREPARATION),
-        "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
+        "source_paths": (
+            _BASELINE,
+            _RELEASE,
+            _PREPARATION,
+            "schemas/portfolio/baseline-catalog.schema.json",
+        ),
+        "contracts": (
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "schemas/portfolio/baseline-catalog.schema.json",
+        ),
         "producer": (_BASELINE, "stage_baseline"),
         "artifacts": ("portfolio-baseline.json", "generation.json"),
         "consumers": ((_RELEASE, "build_baseline"), (_DEPENDENCE, "build_source")),

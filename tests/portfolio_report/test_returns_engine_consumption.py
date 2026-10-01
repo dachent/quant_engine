@@ -1767,8 +1767,13 @@ def _publish_single_link_sole_account_report(
         ],
     }
     full = _full_report_fixture()
+    baseline = {**full._baseline_catalog(), **catalog}
+    # The epoch manifest funds one account, so it is the only account row besides the
+    # reserve: the baseline's current capital stands on it (one account, every strategy).
     baseline_root = full._published_baseline(
-        tmp_path, {**full._baseline_catalog(), **catalog}
+        tmp_path,
+        baseline,
+        capital_funding=full.capital_fixture.shared_funding(baseline, account_id),
     )
     monkeypatch.setattr(
         full.reporter,

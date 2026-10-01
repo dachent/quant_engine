@@ -5513,12 +5513,13 @@ def _write_matrixport_valuation_evidence(
     day: str,
     value: str,
     valuation_source: str = "api_reported_usd_value",
+    currency: str = "USDT",
 ) -> tuple[Path, Path]:
     holdings_path = totals_path.with_name("daily_holdings.csv")
     holdings_path.write_text(
         "utc_date,product_id,share,currency,native_value,valuation_source,"
         "value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
-        f"{day},P1,1,USDT,{value},{valuation_source},1,{value},{value}\n",
+        f"{day},P1,1,{currency},{value},{valuation_source},1,{value},{value}\n",
         encoding="utf-8-sig",
     )
     quality_path = totals_path.with_name("valuation_quality_issues.csv")
@@ -8252,8 +8253,15 @@ def _matrixport_subscription_fixture(
     tmp_path: Path,
     *,
     holdings_value: str = "49891.55",
+    currency: str = "USDT",
+    valuation_source: str = "assumed_stablecoin_parity",
 ) -> tuple[object, dict[str, object]]:
-    """One Robuxio subscription whose only holding is parity-labelled USDT."""
+    """One Robuxio subscription whose only holding is parity-labelled USDT.
+
+    ``currency`` and ``valuation_source`` swap the subscription and holding
+    currency, and the holding's valuation label, for the paths that need a USD
+    subscription or a provider-reported USD value.
+    """
 
     run_id = "matrixport-source"
     csv_root = tmp_path / "output" / run_id / "csv"
@@ -8263,7 +8271,7 @@ def _matrixport_subscription_fixture(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
         "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
-        "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n",
+        f"49891.55,{currency},2025-12-05T21:34:17.414000+00:00\n",
         encoding="utf-8-sig",
     )
     totals_path = csv_root / "daily_portfolio_totals.csv"
@@ -8276,7 +8284,8 @@ def _matrixport_subscription_fixture(
         totals_path,
         day="2025-12-06",
         value=holdings_value,
-        valuation_source="assumed_stablecoin_parity",
+        valuation_source=valuation_source,
+        currency=currency,
     )
     manifest = _make_two_artifact_manifest(
         {
@@ -8320,7 +8329,11 @@ def test_matrixport_capital_anchor_opens_on_the_selected_daily_close(
     fx_generation_id = "f" * 64
     fx = (
         fx_generation_id,
-        {("USDT", date(2025, 12, 6)): Decimal("1.0003390312194824")},
+        {
+            # The anchor also carries the subscription day's close (T5a).
+            ("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658"),
+            ("USDT", date(2025, 12, 6)): Decimal("1.0003390312194824"),
+        },
         (),
     )
 
@@ -8454,6 +8467,334 @@ def test_matrixport_subscription_past_the_admitted_fx_end_fails_closed(
             _MATRIXPORT_ANCHOR_ASSIGNMENTS,
             fx_rates=fx,
         )
+
+
+# A non-USD capital anchor carries the event-date FX (cluster 2 task T5a).
+#
+# The contributed amount of a non-USD subscription converts once, at the rate of
+# the day the subscription was made: the contract's INVESTED_CAPITAL FX rule
+# ACCEPTED_EVENT_TIME_FX_FOR_NON_USD_FLOWS with MISSING_FX_IS_INCOMPLETE.  The
+# NAV-date rate keeps the valuation role (``valuation_fx`` and ``opening_nav``).
+
+_USDT_CONTRACT_CLOSE = {
+    date(2025, 12, 5): Decimal("1.0002319812774658"),
+    date(2025, 12, 6): Decimal("1.0003390312194824"),
+}
+
+
+def _usdt_contract_fx(
+    *days: date,
+) -> tuple[str, dict[tuple[str, date], Decimal], tuple[()]]:
+    """The contract FX generation's USDT closes for just the named days."""
+
+    return (
+        "f" * 64,
+        {("USDT", day): _USDT_CONTRACT_CLOSE[day] for day in days},
+        (),
+    )
+
+
+def _usdt_event_time_fx() -> dict[str, str]:
+    return {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": "2025-12-05",
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1.0002319812774658",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
+
+
+def _robuxio_capital_anchors(
+    tmp_path: Path,
+    *,
+    currency: str = "USDT",
+    valuation_source: str = "assumed_stablecoin_parity",
+    fx_rates: tuple[str, dict[tuple[str, date], Decimal], tuple[()]] | None = None,
+) -> list[dict[str, Any]]:
+    manifest, catalog = _matrixport_subscription_fixture(
+        tmp_path, currency=currency, valuation_source=valuation_source
+    )
+    return ledger._matrixport_capital_anchors(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+        fx_rates=fx_rates,
+    )
+
+
+def _capital_anchor_validator() -> Draft202012Validator:
+    """Validate one anchor against the real ledger schema's anchor definition."""
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return Draft202012Validator(
+        {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            **schema["properties"]["capital_anchors"]["items"],
+        }
+    )
+
+
+def _schema_capital_anchor(*, with_event_time_fx: bool) -> dict[str, Any]:
+    anchor: dict[str, Any] = {
+        "account_id": "account-d2e5821e608e25f1",
+        "amount": {"currency": "USDT", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "a" * 64,
+        "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "nav_source_artifact_id": "csv/daily_holdings.csv",
+        "opening_nav": {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": "49908.46479303836713372",
+        },
+        "provider_id": "matrixport",
+        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "source_artifact_id": "csv/subscription_details.csv",
+        "source_record_id": "7402822649690198016",
+        "strategy_id": "robuxio-crypto",
+    }
+    if with_event_time_fx:
+        anchor["event_time_fx"] = _usdt_event_time_fx()
+    return anchor
+
+
+def test_matrixport_non_usd_capital_anchor_fails_closed_without_an_event_date_rate(
+    tmp_path: Path,
+) -> None:
+    """MISSING_FX_IS_INCOMPLETE: no admitted close on the subscription's own day
+    means no anchor, not an anchor on a neighbouring day's rate.
+
+    The recognition-day close is present, so only the event-date rate is
+    missing: the NAV-date rate must not stand in for the contributed amount's.
+    """
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio FX lacks USDT/USD on 2025-12-05",
+    ):
+        _robuxio_capital_anchors(
+            tmp_path, fx_rates=_usdt_contract_fx(date(2025, 12, 6))
+        )
+
+
+def test_matrixport_non_usd_capital_anchor_carries_the_event_date_rate_and_converts_once(
+    tmp_path: Path,
+) -> None:
+    import portfolio_invested_capital as capital
+
+    anchors = _robuxio_capital_anchors(
+        tmp_path, fx_rates=_usdt_contract_fx(date(2025, 12, 5), date(2025, 12, 6))
+    )
+
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    # The contributed amount stays native: the rate rides beside it, so a
+    # consumer converts it once.
+    assert anchor["amount"] == {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    assert anchor["event_date"] == "2025-12-05"
+    assert anchor["event_time_fx"] == _usdt_event_time_fx()
+    # The NAV-date rate keeps the valuation role and is unchanged.
+    assert anchor["nav_recognition_date"] == "2025-12-06"
+    assert anchor["opening_nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "49908.46479303836713372",
+    }
+    assert [(item["date"], item["rate"]) for item in anchor["valuation_fx"]] == [
+        ("2025-12-06", "1.0003390312194824")
+    ]
+    # The producer's anchor is schema-valid and the repository's own reader of
+    # ledger facts converts it exactly once, at the event-date rate.
+    _capital_anchor_validator().validate(anchor)
+    usd = capital._source_effect_usd(anchor)
+    assert usd == Decimal("49891.55") * Decimal("1.0002319812774658")
+    assert usd.quantize(Decimal("1E-10")) == Decimal("49903.1239055037")
+    assert usd != Decimal(anchor["opening_nav"]["value"])
+
+
+@pytest.mark.parametrize("with_fx_generation", [False, True])
+def test_matrixport_usd_capital_anchor_is_byte_identical_and_carries_no_event_time_fx(
+    tmp_path: Path, with_fx_generation: bool
+) -> None:
+    """A USD subscription needs no conversion, so its anchor is what it was."""
+
+    anchors = _robuxio_capital_anchors(
+        tmp_path,
+        currency="USD",
+        valuation_source="api_reported_usd_value",
+        fx_rates=(
+            _usdt_contract_fx(date(2025, 12, 5), date(2025, 12, 6))
+            if with_fx_generation
+            else None
+        ),
+    )
+
+    expected: dict[str, Any] = {
+        "account_id": "account-d2e5821e608e25f1",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "gen-1",
+        "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "nav_source_artifact_id": (
+            "csv/daily_holdings.csv"
+            if with_fx_generation
+            else "csv/daily_portfolio_totals.csv"
+        ),
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
+        "provider_id": "matrixport",
+        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "source_artifact_id": "csv/subscription_details.csv",
+        "source_product_id": "7361599360326447104",
+        "source_record_id": "7402822649690198016",
+        "strategy_id": "robuxio-crypto",
+    }
+    if with_fx_generation:
+        # An all-USD day applied no rate, so its valuation evidence is empty.
+        expected["valuation_fx"] = []
+    assert len(anchors) == 1
+    assert "event_time_fx" not in anchors[0]
+    assert canonical_json_bytes(anchors[0]) == canonical_json_bytes(expected)
+
+
+def test_matrixport_non_usd_capital_anchor_without_an_fx_generation_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    """With no contract FX generation there is no rate to read an event-date
+    close from.  That route admits an anchor only on a provider-reported USD
+    value, and it is unchanged: the manifest lane fails closed on a non-USD
+    opening anchor that carries no ``event_time_fx``.
+
+    Unchanged means the whole anchor, byte for byte, so the expectation is the
+    complete object as literals, not derived from the producer under test.  It
+    was captured from the merge base (5ec8bf8) by running its producer on this
+    fixture (canonical-bytes sha256 2b71791e...), and the head producer emits
+    the same bytes.  A change to any anchor field on this route, not only the
+    amount currency or the absent ``event_time_fx``, fails here.
+    """
+
+    anchors = _robuxio_capital_anchors(
+        tmp_path, valuation_source="api_reported_usd_value"
+    )
+
+    expected: dict[str, Any] = {
+        "account_id": "account-d2e5821e608e25f1",
+        "amount": {"currency": "USDT", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "gen-1",
+        "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "nav_source_artifact_id": "csv/daily_portfolio_totals.csv",
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
+        "provider_id": "matrixport",
+        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "source_artifact_id": "csv/subscription_details.csv",
+        "source_product_id": "7361599360326447104",
+        "source_record_id": "7402822649690198016",
+        "strategy_id": "robuxio-crypto",
+    }
+    assert len(anchors) == 1
+    assert "event_time_fx" not in anchors[0]
+    assert "valuation_fx" not in anchors[0]
+    assert anchors[0] == expected
+    assert canonical_json_bytes(anchors[0]) == canonical_json_bytes(expected)
+
+
+def test_provider_ledger_schema_admits_event_time_fx_on_a_capital_anchor() -> None:
+    validator = _capital_anchor_validator()
+
+    assert not list(
+        validator.iter_errors(_schema_capital_anchor(with_event_time_fx=True))
+    )
+    # The property is optional: a USD anchor carries none.
+    assert not list(
+        validator.iter_errors(_schema_capital_anchor(with_event_time_fx=False))
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_property", ["event_time_fx_typo", "eventTimeFx", "native_fx", "fx"]
+)
+def test_provider_ledger_schema_still_rejects_any_other_capital_anchor_property(
+    extra_property: str,
+) -> None:
+    validator = _capital_anchor_validator()
+    anchor = _schema_capital_anchor(with_event_time_fx=False)
+    assert not list(validator.iter_errors(anchor))
+
+    anchor[extra_property] = _usdt_event_time_fx()
+    errors = list(validator.iter_errors(anchor))
+
+    assert [error.validator for error in errors] == ["additionalProperties"]
+    assert extra_property in errors[0].message
+
+
+@pytest.mark.parametrize(
+    "defect", ["extra_key", "missing_rate", "empty_rate", "array_not_object"]
+)
+def test_provider_ledger_schema_pins_the_anchor_event_time_fx_shape(
+    defect: str,
+) -> None:
+    """The shape is the wallet flows' single FX object, not an array."""
+
+    anchor = _schema_capital_anchor(with_event_time_fx=True)
+    fx = anchor["event_time_fx"]
+    if defect == "extra_key":
+        fx["unexpected"] = "x"
+    elif defect == "missing_rate":
+        del fx["rate"]
+    elif defect == "empty_rate":
+        fx["rate"] = ""
+    else:
+        anchor["event_time_fx"] = [fx]
+
+    errors = list(_capital_anchor_validator().iter_errors(anchor))
+
+    assert errors
+    assert all(list(error.absolute_path)[:1] == ["event_time_fx"] for error in errors)
+
+
+def test_provider_ledger_schema_keeps_the_anchor_valuation_fx_shape() -> None:
+    """``valuation_fx`` shares the FX object definition with ``event_time_fx``;
+    sharing it must not loosen the valuation evidence."""
+
+    validator = _capital_anchor_validator()
+    anchor = _schema_capital_anchor(with_event_time_fx=False)
+    anchor["valuation_fx"] = [{**_usdt_event_time_fx(), "date": "2025-12-06"}]
+    assert not list(validator.iter_errors(anchor))
+
+    anchor["valuation_fx"][0]["unexpected"] = "x"
+    errors = list(validator.iter_errors(anchor))
+
+    assert errors
+    assert all(list(error.absolute_path)[:1] == ["valuation_fx"] for error in errors)
 
 
 def _ibkr_flow(

@@ -1898,6 +1898,63 @@ def test_blocked_static_receipt_facts_bind_refuses_everything_else(
     )
 
 
+def test_blocked_static_receipt_nav_count_must_cover_the_calculation_rows() -> None:
+    """W19(a) (seat mutation MS-1): the receipt's NAV count binds the stripped row.
+
+    The calculation row of a BLOCKED epoch is a sub-projection of the ledger
+    window its receipt describes, so the receipt cannot have counted fewer NAV
+    rows than the row holds.  Every other clause accepts the receipt below: it is
+    well formed, its window is the epoch's, the row holds no flow and no anchor,
+    and both NAV dates lie inside the receipt's own first and last dates.  The
+    row count is the only difference between the good and the bad case, so
+    removing the ``len(nav_rows) > nav[0]`` clause is the only way to accept
+    the bad one.  The refusal case ``more_calculation_nav_than_receipt_nav``
+    above is also refused by the date-containment clause, and the fixture
+    mutation ``blocked_nav_count_below_calculation`` by the null-date clause, so
+    neither of them isolates the count.
+    """
+
+    start, end = "2025-11-25", "2026-01-04"
+    two_nav_rows = _stripped_calculation_row(
+        nav_observations=[
+            {"as_of_date": "2025-12-01", "value": "100"},
+            {"as_of_date": "2026-01-04", "value": "101"},
+        ]
+    )
+    bind = reporter._blocked_static_receipt_facts_bind
+
+    # Good: the receipt counted both rows, or more (the ledger window is wider).
+    assert bind(_blocked_facts(nav=_summary(2, start, end)), two_nav_rows, start, end)
+    assert bind(_blocked_facts(nav=_summary(41, start, end)), two_nav_rows, start, end)
+    # Bad: the receipt counted one row; the calculation row holds two, both inside
+    # the receipt's own first and last dates.
+    assert not bind(
+        _blocked_facts(nav=_summary(1, start, end)), two_nav_rows, start, end
+    )
+
+
+def test_report_r3_allow_list_equals_the_hwm_selected_input_allow_list() -> None:
+    """W19(b): the report's restated R3 allow-list cannot drift from the HWM one.
+
+    ``tools/portfolio_report.py`` restates ``_R3_ZERO_CAPITAL_REASONS`` so that
+    ``packages/`` stays free of tools imports; the HWM selected-input gate
+    (``tools/portfolio_hwm_selected_inputs.py``) holds the original.  A reason
+    admitted on one side only would let a funded epoch pass the HWM gate and fail
+    the report, or the other way round.  Both hold exactly the one reason the
+    return engine emits for a zero-capital run.
+    """
+
+    # Imported at run time, not collection (see the ``selected_hwm`` fixture of
+    # tests/core/test_hwm_selected_inputs_nonperformance.py for why).
+    import portfolio_hwm_selected_inputs as selected_hwm
+    from quant_engine.portfolio_ledger.returns import ZERO_CAPITAL_RETURN_UNDEFINED
+
+    assert reporter._R3_ZERO_CAPITAL_REASONS == selected_hwm._R3_ZERO_CAPITAL_REASONS
+    assert selected_hwm._R3_ZERO_CAPITAL_REASONS == frozenset(
+        {ZERO_CAPITAL_RETURN_UNDEFINED}
+    )
+
+
 def test_verified_epoch_details_feed_the_summed_value_reconcile_with_the_r3_member(
     tmp_path: Path,
 ) -> None:

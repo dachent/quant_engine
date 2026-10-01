@@ -19,11 +19,13 @@ A check that cannot evaluate raises; the runner turns that into a blocking
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import math
+from pathlib import Path
 import re
 from typing import Any
 
@@ -32,13 +34,17 @@ from .generation import (
     APP,
     PAYLOAD_FILES,
     CANDIDATE,
+    CENSUS_CONTRACT,
     FRESHNESS,
     GENERATION_MANIFEST,
     INDEX,
     PANEL,
     PANEL_SCRIPT,
     REPORT,
+    ContractCensus,
     Generation,
+    GenerationError,
+    load_contract_census,
 )
 
 BLOCKER_INVARIANT = "BLOCKER_INVARIANT"
@@ -188,6 +194,10 @@ class Context:
     expected_not_derivable: list[dict[str, Any]] = field(default_factory=list)
     corrections: list[dict[str, Any]] | None = None
     _cache: dict[str, Any] = field(default_factory=dict)
+    # The repository whose ``contracts/`` the census check reads (upstream authority,
+    # never a production output). ``None`` is the checkout that holds this module,
+    # which is where ``tools/validate_generation.py`` runs from.
+    repo_root: Path | None = None
 
     @property
     def report(self) -> dict[str, Any]:
@@ -328,29 +338,36 @@ def _finding(
 # ----------------------------------------------------------------- derived indices
 
 
-def twr_rows(ctx: Context) -> list[tuple[int, dict[str, Any]]]:
+TableRow = tuple[int, dict[str, Any]]
+
+
+def twr_rows(ctx: Context) -> list[TableRow]:
     return list(enumerate(rows(ctx.report, "twr_mwr")))
 
 
-def manifest_rows(
-    ctx: Context,
-) -> dict[tuple[str, str, str], tuple[int, dict[str, Any]]]:
+def manifest_rows(ctx: Context) -> list[TableRow]:
+    """Every row of the panel's account manifest and its position, in panel order.
+
+    Not an index: two epochs of one account and strategy that start together (a funded
+    epoch re-cut from a blocked epoch's start) are two rows, and neither replaces the
+    other. Whatever needs the row of ONE epoch asks ``manifest_match``.
+    """
+
     cached = ctx._cache.get("manifest_rows")
-    if isinstance(cached, dict):
+    if isinstance(cached, list):
         return cached
-    index: dict[tuple[str, str, str], tuple[int, dict[str, Any]]] = {}
-    for position, row in enumerate(rows(node(ctx.panel, "account_manifest"), "rows")):
-        key = (
-            str(row.get("account_id")),
-            str(row.get("strategy_id")),
-            str(row.get("effective_start")),
-        )
-        index[key] = (position, row)
-    ctx._cache["manifest_rows"] = index
-    return index
+    entries = list(enumerate(rows(node(ctx.panel, "account_manifest"), "rows")))
+    ctx._cache["manifest_rows"] = entries
+    return entries
 
 
 def epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    """The label of an epoch's row in a finding: ``account|strategy|effective_start``.
+
+    A label only. Epochs that start together share it, so no row is ever matched or
+    combined by it: that is ``epoch_identity`` (``manifest_match``, ``report_match``).
+    """
+
     return (
         str(row.get("account_id")),
         str(row.get("strategy_id")),
@@ -419,6 +436,480 @@ def compound_window(
     if not selected:
         return None, 0
     return compound(selected), len(selected)
+
+
+# ------------------------- blocked epoch rows and the contract census (L6a, N26)
+#
+# A ``BLOCKED_ADMISSION`` epoch is a governed outcome, not a numeric view: its epoch
+# is an ``ASSIGNMENT_ONLY`` interval of the contract census, and spec R2 keeps those
+# out of account TWR / MWR / flows (the oracle's account values are the funded
+# epoch's values). The report publishes such a row with null windows and values, so
+# comparing it with an account-level expected value can only give a false
+# regression. The validator therefore skips a blocked row, and its matched panel
+# manifest row, for the account-level expected metrics, but only when the census it
+# reads from upstream authority confirms the row: the census must be the very bytes
+# the expected baseline pins, hold an ASSIGNMENT_ONLY assignment with the row's
+# (strategy_id, effective_start, effective_end), hold no FUNDED_MEMBERSHIP
+# assignment with that tuple, and hold at least as many ASSIGNMENT_ONLY assignments
+# as blocked rows share the tuple. Anything else fails closed: the row is compared
+# exactly as before and ``identity.blocked_admission_census`` says why.
+#
+# What is skipped is exactly what was confirmed: a report row that is itself a blocked
+# admission, and a panel manifest row that is itself blocked, that has the whole
+# identity (account, strategy, effective_start, effective_end) of a confirmed blocked
+# row. The coarser ``epoch_key`` (no ``effective_end``) is only a label: a funded epoch
+# re-cut from the same start shares it, and keying the skip by it hid that funded row's
+# contradiction with the oracle (lane epsilon fix round 1, a). The account-level window
+# recompute (``recompute_metric``) leaves a confirmed blocked epoch out the same way;
+# the strategy-level recompute is unchanged.
+#
+# The panel manifest rows keep their whole identity everywhere else too (fix round 2):
+# ``manifest_rows`` is every row, none replaced by a row that shares its
+# (account, strategy, effective_start), and a report row is matched with the manifest row
+# of its own epoch (``manifest_match``, ``report_match``). The one-row-per-key index let
+# a blocked manifest row listed after a funded one stand in for it: the funded row's
+# trace, net capital and panel views left every aggregation and every match. A row whose
+# whole identity the other table lacks is still compared with the row of its kind that
+# shares its start, never with a row of the other kind.
+#
+# Fix round 3 (Codex lane-eps-r2) closes the two ways that left a disagreement unsaid.
+# The stand-in was compared on its numbers alone, so two tables that differed only in an
+# epoch's end produced no finding at all: every use of a stand-in is now a finding of its
+# own (``epoch_disagreements``, said by ``check_epoch_identity``). And a row whose whole
+# identity the other table holds only as a row of the OTHER kind used to be matched with
+# that row all the same, a funded row read against a blocked one: it has no row now (no
+# sibling stands in either, its epoch is there as something else) and the admission
+# disagreement is the finding. Declining the match without a finding would have left the
+# end-only case silent: no existing finding compares the report's ``twr_mwr`` rows with
+# the panel's ``account_manifest`` rows (``preservation.report_to_panel`` maps
+# ``twr_mwr`` to the panel's ``performance`` table).
+
+CENSUS_CHECK = "identity.blocked_admission_census"
+_ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
+_FUNDED_MEMBERSHIP = "FUNDED_MEMBERSHIP"
+_CENSUS_DEFECTS = ("N26",)
+
+EpochTuple = tuple[str, str | None, str | None]
+EpochIdentity = tuple[str, str, str, str]
+
+
+def is_blocked_admission(row: Mapping[str, Any]) -> bool:
+    """A ``twr_mwr`` row whose two statuses both say the epoch was blocked."""
+
+    return (
+        row.get("twr_status") == "BLOCKED_ADMISSION"
+        and row.get("epoch_admission_status") == "BLOCKED"
+    )
+
+
+def is_blocked_manifest_row(row: Mapping[str, Any]) -> bool:
+    """A panel manifest row whose two statuses both say the epoch was blocked."""
+
+    return (
+        row.get("status") == "BLOCKED_ADMISSION"
+        and row.get("admission_status") == "BLOCKED"
+    )
+
+
+def epoch_identity(row: Mapping[str, Any]) -> EpochIdentity:
+    """An epoch's whole identity, on a report row and on a panel manifest row alike.
+
+    ``epoch_key`` leaves out ``effective_end``; two epochs of one account and strategy
+    that share a start (a re-cut) share it, so whatever must act on one epoch only
+    uses this.
+    """
+
+    return (
+        str(row.get("account_id")),
+        str(row.get("strategy_id")),
+        str(row.get("effective_start")),
+        str(row.get("effective_end")),
+    )
+
+
+def _identity_index(
+    entries: Iterable[TableRow],
+) -> dict[EpochIdentity, list[TableRow]]:
+    index: dict[EpochIdentity, list[TableRow]] = {}
+    for entry in entries:
+        index.setdefault(epoch_identity(entry[1]), []).append(entry)
+    return index
+
+
+# What a pair of rows that carry one epoch apart disagree about; also the field of the
+# report row the finding points at.
+END_DISAGREEMENT = "effective_end"
+ADMISSION_DISAGREEMENT = "epoch_admission_status"
+
+
+@dataclass(frozen=True)
+class EpochMatch:
+    """What the other table holds for one row's epoch.
+
+    ``row`` is the row the comparisons read, ``None`` when there is none. ``disagreement``
+    is ``None`` for an exact match (the row of the whole identity and of the row's
+    kind), ``END_DISAGREEMENT`` when ``row`` is a stand-in that shares only the start,
+    ``ADMISSION_DISAGREEMENT`` when the whole identity is held only by rows of the other
+    kind (``row`` is ``None``: nothing is read across kinds). ``partners`` are the rows
+    a disagreement is with.
+    """
+
+    row: TableRow | None
+    disagreement: str | None = None
+    partners: tuple[TableRow, ...] = ()
+
+
+def _same_epoch(
+    index: Mapping[EpochIdentity, Sequence[TableRow]],
+    row: Mapping[str, Any],
+    blocked: bool,
+    is_blocked: Callable[[Mapping[str, Any]], bool],
+) -> EpochMatch:
+    """What ``index`` holds for ``row``'s own epoch.
+
+    The entries with ``row``'s whole identity; among those the last one that is blocked
+    exactly when ``row`` is (a funded and a blocked row can share even the whole
+    identity): an exact match. Entries with the whole identity but none of ``row``'s
+    kind: no row at all, and an ``ADMISSION_DISAGREEMENT`` with every one of them. The
+    epoch of the other kind is never ``row``'s row, and no sibling stands in for it
+    either: its own epoch is there, as something else (fix round 3: this used to fall
+    back to the entries of the other kind, so a funded row was read against a blocked
+    one). When no entry has the whole identity, the last entry that is blocked exactly
+    when ``row`` is and shares only its (account, strategy, effective_start) stands in,
+    with an ``END_DISAGREEMENT``: a table that carries the epoch with another end
+    contradicts the other table, which a comparison of numbers alone would never say
+    (fix round 3). Nothing qualifies: no row, no disagreement.
+    """
+
+    own = index.get(epoch_identity(row))
+    if own:
+        alike = [entry for entry in own if is_blocked(entry[1]) == blocked]
+        if alike:
+            return EpochMatch(alike[-1])
+        return EpochMatch(None, ADMISSION_DISAGREEMENT, tuple(own))
+    key = epoch_key(row)
+    sharing = [
+        entry
+        for identity, group in index.items()
+        if identity[:3] == key
+        for entry in group
+        if is_blocked(entry[1]) == blocked
+    ]
+    if not sharing:
+        return EpochMatch(None)
+    stand_in = max(sharing, key=lambda entry: entry[0])
+    return EpochMatch(stand_in, END_DISAGREEMENT, (stand_in,))
+
+
+def _manifest_epoch(ctx: Context, row: Mapping[str, Any]) -> EpochMatch:
+    index = ctx._cache.get("manifest_by_identity")
+    if not isinstance(index, dict):
+        index = _identity_index(manifest_rows(ctx))
+        ctx._cache["manifest_by_identity"] = index
+    return _same_epoch(index, row, is_blocked_admission(row), is_blocked_manifest_row)
+
+
+def _report_epoch(ctx: Context, row: Mapping[str, Any]) -> EpochMatch:
+    index = ctx._cache.get("twr_by_identity")
+    if not isinstance(index, dict):
+        index = _identity_index(twr_rows(ctx))
+        ctx._cache["twr_by_identity"] = index
+    return _same_epoch(index, row, is_blocked_manifest_row(row), is_blocked_admission)
+
+
+def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The panel manifest row of one ``twr_mwr`` row: the row of its own epoch."""
+
+    return _manifest_epoch(ctx, row).row
+
+
+def report_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The ``twr_mwr`` row of one panel manifest row: the same match, the other way."""
+
+    return _report_epoch(ctx, row).row
+
+
+@dataclass(frozen=True)
+class EpochDisagreement:
+    """One ``twr_mwr`` row and one panel manifest row that carry one epoch apart.
+
+    ``kind`` is ``END_DISAGREEMENT`` (they share account, strategy and start, and no
+    row of either table has the other's whole identity: one stands in for the other)
+    or ``ADMISSION_DISAGREEMENT`` (they share the whole identity and only one of them is
+    a blocked admission).
+    """
+
+    kind: str
+    report: TableRow
+    panel: TableRow
+
+
+def epoch_disagreements(ctx: Context) -> list[EpochDisagreement]:
+    """Every pair of rows, one per table, that carry one epoch apart.
+
+    Each report row asks the panel and each panel row asks the report, so a row that only
+    one table carries (a second end for the epoch) is found from the table that has it;
+    a pair that both sides find is one pair. Ordered by report row, then panel row.
+    """
+
+    cached = ctx._cache.get("epoch_disagreements")
+    if isinstance(cached, list):
+        return cached
+    pairs: dict[tuple[int, int], EpochDisagreement] = {}
+    for entry in twr_rows(ctx):
+        match = _manifest_epoch(ctx, entry[1])
+        if match.disagreement is not None:
+            for partner in match.partners:
+                pairs[(entry[0], partner[0])] = EpochDisagreement(
+                    match.disagreement, entry, partner
+                )
+    for entry in manifest_rows(ctx):
+        match = _report_epoch(ctx, entry[1])
+        if match.disagreement is not None:
+            for partner in match.partners:
+                pairs[(partner[0], entry[0])] = EpochDisagreement(
+                    match.disagreement, partner, entry
+                )
+    found = [pairs[key] for key in sorted(pairs)]
+    ctx._cache["epoch_disagreements"] = found
+    return found
+
+
+def _day_text(value: Any) -> str | None:
+    """A date as comparable text: ``None`` stays ``None``; junk never matches a date."""
+
+    if value is None:
+        return None
+    day = to_date(value)
+    return day.isoformat() if day is not None else f"<unreadable:{value!r}>"
+
+
+def _epoch_tuple(row: Mapping[str, Any]) -> EpochTuple:
+    return (
+        str(row.get("strategy_id")),
+        _day_text(row.get("effective_start")),
+        _day_text(row.get("effective_end")),
+    )
+
+
+@dataclass(frozen=True)
+class CensusState:
+    """The census when it can be trusted, else why it cannot."""
+
+    census: ContractCensus | None
+    problem: str | None
+
+
+def _census_authority_digests(ctx: Context) -> tuple[set[str], bool]:
+    """The census digests the expected baseline pins, and whether a pointer is unusable."""
+
+    digests: set[str] = set()
+    unusable = False
+    for row in ctx.expected or []:
+        pointers = row.get("authority_pointer")
+        if not isinstance(pointers, list):
+            continue
+        for pointer in pointers:
+            if (
+                not isinstance(pointer, Mapping)
+                or pointer.get("path") != CENSUS_CONTRACT
+            ):
+                continue
+            digest = pointer.get("sha256")
+            if isinstance(digest, str) and digest:
+                digests.add(digest.lower())
+            else:
+                unusable = True
+    return digests, unusable
+
+
+def _read_census(ctx: Context) -> CensusState:
+    if ctx.expected is None:
+        return CensusState(
+            None,
+            "no expected baseline was supplied, so the census has no authority "
+            "pointer to be bound to",
+        )
+    digests, unusable = _census_authority_digests(ctx)
+    if unusable:
+        return CensusState(
+            None, f"an authority pointer for {CENSUS_CONTRACT} carries no sha256"
+        )
+    if not digests:
+        return CensusState(
+            None,
+            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT}",
+        )
+    if len(digests) > 1:
+        return CensusState(
+            None,
+            f"the expected baseline pins several digests for {CENSUS_CONTRACT}: "
+            f"{sorted(digests)}",
+        )
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    try:
+        census = load_contract_census(root)
+    except GenerationError as exc:
+        return CensusState(None, str(exc))
+    (pinned,) = digests
+    if census.sha256 != pinned:
+        return CensusState(
+            None,
+            f"the census contract sha256 {census.sha256} differs from the expected "
+            f"baseline's authority pointer {pinned}",
+        )
+    return CensusState(census, None)
+
+
+def census_state(ctx: Context) -> CensusState:
+    cached = ctx._cache.get("census_state")
+    if isinstance(cached, CensusState):
+        return cached
+    state = _read_census(ctx)
+    ctx._cache["census_state"] = state
+    return state
+
+
+@dataclass(frozen=True)
+class BlockedEpochs:
+    """The blocked rows the census confirmed (skipped) and the findings about the rest."""
+
+    skipped: frozenset[EpochIdentity]
+    findings: tuple[Finding, ...]
+
+    def skips_report_row(self, row: Mapping[str, Any]) -> bool:
+        """Whether this ``twr_mwr`` row is a blocked admission the census confirmed."""
+
+        return is_blocked_admission(row) and epoch_identity(row) in self.skipped
+
+    def skips_manifest_row(self, row: Mapping[str, Any]) -> bool:
+        """Whether this manifest row is the blocked row of a confirmed blocked epoch."""
+
+        return is_blocked_manifest_row(row) and epoch_identity(row) in self.skipped
+
+
+def _classify_blocked_epochs(ctx: Context) -> BlockedEpochs:
+    blocked = [
+        (position, row) for position, row in twr_rows(ctx) if is_blocked_admission(row)
+    ]
+    if not blocked:
+        return BlockedEpochs(frozenset(), ())
+    state = census_state(ctx)
+    census = state.census
+    if census is None:
+        return BlockedEpochs(
+            frozenset(),
+            (
+                _finding(
+                    CENSUS_CHECK,
+                    NOT_READY,
+                    "contract-census",
+                    state.problem,
+                    "a readable contract census whose sha256 equals the expected "
+                    "baseline's authority pointer",
+                    CENSUS_CONTRACT,
+                    "$.current_census.account_sleeves",
+                    _CENSUS_DEFECTS,
+                    f"the contract census cannot confirm the {len(blocked)} blocked "
+                    f"epoch row(s) ({state.problem}); no blocked row is skipped",
+                ),
+            ),
+        )
+    assignment_only: Counter[EpochTuple] = Counter()
+    funded: Counter[EpochTuple] = Counter()
+    for assignment in census.assignments:
+        key = (
+            assignment.strategy_id,
+            _day_text(assignment.effective_start),
+            _day_text(assignment.effective_end),
+        )
+        if assignment.status == _ASSIGNMENT_ONLY:
+            assignment_only[key] += 1
+        elif assignment.status == _FUNDED_MEMBERSHIP:
+            funded[key] += 1
+    groups: dict[EpochTuple, list[tuple[int, dict[str, Any]]]] = {}
+    for position, row in blocked:
+        groups.setdefault(_epoch_tuple(row), []).append((position, row))
+    skipped: set[EpochIdentity] = set()
+    findings: list[Finding] = []
+    for key, group in groups.items():
+        reasons: list[str] = []
+        if assignment_only[key] == 0:
+            reasons.append(
+                "the census holds no ASSIGNMENT_ONLY assignment with this "
+                "(strategy_id, effective_start, effective_end)"
+            )
+        if funded[key] > 0:
+            reasons.append(
+                f"the census holds {funded[key]} FUNDED_MEMBERSHIP assignment(s) "
+                "with this tuple"
+            )
+        if reasons:
+            for position, row in group:
+                findings.append(
+                    _finding(
+                        CENSUS_CHECK,
+                        BLOCKER_AUTHORITY,
+                        "|".join(epoch_key(row)),
+                        {
+                            "strategy_id": key[0],
+                            "effective_start": row.get("effective_start"),
+                            "effective_end": row.get("effective_end"),
+                            "twr_status": row.get("twr_status"),
+                            "epoch_admission_status": row.get("epoch_admission_status"),
+                            "epoch_blocking_reason": row.get("epoch_blocking_reason"),
+                        },
+                        {
+                            "census": CENSUS_CONTRACT,
+                            "requires": "an ASSIGNMENT_ONLY assignment with this "
+                            "(strategy_id, effective_start, effective_end) and no "
+                            "FUNDED_MEMBERSHIP assignment with it",
+                        },
+                        REPORT,
+                        f"$.twr_mwr[{position}]",
+                        _CENSUS_DEFECTS,
+                        "the blocked epoch row is not an ASSIGNMENT_ONLY census "
+                        "interval: " + "; ".join(reasons),
+                    )
+                )
+        elif len(group) > assignment_only[key]:
+            findings.append(
+                _finding(
+                    CENSUS_CHECK,
+                    BLOCKER_AUTHORITY,
+                    "|".join(str(part) for part in key),
+                    {
+                        "blocked_rows": len(group),
+                        "accounts": sorted(
+                            str(row.get("account_id")) for _, row in group
+                        ),
+                    },
+                    {"assignment_only_assignments_at_least": len(group)},
+                    REPORT,
+                    f"$.twr_mwr[{group[0][0]}]",
+                    _CENSUS_DEFECTS,
+                    f"{len(group)} blocked rows share this (strategy_id, "
+                    f"effective_start, effective_end) but the census holds only "
+                    f"{assignment_only[key]} ASSIGNMENT_ONLY assignment(s); none of "
+                    "them is skipped",
+                )
+            )
+        else:
+            skipped.update(epoch_identity(row) for _, row in group)
+    return BlockedEpochs(frozenset(skipped), tuple(findings))
+
+
+def blocked_epochs(ctx: Context) -> BlockedEpochs:
+    cached = ctx._cache.get("blocked_epochs")
+    if isinstance(cached, BlockedEpochs):
+        return cached
+    result = _classify_blocked_epochs(ctx)
+    ctx._cache["blocked_epochs"] = result
+    return result
 
 
 # ------------------------------------------ epoch HPR span receipts (C1 section 5-5)
@@ -1610,6 +2101,20 @@ def check_absolute_paths(ctx: Context) -> Iterator[Finding]:
     )
 
 
+def check_blocked_admission_census(ctx: Context) -> Iterator[Finding]:
+    """N26/R2: every BLOCKED_ADMISSION epoch row is an ASSIGNMENT_ONLY census interval.
+
+    A blocked row is skipped by the account-level expected metrics only when this
+    check has nothing to say about it (see ``blocked_epochs``). A row whose tuple the
+    census does not hold, a tuple the census funds, or more blocked rows than the
+    census counts is a ``BLOCKER_AUTHORITY``; a census that cannot be read, or whose
+    bytes the expected baseline does not pin, is one ``NOT_READY`` and nothing is
+    skipped. Silent when the report has no blocked row.
+    """
+
+    yield from blocked_epochs(ctx).findings
+
+
 def check_cutoff_consistency(ctx: Context) -> Iterator[Finding]:
     cutoff = ctx.cutoff.isoformat()
     for file, path, value in (
@@ -2138,6 +2643,322 @@ def check_reconciliation_recompute(ctx: Context) -> Iterator[Finding]:
             )
 
 
+# -------------------------- value-basis bounds and the oracle (L6c, N28)
+#
+# A strategy whose admitted FX ends before the cutoff has no USD value past that end
+# (FXB-1), so a published date before the cutoff can be correct. The report says so
+# in its top-level ``value_basis_bounds`` block. The validator never takes that
+# block at its word: a date finding becomes ``NOT_READY`` instead of
+# ``BLOCKER_AUTHORITY`` only when an entry of the block has the finding's
+# (section, entity, date) and a non-empty ``bounded_by``, and the oracle confirms it
+# -- every bounded strategy has an expected ``capital.strategy.cutoff`` row whose
+# ``as_of`` is that date -- and, for an account entry, the account is one the block
+# declares for a ``bounded_by`` strategy (lens entries name no account and are
+# exempt). ``dates.value_basis_bound`` then checks the block itself against the
+# oracle and the validator's cutoff. Without an expected baseline nothing is
+# reclassified and only the oracle-free clauses of the block check run.
+
+BOUNDS_CHECK = "dates.value_basis_bound"
+_BOUNDS_BLOCK = "value_basis_bounds"
+_BOUNDS_DEFECTS = ("N28",)
+
+
+@dataclass(frozen=True)
+class BoundStrategy:
+    position: int
+    strategy_id: str
+    effective_end: date
+    raw_end: Any
+    # The accounts the block declares for the strategy; empty when ``account_ids`` is
+    # not a list of strings, so that an unreadable list binds no account.
+    account_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BoundedSection:
+    position: int
+    section: str
+    entity: str
+    day: date
+    bounded_by: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ValueBasisDisclosure:
+    """The ``value_basis_bounds`` block as read, with every structural problem."""
+
+    cutoff: date | None
+    raw_cutoff: Any
+    strategies: tuple[BoundStrategy, ...]
+    sections: tuple[BoundedSection, ...]
+    problems: tuple[str, ...]
+
+
+def _read_value_basis_disclosure(block: Any) -> ValueBasisDisclosure:
+    if not isinstance(block, Mapping):
+        return ValueBasisDisclosure(
+            None, None, (), (), ("value_basis_bounds is not an object",)
+        )
+    problems: list[str] = []
+    raw_cutoff = block.get("calculation_cutoff_date")
+    cutoff = to_date(raw_cutoff)
+    if cutoff is None:
+        problems.append("calculation_cutoff_date is not a date")
+    strategies: list[BoundStrategy] = []
+    raw_strategies = block.get("strategies")
+    if not isinstance(raw_strategies, list):
+        problems.append("strategies is not a list")
+    else:
+        seen: set[str] = set()
+        for position, item in enumerate(raw_strategies):
+            strategy_id = item.get("strategy_id") if isinstance(item, Mapping) else None
+            if not isinstance(strategy_id, str) or not strategy_id:
+                problems.append(f"strategies[{position}] has no strategy_id")
+                continue
+            if strategy_id in seen:
+                problems.append(
+                    f"strategies[{position}] repeats strategy {strategy_id}"
+                )
+                continue
+            seen.add(strategy_id)
+            raw_end = item.get("effective_end")
+            end = to_date(raw_end)
+            if end is None:
+                problems.append(f"strategies[{position}].effective_end is not a date")
+                continue
+            raw_accounts = item.get("account_ids")
+            account_ids = (
+                tuple(raw_accounts)
+                if isinstance(raw_accounts, list)
+                and all(isinstance(account, str) for account in raw_accounts)
+                else ()
+            )
+            strategies.append(
+                BoundStrategy(position, strategy_id, end, raw_end, account_ids)
+            )
+    sections: list[BoundedSection] = []
+    raw_sections = block.get("bounded_sections")
+    if not isinstance(raw_sections, list):
+        problems.append("bounded_sections is not a list")
+    else:
+        for position, item in enumerate(raw_sections):
+            if not isinstance(item, Mapping):
+                problems.append(f"bounded_sections[{position}] is not an object")
+                continue
+            section, entity = item.get("section"), item.get("entity")
+            bounded_by = item.get("bounded_by")
+            day = to_date(item.get("date"))
+            if not isinstance(section, str) or not isinstance(entity, str):
+                problems.append(
+                    f"bounded_sections[{position}] has no section or entity"
+                )
+            elif day is None:
+                problems.append(f"bounded_sections[{position}].date is not a date")
+            elif not isinstance(bounded_by, list) or not all(
+                isinstance(name, str) and name for name in bounded_by
+            ):
+                problems.append(
+                    f"bounded_sections[{position}].bounded_by is not a list of strategy ids"
+                )
+            else:
+                sections.append(
+                    BoundedSection(position, section, entity, day, tuple(bounded_by))
+                )
+    return ValueBasisDisclosure(
+        cutoff, raw_cutoff, tuple(strategies), tuple(sections), tuple(problems)
+    )
+
+
+def value_basis_disclosure(ctx: Context) -> ValueBasisDisclosure | None:
+    """The report's ``value_basis_bounds`` block, or ``None`` when it has none."""
+
+    if "value_basis_disclosure" in ctx._cache:
+        cached = ctx._cache["value_basis_disclosure"]
+        return cached if isinstance(cached, ValueBasisDisclosure) else None
+    block = ctx.report.get(_BOUNDS_BLOCK)
+    result = None if block is None else _read_value_basis_disclosure(block)
+    ctx._cache["value_basis_disclosure"] = result
+    return result
+
+
+def _oracle_cutoff_dates(ctx: Context) -> dict[str, frozenset[date]] | None:
+    """Per strategy, the ``as_of`` dates of its expected ``capital.strategy.cutoff`` rows.
+
+    ``None`` without an expected baseline; a strategy whose rows carry no ``as_of``
+    maps to an empty set (the oracle names no date for it).
+    """
+
+    if ctx.expected is None:
+        return None
+    cached = ctx._cache.get("oracle_cutoff_dates")
+    if isinstance(cached, dict):
+        return cached
+    found: dict[str, set[date]] = {}
+    for row in ctx.expected:
+        if row.get("metric_id") != "capital.strategy.cutoff":
+            continue
+        days = found.setdefault(str(row.get("entity")), set())
+        day = to_date(row.get("as_of"))
+        if day is not None:
+            days.add(day)
+    result = {strategy: frozenset(days) for strategy, days in found.items()}
+    ctx._cache["oracle_cutoff_dates"] = result
+    return result
+
+
+def verified_value_basis_bound(
+    ctx: Context, section: str, entity: str, day: date
+) -> BoundedSection | None:
+    """The block entry that explains this date, when the oracle confirms it.
+
+    The entry has the same (section, entity, date) and a non-empty ``bounded_by``,
+    the date precedes the cutoff, the block has no structural problem, and every
+    bounded strategy has an expected ``capital.strategy.cutoff`` row whose only
+    ``as_of`` is that date. An ``account_summary`` entry also has to name an account
+    the block itself declares (``strategies[*].account_ids``) for at least one of its
+    ``bounded_by`` strategies: published view against published view, the oracle
+    holding no account-to-strategy map. Without that the date could belong to an
+    account the bound says nothing about, and a real freshness blocker would be
+    relabelled. A ``decomposition_lenses`` entry is exempt: its entity is
+    ``{lens_id}:{evidence_mode}``, not an account id, and only the oracle check above
+    ties it to its strategies. ``None`` means the finding is unchanged.
+    """
+
+    disclosure = value_basis_disclosure(ctx)
+    oracle = _oracle_cutoff_dates(ctx)
+    if disclosure is None or disclosure.problems or oracle is None or day >= ctx.cutoff:
+        return None
+    declared = {item.strategy_id: item.account_ids for item in disclosure.strategies}
+    for entry in disclosure.sections:
+        if (
+            (entry.section, entry.entity, entry.day) == (section, entity, day)
+            and entry.bounded_by
+            and all(oracle.get(name) == frozenset({day}) for name in entry.bounded_by)
+            and (
+                section != "account_summary"
+                or any(entity in declared.get(name, ()) for name in entry.bounded_by)
+            )
+        ):
+            return entry
+    return None
+
+
+def _bound_message(entry: BoundedSection, what: str) -> str:
+    return (
+        f"{what} ends before the cutoff only because the value basis of "
+        f"{', '.join(entry.bounded_by)} ends at that date (value_basis_bounds entry "
+        "confirmed by the oracle capital.strategy.cutoff as_of, FXB-1)"
+    )
+
+
+def check_value_basis_bound(ctx: Context) -> Iterator[Finding]:
+    """N28/FXB-1: the report's ``value_basis_bounds`` block against the oracle.
+
+    ``BLOCKER_AUTHORITY`` for a bounded strategy whose ``effective_end`` differs from
+    the oracle's ``capital.strategy.cutoff`` ``as_of`` (a missing oracle row counts)
+    or whose block ``calculation_cutoff_date`` differs from the validator cutoff;
+    ``BLOCKER_INVARIANT`` for an entry whose date is not the earliest
+    ``effective_end`` over its ``bounded_by`` (empty, or naming a strategy the
+    block does not list) and for a block the check cannot read. Without an expected
+    baseline only the oracle-free clauses run. Silent when the report has no block.
+    """
+
+    disclosure = value_basis_disclosure(ctx)
+    if disclosure is None:
+        return
+    for problem in disclosure.problems:
+        yield _finding(
+            BOUNDS_CHECK,
+            BLOCKER_INVARIANT,
+            _BOUNDS_BLOCK,
+            problem,
+            "a well-formed value_basis_bounds block",
+            REPORT,
+            f"$.{_BOUNDS_BLOCK}",
+            _BOUNDS_DEFECTS,
+            f"the value-basis disclosure cannot be read: {problem}",
+        )
+    oracle = _oracle_cutoff_dates(ctx)
+    for strategy in disclosure.strategies:
+        reasons: list[str] = []
+        expected_end: Any = None
+        if oracle is not None:
+            days = oracle.get(strategy.strategy_id, frozenset())
+            expected_end = (
+                next(iter(days)).isoformat()
+                if len(days) == 1
+                else sorted(day.isoformat() for day in days) or None
+            )
+            if not days:
+                reasons.append(
+                    "the oracle has no capital.strategy.cutoff row with an as_of "
+                    f"for {strategy.strategy_id}"
+                )
+            elif days != frozenset({strategy.effective_end}):
+                reasons.append(
+                    f"effective_end {strategy.effective_end} differs from the oracle "
+                    f"capital.strategy.cutoff as_of {expected_end}"
+                )
+        if disclosure.cutoff is not None and disclosure.cutoff != ctx.cutoff:
+            reasons.append(
+                f"calculation_cutoff_date {disclosure.cutoff} differs from the "
+                f"declared cutoff {ctx.cutoff}"
+            )
+        if reasons:
+            yield _finding(
+                BOUNDS_CHECK,
+                BLOCKER_AUTHORITY,
+                strategy.strategy_id,
+                {
+                    "effective_end": strategy.raw_end,
+                    "calculation_cutoff_date": disclosure.raw_cutoff,
+                },
+                {
+                    "effective_end": expected_end,
+                    "calculation_cutoff_date": ctx.cutoff,
+                },
+                REPORT,
+                f"$.{_BOUNDS_BLOCK}.strategies[{strategy.position}]",
+                _BOUNDS_DEFECTS,
+                "the value-basis bound is not the oracle's: " + "; ".join(reasons),
+            )
+    ends = {
+        strategy.strategy_id: strategy.effective_end
+        for strategy in disclosure.strategies
+    }
+    for entry in disclosure.sections:
+        reason = None
+        if not entry.bounded_by:
+            reason = (
+                "bounded_by is empty, so no strategy's value basis ends at the date"
+            )
+        else:
+            unknown = [name for name in entry.bounded_by if name not in ends]
+            if unknown:
+                reason = (
+                    f"bounded_by names strategies the block does not bound: {unknown}"
+                )
+            else:
+                earliest = min(ends[name] for name in entry.bounded_by)
+                if entry.day != earliest:
+                    reason = (
+                        f"the date {entry.day} is not the earliest effective_end "
+                        f"({earliest}) over bounded_by"
+                    )
+        if reason is not None:
+            yield _finding(
+                BOUNDS_CHECK,
+                BLOCKER_INVARIANT,
+                f"{entry.section}|{entry.entity}",
+                {"date": entry.day, "bounded_by": list(entry.bounded_by)},
+                "date = min(effective_end over bounded_by)",
+                REPORT,
+                f"$.{_BOUNDS_BLOCK}.bounded_sections[{entry.position}]",
+                _BOUNDS_DEFECTS,
+                f"the value-basis entry is inconsistent: {reason}",
+            )
+
+
 def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
     """B4/B13: current capital must be dated at the declared cutoff."""
 
@@ -2163,16 +2984,20 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
     for position, row in enumerate(rows(ctx.report, "account_summary")):
         as_of = to_date(row.get("as_of_date"))
         if as_of is not None and as_of < cutoff and is_available(row.get("status")):
+            account = str(row.get("account_id"))
+            bound = verified_value_basis_bound(ctx, "account_summary", account, as_of)
             yield _finding(
                 "capital.as_of_cutoff",
-                BLOCKER_AUTHORITY,
-                str(row.get("account_id")),
+                BLOCKER_AUTHORITY if bound is None else NOT_READY,
+                account,
                 row.get("as_of_date"),
                 cutoff,
                 REPORT,
                 f"$.account_summary[{position}].as_of_date",
                 ("B4",),
-                "current account value is presented available but dated before the cutoff",
+                "current account value is presented available but dated before the cutoff"
+                if bound is None
+                else _bound_message(bound, "current account value"),
             )
     if stale_allocations:
         for position, row in enumerate(rows(ctx.report, "reconciliation_checks")):
@@ -2262,15 +3087,88 @@ def check_strategy_vs_cutoff_accounts(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def check_account_identity(ctx: Context) -> Iterator[Finding]:
-    """Account-row capital arithmetic and terminal values agree across views."""
+def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
+    """The report and the panel carry each account epoch alike (fix round 3).
 
+    One ``BLOCKER_INVARIANT`` per pair of a ``twr_mwr`` row and a panel manifest row
+    that carry one epoch apart (``epoch_disagreements``), pointing at the report row:
+    the two ends when one row stands in for the other, the two admission statuses when
+    the epoch's whole identity is held only as a row of the other kind. They are
+    published as ``capital.account_identity`` because no check id names an epoch
+    identity; this is the one whose subject is the account's epoch row across the report
+    and the panel, entity ``account|strategy|effective_start`` like its siblings. No
+    defect id is attached: none describes it.
+    """
+
+    for item in epoch_disagreements(ctx):
+        position, row = item.report
+        panel_position, panel_row = item.panel
+        shown = {
+            "report": {
+                "row": position,
+                "effective_end": row.get("effective_end"),
+                "twr_status": row.get("twr_status"),
+                "epoch_admission_status": row.get("epoch_admission_status"),
+            },
+            "panel": {
+                "row": panel_position,
+                "effective_end": panel_row.get("effective_end"),
+                "status": panel_row.get("status"),
+                "admission_status": panel_row.get("admission_status"),
+            },
+        }
+        key = epoch_key(row)
+        if item.kind == END_DISAGREEMENT:
+            expected = (
+                "the same effective_end in the report's twr_mwr row and the panel's "
+                "account_manifest row of one epoch"
+            )
+            message = (
+                f"the report row {position} of {key[0]} / {key[1]} from {key[2]} ends "
+                f"{row.get('effective_end')} but the panel manifest row {panel_position} "
+                f"of the same start ends {panel_row.get('effective_end')}: the two are "
+                "paired by account, strategy and start only, because one of them has "
+                "no counterpart with its whole identity in the other table"
+            )
+        else:
+            expected = (
+                "one admission kind for an epoch, blocked or not, in the report's "
+                "twr_mwr row and the panel's account_manifest row"
+            )
+            message = (
+                f"the report row {position} and the panel manifest row "
+                f"{panel_position} of {key[0]} / {key[1]} from {key[2]} (effective_end "
+                f"{row.get('effective_end')}) carry the same epoch but only one of "
+                "them is a blocked admission"
+            )
+        yield _finding(
+            "capital.account_identity",
+            BLOCKER_INVARIANT,
+            "|".join(key),
+            shown,
+            expected,
+            REPORT,
+            f"$.twr_mwr[{position}].{item.kind}",
+            (),
+            message,
+        )
+
+
+def check_account_identity(ctx: Context) -> Iterator[Finding]:
+    """Account-row capital arithmetic and terminal values agree across views.
+
+    And the two tables carry each account epoch alike (``check_epoch_identity``).
+    """
+
+    yield from check_epoch_identity(ctx)
     summary = {
         str(row.get("account_id")): (position, row)
         for position, row in enumerate(rows(ctx.report, "account_summary"))
     }
-    twr_by_key = {epoch_key(row): (position, row) for position, row in twr_rows(ctx)}
-    for key, (position, row) in sorted(manifest_rows(ctx).items()):
+    for position, row in sorted(
+        manifest_rows(ctx), key=lambda entry: epoch_key(entry[1])
+    ):
+        key = epoch_key(row)
         amounts = {
             name: to_decimal(row.get(name))
             for name in (
@@ -2317,7 +3215,7 @@ def check_account_identity(ctx: Context) -> Iterator[Finding]:
         views: dict[str, Decimal | None] = {
             "manifest.current_value": a["current_value"]
         }
-        matched = twr_by_key.get(key)
+        matched = report_match(ctx, row)
         if matched is not None:
             views["twr_mwr.mwr_terminal_value"] = to_decimal(
                 matched[1].get("mwr_terminal_value")
@@ -2654,7 +3552,6 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
 def check_twr_views(ctx: Context) -> Iterator[Finding]:
     """B1/B2/A1: every TWR shown for one account epoch and window must agree."""
 
-    manifest = manifest_rows(ctx)
     current = current_accounts_by_strategy(ctx)
     for position, row in twr_rows(ctx):
         key = epoch_key(row)
@@ -2666,7 +3563,7 @@ def check_twr_views(ctx: Context) -> Iterator[Finding]:
                 (to_date(row.get("observed_start")), to_date(row.get("observed_end"))),
             )
         ]
-        matched = manifest.get(key)
+        matched = manifest_match(ctx, row)
         if matched is not None:
             views.append(
                 (
@@ -3098,12 +3995,20 @@ def _interior_cashflows(row: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def check_flow_lists(ctx: Context) -> Iterator[Finding]:
-    """B1: the TWR flow list, the MWR cash flows and the capital trace are one list."""
+    """B1: the TWR flow list, the MWR cash flows and the capital trace are one list.
 
-    manifest = manifest_rows(ctx)
+    L6b (M3, N27): the MWR opens at the manifest's ``performance_opening_value`` (the
+    NAV at the boundary), not at the contributed ``opening_capital``, so the
+    non-terminal MWR cash flows sum to ``net_capital - opening_capital +
+    performance_opening_value``. A row without ``performance_opening_value`` (a
+    pre-M3 generation) keeps the original comparison with ``net_capital``. A row that
+    carries the value but no readable ``opening_capital`` is itself the finding: it
+    never falls back to the pre-M3 comparison (fix round 1).
+    """
+
     for position, row in twr_rows(ctx):
         key = epoch_key(row)
-        matched = manifest.get(key)
+        matched = manifest_match(ctx, row)
         if matched is None:
             continue
         trace = [
@@ -3132,7 +4037,59 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
             invested = -sum(
                 (to_decimal(item.get("amount")) or Decimal(0)) for item in flows[:-1]
             )
-            if abs(invested - net) > USD_TOLERANCE:
+            contributed = to_decimal(matched[1].get("opening_capital"))
+            performance_opening = to_decimal(
+                matched[1].get("performance_opening_value")
+            )
+            if performance_opening is not None:
+                if contributed is None:
+                    # An M3 row without a readable contributed basis cannot be tied
+                    # to its net capital; falling back to the pre-M3 comparison would
+                    # pass it, or blame net_capital, instead of naming the field.
+                    yield _finding(
+                        "returns.flow_lists_agree",
+                        BLOCKER_INVARIANT,
+                        "|".join(key),
+                        {
+                            "minus_sum_of_non_terminal_mwr_cashflows": invested,
+                            "net_capital": net,
+                            "performance_opening_value": performance_opening,
+                            "opening_capital": matched[1].get("opening_capital"),
+                        },
+                        {
+                            "opening_capital": "a readable amount beside the "
+                            "performance_opening_value"
+                        },
+                        REPORT,
+                        f"$.twr_mwr[{position}].mwr_cashflows",
+                        ("B1",),
+                        "the manifest row carries a performance opening value but no "
+                        "readable opening capital, so the MWR cash flows cannot be "
+                        "tied to its net capital",
+                    )
+                else:
+                    expected_invested = net - contributed + performance_opening
+                    if abs(invested - expected_invested) > USD_TOLERANCE:
+                        yield _finding(
+                            "returns.flow_lists_agree",
+                            BLOCKER_INVARIANT,
+                            "|".join(key),
+                            {"minus_sum_of_non_terminal_mwr_cashflows": invested},
+                            {
+                                "net_capital_less_opening_capital_plus_performance_"
+                                "opening_value": expected_invested,
+                                "net_capital": net,
+                                "opening_capital": contributed,
+                                "performance_opening_value": performance_opening,
+                            },
+                            REPORT,
+                            f"$.twr_mwr[{position}].mwr_cashflows",
+                            ("B1",),
+                            "MWR cash flows do not sum to the account's net capital "
+                            "with the performance opening value in place of the "
+                            "contributed opening capital",
+                        )
+            elif abs(invested - net) > USD_TOLERANCE:
                 yield _finding(
                     "returns.flow_lists_agree",
                     BLOCKER_INVARIANT,
@@ -3147,9 +4104,16 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
 
 
 def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
-    """B8: opening value, first cash flow and first-flow timing agree."""
+    """B8: opening value, first cash flow and first-flow timing agree.
 
-    manifest = manifest_rows(ctx)
+    L6b (M3, N27): the report's MWR opening value and date are the manifest's
+    ``performance_opening_value`` and ``performance_opening_date`` (the NAV at the
+    boundary). A manifest row without ``performance_opening_value`` (a pre-M3
+    generation) keeps the original comparison with ``opening_capital``. A row that
+    carries the value but no readable ``performance_opening_date`` cannot have its
+    opening date compared, and is itself the finding (fix round 1).
+    """
+
     for position, row in twr_rows(ctx):
         flows = [
             item for item in row.get("mwr_cashflows") or [] if isinstance(item, dict)
@@ -3164,15 +4128,34 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             "first_cashflow_date": flows[0].get("date"),
             "first_cashflow_amount": first_amount,
         }
-        matched = manifest.get(epoch_key(row))
-        manifest_opening = (
-            to_decimal(matched[1].get("opening_capital"))
+        matched = manifest_match(ctx, row)
+        performance_opening = (
+            to_decimal(matched[1].get("performance_opening_value"))
             if matched is not None
             else None
         )
-        if manifest_opening is not None:
-            observed["manifest_opening_capital"] = manifest_opening
-        bad = (
+        manifest_date: str | None = None
+        date_unreadable = False
+        if performance_opening is not None and matched is not None:
+            manifest_opening: Decimal | None = performance_opening
+            observed["manifest_performance_opening_value"] = performance_opening
+            raw_date = matched[1].get("performance_opening_date")
+            observed["manifest_performance_opening_date"] = raw_date
+            if isinstance(raw_date, str) and to_date(raw_date) is not None:
+                manifest_date = raw_date
+            else:
+                # the value is there, so the date has to be: a row that does not
+                # supply one must not pass the date clause by omission
+                date_unreadable = True
+        else:
+            manifest_opening = (
+                to_decimal(matched[1].get("opening_capital"))
+                if matched is not None
+                else None
+            )
+            if manifest_opening is not None:
+                observed["manifest_opening_capital"] = manifest_opening
+        disagree = (
             flows[0].get("date") != row.get("mwr_opening_date")
             or first_amount is None
             or abs(-first_amount - opening) > USD_TOLERANCE
@@ -3180,8 +4163,24 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
                 manifest_opening is not None
                 and abs(manifest_opening - opening) > USD_TOLERANCE
             )
+            or (
+                manifest_date is not None
+                and row.get("mwr_opening_date") != manifest_date
+            )
         )
-        if bad:
+        if disagree or date_unreadable:
+            reasons: list[str] = []
+            if disagree:
+                reasons.append(
+                    "opening value and first cash flow disagree (flow merged into "
+                    "or shifted from the opening)"
+                )
+            if date_unreadable:
+                reasons.append(
+                    "the manifest row carries a performance opening value but no "
+                    "readable performance opening date, so the MWR opening date "
+                    "cannot be compared with it"
+                )
             yield _finding(
                 "returns.mwr_opening_matches_first_flow",
                 BLOCKER_INVARIANT,
@@ -3191,22 +4190,20 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
                 REPORT,
                 f"$.twr_mwr[{position}].mwr_cashflows[0]",
                 ("B8",),
-                "opening value and first cash flow disagree (flow merged into or "
-                "shifted from the opening)",
+                "; ".join(reasons),
             )
 
 
 def check_implied_flows(ctx: Context) -> Iterator[Finding]:
     """B14: with no recorded flows, NAV endpoints and the return path must agree."""
 
-    manifest = manifest_rows(ctx)
     current = current_accounts_by_strategy(ctx)
     for position, row in twr_rows(ctx):
         if row.get("effective_end") is not None:
             continue
         if len(current.get(str(row.get("strategy_id")), [])) != 1:
             continue
-        matched = manifest.get(epoch_key(row))
+        matched = manifest_match(ctx, row)
         trace = matched[1].get("capital_flow_trace") if matched else None
         if trace or _interior_cashflows(row):
             continue
@@ -3318,7 +4315,8 @@ def check_flow_admission(ctx: Context) -> Iterator[Finding]:
             account = str(row.get("account_id"))
             admitted[account] = admitted.get(account, 0) + 1
     used: dict[str, int] = {}
-    for (account, _, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        account = str(row.get("account_id"))
         trace = row.get("capital_flow_trace")
         used[account] = used.get(account, 0) + (
             len(trace) if isinstance(trace, list) else 0
@@ -3734,7 +4732,19 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
         if day is None or day == cutoff:
             continue
         after = day > cutoff
-        if is_available(status) or after:
+        bound = (
+            verified_value_basis_bound(
+                ctx, "decomposition_lenses", entity.removeprefix("decomposition:"), day
+            )
+            if not after
+            and is_available(status)
+            and entity.startswith("decomposition:")
+            else None
+        )
+        if bound is not None:
+            klass = NOT_READY
+            message = _bound_message(bound, "section")
+        elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
                 "section is dated after the declared cutoff"
@@ -4165,6 +5175,23 @@ def _window_days(start: Any, end: Any) -> int | None:
     return (last - first).days
 
 
+def _unique_label(prefix: str, row: Mapping[str, Any], taken: Mapping[str, Any]) -> str:
+    """``prefix`` and the row's ``account|strategy|start`` label, never one already taken.
+
+    Epochs that start together share that label; the later one is told apart by its end
+    (and, were that shared too, a count), so a lint payload keeps an entry for each.
+    """
+
+    label = prefix + "|".join(epoch_key(row))
+    if label in taken:
+        label = f"{label}|{row.get('effective_end')}"
+    base, count = label, 1
+    while label in taken:
+        count += 1
+        label = f"{base}#{count}"
+    return label
+
+
 def check_lint_returns(ctx: Context) -> Iterator[Finding]:
     """A2/A4/A5 and extreme live returns: plausibility warnings only."""
 
@@ -4205,7 +5232,7 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             and days < ONE_YEAR_DAYS
             and row.get("mwr_xirr") is not None
         ):
-            short[f"twr_mwr.mwr_xirr:{'|'.join(epoch_key(row))}"] = days
+            short[_unique_label("twr_mwr.mwr_xirr:", row, short)] = days
     impossible: dict[str, Any] = {}
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
     for row in comparisons if isinstance(comparisons, list) else []:
@@ -4262,11 +5289,14 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
         for key in ("twr", "return_path_cumulative_return"):
             amount = to_decimal(row.get(key))
             if amount is not None and amount > 5:
-                live[f"twr_mwr.{key}:{'|'.join(epoch_key(row))}"] = amount
-    for key, (_, row) in manifest_rows(ctx).items():
+                live[_unique_label(f"twr_mwr.{key}:", row, live)] = amount
+    for _, row in manifest_rows(ctx):
         amount = to_decimal(row.get("observation_linked_return"))
         if amount is not None and amount > 5:
-            live[f"account_manifest.observation_linked_return:{'|'.join(key)}"] = amount
+            label = _unique_label(
+                "account_manifest.observation_linked_return:", row, live
+            )
+            live[label] = amount
     if live:
         yield _finding(
             "lint.extreme_live_return",
@@ -4332,7 +5362,8 @@ def check_lint_daily_moves(ctx: Context) -> Iterator[Finding]:
     """A6: a >4 sigma daily move within 3 days of a flow."""
 
     flow_days: dict[str, set[date]] = {}
-    for (_, strategy, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        strategy = str(row.get("strategy_id"))
         for item in row.get("capital_flow_trace") or []:
             if isinstance(item, dict):
                 for key in ("event_date", "nav_recognition_date"):
@@ -4384,7 +5415,8 @@ def check_lint_invested_capital(ctx: Context) -> Iterator[Finding]:
     """B7: invested capital versus net contributed capital."""
 
     net: dict[str, Decimal] = {}
-    for (_, strategy, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        strategy = str(row.get("strategy_id"))
         if row.get("effective_end") is None:
             net[strategy] = net.get(strategy, Decimal(0)) + (
                 to_decimal(row.get("net_capital")) or Decimal(0)
@@ -4569,8 +5601,11 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"$.account_summary[{position}].latest_value_usd",
                         )
                     )
-        for (account, _, _), (position, row) in manifest_rows(ctx).items():
-            if account == entity and row.get("effective_end") is None:
+        for position, row in manifest_rows(ctx):
+            if (
+                str(row.get("account_id")) == entity
+                and row.get("effective_end") is None
+            ):
                 out.append(
                     Observed(
                         "panel:account_manifest.current_value",
@@ -4795,14 +5830,23 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
         "flows.account.count",
         "date.source_last_observation",
     ):
-        epochs = _epoch_views(ctx, entity)
-        manifest = manifest_rows(ctx)
+        # L6a: a blocked epoch row the census confirms never enters an account view
+        # (R2); an unconfirmed one is compared as before, and so is every other row,
+        # whatever part of its key it shares with a confirmed blocked row. Each report
+        # row reads the manifest row of its own epoch, and the aggregates below visit
+        # every manifest row, none standing in for another (fix round 2).
+        blocked = blocked_epochs(ctx)
+        epochs = [
+            (position, row)
+            for position, row in _epoch_views(ctx, entity)
+            if not blocked.skips_report_row(row)
+        ]
         for position, row in epochs:
             start, end = (
                 to_date(row.get("observed_start")),
                 to_date(row.get("observed_end")),
             )
-            matched = manifest.get(epoch_key(row))
+            matched = manifest_match(ctx, row)
             label = "|".join(epoch_key(row))
             if metric_id == "twr.account":
                 out.append(
@@ -4956,8 +6000,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             if metric_id == "flows.account.net":
                 parts = [
                     _flows_net(row)
-                    for key, (_, row) in manifest.items()
-                    if key[0] == entity
+                    for _, row in manifest_rows(ctx)
+                    if str(row.get("account_id")) == entity
+                    and not blocked.skips_manifest_row(row)
                 ]
                 total = (
                     sum(part for part in parts if part is not None)
@@ -4967,8 +6012,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             else:
                 traces = [
                     row.get("capital_flow_trace")
-                    for key, (_, row) in manifest.items()
-                    if key[0] == entity
+                    for _, row in manifest_rows(ctx)
+                    if str(row.get("account_id")) == entity
+                    and not blocked.skips_manifest_row(row)
                 ]
                 total = sum(len(t) for t in traces if isinstance(t, list))
             out.append(
@@ -5161,11 +6207,17 @@ def recompute_metric(
     if end is None:
         return []
     strategy_level = metric_id in ("twr.strategy", "mwr.strategy")
+    # L6a: a blocked epoch the census confirms is outside the account's TWR and MWR
+    # (R2) and publishes no dates or cash flows, so it would only make the account
+    # recompute decline. The strategy-level recompute is not changed (l0-design 5.1
+    # skips account-level views only).
+    blocked = blocked_epochs(ctx)
     epochs = sorted(
         (
             (position, row)
             for position, row in twr_rows(ctx)
             if str(row.get("strategy_id" if strategy_level else "account_id")) == entity
+            and (strategy_level or not blocked.skips_report_row(row))
         ),
         key=lambda item: str(item[1].get("effective_start")),
     )
@@ -5253,8 +6305,8 @@ def recompute_metric(
         ]
     if metric_id in ("flows.account.net", "flows.account.count"):
         events = []
-        for key, (_, row) in manifest_rows(ctx).items():
-            if key[0] != entity:
+        for _, row in manifest_rows(ctx):
+            if str(row.get("account_id")) != entity or blocked.skips_manifest_row(row):
                 continue
             for item in row.get("capital_flow_trace") or []:
                 day = _flow_day(item) if isinstance(item, dict) else None
@@ -5583,6 +6635,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.release_pinned", check_release_pinned),
     ("identity.absolute_local_paths", check_absolute_paths),
     ("identity.cutoff_consistency", check_cutoff_consistency),
+    (CENSUS_CHECK, check_blocked_admission_census),
     ("preservation.report_to_panel", check_report_to_panel),
     ("preservation.capital_summary", check_capital_summary_preserved),
     ("preservation.counts", check_counts),
@@ -5613,6 +6666,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
+    (BOUNDS_CHECK, check_value_basis_bound),
     ("dates.weekly_current_week", check_weekly_current_week),
     ("completeness.required_outputs", check_completeness),
     ("code.data_deref_before_guard", check_app_guard),
