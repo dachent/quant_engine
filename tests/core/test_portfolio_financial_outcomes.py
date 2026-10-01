@@ -1321,3 +1321,24 @@ def test_a_report_without_a_calculation_cutoff_keeps_the_unbounded_read(
     assert (
         world.call()["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
     )
+
+
+@pytest.mark.parametrize(
+    "cutoff",
+    ["20260917", "2026-9-17", 20260917],
+    ids=["basic-format", "unpadded", "an-integer"],
+)
+def test_a_report_cutoff_that_is_not_a_canonical_date_fails_closed(
+    tmp_path, monkeypatch, cutoff
+):
+    """The bound is derived for one exact calendar date, never a looser spelling of it."""
+
+    world = _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=CUTOFF,
+        report_edit=lambda report: report.update(calculation_cutoff_date=cutoff),
+    )
+
+    with pytest.raises(outcomes.FinancialOutcomeError, match="not an ISO date"):
+        world.call()
