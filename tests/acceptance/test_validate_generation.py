@@ -13,7 +13,7 @@ from collections.abc import Callable
 import copy
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, getcontext, setcontext
 import hashlib
 import importlib.util
 import json
@@ -1821,7 +1821,14 @@ def _load_derive_b():
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # derive.py sets the decimal precision to 50 at import, and the context is per
+    # thread: restore the ambient one so the load does not change the arithmetic of
+    # every later test in the session (W20).
+    ambient = getcontext().copy()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        setcontext(ambient)
     return module
 
 
