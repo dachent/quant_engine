@@ -1350,11 +1350,7 @@ def _verified_value_basis_end(
     )
     try:
         bounds = derive_value_basis_bounds(catalog, contract, cutoff)
-        end = (
-            bounds.common_complete_date(required)
-            if bounds.strategies and required
-            else cutoff
-        )
+        end = bounds.common_complete_date(required) if bounds.strategies else cutoff
     except ValueBasisBoundError as exc:
         raise FinancialOutcomeError(f"value-basis bound differs: {exc}") from exc
     return end.isoformat() if end < cutoff else None
