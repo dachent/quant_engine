@@ -446,6 +446,13 @@ def compound_window(
 # assignment with that tuple, and hold at least as many ASSIGNMENT_ONLY assignments
 # as blocked rows share the tuple. Anything else fails closed: the row is compared
 # exactly as before and ``identity.blocked_admission_census`` says why.
+#
+# What is skipped is exactly what was confirmed: a report row that is itself a blocked
+# admission, and a panel manifest row that is itself blocked, that has the whole
+# identity (account, strategy, effective_start, effective_end) of a confirmed blocked
+# row. The coarser ``epoch_key`` (no ``effective_end``) is only how views are matched:
+# a funded epoch re-cut from the same start shares it, and keying the skip by it hid
+# that funded row's contradiction with the oracle (lane epsilon fix round 1, a).
 
 CENSUS_CHECK = "identity.blocked_admission_census"
 _ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
@@ -453,6 +460,7 @@ _FUNDED_MEMBERSHIP = "FUNDED_MEMBERSHIP"
 _CENSUS_DEFECTS = ("N26",)
 
 EpochTuple = tuple[str, str | None, str | None]
+EpochIdentity = tuple[str, str, str, str]
 
 
 def is_blocked_admission(row: Mapping[str, Any]) -> bool:
@@ -461,6 +469,31 @@ def is_blocked_admission(row: Mapping[str, Any]) -> bool:
     return (
         row.get("twr_status") == "BLOCKED_ADMISSION"
         and row.get("epoch_admission_status") == "BLOCKED"
+    )
+
+
+def is_blocked_manifest_row(row: Mapping[str, Any]) -> bool:
+    """A panel manifest row whose two statuses both say the epoch was blocked."""
+
+    return (
+        row.get("status") == "BLOCKED_ADMISSION"
+        and row.get("admission_status") == "BLOCKED"
+    )
+
+
+def epoch_identity(row: Mapping[str, Any]) -> EpochIdentity:
+    """An epoch's whole identity, on a report row and on a panel manifest row alike.
+
+    ``epoch_key`` leaves out ``effective_end``; two epochs of one account and strategy
+    that share a start (a re-cut) share it, so whatever must act on one epoch only
+    uses this.
+    """
+
+    return (
+        str(row.get("account_id")),
+        str(row.get("strategy_id")),
+        str(row.get("effective_start")),
+        str(row.get("effective_end")),
     )
 
 
@@ -567,8 +600,18 @@ def census_state(ctx: Context) -> CensusState:
 class BlockedEpochs:
     """The blocked rows the census confirmed (skipped) and the findings about the rest."""
 
-    skipped: frozenset[tuple[str, str, str]]
+    skipped: frozenset[EpochIdentity]
     findings: tuple[Finding, ...]
+
+    def skips_report_row(self, row: Mapping[str, Any]) -> bool:
+        """Whether this ``twr_mwr`` row is a blocked admission the census confirmed."""
+
+        return is_blocked_admission(row) and epoch_identity(row) in self.skipped
+
+    def skips_manifest_row(self, row: Mapping[str, Any]) -> bool:
+        """Whether this manifest row is the blocked row of a confirmed blocked epoch."""
+
+        return is_blocked_manifest_row(row) and epoch_identity(row) in self.skipped
 
 
 def _classify_blocked_epochs(ctx: Context) -> BlockedEpochs:
@@ -613,7 +656,7 @@ def _classify_blocked_epochs(ctx: Context) -> BlockedEpochs:
     groups: dict[EpochTuple, list[tuple[int, dict[str, Any]]]] = {}
     for position, row in blocked:
         groups.setdefault(_epoch_tuple(row), []).append((position, row))
-    skipped: set[tuple[str, str, str]] = set()
+    skipped: set[EpochIdentity] = set()
     findings: list[Finding] = []
     for key, group in groups.items():
         reasons: list[str] = []
@@ -678,7 +721,7 @@ def _classify_blocked_epochs(ctx: Context) -> BlockedEpochs:
                 )
             )
         else:
-            skipped.update(epoch_key(row) for _, row in group)
+            skipped.update(epoch_identity(row) for _, row in group)
     return BlockedEpochs(frozenset(skipped), tuple(findings))
 
 
@@ -5443,12 +5486,13 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
         "date.source_last_observation",
     ):
         # L6a: a blocked epoch row the census confirms never enters an account view
-        # (R2); an unconfirmed one is compared as before.
-        skipped = blocked_epochs(ctx).skipped
+        # (R2); an unconfirmed one is compared as before, and so is every other row,
+        # whatever part of its key it shares with a confirmed blocked row.
+        blocked = blocked_epochs(ctx)
         epochs = [
             (position, row)
             for position, row in _epoch_views(ctx, entity)
-            if epoch_key(row) not in skipped
+            if not blocked.skips_report_row(row)
         ]
         manifest = manifest_rows(ctx)
         for position, row in epochs:
@@ -5611,7 +5655,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 parts = [
                     _flows_net(row)
                     for key, (_, row) in manifest.items()
-                    if key[0] == entity and key not in skipped
+                    if key[0] == entity and not blocked.skips_manifest_row(row)
                 ]
                 total = (
                     sum(part for part in parts if part is not None)
@@ -5622,7 +5666,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 traces = [
                     row.get("capital_flow_trace")
                     for key, (_, row) in manifest.items()
-                    if key[0] == entity and key not in skipped
+                    if key[0] == entity and not blocked.skips_manifest_row(row)
                 ]
                 total = sum(len(t) for t in traces if isinstance(t, list))
             out.append(
