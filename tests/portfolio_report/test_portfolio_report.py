@@ -43,6 +43,15 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 DEFAULT_PRODUCT_CONTRACT = reporter._PORTABLE_HWM_PRODUCT_CONTRACT
 _SYNTHETIC_PRODUCT_CONTRACT_PATHS: set[Path] = set()
+_CAPITAL_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "current_capital_fixture_report_suite",
+    REPOSITORY_ROOT / "tests" / "portfolio_report" / "current_capital_fixture.py",
+)
+if _CAPITAL_FIXTURE_SPEC is None or _CAPITAL_FIXTURE_SPEC.loader is None:
+    raise RuntimeError("unable to load the current capital fixture")
+capital_fixture = importlib.util.module_from_spec(_CAPITAL_FIXTURE_SPEC)
+sys.modules[_CAPITAL_FIXTURE_SPEC.name] = capital_fixture
+_CAPITAL_FIXTURE_SPEC.loader.exec_module(capital_fixture)
 WORKBOOK_PERMANENT_HOLD = (
     "Owner permanent hold under #374: retired workbook generation, recalculation, "
     "evidence, and delivery workflow"
@@ -1644,6 +1653,23 @@ def _published_baseline(
         # caller's monkeypatch is authoritative and must not be overwritten.
         reporter._PORTABLE_HWM_PRODUCT_CONTRACT = _bind_synthetic_product_contract(
             tmp_path
+        )
+    if "current_capital" not in catalog:
+        # The baseline publishes `current_capital` next to its dated allocations.  A
+        # fixture that does not care about capital arithmetic gets the block its own
+        # allocations imply (value for value), scoped by the product contract that
+        # is bound for this publication, so the report's consumers see a well-formed,
+        # internally consistent block.  Tests that exercise capital build their own.
+        contract = json.loads(
+            Path(reporter._PORTABLE_HWM_PRODUCT_CONTRACT).read_text(encoding="utf-8")
+        )
+        catalog = capital_fixture.with_current_capital(
+            catalog,
+            [
+                row["strategy_id"]
+                for row in contract["strategies"]
+                if row.get("product_requirement") == "REQUIRED"
+            ],
         )
     content = canonical_json_bytes(catalog)
     artifact = SourceArtifact(
@@ -4848,7 +4874,7 @@ def test_provider_live_nav_is_available_without_becoming_account_live() -> None:
         ],
     }
 
-    rows = reporter._strategies(catalog, [])
+    rows = reporter._strategies(capital_fixture.with_current_capital(catalog), [])
 
     assert rows[0]["nav_status"] == "AVAILABLE"
     assert rows[0]["nav_evidence_layer"] == "PROVIDER_LIVE"
@@ -4936,7 +4962,7 @@ def test_account_live_summary_uses_one_hash_bound_canonical_return_path() -> Non
         ],
     }
 
-    rows = reporter._strategies(catalog, [])
+    rows = reporter._strategies(capital_fixture.with_current_capital(catalog), [])
 
     expected_series = [
         {"date": "2025-01-01", "return": "0"},
@@ -5625,7 +5651,12 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
         ],
     }
     allocation_rows = reporter._allocations(catalog, controls)
-    summary = reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+    summary = reporter._portfolio_summary(
+        capital_fixture.with_current_capital(
+            catalog, [f"strategy-{index}" for index in range(2, 10)]
+        ),
+        strategy_product_controls=controls,
+    )
 
     assert canonical == {
         "strategy-2": {
@@ -5730,7 +5761,7 @@ def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
         "strategy_returns": [],
     }
 
-    row = reporter._strategies(catalog, [])[0]
+    row = reporter._strategies(capital_fixture.with_current_capital(catalog), [])[0]
 
     assert row["account_live_return_authority"] == "AUDIT_STRATEGY_LIVE_METRICS"
     assert row["account_live_cagr"] == "0.11"
@@ -6064,7 +6095,10 @@ def test_raw_observation_coverage_selects_within_the_calculation_cutoff(
     projected = reporter._calculation_catalog_through(catalog, "2026-01-17")
     account = next(
         row
-        for row in reporter._accounts(projected, raw_observation_coverage=coverage)
+        for row in reporter._accounts(
+            capital_fixture.with_current_capital(projected),
+            raw_observation_coverage=coverage,
+        )
         if row["account_id"] == "account-a"
     )
     assert account["as_of_date"] == "2026-01-03"
@@ -6407,7 +6441,11 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
 def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
     tmp_path: Path,
 ) -> None:
-    """HWM coverage details must use the same final allocation weights shown publicly."""
+    """HWM coverage details use the same current cutoff weights `strategy_summary` shows.
+
+    The dated allocation snapshot (`allocation_history`) is a different, labeled set:
+    it is shown as recorded and is no longer the weight the coverage rows inherit.
+    """
 
     catalog = _baseline_catalog()
     _attach_hwm_envelope(catalog, _hwm_return_crosswalk())
@@ -6439,7 +6477,18 @@ def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
         if row["strategy_id"] == "strategy-7"
     )
     assert detail["systematic_weight"] == strategy["systematic_weight"]
-    assert detail["systematic_weight"] == allocation["systematic_weight"]
+    assert strategy["weight_basis"] == "CURRENT_CUTOFF"
+    assert report["hwm_summary"]["weight_basis"] == "CURRENT_CUTOFF"
+    # The snapshot row is the table's own recorded column, under its own label.
+    assert allocation["systematic_weight"] == "0.1111111111111111111111111111111111"
+    assert allocation["weight_basis"] == "HISTORICAL_SNAPSHOT_2026_01_03"
+    # The coverage row that carries the uncovered detail shows the same current weight
+    # and says so; no weight anywhere in the report is left without a label.
+    coverage_row = next(
+        row for row in report["coverage_data_quality"] if "uncovered_details" in row
+    )
+    assert coverage_row["weight_basis"] == "CURRENT_CUTOFF"
+    assert capital_fixture.unlabeled_weight_paths(report) == []
 
 
 def test_portable_hwm_proof_coexists_with_governed_report_hwm(
