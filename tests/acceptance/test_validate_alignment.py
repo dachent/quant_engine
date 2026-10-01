@@ -605,6 +605,232 @@ def test_count_aggregate_never_counts_the_flow_trace_of_a_skipped_blocked_row(
     ) in _expected_findings(unconfirmed)
 
 
+# ----------------------------- L6a fix round 1: the skip is exact, never a coarser key
+#
+# The census confirms a blocked row by (strategy_id, effective_start, effective_end).
+# What the validator skips has to be exactly the rows the census confirmed.  A FUNDED
+# row that shares the account, the strategy and the start with a confirmed blocked
+# row (an epoch re-cut that re-admits the interval from the same start date), or even
+# the whole key, is an account-level view like any other: it is still compared with
+# the oracle.  Skipping by (account, strategy, effective_start) alone hid its
+# contradiction with the oracle without a single finding (Kimi lane-eps-r0).
+
+FUNDED_NEXT_TO_BLOCKED_ROW = 4  # three good rows, the blocked row, then this one
+
+
+def _funded_beside_blocked_report(
+    twr: str, *, effective_end: str | None = None
+) -> Mutator:
+    """A1's FUNDED beta epoch from the blocked epoch's own start.
+
+    ``effective_end`` differs from the blocked epoch's, or equals it (the whole key
+    shared); the observed window is the good fixture's, so the oracle compares it.
+    """
+
+    def mutate(report: dict[str, Any]) -> None:
+        row = _twr_row("A1", "beta", "500", "550", [], twr=twr)
+        row["effective_start"] = BLOCKED_START
+        row["effective_end"] = effective_end
+        report["twr_mwr"].append(row)
+
+    return mutate
+
+
+def _funded_beside_blocked_manifest(*, effective_end: str | None = None) -> Mutator:
+    def mutate(panel: dict[str, Any]) -> None:
+        row = _manifest_row("A1", "beta", "500", "0", "550", [])
+        row["effective_start"] = BLOCKED_START
+        row["effective_end"] = effective_end
+        panel["account_manifest"]["rows"].append(row)
+        for name in ("twr_rows", "twr_available", "mwr_available"):
+            panel["counts"][name] += 1
+
+    return mutate
+
+
+def _funded_beside_blocked_world(
+    tmp_path: Path,
+    twr: str,
+    *,
+    effective_end: str | None = None,
+    funded_manifest_first: bool = False,
+) -> list[checks.Finding]:
+    """Findings for a confirmed blocked epoch with a funded one beside it."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    spec = _blocked_epochs(["A1"])
+    spec.report.append(_funded_beside_blocked_report(twr, effective_end=effective_end))
+    funded_manifest = _funded_beside_blocked_manifest(effective_end=effective_end)
+    if funded_manifest_first:
+        spec.panel.insert(0, funded_manifest)
+    else:
+        spec.panel.append(funded_manifest)
+    gen_dir = build(tmp_path / "gen", spec)
+    return _run(gen_dir, _oracle(("A1",), census_sha=sha), repo)
+
+
+def _funded_twr_findings(findings: list[checks.Finding]) -> list[tuple[str, str, Any]]:
+    """The twr.account regressions that point at the funded row's own ``twr``."""
+
+    return [
+        (f.klass, f.json_path, f.observed["value"])
+        for f in findings
+        if f.check_id == "expected.twr.account"
+        and f.json_path == f"$.twr_mwr[{FUNDED_NEXT_TO_BLOCKED_ROW}].twr"
+    ]
+
+
+def test_funded_row_beside_a_confirmed_blocked_row_that_agrees_is_clean(
+    tmp_path: Path,
+) -> None:
+    """Control (green on main): the blocked row is skipped, the funded one agrees."""
+
+    findings = _funded_beside_blocked_world(tmp_path, "0.1")
+    assert _expected_findings(findings) == []
+    assert _census_findings(findings) == []
+
+
+@pytest.mark.parametrize("funded_manifest_first", [False, True], ids=["m_b_f", "m_f_b"])
+def test_funded_row_sharing_account_strategy_and_start_is_still_compared(
+    tmp_path: Path, funded_manifest_first: bool
+) -> None:
+    """L6a fix 1 (fail-before): the funded row's twr contradiction is not hidden.
+
+    The funded epoch shares (account, strategy, effective_start) with the confirmed
+    blocked epoch and ends elsewhere.  Its published twr contradicts the oracle: the
+    regression fires on that row, whichever order the panel lists the two manifest
+    rows in.  Mutation MA-10 (the skip keyed by the three-part key again) turns this
+    red.
+    """
+
+    findings = _funded_beside_blocked_world(
+        tmp_path, "0.99", funded_manifest_first=funded_manifest_first
+    )
+    assert _funded_twr_findings(findings) == [
+        (
+            checks.BLOCKER_REGRESSION,
+            f"$.twr_mwr[{FUNDED_NEXT_TO_BLOCKED_ROW}].twr",
+            "0.99",
+        )
+    ]
+    assert _census_findings(findings) == []
+
+
+def test_only_the_funded_rows_contradiction_is_reported_beside_a_confirmed_blocked_row(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1 (fail-before): exactly one finding; nothing points at the blocked row."""
+
+    findings = _funded_beside_blocked_world(tmp_path, "0.99")
+    assert _expected_findings(findings) == [
+        ("expected.twr.account", checks.BLOCKER_REGRESSION, "A1|ITD")
+    ]
+    blocked_row = FUNDED_NEXT_TO_BLOCKED_ROW - 1
+    assert not [
+        f
+        for f in findings
+        if f.json_path.startswith(f"$.twr_mwr[{blocked_row}]")
+        and f.check_id != "returns.flow_lists_agree"
+    ]
+
+
+def test_funded_row_sharing_the_whole_key_with_a_blocked_row_is_still_compared(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1 (fail-before): the skip is of the blocked row, not of its key.
+
+    A row that is not itself a blocked admission is never skipped, even when it
+    repeats the blocked row's account, strategy, start and end.  Mutation MA-11 (the
+    four-part key without the blocked-row test) turns this red.
+    """
+
+    findings = _funded_beside_blocked_world(tmp_path, "0.99", effective_end=BLOCKED_END)
+    assert _funded_twr_findings(findings) == [
+        (
+            checks.BLOCKER_REGRESSION,
+            f"$.twr_mwr[{FUNDED_NEXT_TO_BLOCKED_ROW}].twr",
+            "0.99",
+        )
+    ]
+
+
+def _closed_funded_beside_blocked(spec: Spec) -> None:
+    """A1's closed FUNDED beta epoch (a 10 deposit) from the blocked epoch's start.
+
+    Its observed window ends before the cutoff, so beside the good A1 row the only
+    view the oracle's ITD window accepts is the multi-epoch aggregate.
+    """
+
+    def report(document: dict[str, Any]) -> None:
+        row = _twr_row("A1", "beta", "500", "510", [("2025-12-01", "10")], twr="0.5")
+        row.update(
+            {
+                "effective_start": BLOCKED_START,
+                "effective_end": "2025-12-31",
+                "observed_start": BLOCKED_START,
+                "observed_end": "2025-12-31",
+                "mwr_opening_date": BLOCKED_START,
+                "mwr_terminal_date": "2025-12-31",
+            }
+        )
+        document["twr_mwr"].append(row)
+
+    def panel(document: dict[str, Any]) -> None:
+        trace = [
+            {
+                "amount": "10",
+                "class": "INTERNAL_IN",
+                "event_date": "2025-12-01",
+                "nav_recognition_date": "2025-12-01",
+            }
+        ]
+        row = _manifest_row("A1", "beta", "500", "10", "510", trace)
+        row.update(
+            {
+                "effective_start": BLOCKED_START,
+                "effective_end": "2025-12-31",
+                "start": BLOCKED_START,
+                "end": "2025-12-31",
+            }
+        )
+        document["account_manifest"]["rows"].append(row)
+        for name in ("twr_rows", "twr_available", "mwr_available"):
+            document["counts"][name] += 1
+
+    spec.report.append(report)
+    spec.panel.append(panel)
+
+
+def test_multi_epoch_flow_aggregates_keep_a_funded_row_sharing_the_blocked_start(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1 (fail-before): the aggregates skip the blocked manifest row only.
+
+    A1's funded epochs hold one 10 deposit (net 10, one trace event), the oracle's
+    net flow and count over them.  The funded manifest row shares account, strategy
+    and start with the confirmed blocked one, so skipping the manifest by the
+    three-part key dropped the deposit from both aggregates (net 0, count 0).
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    spec = _blocked_epochs(["A1"])
+    _closed_funded_beside_blocked(spec)
+    gen_dir = build(tmp_path / "gen", spec)
+    expected = [
+        {**row, "expected": "10" if row["metric_id"] == "flows.account.net" else "1"}
+        for row in _oracle(("A1",), census_sha=sha)
+        if row["metric_id"] in ("flows.account.net", "flows.account.count")
+    ]
+    assert _expected_findings(_run(gen_dir, expected, repo)) == []
+    # the control: unconfirmed, the blocked epoch's empty views enter the comparison
+    unconfirmed = _run(gen_dir, [dict(row, authority_pointer=[]) for row in expected])
+    assert _expected_findings(unconfirmed) != []
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
