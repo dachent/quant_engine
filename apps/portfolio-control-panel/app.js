@@ -96,7 +96,7 @@
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
-  const tableMarkup = (headers, rows, caption = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = ""]) => `<th scope="col" class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const tableMarkup = (headers, rows, caption = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
   const providerName = (providerId) => ({
     alpaca: "Alpaca",
@@ -182,6 +182,54 @@
     return `${observationText}${intervalText}`;
   };
   const hwmExclusionNote = () => (data.hwm_summary.excluded_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${item.reason}`).join(" · ") || "No policy exclusions";
+  // Current capital (cluster 2): every figure below is the payload's value, status
+  // and date.  A component that is not ready at the cutoff is shown as not ready and
+  // is never sized, painted as a remainder, or described as part of a sum.
+  const CAPITAL_COMPONENTS = [
+    { key: "systematic", label: "Systematic", color: "var(--accent)" },
+    { key: "reserve", label: "Reserve", color: "var(--reserve)" },
+    { key: "retained_excluded", label: "Retained excluded", color: "var(--neutral)" },
+  ];
+  const CAPITAL_HATCH = "repeating-linear-gradient(135deg, var(--border-strong) 0 4px, transparent 4px 9px)";
+  const capitalState = (key) => {
+    const value = data.capital?.[key];
+    const ready = data.capital_status?.[key] === "AVAILABLE" && number(value) != null;
+    return { key, value, ready, asOf: ready ? data.capital_as_of?.[key] ?? null : null };
+  };
+  const capitalAmount = (key) => (capitalState(key).ready ? currency(data.capital[key]) : "Not ready");
+  const capitalAsOf = (key) => {
+    const state = capitalState(key);
+    return state.ready && state.asOf ? ` · as of ${formatDate(state.asOf)}` : "";
+  };
+  const capitalNotReadyNote = () => `Not ready at the cutoff: ${CAPITAL_COMPONENTS.filter((part) => !capitalState(part.key).ready).map((part) => part.label.toLowerCase()).join(", ")}`;
+  const capitalRingMarkup = () => {
+    const parts = CAPITAL_COMPONENTS.map((part) => ({ ...part, ...capitalState(part.key), share: null }));
+    const total = capitalState("total_liquid");
+    const sized = total.ready && Number(total.value) > 0 && parts.every((part) => part.ready);
+    const stops = [];
+    let cursor = 0;
+    if (sized) {
+      parts.forEach((part) => {
+        part.share = Number(part.value) / Number(total.value) * 100;
+        stops.push(`${part.color} ${cursor.toFixed(3)}% ${(cursor + part.share).toFixed(3)}%`);
+        cursor += part.share;
+      });
+    }
+    const background = sized ? `conic-gradient(${stops.join(", ")})` : CAPITAL_HATCH;
+    const legend = parts.map((part) => {
+      const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%` : part.label;
+      const dot = part.ready ? `<span class="legend-dot" style="background:${part.color}"></span>` : `<span class="legend-dot is-hatched" style="background:${CAPITAL_HATCH}"></span>`;
+      return `<div class="legend-item" data-capital-component="${part.key}" data-capital-status="${part.ready ? "AVAILABLE" : "NOT_READY_AT_CUTOFF"}">${dot}<span>${safe(label)}</span><strong>${part.ready ? currency(part.value) : "—"}</strong></div>`;
+    }).join("");
+    return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span></div></div><div class="legend-list">${legend}</div>`;
+  };
+  const weightBasisText = (basis) => {
+    const text = String(basis || "");
+    if (text === "CURRENT_CUTOFF") return "Current cutoff weights";
+    if (text === "POLICY_PORT_DEPENDENCE_1") return "Policy weights (PORT-DEPENDENCE-1)";
+    const historical = /^HISTORICAL_SNAPSHOT_(\d{4})_(\d{2})_(\d{2})$/.exec(text);
+    return historical ? `Historical snapshot ${historical[1]}-${historical[2]}-${historical[3]}` : "Weight basis not labeled";
+  };
   const VIEW_TITLES = {
     command: "Portfolio",
     capital: "Allocation & lifecycle",
@@ -228,15 +276,17 @@
     $("#command-reason").textContent = performanceLineageMismatch
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;
+    const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}` : capitalNotReadyNote();
+    const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
     renderKpis("#command-kpis", performanceLineageMismatch ? [
-      ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
-      ["Systematic capital", currency(data.capital.systematic), "Report-derived risk-control status withheld"],
-      ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
+      ["Total liquid", capitalAmount("total_liquid"), liquidNote],
+      ["Systematic capital", capitalAmount("systematic"), "Report-derived risk-control status withheld"],
+      ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
-      ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
-      ["Systematic capital", currency(data.capital.systematic), "Subject to the accepted HWM policy"],
-      ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
+      ["Total liquid", capitalAmount("total_liquid"), liquidNote],
+      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}`],
+      ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
 
@@ -253,9 +303,7 @@
     });
     $("#gate-stack").innerHTML = gateRows.join("");
 
-    const total = Number(data.capital.total_liquid);
-    const systematicShare = total ? Number(data.capital.systematic) / total * 100 : 0;
-    $("#capital-ring").innerHTML = `<div class="capital-donut" style="background:conic-gradient(var(--accent) 0 ${systematicShare}%, var(--reserve) ${systematicShare}% 100%)"><div class="donut-center"><strong>${currency(total)}</strong><span>liquid</span></div></div><div class="legend-list"><div class="legend-item"><span class="legend-dot" style="background:var(--accent)"></span><span>Systematic · ${systematicShare.toFixed(1)}%</span><strong>${currency(data.capital.systematic)}</strong></div><div class="legend-item"><span class="legend-dot" style="background:var(--reserve)"></span><span>Reserve · ${(100 - systematicShare).toFixed(1)}%</span><strong>${currency(data.capital.reserve)}</strong></div></div>`;
+    $("#capital-ring").innerHTML = capitalRingMarkup();
 
     $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => {
       const qualification = hwmQualification(row);
@@ -319,7 +367,7 @@
       && (selectedContextStrategy === "ALL" || row.strategy_name === selectedContextStrategy || row.strategy_id === selectedContextStrategy));
     const rows = accepted.map((row) => {
       const target = targetState(row);
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id || "reserve-classification")}</span></td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDate(row.as_of_date)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id || "reserve-classification")}</span></td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDate(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span></td></tr>`;
     });
     const table = $("#allocation-table");
     table.dataset.visibleRows = String(accepted.length);
@@ -354,13 +402,17 @@
     $("#position-page-next").disabled = positionPage >= pageCount - 1;
   }
 
-  function renderCapital() {
+  function renderCapitalKpis() {
     renderKpis("#capital-kpis", [
-      ["Liquid capital", currency(data.capital.total_liquid), "Accepted dated baseline"],
+      ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}` : capitalNotReadyNote()],
       ["Current strategies", String(data.counts.strategies), "Reserve is not a strategy"],
       ["Accounts", String(data.counts.accounts), "Stable internal identities"],
       ["Positions", data.fact_status.positions, data.counts.positions ? `${integer.format(data.counts.positions)} accepted current rows` : "No accepted position source", data.counts.positions ? "warning" : "danger"],
     ]);
+  }
+
+  function renderCapital() {
+    renderCapitalKpis();
     renderAllocationTable();
     renderInvestedCapital();
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
@@ -632,21 +684,31 @@
     const captureDisclosure = `Artifact/provider capture date: ${safe(providerCaptureDate || "unavailable")}.`;
     $("#account-manifest-authority").textContent = ACCOUNT_MANIFEST_AUTHORITY_LABELS[authorityProfile]
       || "Unknown authority profile — non-releaseable";
+    // T5d-lite: a row opened from a provider capital anchor measures Invested, Net
+    // capital and Gain on the sleeve allocation basis (what entered the strategy
+    // sleeve), not the deposits into the provider cash or wallet account.  The label
+    // is an attribute and a legend sentence: every header and cell text stays what the
+    // attended interaction QA compares.
+    const sleeveRow = (row) => row.opening_basis === "PROVIDER_CAPITAL_ANCHOR";
+    const hasSleeveRows = manifest.rows.some(sleeveRow);
+    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account.";
+    const sleeveAttribute = (row) => (sleeveRow(row) ? ` title="${safe(sleeveTitle)}"` : "");
+    const sleeveHeader = hasSleeveRows ? "Sleeve allocation basis for rows opened from a provider capital anchor" : "";
     const rows = manifest.rows.map((row) => {
       const label = manifestLabel(row);
       if (row.status !== "OK") {
         return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric">${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}">${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}">${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
     });
     $("#account-manifest-table").innerHTML = tableMarkup([
       ["Account"], ["Strategy"], ["Observed interval"],
-      ["Invested", "numeric"], ["Withdrawn", "numeric"], ["Net capital", "numeric"],
-      ["Current", "numeric"], ["Gain", "numeric"],
+      ["Invested", "numeric", sleeveHeader], ["Withdrawn", "numeric"], ["Net capital", "numeric", sleeveHeader],
+      ["Current", "numeric"], ["Gain", "numeric", sleeveHeader],
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
     ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
-    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.`;
+    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? " Rows opened from a provider capital anchor show Invested, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. Governed invested capital (the deposits) and the strategy cash line are reported separately." : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;
     const notes = [
@@ -1136,6 +1198,8 @@
     const dependence = currentDependence();
     let matrix = dependence.matrices[selectedMatrix];
     const series = dependence.series_ids;
+    // The heading counts what the matrix below draws, never a literal.
+    $("#matrix-eyebrow").textContent = `${dependence.series_ids.length} current strategies`;
     let label = matrixLabels[selectedMatrix];
     if (selectedMatrix === "observed_pearson" && selectedCorrelationWindow !== "full") {
       if (dependence.horizon_matrices[selectedCorrelationWindow]) {

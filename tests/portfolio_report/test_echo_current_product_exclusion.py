@@ -31,6 +31,14 @@ assert SPEC is not None and SPEC.loader is not None
 reporter = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
+_CAPITAL_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "current_capital_fixture_echo_exclusion",
+    ROOT / "tests" / "portfolio_report" / "current_capital_fixture.py",
+)
+assert _CAPITAL_FIXTURE_SPEC is not None and _CAPITAL_FIXTURE_SPEC.loader is not None
+capital_fixture = importlib.util.module_from_spec(_CAPITAL_FIXTURE_SPEC)
+sys.modules[_CAPITAL_FIXTURE_SPEC.name] = capital_fixture
+_CAPITAL_FIXTURE_SPEC.loader.exec_module(capital_fixture)
 
 
 REQUIRED_STRATEGY_IDS = {
@@ -307,6 +315,11 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
         == performance
     )
     assert [row["strategy_id"] for row in allocation_rows] == ["current"]
+    # The baseline's current capital is what the summary publishes: here it implies the
+    # same values as the dated allocations (the capital arithmetic has its own tests).
+    catalog = capital_fixture.with_current_capital(
+        catalog, ["current"], reserve_value="0"
+    )
     current_summary = {
         row["metric"]: row
         for row in reporter._portfolio_summary(
@@ -349,7 +362,10 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
     assert summary_by_strategy["retired"]["current_value_usd"] is None
     assert summary_by_strategy["retired"]["systematic_weight"] is None
     assert summary_by_strategy["current"]["current_value_usd"] == "99.81"
-    assert summary_by_strategy["current"]["systematic_weight"] == "0.9981"
+    # The only required strategy holds the whole current systematic capital; the
+    # dated snapshot's own column (0.9981, which counts the retired 0.19) is not it.
+    assert summary_by_strategy["current"]["systematic_weight"] == "1"
+    assert summary_by_strategy["current"]["weight_basis"] == "CURRENT_CUTOFF"
 
 
 def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
@@ -357,10 +373,14 @@ def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
 
     baseline = _real_baseline_catalog()
     controls, _identity = reporter._report_product_controls(baseline)
+    required = sorted(REQUIRED_STRATEGY_IDS)
+    # A retained baseline predates `current_capital`; the block its dated allocations
+    # imply is the one whose retained balance this test moves.
     before_summary = {
         row["metric"]: row["value"]
         for row in reporter._portfolio_summary(
-            baseline, strategy_product_controls=controls
+            capital_fixture.with_current_capital(baseline, required),
+            strategy_product_controls=controls,
         )
     }
     before_projection = reporter._current_product_baseline_projection(
@@ -378,7 +398,8 @@ def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
     after_summary = {
         row["metric"]: row["value"]
         for row in reporter._portfolio_summary(
-            baseline, strategy_product_controls=controls
+            capital_fixture.with_current_capital(baseline, required),
+            strategy_product_controls=controls,
         )
     }
     after_projection = reporter._current_product_baseline_projection(baseline, controls)
@@ -400,33 +421,25 @@ def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
     } == REQUIRED_STRATEGY_IDS
 
 
-@pytest.mark.parametrize(
-    ("replay", "expected_error"),
-    [
-        (
-            {
-                "reserve_total_usd": "10",
-                "systematic_total_usd": "100",
-                "total_liquid_usd": "109",
-            },
-            "replay total liquid does not reconcile",
-        ),
-        (
-            {
-                "reserve_total_usd": "10",
-                "systematic_total_usd": "79",
-                "total_liquid_usd": "89",
-            },
-            "retained excluded systematic balance is negative",
-        ),
-    ],
-)
-def test_portfolio_summary_fails_closed_on_invalid_retained_balance(
-    replay: dict[str, str], expected_error: str
-) -> None:
-    """A replay total or retained balance that cannot reconcile must not publish."""
+def _retained_capital_catalog() -> dict[str, Any]:
+    """Required `current` (80), excluded `retired` (20) and a reserve (10).
 
-    catalog = {
+    The dated snapshot and the baseline's current capital agree here, so a failing
+    case is the block's own inconsistency and nothing else.
+    """
+
+    strategies = [
+        capital_fixture.strategy(
+            "current",
+            [capital_fixture.member("current-account", "80", "2026-01-02")],
+        ),
+        capital_fixture.strategy(
+            "retired",
+            [capital_fixture.member("retired-account", "20", "2026-01-02")],
+            scope="RETAINED_EXCLUDED",
+        ),
+    ]
+    return {
         "allocations": [
             {
                 "allocation_id": "current",
@@ -456,146 +469,11 @@ def test_portfolio_summary_fails_closed_on_invalid_retained_balance(
                 "systematic_weight": None,
             },
         ],
-        "replay": {"status": "PASS", **replay},
-    }
-    controls = {
-        "current": {"product_requirement": "REQUIRED"},
-        "retired": {"product_requirement": "EXCLUDED"},
-    }
-
-    with pytest.raises(reporter.ReportValidationError, match=expected_error):
-        reporter._portfolio_summary(catalog, strategy_product_controls=controls)
-
-
-@pytest.mark.parametrize(
-    ("excluded_allocation", "replay", "expected_error"),
-    [
-        (
-            {
-                "allocation_id": "retired",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("20"),
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "retired",
-                "systematic_weight": "0.2",
-            },
-            {
-                "reserve_total_usd": "10",
-                "systematic_total_usd": "101",
-                "total_liquid_usd": "111",
-            },
-            "retained excluded systematic allocations differ",
+        "current_capital": capital_fixture.block(
+            strategies,
+            valuation_date="2026-01-02",
+            reserve=capital_fixture.aggregate(["reserve"], "10", "2026-01-02"),
         ),
-        (
-            {
-                "allocation_id": "unknown",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("20"),
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "unknown",
-                "systematic_weight": "0.2",
-            },
-            {
-                "reserve_total_usd": "10",
-                "systematic_total_usd": "100",
-                "total_liquid_usd": "110",
-            },
-            "excluded systematic allocation references an unknown product strategy",
-        ),
-        (
-            {
-                "allocation_id": "retired",
-                "as_of_date": "2026-01-02",
-                "current_value": {"currency": "USD", "status": "UNAVAILABLE"},
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "retired",
-                "systematic_weight": "0.2",
-            },
-            {
-                "reserve_total_usd": "10",
-                "systematic_total_usd": "100",
-                "total_liquid_usd": "110",
-            },
-            "excluded systematic allocation.current_value is not available",
-        ),
-    ],
-)
-def test_portfolio_summary_reconciles_raw_excluded_systematic_allocations(
-    excluded_allocation: dict[str, Any],
-    replay: dict[str, str],
-    expected_error: str,
-) -> None:
-    """The retained balance must be supported by raw excluded allocations."""
-
-    catalog = {
-        "allocations": [
-            {
-                "allocation_id": "current",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("80"),
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "current",
-                "systematic_weight": "1",
-            },
-            excluded_allocation,
-            {
-                "allocation_id": "reserve",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("10"),
-                "scope": "RESERVE",
-                "source_key": "synthetic",
-                "strategy_id": None,
-                "systematic_weight": None,
-            },
-        ],
-        "replay": {"status": "PASS", **replay},
-    }
-    controls = {
-        "current": {"product_requirement": "REQUIRED"},
-        "retired": {"product_requirement": "EXCLUDED"},
-    }
-
-    with pytest.raises(reporter.ReportValidationError, match=expected_error):
-        reporter._portfolio_summary(catalog, strategy_product_controls=controls)
-
-
-def test_reserve_mutation_changes_consolidated_total_not_current_systematic() -> None:
-    """Reserve stays outside the current-product systematic/HWM denominator."""
-
-    catalog = {
-        "allocations": [
-            {
-                "allocation_id": "current",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("80"),
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "current",
-                "systematic_weight": "1",
-            },
-            {
-                "allocation_id": "retired",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("20"),
-                "scope": "SYSTEMATIC",
-                "source_key": "synthetic",
-                "strategy_id": "retired",
-                "systematic_weight": "0.2",
-            },
-            {
-                "allocation_id": "reserve",
-                "as_of_date": "2026-01-02",
-                "current_value": _amount("10"),
-                "scope": "RESERVE",
-                "source_key": "synthetic",
-                "strategy_id": None,
-                "systematic_weight": None,
-            },
-        ],
         "replay": {
             "reserve_total_usd": "10",
             "status": "PASS",
@@ -603,6 +481,73 @@ def test_reserve_mutation_changes_consolidated_total_not_current_systematic() ->
             "total_liquid_usd": "110",
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_error"),
+    [
+        (
+            lambda block: block["total_liquid"]["current_value"].update(value="109"),
+            "current total liquid differs from its components",
+        ),
+        (
+            lambda block: block["retained_excluded"]["current_value"].update(
+                value="21"
+            ),
+            "current retained excluded capital differs from its strategies",
+        ),
+        (
+            lambda block: block["strategies"][1].update(
+                current_value=capital_fixture.amount(None),
+                status=capital_fixture.NOT_READY,
+                as_of_date=None,
+            ),
+            "current retained excluded capital is current while a strategy is not",
+        ),
+    ],
+    ids=["total-liquid", "retained-sum", "retained-strategy-not-ready"],
+)
+def test_portfolio_summary_fails_closed_on_invalid_retained_balance(
+    mutate: Any, expected_error: str
+) -> None:
+    """A total or a retained balance the block's own rows cannot reconcile must not publish."""
+
+    catalog = _retained_capital_catalog()
+    mutate(catalog["current_capital"])
+    controls = {
+        "current": {"product_requirement": "REQUIRED"},
+        "retired": {"product_requirement": "EXCLUDED"},
+    }
+
+    with pytest.raises(reporter.ReportValidationError, match=expected_error):
+        reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+
+
+def test_allocation_snapshot_rejects_a_systematic_row_of_an_unknown_strategy() -> None:
+    """The dated snapshot still shows only strategies the product controls know."""
+
+    catalog = _retained_capital_catalog()
+    catalog["allocations"][1] = {
+        **catalog["allocations"][1],
+        "allocation_id": "unknown",
+        "strategy_id": "unknown",
+    }
+    controls = {
+        "current": {"product_requirement": "REQUIRED"},
+        "retired": {"product_requirement": "EXCLUDED"},
+    }
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="systematic allocation must reference a known product strategy",
+    ):
+        reporter._allocations(catalog, controls)
+
+
+def test_reserve_mutation_changes_consolidated_total_not_current_systematic() -> None:
+    """Reserve stays outside the current-product systematic/HWM denominator."""
+
+    catalog = _retained_capital_catalog()
     controls = {
         "current": {"product_requirement": "REQUIRED"},
         "retired": {"product_requirement": "EXCLUDED"},
@@ -617,6 +562,9 @@ def test_reserve_mutation_changes_consolidated_total_not_current_systematic() ->
     catalog["allocations"][2]["current_value"] = _amount("20")
     catalog["replay"]["reserve_total_usd"] = "20"
     catalog["replay"]["total_liquid_usd"] = "120"
+    catalog["current_capital"] = capital_fixture.mirror_allocations(
+        catalog, ["current"]
+    )
     after = {
         row["metric"]: row["value"]
         for row in reporter._portfolio_summary(
@@ -701,7 +649,7 @@ def test_current_account_summary_excludes_deprecated_account() -> None:
         ],
     }
 
-    rows = reporter._accounts(catalog, controls)
+    rows = reporter._accounts(capital_fixture.with_current_capital(catalog), controls)
 
     assert [row["account_id"] for row in rows] == ["current-account", "reserve"]
     assert rows[0]["latest_value_usd"] == "99.81"

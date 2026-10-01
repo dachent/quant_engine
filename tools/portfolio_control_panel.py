@@ -3397,6 +3397,207 @@ def _summary_value(summary: Mapping[str, Mapping[str, Any]], metric: str) -> str
     return _text(row.get("value"), f"portfolio_summary.{metric}")
 
 
+_CAPITAL_AVAILABLE: Final = "AVAILABLE"
+_CAPITAL_NOT_READY: Final = "NOT_READY_AT_CUTOFF"
+_CAPITAL_COMPONENTS: Final = (
+    ("reserve", "Reserve"),
+    ("retained_excluded", "Retained excluded systematic balance"),
+    ("systematic", "Systematic capital"),
+    ("total_liquid", "Total liquid"),
+)
+WEIGHT_BASIS_CURRENT: Final = "CURRENT_CUTOFF"
+WEIGHT_BASIS_POLICY: Final = "POLICY_PORT_DEPENDENCE_1"
+DEPENDENCE_POLICY_ID: Final = "PORT-DEPENDENCE-1"
+DEPENDENCE_WEIGHT_NORMALIZATION: Final = (
+    "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER"
+)
+
+
+def _capital_decimal(value: object, field_name: str) -> Decimal:
+    if not isinstance(value, str):
+        raise ControlPanelValidationError(f"{field_name} must be decimal text")
+    try:
+        accepted = Decimal(value)
+    except InvalidOperation as exc:
+        raise ControlPanelValidationError(f"{field_name} must be decimal text") from exc
+    if not accepted.is_finite():
+        raise ControlPanelValidationError(f"{field_name} must be finite")
+    return accepted
+
+
+def _exact_capital_sum(values: Sequence[Decimal]) -> Decimal:
+    """Add money exactly: the default 28-digit context would round long sums."""
+
+    with localcontext() as context:
+        context.prec = 100
+        return sum(values, Decimal(0))
+
+
+def _capital_summary(
+    summary: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, str | None]]:
+    """The panel capital block, from the report's portfolio summary rows.
+
+    ``capital`` keeps decimal-or-null fields; ``capital_status`` and ``capital_as_of``
+    are its siblings.  A component that is not ready at the cutoff is null with its
+    status, never a stand-in value and never a remainder of another figure.
+    """
+
+    capital: dict[str, str | None] = {}
+    status: dict[str, str | None] = {}
+    as_of: dict[str, str | None] = {}
+    for key, metric in _CAPITAL_COMPONENTS:
+        row = summary.get(metric)
+        if row is None:
+            raise ControlPanelValidationError(f"portfolio summary lacks {metric}")
+        state = row.get("status")
+        if state not in (_CAPITAL_AVAILABLE, _CAPITAL_NOT_READY):
+            raise ControlPanelValidationError(
+                f"portfolio summary capital status is invalid: {metric}"
+            )
+        raw = row.get("value")
+        value = None if raw is None else _text(raw, f"portfolio_summary.{metric}")
+        if value is not None:
+            _capital_decimal(value, f"portfolio_summary.{metric}")
+        if (state == _CAPITAL_AVAILABLE) != (value is not None):
+            raise ControlPanelValidationError(
+                f"portfolio summary capital status contradicts its value: {metric}"
+            )
+        day = row.get("as_of_date")
+        if value is None and day is not None:
+            raise ControlPanelValidationError(
+                f"portfolio summary capital is not ready but dated: {metric}"
+            )
+        if day is not None:
+            day = _text(day, f"portfolio_summary.{metric}.as_of_date")
+            try:
+                date.fromisoformat(day)
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    f"portfolio_summary.{metric}.as_of_date must be an ISO date"
+                ) from exc
+        capital[key] = value
+        status[key] = state
+        as_of[key] = day
+    return {"capital": capital, "capital_as_of": as_of, "capital_status": status}
+
+
+def _capital_identity_problems(data: Mapping[str, Any]) -> list[str]:
+    """Recompute the capital identity from the panel's own rows.
+
+    Systematic capital is the exact sum of the strategy rows; total liquid is
+    systematic plus reserve plus retained excluded, current only when all three are;
+    a component that is not ready makes every figure that needs it not ready.  The
+    check reads the published block and the published strategy rows, never the
+    report's summary rows that fed the block.
+    """
+
+    problems: list[str] = []
+    capital = _object(data.get("capital"), "panel capital")
+    status = _object(data.get("capital_status"), "panel capital status")
+    as_of = _object(data.get("capital_as_of"), "panel capital as_of")
+    values: dict[str, Decimal | None] = {}
+    for key, _metric in _CAPITAL_COMPONENTS:
+        raw = capital.get(key)
+        try:
+            value = None if raw is None else Decimal(str(raw))
+        except InvalidOperation:
+            value = None
+            problems.append(f"capital value is not decimal for {key}")
+        values[key] = value
+        state = status.get(key)
+        if state not in (_CAPITAL_AVAILABLE, _CAPITAL_NOT_READY) or (
+            (state == _CAPITAL_AVAILABLE) != (value is not None)
+        ):
+            problems.append(f"capital status contradicts its value for {key}")
+        if value is None and as_of.get(key) is not None:
+            problems.append(f"capital is not ready but dated for {key}")
+    strategy_values = [
+        row.get("current_value_usd")
+        for row in _objects(data.get("strategies"), "panel strategies")
+    ]
+    if strategy_values and all(item is not None for item in strategy_values):
+        strategy_total = _exact_capital_sum(
+            [Decimal(str(item)) for item in strategy_values]
+        )
+        if values["systematic"] is None:
+            problems.append(
+                "systematic capital is not ready although the strategy rows are current"
+            )
+        elif values["systematic"] != strategy_total:
+            problems.append(
+                "systematic capital differs from the sum of the strategy rows"
+            )
+    components = [values["systematic"], values["reserve"], values["retained_excluded"]]
+    if all(item is not None for item in components):
+        expected = _exact_capital_sum([item for item in components if item is not None])
+        if values["total_liquid"] is None or values["total_liquid"] != expected:
+            problems.append(
+                "total liquid differs from systematic plus reserve plus retained excluded"
+            )
+    elif values["total_liquid"] is not None:
+        problems.append(
+            "total liquid is published although a not ready component exists"
+        )
+    return problems
+
+
+def _reconcile_capital_with_baseline(
+    parts: Mapping[str, Mapping[str, str | None]],
+    baseline_catalog: Mapping[str, Any],
+) -> None:
+    """The report's capital must be the governed baseline's current capital.
+
+    The report derives its capital rows from the same baseline block; this is the
+    panel's own read of the governed baseline, so the panel no longer compares the
+    report's capital rows with themselves.
+    """
+
+    raw = baseline_catalog.get("current_capital")
+    if raw is None:
+        raise ControlPanelValidationError("baseline catalog lacks current_capital")
+    block = _object(raw, "baseline current_capital")
+    for key, _metric in _CAPITAL_COMPONENTS:
+        part = _object(block.get(key), f"baseline current_capital.{key}")
+        amount = _object(part.get("current_value"), f"baseline {key} current_value")
+        baseline_value = amount.get("value")
+        observed_value = parts["capital"][key]
+        same_value = (baseline_value is None) == (observed_value is None) and (
+            baseline_value is None
+            or _capital_decimal(baseline_value, f"baseline {key} value")
+            == _capital_decimal(observed_value, f"report {key} value")
+        )
+        if (
+            not same_value
+            or part.get("status") != parts["capital_status"][key]
+            or part.get("as_of_date") != parts["capital_as_of"][key]
+        ):
+            raise ControlPanelValidationError(
+                "report capital differs from the governed baseline current capital"
+            )
+
+
+def _dependence_weight_authority() -> dict[str, str]:
+    """The authority of the policy weights behind the dependence components."""
+
+    policy = _load_json(DEPENDENCE_POLICY, "dependence policy")
+    if policy.get("policy_id") != DEPENDENCE_POLICY_ID:
+        raise ControlPanelValidationError("dependence policy identity differs")
+    authority = _object(policy.get("allocation_authority"), "dependence authority")
+    day = _text(authority.get("as_of_date"), "dependence authority as_of_date")
+    try:
+        date.fromisoformat(day)
+    except ValueError as exc:
+        raise ControlPanelValidationError(
+            "dependence authority as_of_date must be an ISO date"
+        ) from exc
+    return {
+        "as_of_date": day,
+        "normalization": DEPENDENCE_WEIGHT_NORMALIZATION,
+        "policy_id": DEPENDENCE_POLICY_ID,
+    }
+
+
 def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
     summary = _summary(report)
     counts = {
@@ -3410,14 +3611,7 @@ def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
         raise ControlPanelValidationError(
             "accepted report portfolio dimensions must be non-empty"
         )
-    return {
-        "capital": {
-            "reserve": _summary_value(summary, "Reserve"),
-            "systematic": _summary_value(summary, "Systematic capital"),
-            "total_liquid": _summary_value(summary, "Total liquid"),
-        },
-        "counts": counts,
-    }
+    return {**_capital_summary(summary), "counts": counts}
 
 
 def _fact_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -6692,6 +6886,10 @@ def _dependence_analysis(
         "series_ids": series_ids,
         "series_composition": series_composition,
         "source_sha256": identity["sha256"],
+        # The components' allocation weights are the owner-approved
+        # PORT-DEPENDENCE-1 policy weights, not the cutoff capital weights.
+        "weight_authority": _dependence_weight_authority(),
+        "weight_basis": WEIGHT_BASIS_POLICY,
     }
 
 
@@ -8130,6 +8328,11 @@ def _panel_data(
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
     _report_panel_expectations(report)
+    # The capital block the panel publishes is the governed baseline's current
+    # capital as the report carried it; the report's rows are reconciled with the
+    # baseline here and with the panel's own strategy rows below.
+    capital_parts = _capital_summary(summary)
+    _reconcile_capital_with_baseline(capital_parts, baseline_catalog)
     account_ids = [
         _text(row.get("account_id"), "account_summary.account_id") for row in accounts
     ]
@@ -8742,7 +8945,13 @@ def _panel_data(
     hwm_numerical = _compute_panel_numerical_hwm(
         current_product_catalog, epoch_hpr_receipts
     )
-    hwm_summary = {**hwm_summary, **hwm_numerical}
+    # The coverage rows inherit the current cutoff values and weights of the strategy
+    # rows; the summary says which weight set it shows (the report says the same).
+    hwm_summary = {
+        **hwm_summary,
+        **hwm_numerical,
+        "weight_basis": WEIGHT_BASIS_CURRENT,
+    }
     report_hwm = report.get("hwm_summary")
     if report_hwm is None:
         raise ControlPanelValidationError(
@@ -8787,6 +8996,13 @@ def _panel_data(
         }
         for row in strategies
     ]
+    capital_problems = _capital_identity_problems(
+        {**capital_parts, "strategies": strategies}
+    )
+    if capital_problems:
+        raise ControlPanelValidationError(
+            "panel capital identity differs: " + "; ".join(capital_problems)
+        )
     strategy_underwriting, underwriting_policy_hash = _strategy_underwriting(
         strategies,
         accepted_decomposition_lenses,
@@ -9215,11 +9431,9 @@ def _panel_data(
         "account_manifest": (
             dict(account_manifest) if account_manifest is not None else None
         ),
-        "capital": {
-            "reserve": _summary_value(summary, "Reserve"),
-            "systematic": _summary_value(summary, "Systematic capital"),
-            "total_liquid": _summary_value(summary, "Total liquid"),
-        },
+        "capital": capital_parts["capital"],
+        "capital_as_of": capital_parts["capital_as_of"],
+        "capital_status": capital_parts["capital_status"],
         "counts": {
             "accounts": len(accounts),
             "mwr_available": mwr_available,
@@ -11446,13 +11660,29 @@ def verify_candidate(
     else:
         report, _, _ = _report_candidate(report_candidate)
     report_expectations = _report_panel_expectations(report)
+    # The capital block is the report's current capital (value, status, date) and
+    # holds the identity recomputed from the panel's own strategy rows.  The old
+    # check compared the report's rows with themselves.
+    capital_problems = _capital_identity_problems(data)
     checks.append(
         _check(
-            "Accepted capital replay",
-            data["capital"] == report_expectations["capital"],
+            "Accepted current capital",
+            data["capital"] == report_expectations["capital"]
+            and data["capital_status"] == report_expectations["capital_status"]
+            and data["capital_as_of"] == report_expectations["capital_as_of"]
+            and not capital_problems,
             {
-                "actual": data["capital"],
-                "expected": report_expectations["capital"],
+                "actual": {
+                    "capital": data["capital"],
+                    "capital_as_of": data["capital_as_of"],
+                    "capital_status": data["capital_status"],
+                },
+                "expected": {
+                    "capital": report_expectations["capital"],
+                    "capital_as_of": report_expectations["capital_as_of"],
+                    "capital_status": report_expectations["capital_status"],
+                },
+                "identity_problems": capital_problems,
             },
         )
     )

@@ -154,6 +154,23 @@ DEPENDENCE_POLICY: Final = (
     / "contracts"
     / "portfolio-dependence-policy-v1.json"
 )
+# Cluster 2 (T2): every current capital figure and weight reads the baseline's
+# `current_capital` block (each strategy is its members' latest admitted USD NAV on
+# or before the cutoff).  Every weight view carries the label of the set it shows;
+# a current view carries only CURRENT_CUTOFF.  No contract is edited: the policy
+# weights stay the owner-approved PORT-DEPENDENCE-1 input and the audit snapshot
+# stays what it was recorded as, both labeled.
+CAPITAL_AVAILABLE: Final = "AVAILABLE"
+CAPITAL_NOT_READY: Final = "NOT_READY_AT_CUTOFF"
+CAPITAL_SCOPE_SYSTEMATIC: Final = "SYSTEMATIC"
+CAPITAL_SCOPE_RETAINED_EXCLUDED: Final = "RETAINED_EXCLUDED"
+WEIGHT_BASIS_CURRENT: Final = "CURRENT_CUTOFF"
+WEIGHT_BASIS_POLICY: Final = "POLICY_PORT_DEPENDENCE_1"
+WEIGHT_BASIS_HISTORICAL_PREFIX: Final = "HISTORICAL_SNAPSHOT_"
+DEPENDENCE_POLICY_ID: Final = "PORT-DEPENDENCE-1"
+DEPENDENCE_WEIGHT_NORMALIZATION: Final = (
+    "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER"
+)
 _HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -232,7 +249,8 @@ PUBLISHED_EPOCH_CROSSWALK_RELATIVE_PATH: Final = (
 )
 WORKBOOK_TOTAL_FORMULA: Final = (
     "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
-    'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")'
+    "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
+    '"Reserve")'
     "+SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
     '"Retained excluded systematic balance")'
     "-SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
@@ -1018,6 +1036,11 @@ def _dependence_report(
         "series_ids": series_ids,
         "source": source_identity,
         "status": "AVAILABLE",
+        # The components' allocation weights are the owner-approved
+        # PORT-DEPENDENCE-1 policy weights (authority date, normalized within the
+        # required perimeter); the label keeps them from reading as cutoff weights.
+        "weight_authority": _dependence_weight_authority(),
+        "weight_basis": WEIGHT_BASIS_POLICY,
     }
     if expected_end is not None:
         projection["complete_through"] = expected_end
@@ -2322,6 +2345,302 @@ def _latest_nav(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     return latest
 
 
+def _exact_total(values: Sequence[Decimal]) -> Decimal:
+    """Add money exactly: the default 28-digit context would round long sums."""
+
+    with localcontext() as context:
+        context.prec = 100
+        return sum(values, Decimal(0))
+
+
+def _nullable_usd(amount: Mapping[str, Any], field_name: str) -> Decimal | None:
+    """A catalog money object that may be UNAVAILABLE (``None``) instead of raising."""
+
+    if amount.get("currency") != "USD":
+        raise ReportValidationError(f"{field_name} must be USD")
+    if amount.get("status") == "UNAVAILABLE":
+        if amount.get("value") is not None:
+            raise ReportValidationError(f"{field_name} is unavailable with a value")
+        return None
+    if amount.get("status") != "AVAILABLE":
+        raise ReportValidationError(f"{field_name} status is invalid")
+    return _decimal(amount.get("value"), f"{field_name}.value")
+
+
+def _historical_weight_basis(day: object, field_name: str) -> str:
+    """The label of a dated snapshot: ``HISTORICAL_SNAPSHOT_YYYY_MM_DD``."""
+
+    return WEIGHT_BASIS_HISTORICAL_PREFIX + _date(day, field_name).isoformat().replace(
+        "-", "_"
+    )
+
+
+def _audit_snapshot_date(catalog: Mapping[str, Any]) -> str:
+    """The date of the dated audit snapshot a catalog still carries."""
+
+    snapshot = catalog.get("audit_snapshot")
+    if isinstance(snapshot, Mapping) and snapshot.get("as_of_date") is not None:
+        return _date(
+            snapshot.get("as_of_date"), "audit_snapshot.as_of_date"
+        ).isoformat()
+    days = sorted(
+        {
+            _date(item.get("as_of_date"), "allocation.as_of_date").isoformat()
+            for item in _objects(catalog.get("allocations"), "allocations")
+            if item.get("as_of_date") is not None
+        }
+    )
+    if not days:
+        raise ReportValidationError("historical snapshot has no date")
+    return days[0]
+
+
+def _dependence_weight_authority() -> dict[str, str]:
+    """The authority of the policy weights behind the dependence components.
+
+    PORT-DEPENDENCE-1 carries the owner-approved allocation weights as of the
+    authority date and normalizes them within the required perimeter; they are not
+    the cutoff capital weights.
+    """
+
+    policy = _load_json(DEPENDENCE_POLICY, "dependence policy")
+    if policy.get("policy_id") != DEPENDENCE_POLICY_ID:
+        raise ReportValidationError("dependence policy identity differs")
+    authority = _object(policy.get("allocation_authority"), "dependence authority")
+    return {
+        "as_of_date": _date(
+            authority.get("as_of_date"), "dependence authority as_of_date"
+        ).isoformat(),
+        "normalization": DEPENDENCE_WEIGHT_NORMALIZATION,
+        "policy_id": DEPENDENCE_POLICY_ID,
+    }
+
+
+def _capital_part(
+    raw: object, field_name: str, *, dated: bool = True
+) -> dict[str, Any]:
+    """One component of ``current_capital``: value, status, date, as published.
+
+    A strategy row is always dated when it has a value (the oldest member date).  An
+    aggregate with no component at all (no retained excluded strategy) is a current
+    zero with no date, so aggregates pass ``dated=False``.
+    """
+
+    part = _object(raw, field_name)
+    amount = _object(part.get("current_value"), f"{field_name}.current_value")
+    value = _nullable_usd(amount, f"{field_name}.current_value")
+    status = part.get("status")
+    if status not in (CAPITAL_AVAILABLE, CAPITAL_NOT_READY):
+        raise ReportValidationError(f"current capital status is invalid: {field_name}")
+    if (status == CAPITAL_AVAILABLE) != (value is not None):
+        raise ReportValidationError(
+            f"current capital status contradicts its value: {field_name}"
+        )
+    as_of = part.get("as_of_date")
+    if value is None:
+        if as_of is not None:
+            raise ReportValidationError(
+                f"current capital is not ready but dated: {field_name}"
+            )
+        day = None
+    elif as_of is None and not dated:
+        day = None
+    else:
+        day = _date(as_of, f"{field_name}.as_of_date").isoformat()
+    return {
+        "as_of_date": day,
+        "status": status,
+        "value": value,
+        "value_text": (
+            None
+            if value is None
+            else _text(amount.get("value"), f"{field_name}.current_value.value")
+        ),
+    }
+
+
+def _capital_strategy_rows(block: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """The block's strategy rows as typed values, keyed by strategy id."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    for item in _objects(block.get("strategies"), "current_capital.strategies"):
+        strategy_id = _text(item.get("strategy_id"), "current_capital strategy_id")
+        if strategy_id in rows:
+            raise ReportValidationError("current capital strategy is duplicated")
+        scope = item.get("scope")
+        if scope not in (CAPITAL_SCOPE_SYSTEMATIC, CAPITAL_SCOPE_RETAINED_EXCLUDED):
+            raise ReportValidationError("current capital strategy scope is invalid")
+        row = _capital_part(item, f"current_capital.strategies.{strategy_id}")
+        weight = item.get("current_weight")
+        row["weight"] = (
+            None
+            if weight is None
+            else _decimal(weight, f"current_capital.strategies.{strategy_id}.weight")
+        )
+        row["weight_text"] = weight
+        row["scope"] = scope
+        row["strategy_id"] = strategy_id
+        members: list[dict[str, Any]] = []
+        for member in _objects(
+            item.get("members"), f"current_capital.strategies.{strategy_id}.members"
+        ):
+            member_value = _nullable_usd(
+                _object(member.get("value"), "current_capital member value"),
+                "current_capital member value",
+            )
+            members.append(
+                {
+                    "account_id": _text(
+                        member.get("account_id"), "current_capital member account_id"
+                    ),
+                    "as_of_date": (
+                        None
+                        if member_value is None
+                        else _date(
+                            member.get("as_of_date"),
+                            "current_capital member as_of_date",
+                        ).isoformat()
+                    ),
+                    "value": member_value,
+                }
+            )
+        row["members"] = members
+        rows[strategy_id] = row
+    return rows
+
+
+def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The baseline's current capital block, checked for internal consistency.
+
+    The report is a consumption boundary and never trusts an aggregate it can
+    recompute from the rows beside it.  Systematic capital is the exact sum of the
+    required strategies, the retained excluded balance the exact sum of the excluded
+    ones, total liquid the exact sum of its three components; a component that is
+    not ready makes every figure that needs it not ready, never a stand-in; the
+    weights are the strategies' shares of the systematic total and close to one.
+    """
+
+    raw = catalog.get("current_capital")
+    if raw is None:
+        raise ReportValidationError("baseline catalog lacks current_capital")
+    block = _object(raw, "current_capital")
+    if block.get("weight_basis") != WEIGHT_BASIS_CURRENT:
+        raise ReportValidationError("current capital weight basis differs")
+    _date(block.get("valuation_date"), "current_capital.valuation_date")
+    parts = {
+        name: _capital_part(block.get(name), f"current_capital.{name}", dated=False)
+        for name in ("reserve", "retained_excluded", "systematic", "total_liquid")
+    }
+    rows = _capital_strategy_rows(block)
+    required = [
+        row for row in rows.values() if row["scope"] == CAPITAL_SCOPE_SYSTEMATIC
+    ]
+    excluded = [
+        row for row in rows.values() if row["scope"] == CAPITAL_SCOPE_RETAINED_EXCLUDED
+    ]
+    for row in rows.values():
+        members = row["members"]
+        if row["status"] == CAPITAL_AVAILABLE and members:
+            if (
+                any(member["value"] is None for member in members)
+                or _exact_total([member["value"] for member in members]) != row["value"]
+            ):
+                raise ReportValidationError(
+                    "current capital strategy differs from its members: "
+                    f"{row['strategy_id']}"
+                )
+
+    def reconcile(
+        name: str, group: Sequence[Mapping[str, Any]], label: str, *, empty_ready: bool
+    ) -> None:
+        part = parts[name]
+        ready = all(row["status"] == CAPITAL_AVAILABLE for row in group) and (
+            bool(group) or empty_ready
+        )
+        if ready:
+            expected = _exact_total([row["value"] for row in group])
+            if part["status"] != CAPITAL_AVAILABLE or part["value"] != expected:
+                raise ReportValidationError(
+                    f"current {label} capital differs from its strategies"
+                )
+        elif part["status"] == CAPITAL_AVAILABLE:
+            raise ReportValidationError(
+                f"current {label} capital is current while a strategy is not"
+            )
+
+    reconcile("systematic", required, "systematic", empty_ready=False)
+    reconcile("retained_excluded", excluded, "retained excluded", empty_ready=True)
+    components = [parts["systematic"], parts["reserve"], parts["retained_excluded"]]
+    total = parts["total_liquid"]
+    if all(part["status"] == CAPITAL_AVAILABLE for part in components):
+        expected_total = _exact_total([part["value"] for part in components])
+        if total["status"] != CAPITAL_AVAILABLE or total["value"] != expected_total:
+            raise ReportValidationError(
+                "current total liquid differs from its components"
+            )
+    elif total["status"] == CAPITAL_AVAILABLE:
+        raise ReportValidationError("total liquid is current while a component is not")
+    if parts["systematic"]["status"] == CAPITAL_AVAILABLE:
+        weights = [row["weight"] for row in required]
+        if any(weight is None for weight in weights) or _exact_total(weights) != 1:
+            raise ReportValidationError("current weights do not close to one")
+        systematic_total = parts["systematic"]["value"]
+        with localcontext() as context:
+            context.prec = 34
+            for row in required:
+                if abs(row["weight"] - row["value"] / systematic_total) > Decimal(
+                    "1e-30"
+                ):
+                    raise ReportValidationError(
+                        "current weight differs from its share of systematic capital: "
+                        f"{row['strategy_id']}"
+                    )
+    elif any(row["weight"] is not None for row in required):
+        raise ReportValidationError(
+            "current weights are published while systematic capital is not current"
+        )
+    if any(row["weight"] is not None for row in excluded):
+        raise ReportValidationError("a retained excluded strategy carries a weight")
+    return block
+
+
+def _verify_current_capital_accounts(
+    current_capital: Mapping[str, Any], accounts: Sequence[Mapping[str, Any]]
+) -> None:
+    """Every current member value is the report's own account row for that account.
+
+    The account rows are built from the NAV facts by a different path than the
+    baseline block; a strategy value that disagrees with its member accounts' values
+    (a stale block) must not publish.  A strategy row that lists no member is
+    verified by the aggregates only.
+    """
+
+    by_account = {str(row.get("account_id")): row for row in accounts}
+    for row in _capital_strategy_rows(current_capital).values():
+        if (
+            row["scope"] != CAPITAL_SCOPE_SYSTEMATIC
+            or row["status"] != CAPITAL_AVAILABLE
+        ):
+            continue
+        for member in row["members"]:
+            account = by_account.get(member["account_id"])
+            if account is None:
+                raise ReportValidationError(
+                    "current capital member account is absent from the account rows"
+                )
+            latest = account.get("latest_value_usd")
+            if (
+                member["value"] is None
+                or latest is None
+                or _decimal(latest, "account latest_value_usd") != member["value"]
+                or account.get("as_of_date") != member["as_of_date"]
+            ):
+                raise ReportValidationError(
+                    "current capital member differs from its account row: "
+                    f"{row['strategy_id']}"
+                )
+
+
 def _portfolio_summary(
     catalog: Mapping[str, Any],
     hwm_summary: Mapping[str, Any] | None = None,
@@ -2329,93 +2648,36 @@ def _portfolio_summary(
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     replay = _object(catalog.get("replay"), "replay")
-    total_liquid = replay.get("total_liquid_usd")
-    systematic_total = replay.get("systematic_total_usd")
-    reserve_total = replay.get("reserve_total_usd")
-    retained_excluded_systematic_balance: str | None = None
-    if strategy_product_controls is not None:
-        replay_total_liquid = _decimal(total_liquid, "replay.total_liquid_usd")
-        replay_systematic = _decimal(systematic_total, "replay.systematic_total_usd")
-        replay_reserve = _decimal(reserve_total, "replay.reserve_total_usd")
-        if replay_total_liquid != replay_systematic + replay_reserve:
-            raise ReportValidationError("replay total liquid does not reconcile")
-        raw_excluded_systematic = Decimal("0")
-        for allocation in _objects(catalog.get("allocations"), "allocations"):
-            if allocation.get("scope") != "SYSTEMATIC":
-                continue
-            strategy_id = allocation.get("strategy_id")
-            if (
-                not isinstance(strategy_id, str)
-                or strategy_id not in strategy_product_controls
-            ):
-                raise ReportValidationError(
-                    "excluded systematic allocation references an unknown product strategy"
-                )
-            requirement = strategy_product_controls[strategy_id].get(
-                "product_requirement"
-            )
-            if requirement == "REQUIRED":
-                continue
-            if requirement != "EXCLUDED":
-                raise ReportValidationError(
-                    "systematic allocation product requirement is invalid"
-                )
-            excluded_current_value = _object(
-                allocation.get("current_value"),
-                "excluded systematic allocation.current_value",
-            )
-            if excluded_current_value.get("status") != "AVAILABLE":
-                raise ReportValidationError(
-                    "excluded systematic allocation.current_value is not available"
-                )
-            raw_excluded_systematic += _decimal(
-                excluded_current_value.get("value"),
-                "excluded systematic allocation.current_value.value",
-            )
-        current_allocations = _allocations(catalog, strategy_product_controls)
-        systematic = sum(
-            (
-                _decimal(row["current_value_usd"], "allocation.current_value_usd")
-                for row in current_allocations
-                if row.get("scope") == "SYSTEMATIC"
-            ),
-            Decimal("0"),
-        )
-        reserve = sum(
-            (
-                _decimal(row["current_value_usd"], "allocation.current_value_usd")
-                for row in current_allocations
-                if row.get("scope") == "RESERVE"
-            ),
-            Decimal("0"),
-        )
-        if systematic > replay_systematic:
-            raise ReportValidationError(
-                "retained excluded systematic balance is negative"
-            )
-        retained_excluded = replay_systematic - systematic
-        if raw_excluded_systematic != retained_excluded:
-            raise ReportValidationError(
-                "retained excluded systematic allocations differ"
-            )
-        if reserve != replay_reserve:
-            raise ReportValidationError(
-                "current reserve allocation differs from replay"
-            )
-        if systematic + retained_excluded + replay_reserve != replay_total_liquid:
-            raise ReportValidationError(
-                "portfolio summary total liquid does not reconcile"
-            )
-        systematic_total = decimal_text(systematic)
-        retained_excluded_systematic_balance = decimal_text(retained_excluded)
-        reserve_total = decimal_text(replay_reserve)
-        total_liquid = decimal_text(replay_total_liquid)
+    block = _current_capital(catalog)
+    parts = {
+        name: _capital_part(block.get(name), f"current_capital.{name}", dated=False)
+        for name in ("reserve", "retained_excluded", "systematic", "total_liquid")
+    }
+
+    def capital_row(metric: str, name: str) -> dict[str, Any]:
+        part = parts[name]
+        return {
+            "as_of_date": part["as_of_date"],
+            "metric": metric,
+            "status": part["status"],
+            "unit": "USD",
+            "value": part["value_text"],
+        }
+
     # The coverage fields exist only when a freshness assessment was
     # supplied; a numerical-only hwm_summary (no freshness) falls back to
     # the replayed values exactly as the pre-envelope report did.
     nav_coverage = hwm_summary.get("nav_coverage") if hwm_summary is not None else None
     coverage_status = hwm_summary.get("status") if hwm_summary is not None else None
     correlation_one_stress = replay.get("correlation_one_stress")
+    # The stress is a weighted loss: with a dependence analysis it uses the
+    # owner-approved PORT-DEPENDENCE-1 policy weights; without one it is the audit
+    # replay's own figure, computed with the weights of the dated audit snapshot.
+    stress_label: dict[str, Any] = {
+        "weight_basis": _historical_weight_basis(
+            _audit_snapshot_date(catalog), "audit snapshot date"
+        )
+    }
     if (
         dependence_analysis is not None
         and dependence_analysis.get("status") == "AVAILABLE"
@@ -2440,6 +2702,10 @@ def _portfolio_summary(
             correlation_one_stress,
             "dependence_analysis.mode_summaries.LIVE_ONLY.correlation_one.loss",
         )
+        stress_label = {
+            "weight_authority": _dependence_weight_authority(),
+            "weight_basis": WEIGHT_BASIS_POLICY,
+        }
     return [
         {
             "metric": "Baseline replay",
@@ -2447,36 +2713,14 @@ def _portfolio_summary(
             "unit": "status",
             "value": replay.get("status"),
         },
-        {
-            "metric": "Total liquid",
-            "status": "AVAILABLE",
-            "unit": "USD",
-            "value": total_liquid,
-        },
-        {
-            "metric": "Systematic capital",
-            "status": "AVAILABLE",
-            "unit": "USD",
-            "value": systematic_total,
-        },
+        capital_row("Total liquid", "total_liquid"),
+        capital_row("Systematic capital", "systematic"),
         *(
-            [
-                {
-                    "metric": "Retained excluded systematic balance",
-                    "status": "AVAILABLE",
-                    "unit": "USD",
-                    "value": retained_excluded_systematic_balance,
-                }
-            ]
-            if retained_excluded_systematic_balance is not None
+            [capital_row("Retained excluded systematic balance", "retained_excluded")]
+            if strategy_product_controls is not None
             else []
         ),
-        {
-            "metric": "Reserve",
-            "status": "AVAILABLE",
-            "unit": "USD",
-            "value": reserve_total,
-        },
+        capital_row("Reserve", "reserve"),
         {
             "metric": "NAV coverage",
             "status": (
@@ -2494,6 +2738,7 @@ def _portfolio_summary(
             "status": "ADVERSE_SCENARIO",
             "unit": "ratio",
             "value": correlation_one_stress,
+            **stress_label,
         },
         {
             "metric": "Full-systematic HWM",
@@ -2684,10 +2929,11 @@ def _accounts(
         and not synthetic_controls
         else None
     )
-    reserve = next(
-        item
-        for item in _objects(catalog.get("allocations"), "allocations")
-        if item.get("scope") == "RESERVE"
+    # The reserve classification row follows the CURRENT reserve.  The dated audit
+    # reserve is never a stand-in: with no admitted source at the cutoff the row is
+    # NOT_READY and carries no value and no date.
+    reserve = _capital_part(
+        _current_capital(catalog).get("reserve"), "current_capital.reserve", dated=False
     )
     rows: list[dict[str, Any]] = []
     for account in _objects(catalog.get("accounts"), "accounts"):
@@ -2705,9 +2951,12 @@ def _accounts(
         ):
             continue
         if role == "RESERVE":
-            value = decimal_text(_amount(reserve, "current_value"))
-            as_of = _text(reserve.get("as_of_date"), "reserve.as_of_date")
-            status = "AVAILABLE_MANDATE_CLASSIFICATION"
+            if reserve["value"] is None:
+                as_of, value, status = None, None, CAPITAL_NOT_READY
+            else:
+                value = reserve["value_text"]
+                as_of = reserve["as_of_date"]
+                status = "AVAILABLE_MANDATE_CLASSIFICATION"
         elif account_id in latest:
             as_of, value = latest[account_id]
             status = "AVAILABLE_LATEST_OBSERVATION"
@@ -4301,11 +4550,14 @@ def _strategies(
             raise ReportValidationError(
                 "strategy version catalog must contain exactly 9 strategies"
             )
-    allocations = {
-        str(item["strategy_id"]): item
-        for item in _objects(catalog.get("allocations"), "allocations")
-        if item.get("scope") == "SYSTEMATIC"
-    }
+    # Current value and weight come from the baseline's current capital block, never
+    # from the dated allocation snapshot (which allocation_history still shows,
+    # labeled as that snapshot).
+    capital_rows = _capital_strategy_rows(_current_capital(catalog))
+    registry_ids = [
+        _text(item.get("strategy_id"), "strategy.strategy_id")
+        for item in _objects(catalog.get("strategies"), "strategies")
+    ]
     coverage = {
         str(item["strategy_id"]): item
         for item in _objects(
@@ -4350,7 +4602,7 @@ def _strategies(
         {},
     )
     performance_count: dict[str, tuple[int, int]] = {}
-    for strategy_id in allocations:
+    for strategy_id in registry_ids:
         items = [item for item in performance if item.get("strategy_id") == strategy_id]
         performance_count[strategy_id] = (
             sum(
@@ -4363,7 +4615,6 @@ def _strategies(
     rows: list[dict[str, Any]] = []
     for strategy in _objects(catalog.get("strategies"), "strategies"):
         strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
-        allocation = allocations[strategy_id]
         product_control = (
             strategy_product_controls.get(strategy_id)
             if strategy_product_controls is not None
@@ -4373,6 +4624,17 @@ def _strategies(
             product_control is None
             or product_control.get("product_requirement") == "REQUIRED"
         )
+        capital_row = capital_rows.get(strategy_id) if product_required else None
+        if product_required:
+            if capital_row is None or capital_row["status"] != CAPITAL_AVAILABLE:
+                raise ReportValidationError(
+                    f"required strategy has no current capital: {strategy_id}"
+                )
+            if capital_row["scope"] != CAPITAL_SCOPE_SYSTEMATIC:
+                raise ReportValidationError(
+                    "required strategy is not systematic in current capital: "
+                    f"{strategy_id}"
+                )
         historical_only = bool(
             product_control
             and product_control.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
@@ -4588,12 +4850,19 @@ def _strategies(
                     else None
                 ),
                 "current_value_usd": (
-                    decimal_text(_amount(allocation, "current_value"))
-                    if product_required
-                    else None
+                    capital_row["value_text"] if capital_row is not None else None
+                ),
+                "capital_status": (
+                    capital_row["status"] if capital_row is not None else None
+                ),
+                "capital_as_of_date": (
+                    capital_row["as_of_date"] if capital_row is not None else None
                 ),
                 "systematic_weight": (
-                    allocation.get("systematic_weight") if product_required else None
+                    capital_row["weight_text"] if capital_row is not None else None
+                ),
+                "weight_basis": (
+                    WEIGHT_BASIS_CURRENT if capital_row is not None else None
                 ),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
@@ -4955,6 +5224,11 @@ def _allocations(
                 "source_key": item.get("source_key"),
                 "strategy_id": item.get("strategy_id"),
                 "systematic_weight": item.get("systematic_weight"),
+                # The rows are the dated snapshot as it was recorded, whatever the
+                # cutoff: the label says so, and no consumer reads them as current.
+                "weight_basis": _historical_weight_basis(
+                    item.get("as_of_date"), "allocation.as_of_date"
+                ),
             }
         )
     rows = sorted(
@@ -4978,28 +5252,8 @@ def _allocations(
         or {row.get("strategy_id") for row in systematic_rows} != required_ids
     ):
         raise ReportValidationError("current systematic allocation perimeter differs")
-    systematic_total = sum(
-        (
-            _decimal(row["current_value_usd"], "allocation.current_value_usd")
-            for row in systematic_rows
-        ),
-        Decimal("0"),
-    )
-    if not systematic_rows or systematic_total <= 0:
-        raise ReportValidationError(
-            "current systematic allocations must have positive value"
-        )
-    with localcontext() as context:
-        context.prec = 34
-        assigned = Decimal("0")
-        for row in systematic_rows[:-1]:
-            weight = (
-                _decimal(row["current_value_usd"], "allocation.current_value_usd")
-                / systematic_total
-            )
-            row["systematic_weight"] = decimal_text(weight)
-            assigned += weight
-        systematic_rows[-1]["systematic_weight"] = decimal_text(Decimal("1") - assigned)
+    # No renormalization: the weights are the snapshot's own column as recorded.  The
+    # report's renormalized set is gone; current weights come from `current_capital`.
     return rows
 
 
@@ -6238,6 +6492,9 @@ def _calculation_catalog_through(
             {"first_date", "last_date", "observed_start", "observed_end"}
         ),
         "hwm_acceptance_record": frozenset({"anchor_date"}),
+        # A current capital valued after the calculation cutoff is not the capital
+        # of that cutoff: its figures cannot be shown beside the truncated NAVs.
+        "current_capital": frozenset({"as_of_date", "valuation_date"}),
     }
     for surface, field_names in context_boundaries.items():
         if surface in projected:
@@ -6579,25 +6836,10 @@ def build_report_data(
             attribution_generation_id=attribution_generation_id,
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
+    # The dated snapshot, as recorded and labeled.  It no longer feeds
+    # `strategy_summary`: the weights there are the current cutoff weights that
+    # `_strategies` took from `current_capital`.
     allocation_history = _allocations(catalog, strategy_product_controls)
-    current_weights = {
-        _text(row.get("strategy_id"), "allocation_history.strategy_id"): row.get(
-            "systematic_weight"
-        )
-        for row in allocation_history
-        if row.get("scope") == "SYSTEMATIC"
-    }
-    strategy_summary = [
-        {
-            **row,
-            "systematic_weight": current_weights[
-                _text(row.get("strategy_id"), "strategy_summary.strategy_id")
-            ],
-        }
-        if row.get("strategy_id") in current_weights
-        else row
-        for row in strategy_summary
-    ]
     coverage = _coverage(catalog)
     dependence_analysis: dict[str, Any] = {
         "default_evidence_mode": "LIVE_ONLY",
@@ -6802,7 +7044,13 @@ def build_report_data(
             )
         except HwmCoverageError as exc:
             raise ReportValidationError(str(exc)) from exc
-        hwm_summary = {**coverage_summary, **hwm_numerical}
+        # The coverage rows inherit the current cutoff values and weights of
+        # `strategy_summary`; the summary says which weight set its rows show.
+        hwm_summary = {
+            **coverage_summary,
+            **hwm_numerical,
+            "weight_basis": WEIGHT_BASIS_CURRENT,
+        }
         coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
         hwm_provenance = [
             {
@@ -6859,13 +7107,18 @@ def build_report_data(
         current_account_ids,
         "provider_admissions",
     )
+    account_summary = _accounts(
+        catalog,
+        strategy_product_controls,
+        current_epoch_account_details,
+        raw_observation_coverage=raw_observation_coverage,
+    )
+    # B4: the report never compared a strategy value with its accounts.  The account
+    # rows come from the NAV facts, the strategy values from the baseline block; a
+    # stale block (or a stale snapshot) cannot publish.
+    _verify_current_capital_accounts(_current_capital(catalog), account_summary)
     report: dict[str, Any] = {
-        "account_summary": _accounts(
-            catalog,
-            strategy_product_controls,
-            current_epoch_account_details,
-            raw_observation_coverage=raw_observation_coverage,
-        ),
+        "account_summary": account_summary,
         "allocation_history": allocation_history,
         "as_of_date": catalog.get("as_of_date"),
         "baseline": baseline_ref,
@@ -7535,6 +7788,19 @@ def _decomposition_workbook_rows(
 
 
 def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
+    # The workbook total check ("PASS" in the sentinel cell) is an identity over the
+    # capital rows; a capital row that is not ready has no value to add, and a check
+    # that skipped it would pass on a total nobody computed.  Fail closed.
+    waiting = [
+        str(row.get("metric"))
+        for row in report["portfolio_summary"]
+        if row.get("status") == CAPITAL_NOT_READY
+    ]
+    if waiting:
+        raise ReportValidationError(
+            "the workbook total check cannot be computed while capital is not ready: "
+            + ", ".join(waiting)
+        )
     workbook = xlsxwriter.Workbook(path, {"constant_memory": False})
     workbook.set_properties(
         {

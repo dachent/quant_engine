@@ -27663,6 +27663,13 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
     for coverage in baseline_payload["fact_coverage"]:
         if coverage["fact_type"] == "accounts":
             coverage["fact_type"] = "assignments"
+    # The baseline publishes `current_capital`; the block this fixture's own dated
+    # allocations imply is the one the report and panel consume here.
+    baseline_payload["current_capital"] = (
+        report_fixture.capital_fixture.mirror_allocations(
+            baseline_payload, required_strategy_ids
+        )
+    )
     baseline = InputSnapshot.from_bytes(
         "mixed report-policy baseline", canonical_json_bytes(baseline_payload)
     )

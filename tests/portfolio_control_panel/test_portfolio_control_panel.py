@@ -46,6 +46,15 @@ if SPEC is None or SPEC.loader is None:
 panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
+_CAPITAL_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "current_capital_fixture_panel_suite",
+    REPOSITORY_ROOT / "tests" / "portfolio_report" / "current_capital_fixture.py",
+)
+if _CAPITAL_FIXTURE_SPEC is None or _CAPITAL_FIXTURE_SPEC.loader is None:
+    raise RuntimeError("unable to load the current capital fixture")
+capital_fixture = importlib.util.module_from_spec(_CAPITAL_FIXTURE_SPEC)
+sys.modules[_CAPITAL_FIXTURE_SPEC.name] = capital_fixture
+_CAPITAL_FIXTURE_SPEC.loader.exec_module(capital_fixture)
 
 
 @pytest.mark.parametrize("missing", [None, "DYNAMIC_FLS", "series", "surfaces"])
@@ -378,9 +387,10 @@ def test_report_panel_expectations_follow_accepted_rollforward() -> None:
         "account_summary": [{}, {}],
         "allocation_history": [{}, {}, {}, {}],
         "portfolio_summary": [
-            {"metric": "Reserve", "value": "125000.00"},
-            {"metric": "Systematic capital", "value": "480000.00"},
-            {"metric": "Total liquid", "value": "605000.00"},
+            _capital_summary_row("Reserve", "125000.00", "2026-01-02"),
+            _capital_summary_row("Systematic capital", "480000.00", "2026-01-02"),
+            _capital_summary_row("Total liquid", "605000.00", "2026-01-02"),
+            _capital_summary_row("Retained excluded systematic balance", "0", None),
         ],
         "strategy_summary": [{}, {}, {}],
     }
@@ -388,8 +398,21 @@ def test_report_panel_expectations_follow_accepted_rollforward() -> None:
     assert panel._report_panel_expectations(report) == {
         "capital": {
             "reserve": "125000.00",
+            "retained_excluded": "0",
             "systematic": "480000.00",
             "total_liquid": "605000.00",
+        },
+        "capital_as_of": {
+            "reserve": "2026-01-02",
+            "retained_excluded": None,
+            "systematic": "2026-01-02",
+            "total_liquid": "2026-01-02",
+        },
+        "capital_status": {
+            "reserve": "AVAILABLE",
+            "retained_excluded": "AVAILABLE",
+            "systematic": "AVAILABLE",
+            "total_liquid": "AVAILABLE",
         },
         "counts": {"accounts": 2, "allocations": 4, "strategies": 3},
     }
@@ -631,6 +654,60 @@ def _canonical_return_series_fixture() -> dict[str, Any]:
     }
 
 
+def _capital_summary_row(
+    metric: str, value: str | None, as_of: str | None
+) -> dict[str, object]:
+    return {
+        "as_of_date": as_of,
+        "metric": metric,
+        "status": "AVAILABLE" if value is not None else "NOT_READY_AT_CUTOFF",
+        "unit": "USD",
+        "value": value,
+    }
+
+
+# The fixture strategies are worth 1000 + index (7021 in all); the reserve is the
+# 2026-07-30 figure; nothing is retained excluded.  The report rows and the governed
+# baseline's `current_capital` below are the same numbers.
+FIXTURE_SYSTEMATIC = "7021"
+FIXTURE_RESERVE = "100043.62"
+FIXTURE_TOTAL_LIQUID = "107064.62"
+FIXTURE_CAPITAL_DAY = "2026-07-30"
+
+
+def _fixture_capital_summary_rows() -> list[dict[str, object]]:
+    return [
+        _capital_summary_row("Total liquid", FIXTURE_TOTAL_LIQUID, FIXTURE_CAPITAL_DAY),
+        _capital_summary_row(
+            "Systematic capital", FIXTURE_SYSTEMATIC, FIXTURE_CAPITAL_DAY
+        ),
+        _capital_summary_row("Retained excluded systematic balance", "0", None),
+        _capital_summary_row("Reserve", FIXTURE_RESERVE, FIXTURE_CAPITAL_DAY),
+    ]
+
+
+def _fixture_current_capital() -> dict[str, object]:
+    """The governed baseline's block for the fixture report (hand-built, exact)."""
+
+    return capital_fixture.block(
+        [
+            capital_fixture.strategy(
+                ACTIVE_STRATEGY_IDS[index],
+                [
+                    capital_fixture.member(
+                        f"account-{index:02d}", str(1000 + index), FIXTURE_CAPITAL_DAY
+                    )
+                ],
+            )
+            for index in range(7)
+        ],
+        valuation_date=FIXTURE_CAPITAL_DAY,
+        reserve=capital_fixture.aggregate(
+            ["reserve"], FIXTURE_RESERVE, FIXTURE_CAPITAL_DAY
+        ),
+    )
+
+
 def _report() -> dict[str, object]:
     canonical = _canonical_return_series_fixture()
     strategies = [
@@ -747,9 +824,7 @@ def _report() -> dict[str, object]:
             }
         ],
         "portfolio_summary": [
-            {"metric": "Total liquid", "value": "510316.01"},
-            {"metric": "Systematic capital", "value": "410272.39"},
-            {"metric": "Reserve", "value": "100043.62"},
+            *_fixture_capital_summary_rows(),
             {"metric": "NAV coverage", "value": "0.7175692227302938908465178464"},
             {"metric": "Correlation-one stress", "value": "0.37249726899852387"},
             {
@@ -2158,6 +2233,7 @@ def _with_hwm_summary(
     report["hwm_summary"] = {
         **coverage_summary,
         **panel._compute_panel_numerical_hwm(current_product_catalog),
+        "weight_basis": "CURRENT_CUTOFF",
     }
     for row in report["portfolio_summary"]:
         if row.get("metric") == "Full-systematic HWM":
@@ -2256,6 +2332,7 @@ def _panel_baseline_catalog(
             for index in range(panel.CURRENT_PRODUCT_EPOCH_COUNT)
         ],
         "baseline_schema_version": 1,
+        "current_capital": _fixture_current_capital(),
         "policy_version": "PORT-PERF-1",
         "source_artifacts": [],
         "strategies": [
@@ -12120,3 +12197,153 @@ def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
         panel._report_download_link(
             "downloads/portfolio-report-data.json", "Report data", oversized
         )
+
+
+def test_panel_publishes_the_report_current_capital_with_status_as_of_and_labels(
+    inputs: dict[str, Any],
+) -> None:
+    """The capital block, its statuses and dates, and the labeled weight views."""
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(candidate)
+
+    assert data["capital"] == {
+        "reserve": FIXTURE_RESERVE,
+        "retained_excluded": "0",
+        "systematic": FIXTURE_SYSTEMATIC,
+        "total_liquid": FIXTURE_TOTAL_LIQUID,
+    }
+    assert set(data["capital_status"].values()) == {"AVAILABLE"}
+    assert data["capital_as_of"] == {
+        "reserve": FIXTURE_CAPITAL_DAY,
+        "retained_excluded": None,
+        "systematic": FIXTURE_CAPITAL_DAY,
+        "total_liquid": FIXTURE_CAPITAL_DAY,
+    }
+    assert data["hwm_summary"]["weight_basis"] == "CURRENT_CUTOFF"
+    assert data["dependence_analysis"]["weight_basis"] == "POLICY_PORT_DEPENDENCE_1"
+    assert data["dependence_analysis"]["weight_authority"] == {
+        "as_of_date": "2026-08-16",
+        "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
+        "policy_id": "PORT-DEPENDENCE-1",
+    }
+    assert {row["weight_basis"] for row in data["dependence_modes"].values()} == {
+        "POLICY_PORT_DEPENDENCE_1"
+    }
+    verified = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        Path(str(candidate["candidate_dir"])),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert verified["all_passed"] is True
+
+
+def test_panel_publishes_not_ready_capital_as_null_with_its_status(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A reserve with no admitted source is null and NOT_READY, never a stand-in,
+    and total liquid, which needs it, is not painted either."""
+
+    catalog = _panel_baseline_catalog()
+    catalog["current_capital"] = capital_fixture.block(
+        [
+            capital_fixture.strategy(
+                ACTIVE_STRATEGY_IDS[index],
+                [
+                    capital_fixture.member(
+                        f"account-{index:02d}", str(1000 + index), FIXTURE_CAPITAL_DAY
+                    )
+                ],
+            )
+            for index in range(7)
+        ],
+        valuation_date=FIXTURE_CAPITAL_DAY,
+        reserve_members=[capital_fixture.member("account-reserve", None, None)],
+    )
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "not-ready-baseline.json", catalog
+    )
+    report = _report()
+    report["baseline"] = identity
+    report["portfolio_summary"] = [
+        row
+        for row in report["portfolio_summary"]
+        if row["metric"]
+        not in {
+            "Total liquid",
+            "Systematic capital",
+            "Retained excluded systematic balance",
+            "Reserve",
+        }
+    ] + [
+        _capital_summary_row("Total liquid", None, None),
+        _capital_summary_row(
+            "Systematic capital", FIXTURE_SYSTEMATIC, FIXTURE_CAPITAL_DAY
+        ),
+        _capital_summary_row("Retained excluded systematic balance", "0", None),
+        _capital_summary_row("Reserve", None, None),
+    ]
+    _with_hwm_summary(report, inputs["freshness"], catalog)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(candidate)
+
+    assert data["capital"] == {
+        "reserve": None,
+        "retained_excluded": "0",
+        "systematic": FIXTURE_SYSTEMATIC,
+        "total_liquid": None,
+    }
+    assert data["capital_status"] == {
+        "reserve": "NOT_READY_AT_CUTOFF",
+        "retained_excluded": "AVAILABLE",
+        "systematic": "AVAILABLE",
+        "total_liquid": "NOT_READY_AT_CUTOFF",
+    }
+    assert data["capital_as_of"]["reserve"] is None
+    assert data["capital_as_of"]["total_liquid"] is None
+    verified = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        Path(str(candidate["candidate_dir"])),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert verified["all_passed"] is True
+
+
+def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """The panel reconciles the report's capital rows with the baseline block."""
+
+    report = _report_with_baseline(inputs)
+    report["portfolio_summary"] = [
+        {**row, "value": "445477.45"} if row["metric"] == "Systematic capital" else row
+        for row in report["portfolio_summary"]
+    ]
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report capital differs from the governed baseline current capital",
+    )

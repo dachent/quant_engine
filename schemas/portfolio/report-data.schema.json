@@ -44,9 +44,33 @@
         "catalog_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
-    "portfolio_summary": {"type": "array", "minItems": 8, "items": {"type": "object"}},
+    "portfolio_summary": {
+      "type": "array",
+      "minItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "as_of_date": {"type": ["string", "null"], "format": "date"},
+          "weight_authority": {"$ref": "#/$defs/weight_authority"},
+          "weight_basis": {"$ref": "#/$defs/weight_basis"}
+        }
+      }
+    },
     "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "strategy_summary": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "object"}},
+    "strategy_summary": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "required": ["capital_as_of_date", "capital_status", "weight_basis"],
+        "properties": {
+          "capital_as_of_date": {"type": "string", "format": "date"},
+          "capital_status": {"const": "AVAILABLE"},
+          "weight_basis": {"const": "CURRENT_CUTOFF"}
+        }
+      }
+    },
     "provider_admissions": {"type": "array", "items": {"type": "object"}},
     "provider_coverage": {"type": "array", "items": {"type": "object"}},
     "provider_strategy_returns": {"type": "array", "items": {"type": "object"}},
@@ -75,7 +99,16 @@
     },
     "transactions_and_flows": {"type": "array", "items": {"type": "object"}},
     "twr_mwr": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/performance"}},
-    "allocation_history": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object"}},
+    "allocation_history": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["weight_basis"],
+        "properties": {"weight_basis": {"$ref": "#/$defs/historical_weight_basis"}}
+      }
+    },
     "flow_reconciliation": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "coverage_data_quality": {"type": "array", "minItems": 1, "items": {"type": "object"}},
@@ -102,7 +135,8 @@
         "status_semantics": {"const": "EXPLICIT_GOVERNED_HWM_PERIMETER"},
         "uncovered_details": {"type": "array", "items": {"type": "object"}},
         "uncovered_strategies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-        "uncovered_value_usd": {"$ref": "#/$defs/decimal"}
+        "uncovered_value_usd": {"$ref": "#/$defs/decimal"},
+        "weight_basis": {"const": "CURRENT_CUTOFF"}
       },
       "allOf": [
         {
@@ -121,7 +155,7 @@
         },
         {
           "if": {"required": ["status"]},
-          "then": {"required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "nav_coverage", "policy_id", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"]}
+          "then": {"required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "nav_coverage", "policy_id", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd", "weight_basis"]}
         }
       ]
     },
@@ -210,13 +244,15 @@
             "sha256": {"$ref": "#/$defs/sha256"},
             "size_bytes": {"type": "integer", "minimum": 1}
           }
-        }
+        },
+        "weight_authority": {"$ref": "#/$defs/weight_authority"},
+        "weight_basis": {"const": "POLICY_PORT_DEPENDENCE_1"}
       },
       "allOf": [
         {
           "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
           "then": {
-            "required": ["analytics_hash", "as_of_date", "identity", "mode_payload_sha256", "mode_summaries", "source"],
+            "required": ["analytics_hash", "as_of_date", "identity", "mode_payload_sha256", "mode_summaries", "source", "weight_authority", "weight_basis"],
             "properties": {
               "mode_count": {"const": 2},
               "pair_count": {"const": 21},
@@ -315,6 +351,18 @@
     },
     "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "historical_weight_basis": {"type": "string", "pattern": "^HISTORICAL_SNAPSHOT_[0-9]{4}_[0-9]{2}_[0-9]{2}$"},
+    "weight_basis": {"type": "string", "pattern": "^(?:CURRENT_CUTOFF|POLICY_PORT_DEPENDENCE_1|HISTORICAL_SNAPSHOT_[0-9]{4}_[0-9]{2}_[0-9]{2})$"},
+    "weight_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "normalization", "policy_id"],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "normalization": {"const": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER"},
+        "policy_id": {"const": "PORT-DEPENDENCE-1"}
+      }
+    },
     "dependence_age_evidence": {
       "type": "object",
       "additionalProperties": false,

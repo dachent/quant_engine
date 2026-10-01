@@ -15,6 +15,8 @@
     "candidate_driver_map",
     "canonical_strategy_series",
     "capital",
+    "capital_as_of",
+    "capital_status",
     "counts",
     "coverage",
     "decomposition_lenses",
@@ -163,13 +165,37 @@
     },
     "invested_capital": { "$ref": "#/$defs/invested_capital" },
     "capital": {
+      "$comment": "Decimal or null: a component that is not ready at the cutoff is null and carries its status in capital_status; it is never a stand-in value.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["reserve", "systematic", "total_liquid"],
+      "required": ["reserve", "retained_excluded", "systematic", "total_liquid"],
       "properties": {
-        "reserve": { "$ref": "#/$defs/decimal" },
-        "systematic": { "$ref": "#/$defs/decimal" },
-        "total_liquid": { "$ref": "#/$defs/decimal" }
+        "reserve": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "retained_excluded": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "systematic": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "total_liquid": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+      }
+    },
+    "capital_as_of": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reserve", "retained_excluded", "systematic", "total_liquid"],
+      "properties": {
+        "reserve": { "type": ["string", "null"], "format": "date" },
+        "retained_excluded": { "type": ["string", "null"], "format": "date" },
+        "systematic": { "type": ["string", "null"], "format": "date" },
+        "total_liquid": { "type": ["string", "null"], "format": "date" }
+      }
+    },
+    "capital_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reserve", "retained_excluded", "systematic", "total_liquid"],
+      "properties": {
+        "reserve": { "enum": ["AVAILABLE", "NOT_READY_AT_CUTOFF"] },
+        "retained_excluded": { "enum": ["AVAILABLE", "NOT_READY_AT_CUTOFF"] },
+        "systematic": { "enum": ["AVAILABLE", "NOT_READY_AT_CUTOFF"] },
+        "total_liquid": { "enum": ["AVAILABLE", "NOT_READY_AT_CUTOFF"] }
       }
     },
     "advisory": {
@@ -357,7 +383,18 @@
         "pair_count": { "const": 21 },
         "series_ids": { "type": "array", "minItems": 7, "maxItems": 7, "items": { "type": "string" }, "uniqueItems": true },
         "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
-        "source_sha256": { "$ref": "#/$defs/hash" }
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "weight_authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["as_of_date", "normalization", "policy_id"],
+          "properties": {
+            "as_of_date": { "type": "string", "format": "date" },
+            "normalization": { "const": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER" },
+            "policy_id": { "const": "PORT-DEPENDENCE-1" }
+          }
+        },
+        "weight_basis": { "const": "POLICY_PORT_DEPENDENCE_1" }
       }
     },
     "dependence_modes": {
@@ -427,7 +464,8 @@
         "status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
         "uncovered_details": { "type": "array", "items": { "type": "object" } },
         "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "uncovered_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+        "uncovered_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "weight_basis": { "const": "CURRENT_CUTOFF" }
       },
       "allOf": [
         {

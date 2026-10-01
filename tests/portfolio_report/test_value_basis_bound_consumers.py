@@ -344,7 +344,9 @@ def test_performance_threads_the_bound_to_the_receipt_gate() -> None:
         )
 
 
-def test_strategy_summary_fallback_threads_the_bound_to_the_receipt_gate() -> None:
+def test_strategy_summary_fallback_threads_the_bound_to_the_receipt_gate(
+    full: Any,
+) -> None:
     """``_strategies`` computes its own evidence when it is not handed any."""
 
     catalog = {
@@ -395,6 +397,7 @@ def test_strategy_summary_fallback_threads_the_bound_to_the_receipt_gate() -> No
         }
     ]
 
+    catalog = full.capital_fixture.with_current_capital(catalog)
     rows = reporter._strategies(
         catalog, [], value_basis_bounds=_bounds({"robuxio-crypto": "2026-01-01"})
     )
@@ -1724,11 +1727,14 @@ def test_public_builder_publishes_the_value_basis_bounds_disclosure(
 def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged(
     full: Any, tmp_path: Path
 ) -> None:
-    """With nothing bounded the key is absent and every other byte is unchanged.
+    """With nothing bounded the key is absent and the bytes are exactly the pinned ones.
 
-    The v1 default report (synthetic baseline, no provider ledger, no cutoff) is
-    31,543 bytes with sha256 cfb1ab00... as recorded by the #503 acceptance
-    ruling and re-verified on the merge base of this lane.
+    The default report (synthetic baseline, no provider ledger, no cutoff) was 31,543
+    bytes with sha256 cfb1ab00... under the #503 acceptance ruling.  Cluster 2 (T2)
+    moves it on purpose: the report now carries the capital status and date of each
+    strategy, the weight-basis labels, and the as-of date of each capital row.  The
+    pin below is the new report; the paired test that follows proves the move is
+    exactly that and nothing else by undoing those fields and reproducing cfb1ab00....
     """
 
     baseline_root = full._published_baseline(tmp_path)
@@ -1736,6 +1742,54 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     report, content, _path = full.reporter.build_report_data(baseline_root)
 
     assert "value_basis_bounds" not in report
+    assert len(content) == 32702
+    assert hashlib.sha256(content).hexdigest() == (
+        "57e31595c0e6d508111c4bd7c567451121e577aabc66ca83916b324c02b3c39b"
+    )
+
+
+def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
+    full: Any, tmp_path: Path
+) -> None:
+    """The v1 -> T2 move of the default synthetic report is exactly the T2 fields."""
+
+    baseline_root = full._published_baseline(tmp_path)
+    report, _content, _path = full.reporter.build_report_data(baseline_root)
+
+    undone = json.loads(canonical_json_bytes(report))
+    strategy_weights = {
+        row["strategy_id"]: row["systematic_weight"]
+        for row in undone["strategy_summary"]
+    }
+    for row in undone["strategy_summary"]:
+        for key in ("capital_as_of_date", "capital_status", "weight_basis"):
+            del row[key]
+    for row in undone["allocation_history"]:
+        del row["weight_basis"]
+        if row["scope"] == "SYSTEMATIC":
+            # v1 showed the renormalized set here; in this synthetic world the
+            # current shares equal it value for value.
+            row["systematic_weight"] = strategy_weights[row["strategy_id"]]
+    for row in undone["portfolio_summary"]:
+        row.pop("as_of_date", None)
+        row.pop("weight_basis", None)
+    content = canonical_json_bytes(undone)
+    # The published synthetic baseline now carries its `current_capital` block, so its
+    # catalog bytes and generation identity differ from v1's; those two identities
+    # are the only other bytes that moved.
+    for current, recorded in (
+        (
+            report["baseline"]["generation_id"],
+            "19ba43eca4af8bc01f9f7306724d1956532091cdfa8d7ef129320c6f6445eed7",
+        ),
+        (
+            report["baseline"]["catalog_sha256"],
+            "e4352c6b59a71352a3fa1282febe0ba33d4a9d81c7a02b3a3fb2d26e6eb6ae2d",
+        ),
+    ):
+        assert content.count(current.encode()) >= 1
+        content = content.replace(current.encode(), recorded.encode())
+
     assert len(content) == 31543
     assert hashlib.sha256(content).hexdigest() == (
         "cfb1ab0012f918cd500cf662b8c682302ca5f28a1b1dd56eaf8048c16ae91b78"
