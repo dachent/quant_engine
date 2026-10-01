@@ -27664,10 +27664,27 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
         if coverage["fact_type"] == "accounts":
             coverage["fact_type"] = "assignments"
     # The baseline publishes `current_capital`; the block this fixture's own dated
-    # allocations imply is the one the report and panel consume here.
-    baseline_payload["current_capital"] = (
-        report_fixture.capital_fixture.mirror_allocations(
-            baseline_payload, required_strategy_ids
+    # allocations imply is the one the report and panel consume here.  Each required
+    # strategy stands on the accounts its current assignments fund (the accounts the
+    # epoch manifest admits, so they are the report's account rows); those accounts
+    # carry the NAV observation the block's values come from.
+    capital_fixture = report_fixture.capital_fixture
+    funding: dict[str, list[str]] = {}
+    for assignment in baseline_payload["assignments"]:
+        if (
+            assignment["mapping_status"] == "MAPPED"
+            and assignment["effective_end"] is None
+            and assignment["strategy_id"] in required_strategy_ids
+        ):
+            funded = funding.setdefault(assignment["strategy_id"], [])
+            if assignment["account_id"] not in funded:
+                funded.append(assignment["account_id"])
+    baseline_payload.update(
+        capital_fixture.fund(
+            baseline_payload,
+            capital_fixture.mirror_allocations(
+                baseline_payload, required_strategy_ids, funding=funding
+            ),
         )
     )
     baseline = InputSnapshot.from_bytes(

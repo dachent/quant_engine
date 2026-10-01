@@ -2518,6 +2518,9 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
     ones, total liquid the exact sum of its three components; a component that is
     not ready makes every figure that needs it not ready, never a stand-in; the
     weights are the strategies' shares of the systematic total and close to one.
+    Every AVAILABLE strategy stands on at least one member whose values add up to
+    the strategy's and whose oldest date is the strategy's; each strategy aggregate
+    is dated at the oldest strategy under it.
     """
 
     raw = catalog.get("current_capital")
@@ -2539,21 +2542,31 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
         row for row in rows.values() if row["scope"] == CAPITAL_SCOPE_RETAINED_EXCLUDED
     ]
     for row in rows.values():
+        if row["status"] != CAPITAL_AVAILABLE:
+            continue
         members = row["members"]
-        if row["status"] == CAPITAL_AVAILABLE and members:
-            if (
-                any(member["value"] is None for member in members)
-                or _exact_total([member["value"] for member in members]) != row["value"]
-            ):
-                raise ReportValidationError(
-                    "current capital strategy differs from its members: "
-                    f"{row['strategy_id']}"
-                )
-            if row["as_of_date"] != min(member["as_of_date"] for member in members):
-                raise ReportValidationError(
-                    "current capital strategy is not dated at its oldest member: "
-                    f"{row['strategy_id']}"
-                )
+        # A strategy value is the sum of its members' admitted NAVs.  A row that lists
+        # no member would skip both checks below and publish whatever value the block
+        # carries with no account behind it, so an AVAILABLE row (in any scope) must
+        # stand on at least one member.  The baseline never emits one: a strategy with
+        # no member is NOT_READY, and a NOT_READY row may list none.
+        if not members:
+            raise ReportValidationError(
+                f"current capital strategy has no member evidence: {row['strategy_id']}"
+            )
+        if (
+            any(member["value"] is None for member in members)
+            or _exact_total([member["value"] for member in members]) != row["value"]
+        ):
+            raise ReportValidationError(
+                "current capital strategy differs from its members: "
+                f"{row['strategy_id']}"
+            )
+        if row["as_of_date"] != min(member["as_of_date"] for member in members):
+            raise ReportValidationError(
+                "current capital strategy is not dated at its oldest member: "
+                f"{row['strategy_id']}"
+            )
 
     def reconcile(
         name: str, group: Sequence[Mapping[str, Any]], label: str, *, empty_ready: bool
@@ -2567,6 +2580,12 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
             if part["status"] != CAPITAL_AVAILABLE or part["value"] != expected:
                 raise ReportValidationError(
                     f"current {label} capital differs from its strategies"
+                )
+            # An aggregate is as old as the oldest strategy under it; an empty group
+            # (no retained excluded strategy) is a current zero with no date.
+            if group and part["as_of_date"] != min(row["as_of_date"] for row in group):
+                raise ReportValidationError(
+                    f"current {label} capital is not dated at its oldest strategy"
                 )
         elif part["status"] == CAPITAL_AVAILABLE:
             raise ReportValidationError(
@@ -2616,8 +2635,9 @@ def _verify_current_capital_accounts(
 
     The account rows are built from the NAV facts by a different path than the
     baseline block; a strategy value that disagrees with its member accounts' values
-    (a stale block) must not publish.  A strategy row that lists no member is
-    verified by the aggregates only.
+    (a stale block) must not publish.  An AVAILABLE strategy row always lists at least
+    one member (``_current_capital`` refuses one that does not), so every published
+    systematic value is checked here against account rows.
     """
 
     by_account = {str(row.get("account_id")): row for row in accounts}

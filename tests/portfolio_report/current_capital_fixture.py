@@ -14,7 +14,7 @@ the real builder's output through the same consumers.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal, localcontext
+from decimal import ROUND_DOWN, Decimal, localcontext
 from typing import Any
 
 AVAILABLE = "AVAILABLE"
@@ -228,11 +228,53 @@ def block(
     }
 
 
+def _share(value: str, parts: int) -> list[str]:
+    """``value`` shared exactly by ``parts`` accounts: equal cents, the rest on the last."""
+
+    if parts <= 1:
+        return [value] * parts
+    total = Decimal(value)
+    cents = (total / parts).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    shares = [cents] * (parts - 1)
+    shares.append(total - sum(shares, Decimal(0)))
+    return [_text(item) for item in shares]
+
+
+def _latest_navs(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """Each account's latest NAV observation in the catalog: ``(date, value text)``."""
+
+    latest: dict[str, tuple[str, str]] = {}
+    for item in catalog.get("nav_observations", []):
+        account_id, day = str(item["account_id"]), str(item["as_of_date"])
+        if account_id not in latest or day > latest[account_id][0]:
+            latest[account_id] = (day, str(item["nav"]["value"]))
+    return latest
+
+
+def shared_funding(catalog: Mapping[str, Any], account_id: str) -> dict[str, list[str]]:
+    """One funded account stands behind every strategy (a one-epoch synthetic world).
+
+    A synthetic baseline whose epoch manifest funds a single account leaves only that
+    account among the report's account rows, and the report compares every
+    systematic member with those rows, so every strategy must stand on it.  Each
+    strategy then holds that account's whole NAV: a shape no real baseline has (it
+    refuses an account that funds two strategies), fit only for tests that are about
+    something other than capital.  Pass the result as ``funding``.
+    """
+
+    return {
+        str(item["strategy_id"]): [account_id]
+        for item in catalog.get("allocations", [])
+        if item.get("scope") == "SYSTEMATIC"
+    }
+
+
 def mirror_allocations(
     catalog: Mapping[str, Any],
     required_ids: Sequence[str] | None = None,
     *,
     reserve_value: str | None = None,
+    funding: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The block a legacy synthetic catalog implies: each value equals its allocation.
 
@@ -242,7 +284,18 @@ def mirror_allocations(
     (default: every SYSTEMATIC allocation); the others are retained excluded.  A
     RESERVE allocation becomes the reserve component, dated like the allocation;
     without one the reserve is ``reserve_value`` when given and NOT_READY otherwise.
-    The strategy rows list no members: they are verified by the aggregates only.
+
+    Every strategy row stands on members, because the report refuses an AVAILABLE
+    strategy that lists none.  By default that is one synthetic funding account,
+    ``mirror-<strategy_id>``, whose NAV has the allocation's value and date.
+    ``funding`` names, per strategy, the catalog accounts that fund it instead (the
+    accounts an epoch or an assignment puts behind it).  A funding account the
+    catalog already has NAV observations for is a member at its own latest NAV, so the
+    strategy's value is then what its accounts hold, not its allocation; one without
+    any shares the allocation's value exactly with the strategy's other bare
+    accounts.  The block alone does not make a member an account row: :func:`fund`
+    (and so :func:`with_current_capital`) adds the account and its NAV observation
+    where the catalog lacks them, the way a real baseline carries both.
     """
 
     allocations = [dict(item) for item in catalog.get("allocations", [])]
@@ -256,22 +309,32 @@ def mirror_allocations(
         if required_ids is not None
         else {str(item["strategy_id"]) for item in systematic_rows}
     )
+    held = _latest_navs(catalog)
     strategies = []
     for item in sorted(systematic_rows, key=lambda row: str(row["strategy_id"])):
         strategy_id = str(item["strategy_id"])
-        row = strategy(
-            strategy_id,
-            [
-                member(
-                    f"mirror-{strategy_id}",
-                    item["current_value"]["value"],
-                    str(item.get("as_of_date") or valuation),
-                )
-            ],
-            scope="SYSTEMATIC" if strategy_id in wanted else "RETAINED_EXCLUDED",
+        account_ids = list(
+            (funding or {}).get(strategy_id) or [f"mirror-{strategy_id}"]
         )
-        row["members"] = []
-        strategies.append(row)
+        day = str(item.get("as_of_date") or valuation)
+        bare = [account_id for account_id in account_ids if account_id not in held]
+        shares = dict(
+            zip(bare, _share(item["current_value"]["value"], len(bare)), strict=True)
+        )
+        strategies.append(
+            strategy(
+                strategy_id,
+                [
+                    (
+                        member(account_id, held[account_id][1], held[account_id][0])
+                        if account_id in held
+                        else member(account_id, shares[account_id], day)
+                    )
+                    for account_id in account_ids
+                ],
+                scope="SYSTEMATIC" if strategy_id in wanted else "RETAINED_EXCLUDED",
+            )
+        )
     reserve_rows = [item for item in allocations if item.get("scope") == "RESERVE"]
     if reserve_rows:
         reserve = aggregate(
@@ -286,20 +349,97 @@ def mirror_allocations(
     return block(strategies, valuation_date=valuation, reserve=reserve)
 
 
+def funding_rows(
+    catalog: Mapping[str, Any], block: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The account rows and NAV observations that stand behind a block's members.
+
+    A member names an account and the NAV the baseline read from it, and the report
+    compares the two with its own account rows.  A synthetic baseline whose accounts
+    are about something else does not carry the member's account, so it gets one: an
+    INVESTMENT account and one USD NAV observation with the member's value and date.
+    An account the catalog already has is kept, and so are the NAVs it already holds;
+    one without any NAV observation gets the member's.  Members that share an account
+    must agree on its value and date: an account has one latest NAV.
+    """
+
+    known = {str(item.get("account_id")) for item in catalog.get("accounts", [])}
+    observed = {
+        str(item.get("account_id")) for item in catalog.get("nav_observations", [])
+    }
+    claims: dict[str, tuple[Any, Any]] = {}
+    accounts: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    for row in block["strategies"]:
+        for item in row["members"]:
+            account_id = str(item["account_id"])
+            if item["value"]["value"] is None:
+                continue
+            claim = (item["as_of_date"], item["value"]["value"])
+            if claims.setdefault(account_id, claim) != claim:
+                raise ValueError(
+                    f"members of {account_id} disagree about its NAV: "
+                    f"{claims[account_id]} and {claim}"
+                )
+            if account_id not in known:
+                known.add(account_id)
+                accounts.append(
+                    {
+                        "account_id": account_id,
+                        "base_currency": "USD",
+                        "provider": "SYNTHETIC",
+                        "role": "INVESTMENT",
+                    }
+                )
+            if account_id not in observed:
+                observed.add(account_id)
+                observations.append(
+                    {
+                        "account_id": account_id,
+                        "as_of_date": item["as_of_date"],
+                        "nav": dict(item["value"]),
+                        "provider": "SYNTHETIC",
+                        "record_id": f"nav-{account_id}",
+                        "source_key": "synthetic-nav",
+                    }
+                )
+    return accounts, observations
+
+
+def fund(catalog: Mapping[str, Any], block: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of the catalog with ``block`` as its current capital and its funding.
+
+    The accounts and NAV observations of :func:`funding_rows` are appended; a key the
+    catalog does not have is only created when there is something to put in it.
+    """
+
+    accounts, observations = funding_rows(catalog, block)
+    funded = {**catalog, "current_capital": block}
+    if accounts:
+        funded["accounts"] = [*catalog.get("accounts", []), *accounts]
+    if observations:
+        funded["nav_observations"] = [
+            *catalog.get("nav_observations", []),
+            *observations,
+        ]
+    return funded
+
+
 def with_current_capital(
     catalog: Mapping[str, Any],
     required_ids: Sequence[str] | None = None,
     *,
     reserve_value: str | None = None,
+    funding: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
-    """The catalog plus the mirrored block (a copy; the input is not changed)."""
+    """The catalog plus the mirrored block and its funding (the input is not changed)."""
 
-    return {
-        **catalog,
-        "current_capital": mirror_allocations(
-            catalog, required_ids, reserve_value=reserve_value
+    return fund(
+        catalog,
+        mirror_allocations(
+            catalog, required_ids, reserve_value=reserve_value, funding=funding
         ),
-    }
+    )
 
 
 def unlabeled_weight_paths(document: Any) -> list[str]:

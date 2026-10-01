@@ -600,8 +600,9 @@ def test_published_report_refuses_an_arbitrary_strategy_value_without_members(
     reserve = {
         key: value for key, value in mirrored["reserve"].items() if key != "members"
     }
-    catalog["current_capital"] = fx.block(
-        rows, valuation_date=mirrored["valuation_date"], reserve=reserve
+    catalog = fx.fund(
+        catalog,
+        fx.block(rows, valuation_date=mirrored["valuation_date"], reserve=reserve),
     )
     baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
 
@@ -901,8 +902,9 @@ def test_published_report_carries_the_block_values_end_to_end(
     block = fx.mirror_allocations(
         catalog, [f"strategy-{index}" for index in range(1, 8)]
     )
-    catalog["current_capital"] = block
-    baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
+    baseline_root = full._published_baseline(
+        tmp_path / "baseline", fx.fund(catalog, block)
+    )
 
     report, _, _ = full.reporter.build_report_data(baseline_root)
 
@@ -935,8 +937,8 @@ def test_published_report_refuses_a_stale_current_capital_against_its_account_ro
     reserve = {
         key: value for key, value in mirrored["reserve"].items() if key != "members"
     }
-    catalog["current_capital"] = fx.block(
-        rows, valuation_date="2026-01-03", reserve=reserve
+    catalog = fx.fund(
+        catalog, fx.block(rows, valuation_date="2026-01-03", reserve=reserve)
     )
     baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
 
@@ -964,8 +966,9 @@ def test_published_report_refuses_a_block_that_counts_an_excluded_strategy(
     reserve = {
         key: value for key, value in mirrored["reserve"].items() if key != "members"
     }
-    catalog["current_capital"] = fx.block(
-        rows, valuation_date=mirrored["valuation_date"], reserve=reserve
+    catalog = fx.fund(
+        catalog,
+        fx.block(rows, valuation_date=mirrored["valuation_date"], reserve=reserve),
     )
     baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
 
