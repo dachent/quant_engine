@@ -1438,32 +1438,37 @@ def test_the_flow_recompute_counts_a_funded_rows_trace_in_either_manifest_order(
     assert _row_findings(findings) == []
 
 
-def test_the_extreme_return_lint_names_each_of_two_epochs_that_share_a_start(
-    tmp_path: Path,
-) -> None:
-    """L6a fix 2 (fail-before): lint.extreme_live_return keeps one entry per epoch.
+def test_the_lint_payloads_name_each_epoch_that_shares_a_start(tmp_path: Path) -> None:
+    """L6a fix 2 (fail-before): the lint payloads keep one entry per epoch.
 
-    Two funded epochs from the blocked epoch's start both show a 600% return; each is
-    named, in the report and in the panel (the panel rows are listed before the blocked
-    one, which used to replace them).  The first epoch keeps the plain label.
+    Three funded epochs from the blocked epoch's start (the third shares the second's
+    whole identity) each show a 600% return over a window shorter than a year; each is
+    named in lint.extreme_live_return, in the report and in the panel (the panel rows
+    are listed before the blocked one, which used to replace them), and in
+    lint.short_window_annualization.  The first epoch keeps the plain label.
     """
 
     first, second = RECUT_ENDS["closed"], "2026-03-31"
+    ends = (first, second, second)
     spec = _blocked_epochs(["A1"])
-    spec.report.extend(
-        [_recut_report(first, twr="6"), _recut_report(second, twr="6", admitted=False)]
-    )
-    spec.panel[:0] = [
-        _recut_manifest(first, linked="6"),
-        _recut_manifest(second, linked="6"),
-    ]
+    spec.report.extend(_recut_report(end, twr="6", admitted=False) for end in ends)
+    spec.panel[:0] = [_recut_manifest(end, linked="6") for end in ends]
     findings = _run(build(tmp_path / "gen", spec), None)
-    found = [f for f in findings if f.check_id == "lint.extreme_live_return"]
-    assert len(found) == 1
-    assert len(found[0].observed) == 6
     label = f"A1|beta|{BLOCKED_START}"
-    assert f"account_manifest.observation_linked_return:{label}" in found[0].observed
-    assert f"twr_mwr.twr:{label}" in found[0].observed
+    live = [f for f in findings if f.check_id == "lint.extreme_live_return"]
+    assert len(live) == 1
+    assert len(live[0].observed) == 9
+    assert f"account_manifest.observation_linked_return:{label}" in live[0].observed
+    assert f"twr_mwr.twr:{label}" in live[0].observed
+    short = [f for f in findings if f.check_id == "lint.short_window_annualization"]
+    assert len(short) == 1
+    assert [
+        key for key in short[0].observed if key.startswith("twr_mwr.mwr_xirr:")
+    ] == [
+        f"twr_mwr.mwr_xirr:{label}",
+        f"twr_mwr.mwr_xirr:{label}|{second}",
+        f"twr_mwr.mwr_xirr:{label}|{second}#2",
+    ]
 
 
 @MANIFEST_ORDERS
