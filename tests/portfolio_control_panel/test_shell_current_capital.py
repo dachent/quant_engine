@@ -184,6 +184,27 @@ def test_not_ready_components_are_hatched_and_the_ring_claims_no_sizes(
     assert "Not ready" in kpis
 
 
+def test_ring_stays_unsized_when_a_payload_total_outruns_a_component(
+    tmp_path: Path,
+) -> None:
+    # The builder refuses this payload; the shell must not rescue it by painting the
+    # missing reserve as an empty or remainder segment under a total that claims 100.
+    payload = _command_payload(
+        systematic="55", reserve=None, retained="10", total="100"
+    )
+    payload["capital_status"]["total_liquid"] = "AVAILABLE"
+    payload["capital_as_of"]["total_liquid"] = "2026-09-17"
+    dom = _run(tmp_path, payload, "renderCommand")
+    ring = dom["#capital-ring"]["innerHTML"]
+
+    assert 'data-capital-state="NOT_READY"' in ring
+    assert "conic-gradient" not in ring
+    legend = _legend(ring)
+    assert legend["reserve"]["status"] == "NOT_READY_AT_CUTOFF"
+    assert "%" not in legend["systematic"]["body"]
+    assert "%" not in legend["retained_excluded"]["body"]
+
+
 def test_capital_view_kpi_does_not_call_a_missing_total_an_accepted_baseline(
     tmp_path: Path,
 ) -> None:
