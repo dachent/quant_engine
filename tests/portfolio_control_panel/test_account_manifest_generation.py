@@ -14492,7 +14492,10 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
             ("__future__", 0, (("annotations", None),)),
             ("collections.abc", 0, (("Mapping", None),)),
             ("dataclasses", 0, (("dataclass", None),)),
-            ("datetime", 0, (("date", None), ("timedelta", None))),
+            # ``datetime`` is the pure stdlib value type behind
+            # ``datetime.fromisoformat``: the verifier restates the ledger's
+            # economic_fill_timestamp rule (N25) with the parser the ledger uses.
+            ("datetime", 0, (("date", None), ("datetime", None), ("timedelta", None))),
             (
                 "decimal",
                 0,
@@ -26246,12 +26249,15 @@ def test_mixed_independent_verifier_rejects_when_only_the_census_membership_chan
 def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
     perimeter_module: Any, verifier_module: Any
 ) -> None:
-    """C2: the MWR cash date is bound to the raw anchor economic date.
+    """C2: the MWR cash date is bound to the raw anchor economic fill.
 
-    Only the candidate's published flow-leg economic date is mutated here;
-    the source ledger keeps its raw anchor economic date, so the MWR cash
-    date derived from that source value no longer agrees and verification
-    fails closed.
+    The raw anchor carries the ledger's own ``economic_fill_timestamp``.  The
+    provider-ledger schema forbids an ``economic_date`` on a capital anchor, so
+    the fixture that used to stand here built a schema-invalid shape and hid
+    that the producer read a field no ledger carries (defect N25, W16).  Only
+    the candidate's published flow-leg economic date is mutated below; the
+    source ledger keeps its fill timestamp, so the MWR cash date derived from
+    that source value no longer agrees and verification fails closed.
     """
 
     selected = _mixed_composer_selected_inputs(perimeter_module)
@@ -26268,7 +26274,7 @@ def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
             "evidence_layer": "ACCOUNT_LIVE",
             "event_date": "2026-01-31",
             "nav_recognition_date": "2026-02-01",
-            "economic_date": "2026-01-31",
+            "economic_fill_timestamp": "2026-01-31T20:30:00+00:00",
             "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
             "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
             "source_artifact_id": "raw/synthetic.json",
@@ -26299,6 +26305,380 @@ def test_mixed_independent_verifier_rejects_a_published_economic_date_mutation(
         verifier_module.IndependentAccountManifestVerifier().verify(
             _mixed_verifier_inputs(verifier_module, selected), payloads
         )
+
+
+_FILL_EVENT = "2026-01-30"
+_FILL_DATE = "2026-01-31"
+_FILL_RECOGNITION = "2026-02-01"
+_FILL_TIMESTAMP = "2026-01-31T20:30:00.750912+00:00"
+
+
+def _quantbase_fill_allocation(
+    opening: Mapping[str, object],
+    *,
+    drop: tuple[str, ...] = (),
+    **overrides: object,
+) -> dict[str, object]:
+    """A fund-allocation anchor in the shape ``provider_ledger`` emits.
+
+    The ledger carries the fill as ``economic_fill_timestamp`` (a timezone-aware
+    UTC instant).  Its schema forbids ``economic_date`` on a capital anchor.
+    The fill falls strictly between the activity (event) date and the first NAV
+    that recognizes it, as in the real Quantbase ledger.
+    """
+
+    anchor: dict[str, object] = {
+        "record_id": "mixed-exact-fill-allocation",
+        "account_id": opening["account_id"],
+        "provider_id": opening["provider_id"],
+        "generation_id": opening["generation_id"],
+        "strategy_id": opening["strategy_id"],
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": _FILL_EVENT,
+        "nav_recognition_date": _FILL_RECOGNITION,
+        "economic_fill_timestamp": _FILL_TIMESTAMP,
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        "source_artifact_id": "raw/synthetic.json",
+        "nav_source_artifact_id": "raw/synthetic.json",
+        "source_record_id": "synthetic-exact-fill-allocation",
+        "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+    }
+    anchor.update(overrides)
+    for key in drop:
+        del anchor[key]
+    return anchor
+
+
+def _mixed_fill_selected(
+    perimeter_module: Any,
+    *,
+    allocation: Mapping[str, object] | None = None,
+    drop: tuple[str, ...] = (),
+    opening: Mapping[str, object] | None = None,
+) -> object:
+    """The mixed world plus one Quantbase-shaped allocation (``{}`` = defaults).
+
+    ``allocation=None`` appends no allocation; ``opening`` edits the world's
+    opening anchor in place.
+    """
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    opening_anchor = ledger["capital_anchors"][0]
+    if opening is not None:
+        opening_anchor.update(opening)
+    if allocation is not None:
+        ledger["capital_anchors"].append(
+            _quantbase_fill_allocation(opening_anchor, drop=drop, **allocation)
+        )
+    return _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+
+def _ok_manifest_row(payloads: Mapping[str, bytes]) -> dict[str, Any]:
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    return next(item for item in output["rows"] if item["status"] == "OK")
+
+
+def _verifier_epoch_bridge(
+    verifier_module: Any, selected: object
+) -> tuple[object, dict[str, object], dict[str, object]]:
+    """The verifier's own inputs, funded assignment and calculation bridge.
+
+    The verifier reads the raw ledger anchors through its own normalization,
+    which passes every anchor key through, so a raw anchor carrying a forbidden
+    or malformed field reaches the two numeric sites exactly as the ledger wrote
+    it.
+    """
+
+    inputs = _mixed_verifier_inputs(verifier_module, selected)
+    mapped = verifier_module._independently_validate_current_epoch_crosswalk(
+        selected.baseline, selected.current_epoch_crosswalk
+    )
+    assignment = next(
+        item for item in mapped if item["account_id"] == "synthetic-account-01"
+    )
+    navs, flows, anchors = verifier_module._mixed_normalized_facts(inputs)
+    events = [
+        {
+            "account_id": flow["account_id"],
+            "event_date": flow["event_date"],
+            "nav_recognition_date": flow["nav_recognition_date"],
+            "amount": flow["amount"]["value"],
+            "disposition": "EXTERNAL",
+            "source_record_id": flow["record_id"],
+        }
+        for flow in flows
+    ]
+    return (
+        inputs,
+        assignment,
+        {
+            "ledger": {"nav_observations": navs},
+            "events": events,
+            "capital_anchors": anchors,
+            "currency": "USD",
+        },
+    )
+
+
+def _assert_verifier_rejects_the_raw_anchors(
+    perimeter_module: Any, verifier_module: Any, selected: object
+) -> None:
+    """Both numeric sites that read a raw anchor's fill fail closed on it."""
+
+    good = _mixed_fill_selected(perimeter_module, allocation={})
+    good_inputs, assignment, good_bridge = _verifier_epoch_bridge(verifier_module, good)
+    good_facts = verifier_module._mixed_numeric_facts(
+        good_inputs, assignment, good_bridge
+    )
+    bad_inputs, bad_assignment, bad_bridge = _verifier_epoch_bridge(
+        verifier_module, selected
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._mixed_numeric_facts(bad_inputs, bad_assignment, bad_bridge)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._derive_independent_mwr_projection(
+            assignment, good_facts, bad_bridge
+        )
+
+
+def test_t5_1_mixed_generation_dates_a_fund_fill_at_the_ledger_fill_date(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """N25 / T5-1 (fail-before): the fill date is the ledger's own fill.
+
+    A Quantbase allocation carries ``economic_fill_timestamp``; on the merge
+    base the producer read ``economic_date``, which the ledger schema forbids,
+    so the fill had no date and the MWR was BLOCKED_ADMISSION
+    EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE.  The fill date is neither the event
+    (01-30) nor the recognition (02-01) date here.
+    """
+
+    selected = _mixed_fill_selected(perimeter_module, allocation={})
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    row = _ok_manifest_row(payloads)
+
+    leg = next(
+        item
+        for item in row["performance_flow_legs"]
+        if item["timing"] == "EXACT_TIMESTAMP"
+    )
+    assert (leg["event_date"], leg["economic_date"], leg["nav_recognition_date"]) == (
+        _FILL_EVENT,
+        _FILL_DATE,
+        _FILL_RECOGNITION,
+    )
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_reason"] is None
+    assert row["mwr_cashflows"] == [
+        {
+            "date": "2026-01-30",
+            "amount": "-50",
+            "source_record_ids": ["mixed-nav-1", "synthetic-opening-1"],
+        },
+        {
+            "date": _FILL_DATE,
+            "amount": "-30",
+            "source_record_ids": ["mixed-flow-1", "synthetic-exact-fill-allocation"],
+        },
+        {"date": "2026-02-01", "amount": "70", "source_record_ids": ["mixed-nav-3"]},
+    ]
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+
+    # Without the timestamp the fill date is unavailable and the MWR fails
+    # closed, while the TWR (which never reads the fill date) is identical.
+    undated = _mixed_fill_selected(
+        perimeter_module, allocation={}, drop=("economic_fill_timestamp",)
+    )
+    undated_row = _ok_manifest_row(
+        perimeter_module.build_account_manifest_payloads(undated)
+    )
+    assert undated_row["mwr_status"] == "BLOCKED_ADMISSION"
+    assert undated_row["mwr_reason"] == "EXACT_TIMESTAMP_FILL_DATE_UNAVAILABLE"
+    assert undated_row["observation_linked_return"] == row["observation_linked_return"]
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "fill_date"),
+    [
+        ("2026-01-30T00:00:00+00:00", "2026-01-30"),
+        ("2026-01-31T23:59:59.999999+00:00", "2026-01-31"),
+        ("2026-01-31T20:30:00Z", "2026-01-31"),
+        ("2026-02-01T23:59:59+00:00", "2026-02-01"),
+    ],
+    ids=["event_day_start", "last_microsecond", "zulu_suffix", "recognition_day_end"],
+)
+def test_t5_1_the_fill_date_is_the_utc_date_and_both_sides_agree(
+    perimeter_module: Any, verifier_module: Any, timestamp: str, fill_date: str
+) -> None:
+    """The date is the UTC calendar date of the instant, on both sides.
+
+    The window ends are inclusive and ``Z`` is UTC, as in the ledger.  The
+    independent verifier recomputes the date from the same raw field without
+    importing the producer, so a lockstep gap makes ``verify`` raise.
+    """
+
+    selected = _mixed_fill_selected(
+        perimeter_module, allocation={"economic_fill_timestamp": timestamp}
+    )
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    row = _ok_manifest_row(payloads)
+
+    leg = next(
+        item
+        for item in row["performance_flow_legs"]
+        if item["timing"] == "EXACT_TIMESTAMP"
+    )
+    assert leg["economic_date"] == fill_date
+    # The world spans two days, so the root search is not always resolved; the
+    # published cash flows are dated at the fill whatever the XIRR status.
+    assert fill_date in {flow["date"] for flow in row["mwr_cashflows"]}
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_t5_independent_verifier_does_not_import_the_producer() -> None:
+    """Lockstep without a shared implementation: no import of the producer."""
+
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    assert imported
+    assert not any(
+        "account_strategy_manifest" in name
+        or "build_account_manifest_generation" in name
+        for name in imported
+    )
+
+
+_BAD_FILL_TIMESTAMPS = [
+    pytest.param("2026-01-31T20:30:00", id="naive"),
+    pytest.param("2026-01-31T15:30:00-05:00", id="offset_minus_five"),
+    pytest.param("2026-01-31T21:30:00+01:00", id="offset_plus_one"),
+    pytest.param("2026-01-29T23:59:59+00:00", id="before_the_event_date"),
+    pytest.param("2026-02-02T00:00:00+00:00", id="after_the_recognition_date"),
+    pytest.param("2026-01-31", id="date_only"),
+    pytest.param("yesterday evening", id="not_a_timestamp"),
+    pytest.param("", id="empty"),
+    pytest.param(" 2026-01-31T20:30:00+00:00", id="padded"),
+    pytest.param(5, id="number"),
+    pytest.param(None, id="null"),
+]
+
+
+@pytest.mark.parametrize("timestamp", _BAD_FILL_TIMESTAMPS)
+def test_t5_4_a_malformed_non_utc_or_out_of_window_fill_fails_closed_on_both_sides(
+    perimeter_module: Any, verifier_module: Any, timestamp: object
+) -> None:
+    """Fail closed on a naive or non-UTC instant and on a date off its window."""
+
+    selected = _mixed_fill_selected(
+        perimeter_module, allocation={"economic_fill_timestamp": timestamp}
+    )
+    with pytest.raises(
+        perimeter_module.ManifestError, match="economic_fill_timestamp|fill date"
+    ):
+        perimeter_module.build_account_manifest_payloads(selected)
+    _assert_verifier_rejects_the_raw_anchors(
+        perimeter_module, verifier_module, selected
+    )
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param("2026-01-29T12:00:00", id="naive"),
+        pytest.param("2025-01-01T12:00:00-05:00", id="offset_minus_five"),
+        pytest.param("2024-12-30T23:59:59+00:00", id="before_the_event_date"),
+        pytest.param("2026-01-31T00:00:00+00:00", id="after_the_recognition_date"),
+    ],
+)
+def test_t5_4_an_opening_anchor_fill_timestamp_is_validated_too(
+    perimeter_module: Any, verifier_module: Any, timestamp: str
+) -> None:
+    """The opening anchor's timestamp is checked even though it dates no leg."""
+
+    selected = _mixed_fill_selected(
+        perimeter_module,
+        allocation={},
+        opening={"economic_fill_timestamp": timestamp},
+    )
+    with pytest.raises(
+        perimeter_module.ManifestError, match="economic_fill_timestamp|fill date"
+    ):
+        perimeter_module.build_account_manifest_payloads(selected)
+    _assert_verifier_rejects_the_raw_anchors(
+        perimeter_module, verifier_module, selected
+    )
+
+
+@pytest.mark.parametrize("carries_a_date", [True, False], ids=["a_date", "null"])
+@pytest.mark.parametrize("where", ["allocation", "opening"])
+def test_t5_3_a_raw_anchor_carrying_economic_date_fails_closed_on_both_sides(
+    perimeter_module: Any, verifier_module: Any, where: str, carries_a_date: bool
+) -> None:
+    """The ledger schema forbids ``economic_date`` on an anchor: never read it.
+
+    The carried date lies inside the anchor's own event and recognition window,
+    so only the key's presence (not a window violation) can reject it.
+    """
+
+    if where == "allocation":
+        carried = _FILL_DATE if carries_a_date else None
+        selected = _mixed_fill_selected(
+            perimeter_module, allocation={"economic_date": carried}
+        )
+    else:
+        carried = "2025-01-01" if carries_a_date else None
+        selected = _mixed_fill_selected(
+            perimeter_module, allocation={}, opening={"economic_date": carried}
+        )
+    with pytest.raises(
+        perimeter_module.ManifestError,
+        match=r"carries economic_date; the ledger field is economic_fill_timestamp",
+    ):
+        perimeter_module.build_account_manifest_payloads(selected)
+    _assert_verifier_rejects_the_raw_anchors(
+        perimeter_module, verifier_module, selected
+    )
+
+
+def test_t5_5_an_opening_anchor_timestamp_dates_no_mwr_leg_and_changes_no_row(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """The opening anchor is validated but has no MWR leg: every row is intact."""
+
+    unstamped = _mixed_composer_selected_inputs(perimeter_module)
+    baseline = json.loads(
+        perimeter_module.build_account_manifest_payloads(unstamped)[
+            "outputs/account-strategy-manifest.json"
+        ]
+    )
+    stamped = _mixed_fill_selected(
+        perimeter_module,
+        opening={"economic_fill_timestamp": "2025-01-01T12:00:00+00:00"},
+    )
+    payloads = dict(perimeter_module.build_account_manifest_payloads(stamped))
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+
+    assert output["rows"] == baseline["rows"]
+    row = _ok_manifest_row(payloads)
+    assert all(leg["economic_date"] is None for leg in row["performance_flow_legs"])
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, stamped), payloads
+    )
 
 
 def test_verifier_manifest_schema_pin_matches_repository_bytes(
