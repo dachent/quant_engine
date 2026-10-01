@@ -8688,15 +8688,43 @@ def test_matrixport_non_usd_capital_anchor_without_an_fx_generation_is_unchanged
     close from.  That route admits an anchor only on a provider-reported USD
     value, and it is unchanged: the manifest lane fails closed on a non-USD
     opening anchor that carries no ``event_time_fx``.
+
+    Unchanged means the whole anchor, byte for byte, so the expectation is the
+    complete object as literals, not derived from the producer under test.  It
+    was captured from the merge base (5ec8bf8) by running its producer on this
+    fixture (canonical-bytes sha256 2b71791e...), and the head producer emits
+    the same bytes.  A change to any anchor field on this route, not only the
+    amount currency or the absent ``event_time_fx``, fails here.
     """
 
     anchors = _robuxio_capital_anchors(
         tmp_path, valuation_source="api_reported_usd_value"
     )
 
+    expected: dict[str, Any] = {
+        "account_id": "account-d2e5821e608e25f1",
+        "amount": {"currency": "USDT", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "gen-1",
+        "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "nav_source_artifact_id": "csv/daily_portfolio_totals.csv",
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
+        "provider_id": "matrixport",
+        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "source_artifact_id": "csv/subscription_details.csv",
+        "source_product_id": "7361599360326447104",
+        "source_record_id": "7402822649690198016",
+        "strategy_id": "robuxio-crypto",
+    }
     assert len(anchors) == 1
-    assert anchors[0]["amount"]["currency"] == "USDT"
     assert "event_time_fx" not in anchors[0]
+    assert "valuation_fx" not in anchors[0]
+    assert anchors[0] == expected
+    assert canonical_json_bytes(anchors[0]) == canonical_json_bytes(expected)
 
 
 def test_provider_ledger_schema_admits_event_time_fx_on_a_capital_anchor() -> None:
