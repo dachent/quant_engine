@@ -353,6 +353,38 @@ def test_a_member_account_missing_from_the_account_rows_is_refused() -> None:
         reporter._verify_current_capital_accounts(catalog["current_capital"], accounts)
 
 
+def test_the_block_perimeter_must_be_the_required_product_strategies() -> None:
+    """The scope of a block row is the baseline's word; the controls are the report's.
+
+    The old report derived the retained excluded balance from the product controls.  A
+    block that counts an excluded strategy as systematic capital (or drops a required
+    one, or names a strategy the product does not know) must not publish.
+    """
+
+    block = _world()["current_capital"]
+    controls = _controls()
+    reporter._verify_current_capital_perimeter(block, controls)
+    reporter._verify_current_capital_perimeter(block, None)
+
+    excluded = {**controls, "s-gamma": dict(controls["s-retired"])}
+    with pytest.raises(
+        reporter.ReportValidationError, match="systematic perimeter differs"
+    ):
+        reporter._verify_current_capital_perimeter(block, excluded)
+
+    required = {**controls, "s-retired": dict(controls["s-alpha"])}
+    with pytest.raises(
+        reporter.ReportValidationError, match="systematic perimeter differs"
+    ):
+        reporter._verify_current_capital_perimeter(block, required)
+
+    unknown = {key: value for key, value in controls.items() if key != "s-retired"}
+    with pytest.raises(
+        reporter.ReportValidationError, match="unknown product strategy"
+    ):
+        reporter._verify_current_capital_perimeter(block, unknown)
+
+
 def test_keys_the_report_does_not_know_are_ignored_in_every_part_of_the_block() -> None:
     """Lane T1b adds a strategy cash line and reserve rows to this same block.
 
@@ -444,8 +476,25 @@ def test_a_required_strategy_without_current_capital_is_refused() -> None:
             lambda block: block["reserve"].update(status=fx.AVAILABLE),
             "current capital status contradicts its value",
         ),
+        (
+            lambda block: block["strategies"][0]["members"][0]["value"].update(
+                value="111"
+            ),
+            "current capital strategy differs from its members: s-alpha",
+        ),
+        (
+            lambda block: block["strategies"][0].update(as_of_date="2025-12-01"),
+            "current capital strategy is not dated at its oldest member: s-alpha",
+        ),
     ],
-    ids=["systematic-sum", "total-liquid-painted", "weights", "status-vs-value"],
+    ids=[
+        "systematic-sum",
+        "total-liquid-painted",
+        "weights",
+        "status-vs-value",
+        "strategy-vs-members",
+        "strategy-date",
+    ],
 )
 def test_report_rejects_an_inconsistent_current_capital_block(
     mutate: Any, message: str
@@ -706,6 +755,34 @@ def test_published_report_refuses_a_stale_current_capital_against_its_account_ro
     with pytest.raises(
         full.reporter.ReportValidationError,
         match="current capital member differs from its account row",
+    ):
+        full.reporter.build_report_data(baseline_root)
+
+
+def test_published_report_refuses_a_block_that_counts_an_excluded_strategy(
+    tmp_path: Path, full: Any
+) -> None:
+    catalog = full._baseline_catalog()
+    mirrored = fx.mirror_allocations(
+        catalog, [f"strategy-{index}" for index in range(1, 8)]
+    )
+    # The product controls require strategy-1..7.  A block that also counts the
+    # excluded strategy-8 as systematic capital adds up on its own terms, yet it is
+    # not the required perimeter.
+    rows = [dict(row) for row in mirrored["strategies"]]
+    for row in rows:
+        if row["strategy_id"] == "strategy-8":
+            row["scope"] = "SYSTEMATIC"
+    reserve = {
+        key: value for key, value in mirrored["reserve"].items() if key != "members"
+    }
+    catalog["current_capital"] = fx.block(
+        rows, valuation_date=mirrored["valuation_date"], reserve=reserve
+    )
+    baseline_root = full._published_baseline(tmp_path / "baseline", catalog)
+
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="systematic perimeter differs"
     ):
         full.reporter.build_report_data(baseline_root)
 

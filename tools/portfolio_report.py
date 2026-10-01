@@ -2549,6 +2549,11 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
                     "current capital strategy differs from its members: "
                     f"{row['strategy_id']}"
                 )
+            if row["as_of_date"] != min(member["as_of_date"] for member in members):
+                raise ReportValidationError(
+                    "current capital strategy is not dated at its oldest member: "
+                    f"{row['strategy_id']}"
+                )
 
     def reconcile(
         name: str, group: Sequence[Mapping[str, Any]], label: str, *, empty_ready: bool
@@ -2639,6 +2644,41 @@ def _verify_current_capital_accounts(
                     "current capital member differs from its account row: "
                     f"{row['strategy_id']}"
                 )
+
+
+def _verify_current_capital_perimeter(
+    current_capital: Mapping[str, Any],
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None,
+) -> None:
+    """The block's systematic strategies are exactly the required product strategies.
+
+    A row's scope is the baseline's classification; the product controls reach the
+    report by another path.  A strategy the controls exclude must not be counted as
+    systematic capital, a required one must not be left out of it, and the block must
+    not name a strategy the product does not know.
+    """
+
+    if not strategy_product_controls:
+        return
+    rows = _capital_strategy_rows(current_capital)
+    if set(rows) - set(strategy_product_controls):
+        raise ReportValidationError(
+            "current capital references an unknown product strategy"
+        )
+    required = {
+        strategy_id
+        for strategy_id, control in strategy_product_controls.items()
+        if control.get("product_requirement") == "REQUIRED"
+    }
+    systematic = {
+        strategy_id
+        for strategy_id, row in rows.items()
+        if row["scope"] == CAPITAL_SCOPE_SYSTEMATIC
+    }
+    if systematic != required:
+        raise ReportValidationError(
+            "current capital systematic perimeter differs from the required strategies"
+        )
 
 
 def _portfolio_summary(
@@ -7116,7 +7156,9 @@ def build_report_data(
     # B4: the report never compared a strategy value with its accounts.  The account
     # rows come from the NAV facts, the strategy values from the baseline block; a
     # stale block (or a stale snapshot) cannot publish.
-    _verify_current_capital_accounts(_current_capital(catalog), account_summary)
+    verified_capital = _current_capital(catalog)
+    _verify_current_capital_perimeter(verified_capital, strategy_product_controls)
+    _verify_current_capital_accounts(verified_capital, account_summary)
     report: dict[str, Any] = {
         "account_summary": account_summary,
         "allocation_history": allocation_history,
