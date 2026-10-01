@@ -203,9 +203,7 @@ def _declare_matrixport_nav_gap_coverage(
     """Bind Matrixport's declared NAV outage to its synthetic ledger coverage."""
     history = plan_tests.history_tests
     matrixport_coverage = next(
-        row
-        for row in ledger["provider_coverage"]
-        if row["provider_id"] == "matrixport"
+        row for row in ledger["provider_coverage"] if row["provider_id"] == "matrixport"
     )
     matrixport_coverage["coverage"]["declared_exclusions"] = (
         history._matrixport_exclusions(*missing_dates)
@@ -481,24 +479,27 @@ def bind_native_history_sources(
                     if row["as_of_date"] != missing_day
                 ],
             )
+            daily_navs = {row["as_of_date"]: row for row in navs}
             history._write_csv(
                 daily_path,
                 ["product_id", "utc_date", "share", "nav", "nav_available"],
                 [
                     {
                         "product_id": product,
-                        "utc_date": row["as_of_date"],
+                        "utc_date": observed_day,
                         "share": "10",
                         "nav": (
                             ""
-                            if row["as_of_date"] == missing_day
-                            else str(Decimal(row["nav"]["value"]) / 10)
+                            if observed_day == missing_day
+                            else str(
+                                Decimal(daily_navs[observed_day]["nav"]["value"]) / 10
+                            )
                         ),
                         "nav_available": (
-                            "false" if row["as_of_date"] == missing_day else "true"
+                            "false" if observed_day == missing_day else "true"
                         ),
                     }
-                    for row in navs
+                    for observed_day in sorted({*daily_navs, missing_day})
                 ],
             )
             history._write_csv(
@@ -687,10 +688,10 @@ def build_shared_history_source(
         project_account_source(baseline, ledger)
         # The accepted ledger must carry the catalog result the real builder
         # enforces for the declared #287 matrixport outage: no daily return on
-        # an unavailable date enters strategy_returns.  Keep the gap day's NAV
-        # observation -- bind_native_history_sources needs it for the retained
-        # unavailable holdings row -- but filter the returns before evidence,
-        # hashing, and downstream consumers bind them.
+        # an unavailable date enters strategy_returns.  A missing Matrixport
+        # NAV is absent from the producer's observed series, so remove the
+        # synthetic observation before account-manifest/HWM links form.  The
+        # native daily-holdings artifact retains a separate unavailable marker.
         matrixport_gap_policy = next(
             row["declared_gap_policy"]
             for row in json.loads(prepared["contract_path"].read_bytes())[
@@ -700,6 +701,21 @@ def build_shared_history_source(
         )
         _declare_matrixport_nav_gap_coverage(
             ledger, matrixport_gap_policy["declared_missing_source_dates"]
+        )
+        declared_missing_dates = frozenset(
+            matrixport_gap_policy["declared_missing_source_dates"]
+        )
+        unfiltered_nav_count = len(ledger["nav_observations"])
+        ledger["nav_observations"] = [
+            row
+            for row in ledger["nav_observations"]
+            if row["strategy_id"] != "robuxio-crypto"
+            or row["as_of_date"] not in declared_missing_dates
+        ]
+        removed_nav_count = unfiltered_nav_count - len(ledger["nav_observations"])
+        assert removed_nav_count == len(declared_missing_dates), (
+            removed_nav_count,
+            declared_missing_dates,
         )
         unavailable_return_dates = frozenset(
             matrixport_gap_policy["unavailable_return_dates"]

@@ -572,6 +572,21 @@ def _selected_inputs(
         mutate_ledger(ledger_doc)
     if mutate_baseline is not None:
         mutate_baseline(baseline_doc, ledger_doc)
+    if daily:
+        # The admission policy is an epoch/ledger seam: a fixture mutation
+        # that removes a raw NAV observation must also remove its citation.
+        # Rebind from the serialized ledger after the caller's producer-shaped
+        # projection rather than retaining the pre-projection daily grid.
+        epoch_nav_ids = {
+            epoch_key: [
+                str(observation["record_id"])
+                for observation in ledger_doc["nav_observations"]
+                if observation["account_id"] == epoch_key[0]
+                and epoch_key[2] <= observation["as_of_date"]
+                and (epoch_key[3] is None or observation["as_of_date"] <= epoch_key[3])
+            ]
+            for epoch_key in epoch_nav_ids
+        }
     provider_ledger = fixture.InputSnapshot.from_bytes(
         "HWM synthetic provider ledger", canonical_json_bytes(ledger_doc)
     )
@@ -1843,6 +1858,62 @@ def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
             },
         }
     ]
+
+
+def test_mvp2_matrixport_declared_nav_gap_omits_observation_and_spans_hwm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared Matrixport outage must remove its NAV before HWM links form."""
+    module_path = REPO / "tests/core/mvp2_financial_fixture.py"
+    spec = importlib.util.spec_from_file_location(
+        "mvp2_financial_fixture_gap_topology_unit", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    fixture_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture_module
+    spec.loader.exec_module(fixture_module)
+
+    prepared, selected = fixture_module.build_shared_history_source(
+        tmp_path / "mvp2", monkeypatch
+    )
+    ledger = json.loads(
+        (
+            selected["provider_generation"].parent / "normalized/provider-ledger.json"
+        ).read_bytes()
+    )
+    assert not [
+        row
+        for row in ledger["nav_observations"]
+        if row["strategy_id"] == "robuxio-crypto" and row["as_of_date"] == "2026-04-25"
+    ]
+
+    decomposition = fixture_module.build_decomposition_vertical(
+        tmp_path / "decomposition",
+        monkeypatch,
+        prepared_history_fixture=prepared,
+    )
+    fixture_module.bind_final_hwm_contract(selected, decomposition.contract_path)
+    fixture_module.install_synthetic_financial_authority(
+        monkeypatch,
+        [
+            selected["contract"],
+            decomposition.contract_path,
+            *(
+                bundle / "inputs/history/financial-mvp-contract.json"
+                for bundle in decomposition.plan_bundles.values()
+            ),
+        ],
+        source_period_fixture=prepared,
+    )
+    generation = _build(selected)
+    robuxio_intervals = [
+        (row["interval_start"], row["interval_end"])
+        for row in generation["component_periods"]
+        if row["strategy_id"] == "robuxio-crypto"
+    ]
+    assert ("2026-04-24", "2026-04-26") in robuxio_intervals
+    assert ("2026-04-24", "2026-04-25") not in robuxio_intervals
+    assert ("2026-04-25", "2026-04-26") not in robuxio_intervals
 
 
 def test_rejects_hwm_only_interval_without_declared_gap() -> None:
