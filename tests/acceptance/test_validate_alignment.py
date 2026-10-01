@@ -831,6 +831,43 @@ def test_multi_epoch_flow_aggregates_keep_a_funded_row_sharing_the_blocked_start
     assert _expected_findings(unconfirmed) != []
 
 
+def test_a_manifest_row_blocked_in_only_one_status_is_not_skipped(
+    tmp_path: Path,
+) -> None:
+    """L6a fix 1 (fail-before): the panel row is skipped only when it says blocked twice.
+
+    The report row is a confirmed blocked epoch, but its panel row has a funded
+    status: report and panel disagree about the epoch, and the multi-epoch net flow
+    shows it (the row has no net capital).  Skipping the panel row by the key alone
+    hid that.  Mutation MA-14 (either status will do) turns this red.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+
+    def half_blocked(panel: dict[str, Any]) -> None:
+        for row in panel["account_manifest"]["rows"]:
+            if row.get("admission_status") == "BLOCKED":
+                row["status"] = "OK"
+
+    spec = _blocked_epochs(["A1"])
+    spec.report.insert(0, _closed_funded_epoch)
+    spec.panel.extend([_closed_funded_manifest_row, half_blocked])
+    gen_dir = build(tmp_path / "gen", spec)
+    expected = [
+        row
+        for row in _oracle(census_sha=sha)
+        if row["metric_id"] in ("flows.account.net", "flows.account.count")
+    ]
+    findings = _run(gen_dir, expected, repo)
+    assert (
+        "expected.flows.account.net",
+        checks.BLOCKER_REGRESSION,
+        "A1|ITD",
+    ) in _expected_findings(findings)
+
+
 # -------------------------------------------------------------- L6b: the M3 opening
 #
 # The M3 convention (c1-design M3, spec R1): the MWR opens at the performance
