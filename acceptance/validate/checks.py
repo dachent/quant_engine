@@ -338,29 +338,36 @@ def _finding(
 # ----------------------------------------------------------------- derived indices
 
 
-def twr_rows(ctx: Context) -> list[tuple[int, dict[str, Any]]]:
+TableRow = tuple[int, dict[str, Any]]
+
+
+def twr_rows(ctx: Context) -> list[TableRow]:
     return list(enumerate(rows(ctx.report, "twr_mwr")))
 
 
-def manifest_rows(
-    ctx: Context,
-) -> dict[tuple[str, str, str], tuple[int, dict[str, Any]]]:
+def manifest_rows(ctx: Context) -> list[TableRow]:
+    """Every row of the panel's account manifest and its position, in panel order.
+
+    Not an index: two epochs of one account and strategy that start together (a funded
+    epoch re-cut from a blocked epoch's start) are two rows, and neither replaces the
+    other. Whatever needs the row of ONE epoch asks ``manifest_match``.
+    """
+
     cached = ctx._cache.get("manifest_rows")
-    if isinstance(cached, dict):
+    if isinstance(cached, list):
         return cached
-    index: dict[tuple[str, str, str], tuple[int, dict[str, Any]]] = {}
-    for position, row in enumerate(rows(node(ctx.panel, "account_manifest"), "rows")):
-        key = (
-            str(row.get("account_id")),
-            str(row.get("strategy_id")),
-            str(row.get("effective_start")),
-        )
-        index[key] = (position, row)
-    ctx._cache["manifest_rows"] = index
-    return index
+    entries = list(enumerate(rows(node(ctx.panel, "account_manifest"), "rows")))
+    ctx._cache["manifest_rows"] = entries
+    return entries
 
 
 def epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    """The label of an epoch's row in a finding: ``account|strategy|effective_start``.
+
+    A label only. Epochs that start together share it, so no row is ever matched or
+    combined by it: that is ``epoch_identity`` (``manifest_match``, ``report_match``).
+    """
+
     return (
         str(row.get("account_id")),
         str(row.get("strategy_id")),
@@ -450,11 +457,18 @@ def compound_window(
 # What is skipped is exactly what was confirmed: a report row that is itself a blocked
 # admission, and a panel manifest row that is itself blocked, that has the whole
 # identity (account, strategy, effective_start, effective_end) of a confirmed blocked
-# row. The coarser ``epoch_key`` (no ``effective_end``) is only how views are matched:
-# a funded epoch re-cut from the same start shares it, and keying the skip by it hid
-# that funded row's contradiction with the oracle (lane epsilon fix round 1, a). The
-# account-level window recompute (``recompute_metric``) leaves a confirmed blocked
-# epoch out the same way; the strategy-level recompute is unchanged.
+# row. The coarser ``epoch_key`` (no ``effective_end``) is only a label: a funded epoch
+# re-cut from the same start shares it, and keying the skip by it hid that funded row's
+# contradiction with the oracle (lane epsilon fix round 1, a). The account-level window
+# recompute (``recompute_metric``) leaves a confirmed blocked epoch out the same way;
+# the strategy-level recompute is unchanged.
+#
+# The panel manifest rows keep their whole identity everywhere else too (fix round 2):
+# ``manifest_rows`` is every row, none replaced by a row that shares its
+# (account, strategy, effective_start), and a report row is matched with the manifest row
+# of its own epoch (``manifest_match``, ``report_match``). The one-row-per-key index let
+# a blocked manifest row listed after a funded one stand in for it: the funded row's
+# trace, net capital and panel views left every aggregation and every match.
 
 CENSUS_CHECK = "identity.blocked_admission_census"
 _ASSIGNMENT_ONLY = "ASSIGNMENT_ONLY"
@@ -497,6 +511,55 @@ def epoch_identity(row: Mapping[str, Any]) -> EpochIdentity:
         str(row.get("effective_start")),
         str(row.get("effective_end")),
     )
+
+
+def _identity_index(
+    entries: Iterable[TableRow],
+) -> dict[EpochIdentity, list[TableRow]]:
+    index: dict[EpochIdentity, list[TableRow]] = {}
+    for entry in entries:
+        index.setdefault(epoch_identity(entry[1]), []).append(entry)
+    return index
+
+
+def _same_epoch(
+    index: Mapping[EpochIdentity, Sequence[TableRow]],
+    row: Mapping[str, Any],
+    blocked: bool,
+    is_blocked: Callable[[Mapping[str, Any]], bool],
+) -> TableRow | None:
+    """The entry of ``index`` that is ``row``'s own epoch, or ``None``.
+
+    The entries with ``row``'s whole identity; among those the one that is blocked
+    exactly when ``row`` is (a funded and a blocked row can share even the whole
+    identity), else the last. An epoch whose identity no entry has matches nothing.
+    """
+
+    candidates = index.get(epoch_identity(row))
+    if not candidates:
+        return None
+    alike = [entry for entry in candidates if is_blocked(entry[1]) == blocked]
+    return (alike or candidates)[-1]
+
+
+def manifest_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The panel manifest row of one ``twr_mwr`` row: the row of its own epoch."""
+
+    index = ctx._cache.get("manifest_by_identity")
+    if not isinstance(index, dict):
+        index = _identity_index(manifest_rows(ctx))
+        ctx._cache["manifest_by_identity"] = index
+    return _same_epoch(index, row, is_blocked_admission(row), is_blocked_manifest_row)
+
+
+def report_match(ctx: Context, row: Mapping[str, Any]) -> TableRow | None:
+    """The ``twr_mwr`` row of one panel manifest row: the same match, the other way."""
+
+    index = ctx._cache.get("twr_by_identity")
+    if not isinstance(index, dict):
+        index = _identity_index(twr_rows(ctx))
+        ctx._cache["twr_by_identity"] = index
+    return _same_epoch(index, row, is_blocked_manifest_row(row), is_blocked_admission)
 
 
 def _day_text(value: Any) -> str | None:
@@ -2918,8 +2981,10 @@ def check_account_identity(ctx: Context) -> Iterator[Finding]:
         str(row.get("account_id")): (position, row)
         for position, row in enumerate(rows(ctx.report, "account_summary"))
     }
-    twr_by_key = {epoch_key(row): (position, row) for position, row in twr_rows(ctx)}
-    for key, (position, row) in sorted(manifest_rows(ctx).items()):
+    for position, row in sorted(
+        manifest_rows(ctx), key=lambda entry: epoch_key(entry[1])
+    ):
+        key = epoch_key(row)
         amounts = {
             name: to_decimal(row.get(name))
             for name in (
@@ -2966,7 +3031,7 @@ def check_account_identity(ctx: Context) -> Iterator[Finding]:
         views: dict[str, Decimal | None] = {
             "manifest.current_value": a["current_value"]
         }
-        matched = twr_by_key.get(key)
+        matched = report_match(ctx, row)
         if matched is not None:
             views["twr_mwr.mwr_terminal_value"] = to_decimal(
                 matched[1].get("mwr_terminal_value")
@@ -3303,7 +3368,6 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
 def check_twr_views(ctx: Context) -> Iterator[Finding]:
     """B1/B2/A1: every TWR shown for one account epoch and window must agree."""
 
-    manifest = manifest_rows(ctx)
     current = current_accounts_by_strategy(ctx)
     for position, row in twr_rows(ctx):
         key = epoch_key(row)
@@ -3315,7 +3379,7 @@ def check_twr_views(ctx: Context) -> Iterator[Finding]:
                 (to_date(row.get("observed_start")), to_date(row.get("observed_end"))),
             )
         ]
-        matched = manifest.get(key)
+        matched = manifest_match(ctx, row)
         if matched is not None:
             views.append(
                 (
@@ -3758,10 +3822,9 @@ def check_flow_lists(ctx: Context) -> Iterator[Finding]:
     never falls back to the pre-M3 comparison (fix round 1).
     """
 
-    manifest = manifest_rows(ctx)
     for position, row in twr_rows(ctx):
         key = epoch_key(row)
-        matched = manifest.get(key)
+        matched = manifest_match(ctx, row)
         if matched is None:
             continue
         trace = [
@@ -3867,7 +3930,6 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
     opening date compared, and is itself the finding (fix round 1).
     """
 
-    manifest = manifest_rows(ctx)
     for position, row in twr_rows(ctx):
         flows = [
             item for item in row.get("mwr_cashflows") or [] if isinstance(item, dict)
@@ -3882,7 +3944,7 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
             "first_cashflow_date": flows[0].get("date"),
             "first_cashflow_amount": first_amount,
         }
-        matched = manifest.get(epoch_key(row))
+        matched = manifest_match(ctx, row)
         performance_opening = (
             to_decimal(matched[1].get("performance_opening_value"))
             if matched is not None
@@ -3951,14 +4013,13 @@ def check_mwr_opening(ctx: Context) -> Iterator[Finding]:
 def check_implied_flows(ctx: Context) -> Iterator[Finding]:
     """B14: with no recorded flows, NAV endpoints and the return path must agree."""
 
-    manifest = manifest_rows(ctx)
     current = current_accounts_by_strategy(ctx)
     for position, row in twr_rows(ctx):
         if row.get("effective_end") is not None:
             continue
         if len(current.get(str(row.get("strategy_id")), [])) != 1:
             continue
-        matched = manifest.get(epoch_key(row))
+        matched = manifest_match(ctx, row)
         trace = matched[1].get("capital_flow_trace") if matched else None
         if trace or _interior_cashflows(row):
             continue
@@ -4070,7 +4131,8 @@ def check_flow_admission(ctx: Context) -> Iterator[Finding]:
             account = str(row.get("account_id"))
             admitted[account] = admitted.get(account, 0) + 1
     used: dict[str, int] = {}
-    for (account, _, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        account = str(row.get("account_id"))
         trace = row.get("capital_flow_trace")
         used[account] = used.get(account, 0) + (
             len(trace) if isinstance(trace, list) else 0
@@ -4929,6 +4991,23 @@ def _window_days(start: Any, end: Any) -> int | None:
     return (last - first).days
 
 
+def _unique_label(prefix: str, row: Mapping[str, Any], taken: Mapping[str, Any]) -> str:
+    """``prefix`` and the row's ``account|strategy|start`` label, never one already taken.
+
+    Epochs that start together share that label; the later one is told apart by its end
+    (and, were that shared too, a count), so a lint payload keeps an entry for each.
+    """
+
+    label = prefix + "|".join(epoch_key(row))
+    if label in taken:
+        label = f"{label}|{row.get('effective_end')}"
+    base, count = label, 1
+    while label in taken:
+        count += 1
+        label = f"{base}#{count}"
+    return label
+
+
 def check_lint_returns(ctx: Context) -> Iterator[Finding]:
     """A2/A4/A5 and extreme live returns: plausibility warnings only."""
 
@@ -4969,7 +5048,7 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             and days < ONE_YEAR_DAYS
             and row.get("mwr_xirr") is not None
         ):
-            short[f"twr_mwr.mwr_xirr:{'|'.join(epoch_key(row))}"] = days
+            short[_unique_label("twr_mwr.mwr_xirr:", row, short)] = days
     impossible: dict[str, Any] = {}
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
     for row in comparisons if isinstance(comparisons, list) else []:
@@ -5026,11 +5105,14 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
         for key in ("twr", "return_path_cumulative_return"):
             amount = to_decimal(row.get(key))
             if amount is not None and amount > 5:
-                live[f"twr_mwr.{key}:{'|'.join(epoch_key(row))}"] = amount
-    for key, (_, row) in manifest_rows(ctx).items():
+                live[_unique_label(f"twr_mwr.{key}:", row, live)] = amount
+    for _, row in manifest_rows(ctx):
         amount = to_decimal(row.get("observation_linked_return"))
         if amount is not None and amount > 5:
-            live[f"account_manifest.observation_linked_return:{'|'.join(key)}"] = amount
+            label = _unique_label(
+                "account_manifest.observation_linked_return:", row, live
+            )
+            live[label] = amount
     if live:
         yield _finding(
             "lint.extreme_live_return",
@@ -5096,7 +5178,8 @@ def check_lint_daily_moves(ctx: Context) -> Iterator[Finding]:
     """A6: a >4 sigma daily move within 3 days of a flow."""
 
     flow_days: dict[str, set[date]] = {}
-    for (_, strategy, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        strategy = str(row.get("strategy_id"))
         for item in row.get("capital_flow_trace") or []:
             if isinstance(item, dict):
                 for key in ("event_date", "nav_recognition_date"):
@@ -5148,7 +5231,8 @@ def check_lint_invested_capital(ctx: Context) -> Iterator[Finding]:
     """B7: invested capital versus net contributed capital."""
 
     net: dict[str, Decimal] = {}
-    for (_, strategy, _), (_, row) in manifest_rows(ctx).items():
+    for _, row in manifest_rows(ctx):
+        strategy = str(row.get("strategy_id"))
         if row.get("effective_end") is None:
             net[strategy] = net.get(strategy, Decimal(0)) + (
                 to_decimal(row.get("net_capital")) or Decimal(0)
@@ -5333,8 +5417,11 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"$.account_summary[{position}].latest_value_usd",
                         )
                     )
-        for (account, _, _), (position, row) in manifest_rows(ctx).items():
-            if account == entity and row.get("effective_end") is None:
+        for position, row in manifest_rows(ctx):
+            if (
+                str(row.get("account_id")) == entity
+                and row.get("effective_end") is None
+            ):
                 out.append(
                     Observed(
                         "panel:account_manifest.current_value",
@@ -5561,20 +5648,21 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
     ):
         # L6a: a blocked epoch row the census confirms never enters an account view
         # (R2); an unconfirmed one is compared as before, and so is every other row,
-        # whatever part of its key it shares with a confirmed blocked row.
+        # whatever part of its key it shares with a confirmed blocked row. Each report
+        # row reads the manifest row of its own epoch, and the aggregates below visit
+        # every manifest row, none standing in for another (fix round 2).
         blocked = blocked_epochs(ctx)
         epochs = [
             (position, row)
             for position, row in _epoch_views(ctx, entity)
             if not blocked.skips_report_row(row)
         ]
-        manifest = manifest_rows(ctx)
         for position, row in epochs:
             start, end = (
                 to_date(row.get("observed_start")),
                 to_date(row.get("observed_end")),
             )
-            matched = manifest.get(epoch_key(row))
+            matched = manifest_match(ctx, row)
             label = "|".join(epoch_key(row))
             if metric_id == "twr.account":
                 out.append(
@@ -5728,8 +5816,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             if metric_id == "flows.account.net":
                 parts = [
                     _flows_net(row)
-                    for key, (_, row) in manifest.items()
-                    if key[0] == entity and not blocked.skips_manifest_row(row)
+                    for _, row in manifest_rows(ctx)
+                    if str(row.get("account_id")) == entity
+                    and not blocked.skips_manifest_row(row)
                 ]
                 total = (
                     sum(part for part in parts if part is not None)
@@ -5739,8 +5828,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             else:
                 traces = [
                     row.get("capital_flow_trace")
-                    for key, (_, row) in manifest.items()
-                    if key[0] == entity and not blocked.skips_manifest_row(row)
+                    for _, row in manifest_rows(ctx)
+                    if str(row.get("account_id")) == entity
+                    and not blocked.skips_manifest_row(row)
                 ]
                 total = sum(len(t) for t in traces if isinstance(t, list))
             out.append(
@@ -6031,8 +6121,8 @@ def recompute_metric(
         ]
     if metric_id in ("flows.account.net", "flows.account.count"):
         events = []
-        for key, (_, row) in manifest_rows(ctx).items():
-            if key[0] != entity or blocked.skips_manifest_row(row):
+        for _, row in manifest_rows(ctx):
+            if str(row.get("account_id")) != entity or blocked.skips_manifest_row(row):
                 continue
             for item in row.get("capital_flow_trace") or []:
                 day = _flow_day(item) if isinstance(item, dict) else None
