@@ -94,6 +94,14 @@ def _provider_ledger(root: Path) -> str:
                 "strategy_id": "current-one",
             },
             {
+                "account": {
+                    "observed_end": "2025-11-24",
+                    "provider_id": "alpaca",
+                },
+                "provider_id": "alpaca",
+                "strategy_id": "finite-one",
+            },
+            {
                 "provider": {
                     "observed_end": "2026-07-17",
                     "provider_id": "tracker",
@@ -156,6 +164,11 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
         by_lane[("current-one", "ACCOUNT", "strategy-returns")]["provider_id"] == "ibkr"
     )
     assert by_lane[("current-one", "ACCOUNT", "strategy-returns")]["state"] == ("FRESH")
+    finite = by_lane[("finite-one", "ACCOUNT", "strategy-returns")]
+    assert finite["state"] == "FINITE_COMPLETE"
+    assert finite["last_accepted_date"] == "2025-11-24"
+    assert finite["required_for_current"] is False
+    assert finite["blocks_current_consumers"] is False
     assert (
         by_lane[("current-one", "PROVIDER", "strategy-returns")]["provider_id"]
         == "portfolio123"
