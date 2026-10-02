@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -699,6 +700,256 @@ _WEEKLY_REFERENCE_RETURNS = {
 }
 
 
+_RECEIPT_ACCOUNT_RETURNS = {
+    date(2026, 1, 12): "0.10",
+    date(2026, 1, 15): "0.01",
+    date(2026, 1, 22): "0",
+}
+
+
+def _epoch_receipt(
+    *,
+    account_returns: dict[date, str] = _RECEIPT_ACCOUNT_RETURNS,
+    span_start: str = "2026-01-12",
+    span_end: str = "2026-01-14",
+    daily_cumulative_return: str = "0.111",
+    epoch_cumulative_return: str = "0.3332",
+) -> dict[str, Any]:
+    """An admitted source receipt whose data hash binds the supplied daily rows."""
+
+    daily_rows = [
+        {
+            "date": day.isoformat(),
+            "return": (
+                "0" if Decimal(value) == 0 else format(Decimal(value).normalize(), "f")
+            ),
+        }
+        for day, value in sorted(account_returns.items())
+    ]
+    receipt = {
+        "admission_cutoff": daily_rows[-1]["date"],
+        "daily_cumulative_return": daily_cumulative_return,
+        "daily_return_observations": len(daily_rows),
+        "daily_return_series_schema": "ordered-date-return/1",
+        "daily_return_series_sha256": hashlib.sha256(
+            canonical_json_bytes(daily_rows)
+        ).hexdigest(),
+        "epoch_cumulative_return": epoch_cumulative_return,
+        "epoch_holding_period_link_observations": len(daily_rows) + 1,
+        "observed_end": daily_rows[-1]["date"],
+        "observed_start": daily_rows[0]["date"],
+        "source_gap_policy_sha256": "2" * 64,
+        "span_return_receipts": [
+            {
+                "end_endpoint_sha256": "3" * 64,
+                "missing_source_date": (
+                    date.fromisoformat(span_start) + timedelta(days=1)
+                ).isoformat(),
+                "return": "0.20",
+                "span_days": 2,
+                "span_end_date": span_end,
+                "span_start_date": span_start,
+                "start_endpoint_sha256": "4" * 64,
+                "subscription_events_in_span": 0,
+            }
+        ],
+    }
+    return {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "receipt": receipt,
+        "source_generation_id": "5" * 64,
+        "source_id": "matrixport-account-generation",
+        "strategy_id": "strategy-1",
+    }
+
+
+def _dependence_selected(tmp_path, baseline, monkeypatch, receipt):
+    """Exercise attribution's authority boundary with a verified-service test double.
+
+    Real immutable package verification is separately replayed without this double.
+    No unsupported fields are written into the published baseline catalog.
+    """
+    source = tmp_path / "dependence"
+    source.mkdir(exist_ok=True)
+    coverage = canonical_json_bytes({"epoch_hpr_receipts": [receipt]})
+    (source / "history-coverage.json").write_bytes(coverage)
+    (source / "dependence-source.json").write_bytes(
+        canonical_json_bytes({"schema_version": 2})
+    )
+    contract = tmp_path / "financial-contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    selected = tmp_path / "dependence-selected-inputs.json"
+    baseline_path = attribution._baseline(baseline)[2].parent
+    ledger = tmp_path / "ledger"
+    ledger.mkdir(exist_ok=True)
+    (ledger / "provider-ledger.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "provider_generations": [
+                    {"provider_id": "matrixport", "generation_id": "5" * 64}
+                ],
+                "strategy_returns": attribution._baseline(baseline)[0][
+                    "strategy_returns"
+                ],
+            }
+        )
+    )
+    selected.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "allocation_generation_root": str(baseline_path),
+                "financial_input_contract_path": str(contract),
+                "provider_ledger_generation_root": str(ledger),
+            }
+        )
+    )
+
+    def verify(root, *, contract_path, policy_path, selected_inputs_path):
+        assert root == source
+        assert contract_path == contract
+        assert policy_path == ROOT / "contracts" / "portfolio-dependence-policy-v1.json"
+        assert selected_inputs_path == selected
+        if (source / "history-coverage.json").read_bytes() != coverage:
+            raise ValueError("history coverage differs")
+        return {"verification": "VALID", "epoch_hpr_receipts": [receipt]}
+
+    monkeypatch.setattr(attribution, "_verify_dependence_source", verify)
+    return {"dependence_source_root": source, "dependence_selected_inputs": selected}
+
+
+def test_receipt_bound_coarse_period_restores_exact_headline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hash-bound span restores endpoint wealth without changing daily rows."""
+
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns=_RECEIPT_ACCOUNT_RETURNS,
+    )
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec, returns, {"2026-01-11": "0", "2026-01-15": "0", "2026-01-22": "0"}
+    )
+
+    catalog, _, _ = attribution.build_catalog(
+        baseline,
+        spec,
+        **_dependence_selected(tmp_path, baseline, monkeypatch, _epoch_receipt()),
+    )
+
+    for comparison in (
+        catalog["comparisons"][0],
+        catalog["benchmark_comparisons"][0],
+    ):
+        assert comparison["status"] in attribution.AVAILABLE_STATUSES
+        assert comparison["metrics"]["observations"] == 2
+        # 1.10 * 1.20 * 1.01 - 1: daily + HPR gap + daily.
+        assert comparison["metrics"]["account_cumulative_return"] == "0.3332"
+
+    raw_daily = attribution._account_live_series(attribution._baseline(baseline)[0])[
+        "strategy-1"
+    ]
+    assert raw_daily == {
+        date(2026, 1, 12): Decimal("0.10"),
+        date(2026, 1, 15): Decimal("0.01"),
+        date(2026, 1, 22): Decimal("0"),
+    }
+    # The retained daily path is still exactly 1.10 * 1.01 - 1.
+    assert Decimal("1.10") * Decimal("1.01") - Decimal("1") == Decimal("0.111")
+
+
+@pytest.mark.parametrize(
+    "receipt_variant, message",
+    [
+        ("missing", "epoch HPR receipt keys differ"),
+        ("altered", "epoch HPR daily path differs"),
+        ("mismatched", "epoch HPR receipt authority differs"),
+    ],
+)
+def test_receipt_bound_coarse_period_rejects_missing_altered_or_mismatched_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_variant: str, message: str
+) -> None:
+    """The report-reader binding rejects absent, tampered, and foreign receipts."""
+
+    receipt = _epoch_receipt()
+    if receipt_variant == "missing":
+        receipt.pop("receipt")
+    elif receipt_variant == "altered":
+        # This is deliberately independent from the crossing-boundary case.
+        receipt["receipt"]["daily_return_series_sha256"] = "0" * 64
+    else:
+        receipt["source_id"] = "unadmitted-source"
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns=_RECEIPT_ACCOUNT_RETURNS,
+    )
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec, returns, {"2026-01-11": "0", "2026-01-15": "0", "2026-01-22": "0"}
+    )
+
+    with pytest.raises(attribution.AttributionValidationError, match=message):
+        attribution.build_catalog(
+            baseline,
+            spec,
+            **_dependence_selected(tmp_path, baseline, monkeypatch, receipt),
+        )
+
+
+def test_receipt_bound_crossing_reference_boundary_is_not_ready_and_preserves_daily_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid changed span that cuts a reference period is not silently sliced."""
+
+    changed_daily = {
+        date(2026, 1, 12): "0.10",
+        date(2026, 1, 13): "0.10",
+        date(2026, 1, 16): "0.01",
+    }
+    # Build the changed receipt afresh: its daily-series hash now binds these
+    # changed observations and the valid (2026-01-13, 2026-01-15] HPR link.
+    receipt = _epoch_receipt(
+        account_returns=changed_daily,
+        span_start="2026-01-13",
+        span_end="2026-01-15",
+        daily_cumulative_return="0.2221",
+        epoch_cumulative_return="0.46652",
+    )
+    baseline = _baseline(tmp_path, account_live_returns=changed_daily)
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec,
+        returns,
+        {"2026-01-11": "0", "2026-01-14": "0"},
+        observed_start="2026-01-14",
+        observed_end="2026-01-14",
+    )
+
+    # Establish receipt validity before testing the independent reference boundary.
+    attribution._validated_account_live_return_series(
+        {**attribution._baseline(baseline)[0], "epoch_hpr_receipts": [receipt]}
+    )
+    catalog, _, _ = attribution.build_catalog(
+        baseline, spec, **_dependence_selected(tmp_path, baseline, monkeypatch, receipt)
+    )
+
+    for comparison in (
+        catalog["comparisons"][0],
+        catalog["benchmark_comparisons"][0],
+    ):
+        assert comparison["status"] == attribution.NOT_READY_STATUS
+        assert (
+            comparison["not_ready_reason"]
+            == "RECEIPT_BOUND_COARSE_PERIOD_CUTS_HPR_SPAN"
+        )
+        assert comparison["metrics"] is None
+    assert attribution._account_live_series(attribution._baseline(baseline)[0])[
+        "strategy-1"
+    ] == {day: Decimal(value) for day, value in changed_daily.items()}
+
+
 def _with_weekly_reference(
     spec_path: Path,
     returns: Path,
@@ -706,6 +957,7 @@ def _with_weekly_reference(
     *,
     periods_per_year: int = 52,
     observed_end: str = "2026-01-30",
+    observed_start: str = "2026-01-16",
 ) -> None:
     """Point strategy-1's provider comparison at a weekly reference series."""
 
@@ -716,13 +968,41 @@ def _with_weekly_reference(
     spec["comparisons"][0].update(
         expected_legacy_cumulative_gap="0.105732",
         observed_end=observed_end,
-        observed_start="2026-01-16",
+        observed_start=observed_start,
         periods_per_year=periods_per_year,
         reference_series_id="weekly",
     )
     spec["return_source"]["expected_sha256"] = hashlib.sha256(
         returns.read_bytes()
     ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+def _with_receipt_bound_coarse_reference(
+    spec_path: Path,
+    returns: Path,
+    reference_returns: dict[str, str],
+    *,
+    observed_start: str = "2026-01-15",
+    observed_end: str = "2026-01-22",
+) -> None:
+    """Bind both real comparison consumers to the same coarse source period."""
+
+    _with_weekly_reference(
+        spec_path,
+        returns,
+        reference_returns,
+        observed_start=observed_start,
+        observed_end=observed_end,
+    )
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["benchmark_assignments"][0]["benchmark_id"] = "weekly"
+    spec["benchmark_comparisons"][0].update(
+        observed_end=observed_end,
+        observed_start=observed_start,
+        periods_per_year=52,
+        reference_series_id="weekly",
+    )
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
 
@@ -963,3 +1243,226 @@ def test_attribution_rejects_baseline_generation_date_not_derived_from_artifacts
         match="baseline generation date is not artifact-derived",
     ):
         attribution.stage_catalog(baseline_root, spec, tmp_path / "attribution")
+
+
+@pytest.mark.parametrize("frequency", [252, 52])
+def test_dependence_selected_actual_stage_publish_preserves_raw_statistics(
+    tmp_path, monkeypatch, frequency
+):
+    baseline = _baseline(tmp_path, account_live_returns=_RECEIPT_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec,
+        returns,
+        {"2026-01-11": "0", "2026-01-12": "0", "2026-01-15": "0", "2026-01-22": "0"},
+        observed_start="2026-01-12",
+    )
+    if frequency == 252:
+        value = json.loads(spec.read_text())
+        for name in ("comparisons", "benchmark_comparisons"):
+            value[name][0]["periods_per_year"] = 252
+        spec.write_text(json.dumps(value))
+    args = _dependence_selected(tmp_path, baseline, monkeypatch, _epoch_receipt())
+    output = tmp_path / "output"
+    cli = [
+        "--baseline-root",
+        str(baseline),
+        "--spec",
+        str(spec),
+        "--output-root",
+        str(output),
+        "--dependence-source-root",
+        str(args["dependence_source_root"]),
+        "--dependence-selected-inputs",
+        str(args["dependence_selected_inputs"]),
+    ]
+    assert attribution.main(["stage", *cli]) == 0
+    generation = next((output / "generations").iterdir())
+    assert attribution.main(["publish", *cli, "--generation-id", generation.name]) == 0
+    catalog = json.loads((generation / attribution.CATALOG_NAME).read_text())
+    for name in ("comparisons", "benchmark_comparisons"):
+        assert catalog[name][0]["metrics"]["account_cumulative_return"] == "0.3332"
+        assert catalog[name][0]["metrics"]["cumulative_gap"] == "0.3332"
+        if frequency == 252:
+            assert catalog[name][0]["metrics"]["observations"] == 3
+            assert catalog[name][0]["metrics"][
+                "active_return_annualized"
+            ] == attribution._decimal_text(statistics.fmean([0.10, 0.01, 0]) * 252)
+    artifact_ids = {
+        item["artifact_id"]
+        for item in json.loads((generation / "generation.json").read_text())[
+            "artifacts"
+        ]
+    }
+    assert "input/dependence-selected-inputs.json" in artifact_ids
+    assert "input/dependence-source.json" in artifact_ids
+    assert "input/dependence-history-coverage.json" in artifact_ids
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["half-source", "half-selected", "baseline", "tamper", "missing-matrixport"],
+)
+def test_dependence_selected_rejects_before_stage_write(tmp_path, monkeypatch, attack):
+    baseline = _baseline(tmp_path, account_live_returns=_RECEIPT_ACCOUNT_RETURNS)
+    spec, _ = _inputs(tmp_path)
+    args = _dependence_selected(tmp_path, baseline, monkeypatch, _epoch_receipt())
+    if attack == "half-source":
+        args.pop("dependence_selected_inputs")
+    elif attack == "half-selected":
+        args.pop("dependence_source_root")
+    elif attack == "baseline":
+        value = json.loads(args["dependence_selected_inputs"].read_text())
+        value["allocation_generation_root"] = str(tmp_path / "other")
+        args["dependence_selected_inputs"].write_text(json.dumps(value))
+    elif attack == "tamper":
+        (args["dependence_source_root"] / "history-coverage.json").write_text("{}")
+    else:
+        # A receipt-capable provider cannot silently take the legacy raw path.
+        original = attribution._baseline
+
+        def read(*a, **kw):
+            catalog, identity, path, artifact = original(*a, **kw)
+            for row in catalog["strategy_returns"]:
+                row["provider_id"] = "matrixport"
+            return catalog, identity, path, artifact
+
+        monkeypatch.setattr(attribution, "_baseline", read)
+        args = {}
+    output = tmp_path / "output"
+    with pytest.raises(attribution.AttributionValidationError):
+        attribution.stage_catalog(baseline, spec, output, **args)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("attack", ["foreign-generation", "foreign-account", "overlap"])
+def test_dependence_selected_receipt_identity_and_overlap_fail_closed(
+    tmp_path, monkeypatch, attack
+):
+    baseline = _baseline(tmp_path, account_live_returns=_RECEIPT_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec, returns, {"2026-01-11": "0", "2026-01-15": "0", "2026-01-22": "0"}
+    )
+    receipt = _epoch_receipt()
+    attribution._validated_account_live_return_series(
+        {**attribution._baseline(baseline)[0], "epoch_hpr_receipts": [receipt]}
+    )
+    if attack == "foreign-generation":
+        receipt["source_generation_id"] = "6" * 64
+    elif attack == "overlap":
+        receipt["receipt"]["span_return_receipts"] *= 2
+        receipt["receipt"]["epoch_holding_period_link_observations"] += 1
+    args = _dependence_selected(tmp_path, baseline, monkeypatch, receipt)
+    if attack == "foreign-account":
+        ledger_path = tmp_path / "ledger" / "provider-ledger.json"
+        value = json.loads(ledger_path.read_text())
+        for row in value["strategy_returns"]:
+            row["component_account_ids"] = ["other-account"]
+        ledger_path.write_text(json.dumps(value))
+    message = {
+        "foreign-generation": "selected provider generation",
+        "foreign-account": "account identity",
+        "overlap": "epoch HPR span differs",
+    }[attack]
+    with pytest.raises(attribution.AttributionValidationError, match=message):
+        attribution.stage_catalog(baseline, spec, tmp_path / "output", **args)
+    assert not (tmp_path / "output").exists()
+
+
+def test_receipt_bound_first_reference_opening_is_not_inferred(tmp_path, monkeypatch):
+    baseline = _baseline(tmp_path, account_live_returns=_RECEIPT_ACCOUNT_RETURNS)
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec, returns, {"2026-01-15": "0", "2026-01-22": "0"}
+    )
+    args = _dependence_selected(tmp_path, baseline, monkeypatch, _epoch_receipt())
+    catalog, _, _ = attribution.build_catalog(baseline, spec, **args)
+    for name in ("comparisons", "benchmark_comparisons"):
+        assert catalog[name][0]["status"] == "NOT_READY"
+        assert (
+            catalog[name][0]["not_ready_reason"]
+            == "RECEIPT_BOUND_REFERENCE_OPENING_UNPROVEN"
+        )
+        assert catalog[name][0]["metrics"] is None
+
+
+def test_dependence_selected_invalid_package_uses_real_verifier_before_write(tmp_path):
+    baseline = _baseline(tmp_path, account_live_returns=_RECEIPT_ACCOUNT_RETURNS)
+    spec, _ = _inputs(tmp_path)
+    source = tmp_path / "invalid-package"
+    source.mkdir()
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "provider-ledger.json",
+        "contract.json",
+    ):
+        (source / name).write_text("{}")
+    selected = tmp_path / "selected.json"
+    selected.write_text(
+        json.dumps(
+            {
+                "allocation_generation_root": str(
+                    attribution._baseline(baseline)[2].parent
+                ),
+                "financial_input_contract_path": str(source / "contract.json"),
+                "provider_ledger_generation_root": str(source),
+            }
+        )
+    )
+    with pytest.raises(
+        attribution.AttributionValidationError,
+        match="selected dependence authority is invalid",
+    ):
+        attribution.stage_catalog(
+            baseline,
+            spec,
+            tmp_path / "output",
+            dependence_source_root=source,
+            dependence_selected_inputs=selected,
+        )
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("end,expected", [("2026-01-14", "0.32"), ("2026-01-13", None)])
+def test_receipt_bound_daily_exact_endpoint_or_cut_is_explicit(
+    tmp_path, monkeypatch, end, expected
+):
+    daily = {
+        date(2026, 1, 11): "0.10",
+        date(2026, 1, 12): "0",
+        date(2026, 1, 15): "0.01",
+    }
+    receipt = _epoch_receipt(account_returns=daily)
+    baseline = _baseline(tmp_path, account_live_returns=daily)
+    attribution._validated_account_live_return_series(
+        {**attribution._baseline(baseline)[0], "epoch_hpr_receipts": [receipt]}
+    )
+    spec, returns = _inputs(tmp_path)
+    _with_receipt_bound_coarse_reference(
+        spec,
+        returns,
+        {
+            "2026-01-11": "0",
+            "2026-01-12": "0",
+            "2026-01-13": "0",
+            "2026-01-14": "0",
+            "2026-01-15": "0",
+        },
+        observed_start="2026-01-11",
+        observed_end=end,
+    )
+    value = json.loads(spec.read_text())
+    for name in ("comparisons", "benchmark_comparisons"):
+        value[name][0]["periods_per_year"] = 252
+    spec.write_text(json.dumps(value))
+    args = _dependence_selected(tmp_path, baseline, monkeypatch, receipt)
+    catalog, _, _ = attribution.build_catalog(baseline, spec, **args)
+    for name in ("comparisons", "benchmark_comparisons"):
+        if expected is None:
+            assert catalog[name][0]["status"] == "NOT_READY"
+            assert catalog[name][0]["metrics"] is None
+        else:
+            assert catalog[name][0]["metrics"]["account_cumulative_return"] == expected
+            assert catalog[name][0]["metrics"]["observations"] == 2

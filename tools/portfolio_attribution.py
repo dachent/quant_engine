@@ -28,7 +28,19 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.portfolio_ledger import ReturnsError, splice_spans
+from quant_engine.portfolio_ledger import ReturnSpan, ReturnsError, splice_spans
+from portfolio_current_dependence import (
+    verify_packaged_source as _verify_dependence_source,
+)
+from quant_engine.portfolio_ledger.value_basis_bounds import (
+    derive_value_basis_bounds,
+    ValueBasisBoundError,
+)
+from portfolio_report import (
+    ReportValidationError,
+    _account_live_return_series as _validated_account_live_return_series,
+    _epoch_hpr_receipts as _validated_epoch_hpr_receipts,
+)
 
 
 SCHEMA_VERSION: Final = 2
@@ -41,6 +53,7 @@ AVAILABLE_STATUSES: Final = {
     "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
 }
 AVAILABLE_STATUS: Final = "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
+NOT_READY_STATUS: Final = "NOT_READY"
 # A comparison declaring fewer periods a year than this has a reference coarser
 # than daily (weekly, monthly): its account side is compounded per reference period.
 DAILY_PERIODS_PER_YEAR: Final = 252
@@ -51,6 +64,151 @@ ACCOUNT_SOURCE_RETAINED_HISTORY: Final = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTOR
 
 class AttributionValidationError(ValueError):
     """Raised when attribution inputs or identities are unsafe or ambiguous."""
+
+
+def _epoch_receipts(
+    baseline: Mapping[str, Any],
+    baseline_path: Path,
+    source_root: Path | None,
+    selected_path: Path | None,
+) -> tuple[dict[str, dict[str, Any]], list[SourceArtifact]]:
+    """Admit receipt evidence from the existing selected dependence package only."""
+    if (source_root is None) != (selected_path is None):
+        raise AttributionValidationError(
+            "dependence source and selected inputs must be paired"
+        )
+    if source_root is None:
+        if baseline.get("epoch_hpr_receipts") or any(
+            row.get("provider_id") == "matrixport"
+            and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            for row in baseline.get("strategy_returns", [])
+        ):
+            raise AttributionValidationError(
+                "receipt-capable account requires selected dependence authority"
+            )
+        return {}, []
+    assert selected_path is not None
+    selected = _load_json(selected_path, "selected dependence inputs")
+    allocation = Path(
+        _text(
+            selected.get("allocation_generation_root"), "selected allocation generation"
+        )
+    )
+    if allocation.resolve() != baseline_path.parent.resolve():
+        raise AttributionValidationError(
+            "selected allocation generation differs from attribution baseline"
+        )
+    contract = Path(
+        _text(
+            selected.get("financial_input_contract_path"), "selected financial contract"
+        )
+    )
+    policy = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "portfolio-dependence-policy-v1.json"
+    )
+    ledger_root = Path(
+        _text(
+            selected.get("provider_ledger_generation_root"), "selected provider ledger"
+        )
+    )
+    sources = [
+        ("dependence-selected-inputs.json", selected_path),
+        ("dependence-source.json", source_root / "dependence-source.json"),
+        ("dependence-history-coverage.json", source_root / "history-coverage.json"),
+        ("dependence-financial-contract.json", contract),
+        ("dependence-policy.json", policy),
+        ("dependence-provider-ledger.json", ledger_root / "provider-ledger.json"),
+    ]
+    identities = [(name, path, *_hash(path, name)) for name, path in sources]
+    try:
+        verified = _verify_dependence_source(
+            source_root,
+            contract_path=contract,
+            policy_path=policy,
+            selected_inputs_path=selected_path,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise AttributionValidationError(
+            f"selected dependence authority is invalid: {exc}"
+        ) from exc
+    if verified.get("verification") != "VALID" or not isinstance(
+        verified.get("epoch_hpr_receipts"), list
+    ):
+        raise AttributionValidationError("selected dependence verification differs")
+    for name, path, digest, size in identities:
+        if _hash(path, name) != (digest, size):
+            raise AttributionValidationError(
+                "selected dependence authority changed during verification"
+            )
+    ledger = _load_json(
+        ledger_root / "provider-ledger.json", "selected provider ledger"
+    )
+    for outer in verified["epoch_hpr_receipts"]:
+        strategy_id = outer.get("strategy_id")
+        if not any(
+            row.get("provider_id") == "matrixport"
+            and row.get("generation_id") == outer.get("source_generation_id")
+            for row in ledger.get("provider_generations", [])
+        ):
+            raise AttributionValidationError(
+                "epoch HPR receipt authority differs from selected provider generation"
+            )
+
+        def bound_rows(catalog):
+            return sorted(
+                (
+                    row.get("date"),
+                    row.get("return"),
+                    tuple(row.get("component_account_ids", [])),
+                    row.get("account_reconciliation_sha256"),
+                )
+                for row in catalog.get("strategy_returns", [])
+                if row.get("strategy_id") == strategy_id
+                and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            )
+
+        observed = bound_rows(baseline)
+        if (
+            not observed
+            or observed != bound_rows(ledger)
+            or any(len(row[2]) != 1 for row in observed)
+        ):
+            raise AttributionValidationError(
+                "epoch HPR account identity differs from selected ledger"
+            )
+    transient = {**baseline, "epoch_hpr_receipts": verified["epoch_hpr_receipts"]}
+    try:
+        bounds = None
+        if any(
+            outer.get("receipt", {}).get("admission_cutoff")
+            != outer.get("receipt", {}).get("observed_end")
+            for outer in verified["epoch_hpr_receipts"]
+        ):
+            bounds = derive_value_basis_bounds(
+                ledger,
+                _load_json(contract, "selected financial contract"),
+                date.fromisoformat(str(baseline["as_of_date"])),
+            )
+        receipts = _validated_epoch_hpr_receipts(
+            transient, calculation_cutoff_date=None, value_basis_bounds=bounds
+        )
+        _validated_account_live_return_series(transient, value_basis_bounds=bounds)
+    except (ReportValidationError, ValueBasisBoundError) as exc:
+        raise AttributionValidationError(str(exc)) from exc
+    as_of = date.fromisoformat(str(baseline["as_of_date"]))
+    return receipts, [
+        SourceArtifact(
+            artifact_id=f"input/{name}",
+            sha256=digest,
+            size_bytes=size,
+            as_of_date=as_of,
+            schema_name="selected-dependence-authority",
+            schema_version="1",
+        )
+        for name, _, digest, size in identities
+    ]
 
 
 def _load_json(path: Path, name: str) -> dict[str, Any]:
@@ -369,6 +527,67 @@ def _compound_to_reference_periods(
     return result
 
 
+def _receipt_bound_periods(
+    account: Mapping[date, Decimal],
+    reference: Mapping[date, Decimal],
+    window: Mapping[date, Decimal],
+    *,
+    receipt: Mapping[str, Any] | None,
+) -> tuple[dict[date, Decimal], str | None]:
+    if receipt is None:
+        return _compound_to_reference_periods(account, reference, window), None
+    dates = sorted(reference)
+    opens = dict(zip(dates[1:], dates))
+    spans = [
+        ReturnSpan(
+            date.fromisoformat(str(item["span_start_date"])),
+            date.fromisoformat(str(item["span_end_date"])),
+            _decimal(item["return"], "epoch HPR span return"),
+        )
+        for item in receipt["span_return_receipts"]
+    ]
+    account_dates = sorted(account)
+    result: dict[date, Decimal] = {}
+    for day in sorted(window):
+        if day not in opens:
+            return {}, "RECEIPT_BOUND_REFERENCE_OPENING_UNPROVEN"
+        opening = opens[day]
+        period_spans = [
+            span for span in spans if span.start_date < day and span.end_date > opening
+        ]
+        if any(
+            span.start_date < opening or span.end_date > day for span in period_spans
+        ):
+            return {}, "RECEIPT_BOUND_COARSE_PERIOD_CUTS_HPR_SPAN"
+        daily = [
+            (item, account[item]) for item in account_dates if opening < item <= day
+        ]
+        if not daily:
+            continue
+        try:
+            # Validate/compound real observations only. A span may start at the
+            # reference opening; retain that actual anchor in the kernel and
+            # cancel all daily factors outside (opening, day] afterwards.
+            with localcontext() as context:
+                context.prec = 34
+                full = splice_spans(
+                    sorted(account.items()), period_spans
+                ).cumulative_return
+                outside = _cumulative(
+                    [
+                        value
+                        for observed, value in sorted(account.items())
+                        if not opening < observed <= day
+                    ]
+                )
+                result[day] = (Decimal(1) + full) / (Decimal(1) + outside) - Decimal(1)
+        except ReturnsError as exc:
+            raise AttributionValidationError(
+                "receipt-bound coarse period is invalid"
+            ) from exc
+    return result, None
+
+
 def _cumulative(values: Sequence[Decimal]) -> Decimal:
     wealth = Decimal(1)
     with localcontext() as context:
@@ -382,6 +601,8 @@ def _comparison_metrics(
     account: Mapping[date, Decimal],
     reference: Mapping[date, Decimal],
     periods_per_year: int,
+    *,
+    complete_cumulative: Decimal | None = None,
 ) -> dict[str, Any]:
     common = sorted(set(account) & set(reference))
     if len(common) < 2:
@@ -439,6 +660,8 @@ def _comparison_metrics(
         raise AttributionValidationError(
             f"account live series is invalid: {exc}"
         ) from exc
+    if complete_cumulative is not None:
+        account_cumulative = complete_cumulative
     reference_cumulative = _cumulative(reference_dec)
     return {
         "account_cumulative_return": _decimal_text(account_cumulative),
@@ -465,6 +688,7 @@ def _accepted_comparison(
     reference_series: Mapping[str, Mapping[date, Decimal]],
     reference_only_history: Mapping[str, str],
     series_identities: Mapping[str, tuple[str, str, str]],
+    epoch_receipts: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     accepted = dict(comparison)
     status = accepted.get("status")
@@ -472,6 +696,7 @@ def _accepted_comparison(
     legacy_delta = None
     legacy_disposition = "NOT_APPLICABLE"
     account_source = None
+    receipt_reason = None
     if status in AVAILABLE_STATUSES:
         # The account values come from the baseline's own ACCOUNT_LIVE series
         # keyed by strategy_id (B3: never a separately retained return-source
@@ -526,17 +751,85 @@ def _accepted_comparison(
             # A reference coarser than daily reports one return per period, so the
             # account's daily returns are compounded over the same periods before
             # the exact-date pairing (T6-F2); daily comparisons are unchanged.
-            account_window = _compound_to_reference_periods(
-                account_full_series, reference_series[reference_id], reference_window
+            account_window, receipt_reason = _receipt_bound_periods(
+                account_full_series,
+                reference_series[reference_id],
+                reference_window,
+                receipt=epoch_receipts.get(strategy_id),
             )
+            if receipt_reason is not None:
+                accepted["status"] = NOT_READY_STATUS
+                accepted["not_ready_reason"] = receipt_reason
+                return {
+                    **accepted,
+                    "account_series_source": account_source,
+                    "legacy_baseline_delta": legacy_delta,
+                    "legacy_baseline_disposition": legacy_disposition,
+                    "metrics": None,
+                }
         else:
             account_window = {
                 day: value
                 for day, value in account_full_series.items()
                 if (start is None or day >= start) and (end is None or day <= end)
             }
+        complete_cumulative = None
+        receipt = epoch_receipts.get(strategy_id)
+        if receipt is not None and periods_per_year >= DAILY_PERIODS_PER_YEAR:
+            if not account_window:
+                raise AttributionValidationError(
+                    "receipt-bound comparison has no daily observations"
+                )
+            first = start if start is not None else min(account_window)
+            last = end if end is not None else max(account_window)
+            spans = [
+                ReturnSpan(
+                    date.fromisoformat(item["span_start_date"]),
+                    date.fromisoformat(item["span_end_date"]),
+                    _decimal(item["return"], "epoch HPR span return"),
+                )
+                for item in receipt["span_return_receipts"]
+                if date.fromisoformat(item["span_start_date"]) < last
+                and date.fromisoformat(item["span_end_date"]) > first
+            ]
+            if any(span.start_date < first or span.end_date > last for span in spans):
+                accepted["status"] = NOT_READY_STATUS
+                accepted["not_ready_reason"] = "RECEIPT_BOUND_COMPARISON_CUTS_HPR_SPAN"
+                return {
+                    **accepted,
+                    "account_series_source": account_source,
+                    "legacy_baseline_delta": None,
+                    "legacy_baseline_disposition": legacy_disposition,
+                    "metrics": None,
+                }
+            try:
+                # The admitted complete path supplies real anchors on both sides
+                # of each span. Cancel only actual daily factors outside this
+                # inclusive comparison window; do not invent an endpoint row.
+                with localcontext() as context:
+                    context.prec = 34
+                    full = splice_spans(
+                        sorted(account_full_series.items()), spans
+                    ).cumulative_return
+                    outside = _cumulative(
+                        [
+                            value
+                            for observed, value in sorted(account_full_series.items())
+                            if not first <= observed <= last
+                        ]
+                    )
+                    complete_cumulative = (Decimal(1) + full) / (
+                        Decimal(1) + outside
+                    ) - Decimal(1)
+            except ReturnsError as exc:
+                raise AttributionValidationError(
+                    "receipt-bound comparison interval is invalid"
+                ) from exc
         metrics = _comparison_metrics(
-            account_window, reference_window, periods_per_year
+            account_window,
+            reference_window,
+            periods_per_year,
+            complete_cumulative=complete_cumulative,
         )
         expected_gap = accepted.get("expected_legacy_cumulative_gap")
         if expected_gap is not None:
@@ -573,6 +866,8 @@ def build_catalog(
     spec_path: Path,
     *,
     baseline_generation_id: str | None = None,
+    dependence_source_root: Path | None = None,
+    dependence_selected_inputs: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, list[SourceArtifact]]:
     spec = _load_json(spec_path, "attribution spec")
     if spec.get("schema_version") != SCHEMA_VERSION:
@@ -620,6 +915,9 @@ def build_catalog(
         ) from exc
     series, series_identities = _rows(source_path)
     account_live_series = _account_live_series(baseline)
+    epoch_receipts, dependence_artifacts = _epoch_receipts(
+        baseline, baseline_path, dependence_source_root, dependence_selected_inputs
+    )
     reference_only_history = _reference_only_account_history(baseline)
     benchmark_rows = spec.get("benchmark_assignments")
     benchmark_comparison_rows = spec.get("benchmark_comparisons")
@@ -722,6 +1020,7 @@ def build_catalog(
                 series,
                 reference_only_history,
                 series_identities,
+                epoch_receipts,
             )
         )
         accepted_comparisons.append(
@@ -732,6 +1031,7 @@ def build_catalog(
                 series,
                 reference_only_history,
                 series_identities,
+                epoch_receipts,
             )
         )
         allocation = allocations[strategy_id]
@@ -799,7 +1099,7 @@ def build_catalog(
             schema_version="1",
         ),
     ]
-    return catalog, canonical_json_bytes(catalog), artifacts
+    return catalog, canonical_json_bytes(catalog), artifacts + dependence_artifacts
 
 
 def stage_catalog(
@@ -808,9 +1108,15 @@ def stage_catalog(
     output_root: Path,
     *,
     baseline_generation_id: str | None = None,
+    dependence_source_root: Path | None = None,
+    dependence_selected_inputs: Path | None = None,
 ) -> dict[str, Any]:
     catalog, catalog_bytes, artifacts = build_catalog(
-        baseline_root, spec_path, baseline_generation_id=baseline_generation_id
+        baseline_root,
+        spec_path,
+        baseline_generation_id=baseline_generation_id,
+        dependence_source_root=dependence_source_root,
+        dependence_selected_inputs=dependence_selected_inputs,
     )
     as_of = date.fromisoformat(catalog["as_of_date"])
     catalog_artifact = SourceArtifact(
@@ -869,12 +1175,16 @@ def publish_catalog(
     generation_id: str,
     *,
     baseline_generation_id: str | None = None,
+    dependence_source_root: Path | None = None,
+    dependence_selected_inputs: Path | None = None,
 ) -> dict[str, Any]:
     staged = stage_catalog(
         baseline_root,
         spec_path,
         output_root,
         baseline_generation_id=baseline_generation_id,
+        dependence_source_root=dependence_source_root,
+        dependence_selected_inputs=dependence_selected_inputs,
     )
     if staged["generation_id"] != generation_id:
         raise AttributionValidationError("rebuilt generation differs")
@@ -889,6 +1199,8 @@ def _parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--baseline-root", type=Path, required=True)
         command.add_argument("--baseline-generation-id")
+        command.add_argument("--dependence-source-root", type=Path)
+        command.add_argument("--dependence-selected-inputs", type=Path)
         command.add_argument("--spec", type=Path, required=True)
         command.add_argument("--output-root", type=Path, required=True)
         if name == "publish":
@@ -905,6 +1217,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.spec,
                 args.output_root,
                 baseline_generation_id=args.baseline_generation_id,
+                dependence_source_root=args.dependence_source_root,
+                dependence_selected_inputs=args.dependence_selected_inputs,
             )
         else:
             result = publish_catalog(
@@ -913,6 +1227,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_root,
                 args.generation_id,
                 baseline_generation_id=args.baseline_generation_id,
+                dependence_source_root=args.dependence_source_root,
+                dependence_selected_inputs=args.dependence_selected_inputs,
             )
     except (AttributionValidationError, OSError, ValueError) as exc:
         print(f"portfolio-attribution: FAIL: {exc}", file=sys.stderr)
