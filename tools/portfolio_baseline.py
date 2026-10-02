@@ -684,7 +684,7 @@ def _provider_ledger(
         "schwab",
     }:
         raise BaselineValidationError("provider-ledger provider scope differs")
-    artifacts = (
+    artifacts: tuple[SourceArtifact, ...] = (
         SourceArtifact(
             artifact_id="providers/provider-ledger/generation.json",
             sha256=actual_manifest_hash,
@@ -3235,6 +3235,8 @@ def _reconcile_current_capital(
                 )
             value, day, accounts = recomputed[strategy_id]
             if value is not None:
+                # _recompute_strategy_capital returns value and date together.
+                assert day is not None
                 value = _exact_sum(
                     [
                         value,
