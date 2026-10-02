@@ -7399,3 +7399,110 @@ def test_financial_product_direct_publish_requires_private_stage_without_new_fla
     assert pointer.read_bytes() == b"prior accepted pointer"
     assert list(output_root.iterdir()) == [pointer]
     assert not qa.exists()
+def _n52_current_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    captured: list[dict[str, Any]] = []
+    original = reporter.build_report_data
+
+    def capture(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bytes, Path]:
+        result = original(*args, **kwargs)
+        captured.append(json.loads(json.dumps(result[0])))
+        return result
+
+    monkeypatch.setattr(reporter, "build_report_data", capture)
+    test_current_dependence_reaches_report_data_identity(tmp_path, monkeypatch)
+    assert captured
+    return captured[-1]
+
+
+def test_schema2_weight_labels_preserve_schema1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from copy import deepcopy
+    from jsonschema import Draft202012Validator
+
+    report = _n52_current_report(tmp_path, monkeypatch)
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas" / "portfolio" / "report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(schema)
+    assert report["report_schema_version"] == 2
+    assert reporter.BUILDER_VERSION == "1.6.0"
+    assert not list(validator.iter_errors(report))
+    row_index = next(
+        index
+        for index, row in enumerate(report["portfolio_summary"])
+        if row["metric"] == "Correlation-one stress"
+    )
+    for field in ("weight_basis", "weight_authority"):
+        broken = deepcopy(report)
+        del broken["portfolio_summary"][row_index][field]
+        errors = list(validator.iter_errors(broken))
+        assert errors
+        assert any(list(error.absolute_path)[:2] == ["portfolio_summary", row_index] for error in errors)
+    for field, value in (
+        ("weight_basis", "CURRENT_CUTOFF"),
+        ("weight_authority", {"policy_id": "WRONG", "normalization": "WRONG"}),
+    ):
+        broken = deepcopy(report)
+        broken["portfolio_summary"][row_index][field] = value
+        assert list(validator.iter_errors(broken))
+    legacy = deepcopy(report)
+    legacy["report_schema_version"] = 1
+    legacy["portfolio_summary"][row_index].pop("weight_basis", None)
+    legacy["portfolio_summary"][row_index].pop("weight_authority", None)
+    assert not list(validator.iter_errors(legacy))
+    non_stress = deepcopy(report)
+    other = next(row for row in non_stress["portfolio_summary"] if row["metric"] != "Correlation-one stress")
+    other.pop("weight_basis", None)
+    other.pop("weight_authority", None)
+    assert not list(validator.iter_errors(non_stress))
+
+
+def test_schema2_publication_records_matching_report_version(tmp_path: Path) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    published_root = tmp_path / "published"
+    reporter.publish_report(
+        baseline_root, candidate, None, None, None, published_root
+    )
+    pointer = read_current(published_root)
+    generation = published_root / "generations" / pointer.generation_id
+    manifest = json.loads((generation / "generation.json").read_bytes())
+    payload_path = generation / "portfolio-report-data.json"
+    report = json.loads(payload_path.read_bytes())
+    artifact = next(
+        artifact
+        for artifact in manifest["artifacts"]
+        if artifact["artifact_id"] == "normalized/portfolio-report-data.json"
+    )
+    assert report["report_schema_version"] == 2
+    assert reporter.REPORT_SCHEMA_VERSION == 2
+    assert reporter.BUILDER_VERSION == "1.6.0"
+    assert manifest["adapter"]["version"] == "1.6.0"
+    assert artifact["schema"]["version"] == "2"
+    assert artifact["sha256"] == hashlib.sha256(payload_path.read_bytes()).hexdigest()
+
+
+def test_workbook_parity_accepts_report_schema1_and2(tmp_path: Path) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    report, _content, _path = reporter.build_report_data(baseline_root)
+    workbook_path = tmp_path / "compatibility.xlsx"
+    reporter._workbook(report, workbook_path)
+    workbook_bytes = workbook_path.read_bytes()
+    for version in (1, 2):
+        compatible = json.loads(json.dumps(report))
+        compatible["report_schema_version"] = version
+        reporter._workbook_parity_receipt(
+            canonical_json_bytes(compatible), workbook_bytes
+        )
+    unsupported = json.loads(json.dumps(report))
+    unsupported["report_schema_version"] = 3
+    with pytest.raises(reporter.ReportValidationError, match="contract differs"):
+        reporter._workbook_parity_receipt(
+            canonical_json_bytes(unsupported), workbook_bytes
+        )

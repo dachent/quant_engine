@@ -32,7 +32,7 @@
     "hwm_summary"
   ],
   "properties": {
-    "report_schema_version": {"const": 1},
+    "report_schema_version": {"enum": [1, 2]},
     "as_of_date": {"type": "string", "format": "date"},
     "calculation_cutoff_date": {"type": "string", "format": "date"},
     "baseline": {
@@ -745,6 +745,23 @@
         "required": ["twr_mwr"]
       },
       "then": {"required": ["calculation_cutoff_date"]}
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"const": 2}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "portfolio_summary": {
+            "items": {
+              "if": {"properties": {"metric": {"const": "Correlation-one stress"}}, "required": ["metric"]},
+              "then": {
+                "required": ["weight_basis"],
+                "properties": {"weight_basis": {"anyOf": [{"const": "POLICY_PORT_DEPENDENCE_1"}, {"$ref": "#/$defs/historical_weight_basis"}]}},
+                "allOf": [{"if": {"properties": {"weight_basis": {"const": "POLICY_PORT_DEPENDENCE_1"}}, "required": ["weight_basis"]}, "then": {"required": ["weight_authority"]}}]
+              }
+            }
+          }
+        }
+      }
     }
   ]
 }

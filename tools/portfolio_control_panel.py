@@ -88,8 +88,8 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
-PANEL_SCHEMA_VERSION: Final = 21
-BUILDER_VERSION: Final = "2.11.0"
+PANEL_SCHEMA_VERSION: Final = 22
+BUILDER_VERSION: Final = "2.12.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
         "grizzlybears-vtma",
@@ -1042,7 +1042,10 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         raise ControlPanelValidationError(
             "portfolio report data is not readable JSON"
         ) from exc
-    if report.get("report_schema_version") != 1:
+    if (
+        isinstance(report.get("report_schema_version"), bool)
+        or report.get("report_schema_version") not in {1, 2}
+    ):
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1122,7 +1125,10 @@ def _report_candidate(
     if candidate.name != sha256:
         raise ControlPanelValidationError("report candidate directory identity differs")
     report = _json_from_bytes(content, "report candidate data")
-    if report.get("report_schema_version") != 1:
+    if (
+        isinstance(report.get("report_schema_version"), bool)
+        or report.get("report_schema_version") not in {1, 2}
+    ):
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -9147,7 +9153,7 @@ def _panel_data(
         {
             "artifact": "portfolio-report-generation",
             "as_of_date": report.get("as_of_date"),
-            "schema": "portfolio-report-data/1",
+            "schema": f"portfolio-report-data/{report['report_schema_version']}",
             "sha256": report_identity["sha256"],
         },
         *provenance,
@@ -12955,6 +12961,23 @@ def publish_panel(
         )
     )
     publication_as_of = max(portfolio_as_of, freshness_as_of)
+    try:
+        retained_report = _object(
+            json.loads(input_snapshots["report"].decode("utf-8")),
+            "bound publication report snapshot",
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlPanelValidationError(
+            "bound publication report snapshot is invalid JSON"
+        ) from exc
+    retained_report_schema_version = retained_report.get("report_schema_version")
+    if (
+        isinstance(retained_report_schema_version, bool)
+        or retained_report_schema_version not in {1, 2}
+    ):
+        raise ControlPanelValidationError(
+            "bound publication report schema is unsupported"
+        )
 
     def snapshot_artifact(
         binding: str,
@@ -12998,7 +13021,7 @@ def publish_panel(
             artifact_id="input/portfolio-report-data.json",
             as_of_date=portfolio_as_of,
             schema_name="portfolio-report-data",
-            schema_version="1",
+            schema_version=str(retained_report_schema_version),
         ),
         snapshot_artifact(
             "legacy",

@@ -1754,7 +1754,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 21) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || ![21, 22].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

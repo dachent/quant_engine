@@ -45,7 +45,7 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 21 },
+    "panel_schema_version": { "enum": [21, 22] },
     "account_manifest": {
       "anyOf": [
         { "$ref": "#/$defs/account_manifest_v7" },
@@ -854,6 +854,23 @@
             { "required": ["hwm_portable_proof"] },
             { "required": ["hwm_governed_proof"] }
           ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"panel_schema_version": {"const": 22}}, "required": ["panel_schema_version"]},
+      "then": {
+        "properties": {
+          "dependence_analysis": {"required": ["weight_basis", "weight_authority"]},
+          "dependence_modes": {
+            "properties": {
+              "LIVE_ONLY": {"required": ["weight_basis", "weight_authority"]},
+              "LIVE_PLUS_BACKTEST": {"required": ["weight_basis", "weight_authority"]}
+            }
+          },
+          "hwm_summary": {
+            "allOf": [{"if": {"properties": {"hwm_numerical_status": {"const": "AVAILABLE"}}, "required": ["hwm_numerical_status"]}, "then": {"required": ["weight_basis"]}}]
+          }
         }
       }
     }

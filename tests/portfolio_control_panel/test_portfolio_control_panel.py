@@ -2180,7 +2180,7 @@ def _publish_report(root: Path, source: Path, value: object) -> None:
                 artifact_id="normalized/portfolio-report-data.json",
                 as_of_date=date(2026, 7, 30),
                 schema_name="synthetic-portfolio-report",
-                schema_version="1",
+                schema_version=str(value["report_schema_version"]),
             ),
         ),
         verification=VerificationStatus.VERIFIED,
@@ -5866,7 +5866,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 21" in renderer
+    assert "![21, 22].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -12360,6 +12360,285 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
         report,
         "report capital differs from the governed baseline current capital",
     )
+def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
+    for version in (1, 2):
+        value = _report()
+        value["report_schema_version"] = version
+        root = tmp_path / f"published-{version}"
+        source = tmp_path / f"report-{version}.json"
+        _publish_report(root, source, value)
+        accepted, identity, returned = panel._current_report(root)
+        assert accepted["report_schema_version"] == version
+        assert returned.read_bytes() == source.read_bytes()
+        candidate = tmp_path / f"candidate-{version}" / identity["sha256"]
+        candidate.mkdir(parents=True)
+        payload = candidate / "portfolio-report-data.json"
+        payload.write_bytes(source.read_bytes())
+        candidate_value, candidate_identity, candidate_path = panel._report_candidate(
+            candidate
+        )
+        assert candidate_value["report_schema_version"] == version
+        assert candidate_identity["sha256"] == identity["sha256"]
+        assert candidate_path == payload
+    for version in (3, True, "2"):
+        value = _report()
+        value["report_schema_version"] = version
+        root = tmp_path / f"rejected-{version!s}"
+        _publish_report(root, tmp_path / f"rejected-{version!s}.json", value)
+        with pytest.raises(panel.ControlPanelValidationError, match="schema is unsupported"):
+            panel._current_report(root)
+
+
+def test_schema22_weight_labels_preserve_schema21(
+    inputs: dict[str, Path],
+) -> None:
+    from copy import deepcopy
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = json.loads(
+        (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
+    )
+    assert data["panel_schema_version"] == 22
+    assert panel.BUILDER_VERSION == "2.12.0"
+    panel._validate_panel_data_schema(data)
+    data["dependence_modes"]["LIVE_PLUS_BACKTEST"] = deepcopy(
+        data["dependence_modes"]["LIVE_ONLY"]
+    )
+    panel._validate_panel_data_schema(data)
+    targets = [
+        data["dependence_analysis"],
+        data["dependence_modes"]["LIVE_ONLY"],
+        data["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+    ]
+    for target_index in range(len(targets)):
+        for field in ("weight_basis", "weight_authority"):
+            broken = deepcopy(data)
+            broken_targets = [
+                broken["dependence_analysis"],
+                broken["dependence_modes"]["LIVE_ONLY"],
+                broken["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+            ]
+            del broken_targets[target_index][field]
+            with pytest.raises(panel.ControlPanelValidationError):
+                panel._validate_panel_data_schema(broken)
+    if data["hwm_summary"]["hwm_numerical_status"] == "AVAILABLE":
+        broken = deepcopy(data)
+        del broken["hwm_summary"]["weight_basis"]
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel._validate_panel_data_schema(broken)
+    legacy = deepcopy(data)
+    legacy["panel_schema_version"] = 21
+    for target in (
+        legacy["dependence_analysis"],
+        legacy["dependence_modes"]["LIVE_ONLY"],
+        legacy["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+    ):
+        target.pop("weight_basis", None)
+        target.pop("weight_authority", None)
+    legacy["hwm_summary"].pop("weight_basis", None)
+    panel._validate_panel_data_schema(legacy)
+
+
+def test_panel_schema22_publication_records_input_report_version(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    for report_version in (1, 2):
+        report = _report_with_baseline(inputs)
+        report["report_schema_version"] = report_version
+        report = _with_hwm_summary(
+            report, inputs["freshness"], _panel_baseline_catalog()
+        )
+        report_root = tmp_path / f"report-v{report_version}"
+        report_source = tmp_path / f"report-v{report_version}.json"
+        _publish_report(report_root, report_source, report)
+
+        version_inputs = dict(inputs)
+        version_inputs["report"] = report_root
+        version_inputs["output"] = tmp_path / f"panel-v{report_version}"
+        financial = _financial_manifest_kwargs(
+            tmp_path / f"manifest-v{report_version}", inputs["baseline"]
+        )
+        built = panel.build_candidate(
+            version_inputs["report"],
+            version_inputs["legacy"],
+            version_inputs["output"],
+            freshness_health_path=version_inputs["freshness"],
+            baseline_root=version_inputs["baseline"],
+            **financial,
+        )
+        candidate = Path(built["candidate_dir"])
+        qa = _qa(candidate, tmp_path / f"qa-v{report_version}")
+        release_root = tmp_path / f"release-v{report_version}"
+        release_root.mkdir()
+        receipt = _frozen_financial_receipt(
+            release_root,
+            version_inputs,
+            candidate,
+            qa,
+            financial,
+        )
+        published = panel.publish_panel(
+            version_inputs["report"],
+            version_inputs["legacy"],
+            candidate,
+            qa,
+            version_inputs["output"],
+            private_stage_root=version_inputs["output"],
+            portfolio_root=tmp_path / f"production-v{report_version}",
+            freshness_health_path=version_inputs["freshness"],
+            baseline_root=version_inputs["baseline"],
+            coordinated_release_receipt=receipt,
+            **financial,
+        )
+        generation = (
+            version_inputs["output"]
+            / "generations"
+            / published["generation_id"]
+        )
+        manifest = json.loads((generation / "generation.json").read_bytes())
+        dashboard = json.loads(
+            (generation / "data" / "dashboard_data.json").read_bytes()
+        )
+        artifact = next(
+            artifact
+            for artifact in manifest["artifacts"]
+            if artifact["artifact_id"] == "input/portfolio-report-data.json"
+        )
+        selected_sha = hashlib.sha256(report_source.read_bytes()).hexdigest()
+        provenance = next(
+            item
+            for item in dashboard["provenance"]
+            if item.get("artifact") == "portfolio-report-generation"
+        )
+        assert manifest["adapter"]["version"] == "2.12.0"
+        assert dashboard["panel_schema_version"] == 22
+        assert artifact["schema"]["version"] == str(report_version)
+        assert artifact["sha256"] == selected_sha
+        assert provenance["schema"] == f"portfolio-report-data/{report_version}"
+        assert provenance["sha256"] == selected_sha
+
+
+def test_renderer_accepts_panel_schema21_and22(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    import textwrap
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    candidate_renderer = (candidate / "app.js").read_text(encoding="utf-8")
+    assert candidate_renderer.replace("\r\n", "\n") == renderer.replace(
+        "\r\n", "\n"
+    )
+
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    assert node and runtime_node, "the installed Node/Playwright runtime is required"
+    playwright_module = (
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    assert playwright_module.is_file() and Path(executable).is_file(), (
+        "the installed Playwright module and Chromium are required"
+    )
+
+    pages: dict[int, Path] = {}
+    for version in (21, 22, 23):
+        page_root = tmp_path / f"renderer-v{version}"
+        shutil.copytree(candidate, page_root)
+        data_path = page_root / "data" / "dashboard_data.json"
+        data = json.loads(data_path.read_bytes())
+        data["panel_schema_version"] = version
+        if version == 21:
+            for target in (
+                data["dependence_analysis"],
+                *data["dependence_modes"].values(),
+                data["hwm_summary"],
+            ):
+                target.pop("weight_basis", None)
+                target.pop("weight_authority", None)
+        serialized = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        data_path.write_text(serialized + "\n", encoding="utf-8")
+        (page_root / "data" / "dashboard_data.js").write_text(
+            "window.PORTFOLIO_DATA = " + serialized + ";\n", encoding="utf-8"
+        )
+        pages[version] = page_root / "index.html"
+
+    probe = textwrap.dedent(
+        r"""
+        import { pathToFileURL } from "node:url";
+        const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+        const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+        const results = [];
+        try {
+          for (const version of [21, 22, 23]) {
+            const page = await browser.newPage();
+            const errors = [];
+            page.on("pageerror", error => errors.push(String(error)));
+            page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+            await page.goto(process.env[`PANEL_HTML_${version}`], { waitUntil: "load", timeout: 15000 });
+            await page.waitForFunction(
+              () => ["ready", "error"].includes(document.querySelector("#app")?.dataset.appState),
+              null,
+              { timeout: 8000 }
+            );
+            const state = await page.evaluate(() => ({
+              state: document.querySelector("#app")?.dataset.appState,
+              errorVisible: !document.querySelector("#error-state").hidden,
+              kpis: document.querySelector("#command-kpis")?.textContent?.trim() || "",
+              errorText: document.querySelector("#error-state")?.innerText || ""
+            }));
+            results.push({ version, ...state, errors });
+            await page.close();
+          }
+        } finally { await browser.close(); }
+        console.log(JSON.stringify(results));
+        """
+    )
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    for version, html in pages.items():
+        env[f"PANEL_HTML_{version}"] = html.resolve().as_uri()
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        env=env,
+    )
+    evidence = json.loads(result.stdout.strip().splitlines()[-1])
+    assert [item["version"] for item in evidence] == [21, 22, 23]
+    for item in evidence[:2]:
+        assert item["state"] == "ready" and not item["errorVisible"]
+        assert item["kpis"]
+        assert not item["errors"]
+    unsupported = evidence[2]
+    assert unsupported["state"] == "error" and unsupported["errorVisible"]
+    assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
+    assert any("missing or unsupported" in error for error in unsupported["errors"])
 
 
 def _run_f2_f7_browser_probe(html: Path) -> dict[str, object]:
@@ -12471,7 +12750,7 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     candidate = Path(built["candidate_dir"])
     data_path = candidate / "data" / "dashboard_data.json"
     payload = json.loads(data_path.read_text(encoding="utf-8"))
-    assert payload["panel_schema_version"] == 21
+    assert payload["panel_schema_version"] == 22
     assert len(payload["allocations"]) >= 2
     payload["allocations"][0]["as_of_date"] = "2026-08-16"
     payload["allocations"][0]["weight_basis"] = "CURRENT_CUTOFF"

@@ -89,9 +89,9 @@ from portfolio_invested_capital import (
 )
 
 
-REPORT_SCHEMA_VERSION: Final = 1
+REPORT_SCHEMA_VERSION: Final = 2
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -8643,7 +8643,11 @@ def _workbook_parity_receipt(
         report = json.loads(report_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReportValidationError("workbook parity report JSON is invalid") from exc
-    if not isinstance(report, dict) or report.get("report_schema_version") != 1:
+    if (
+        not isinstance(report, dict)
+        or isinstance(report.get("report_schema_version"), bool)
+        or report.get("report_schema_version") not in {1, 2}
+    ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
         formula_workbook = load_workbook(
@@ -12454,7 +12458,7 @@ def publish_report(
             candidate_dir / REPORT_DATA_NAME,
             "normalized/portfolio-report-data.json",
             "portfolio-report-data",
-            "1",
+            str(report["report_schema_version"]),
         ),
     ]
     if "workbook" in evidence_snapshots:
