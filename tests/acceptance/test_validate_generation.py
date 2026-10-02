@@ -318,7 +318,10 @@ def base_report() -> dict[str, Any]:
             "benchmark_comparisons": [
                 {
                     "strategy_id": strategy,
+                    "account_series_id": f"account:{strategy}",
+                    "reference_series_id": f"benchmark:{strategy}",
                     "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                    "version_compatibility_status": "PROVEN_COMPATIBLE",
                     "observed_start": PATH_START,
                     "observed_end": CUTOFF,
                     "metrics": _metrics(),
@@ -413,8 +416,22 @@ def base_report() -> dict[str, Any]:
                 "LIVE_PLUS_BACKTEST": copy.deepcopy(mode),
             },
         },
-        "implementation_reconciliation_contract": {"as_of_date": CUTOFF},
-        "implementation_return_attribution_contract": {"as_of_date": CUTOFF},
+        "implementation_reconciliation_contract": {
+            "as_of_date": CUTOFF,
+            "reconciliation_id": "a" * 64,
+            "schema_version": 1,
+            "sha256": "b" * 64,
+            "size_bytes": 123,
+            "strategy_count": 3,
+        },
+        "implementation_return_attribution_contract": {
+            "as_of_date": CUTOFF,
+            "attribution_id": "c" * 64,
+            "schema_version": 1,
+            "sha256": "d" * 64,
+            "size_bytes": 123,
+            "strategy_count": 3,
+        },
         "methodology": [
             {"item": "MWR", "value": "Available when complete dated flows exist."}
         ],
@@ -5428,3 +5445,203 @@ def test_n50_w27_n51_historical_reserve_is_not_current_oracle_view(tmp_path):
         ],
     )
     assert not [f for f in found if f.check_id == "expected.capital.reserve.cutoff"]
+
+
+def _c2_c4_date_findings(found):
+    return [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and ("benchmark:" in finding.entity or finding.entity.startswith("implementation_"))
+    ]
+
+
+def _c2_c4_contract(key, as_of_date="2026-08-03"):
+    identity_key = "reconciliation_id" if key == "implementation_reconciliation_contract" else "attribution_id"
+    return {
+        "as_of_date": as_of_date,
+        identity_key: "a" * 64,
+        "schema_version": 1,
+        "sha256": "b" * 64,
+        "size_bytes": 123,
+        "strategy_count": 3,
+    }
+
+
+def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_path):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "strategy_id": "echotrade-growth-pivots",
+                "account_series_id": "account:echotrade-growth-pivots",
+                "reference_series_id": "benchmark:us-total-market-itot",
+                "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "observed_start": "2025-10-01",
+                "observed_end": "2025-11-24",
+            }
+        )
+        report["strategy_attribution"]["benchmark_assignments"] = []
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract", "2026-08-09"
+        )
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not _c2_c4_date_findings(found)
+
+
+def test_c2_c4_descriptive_absent_optional_contracts_remain_absent(tmp_path):
+    def mutate(report):
+        report.pop("implementation_reconciliation_contract")
+        report.pop("implementation_return_attribution_contract")
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not [f for f in _c2_c4_date_findings(found) if f.entity.startswith("implementation_")]
+
+
+def test_c2_c4_descriptive_unavailable_null_comparisons_remain_valid(tmp_path):
+    def mutate(report):
+        comparisons = report["strategy_attribution"]["benchmark_comparisons"]
+        comparisons.extend(
+            {
+                "strategy_id": strategy,
+                "status": "UNAVAILABLE",
+                "version_compatibility_status": "UNRESOLVED",
+                "observed_start": None,
+                "observed_end": None,
+                "account_series_id": None,
+                "reference_series_id": None,
+            }
+            for strategy in ("composer-holy-grail", "robuxio-crypto")
+        )
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not _c2_c4_date_findings(found)
+
+
+def test_c2_c4_descriptive_unavailable_missing_null_field_blocks(tmp_path):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "status": "UNAVAILABLE",
+                "observed_start": None,
+                "observed_end": None,
+                "account_series_id": None,
+                "reference_series_id": None,
+            }
+        )
+        row.pop("observed_start")
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", None),
+        ("status", "UNKNOWN"),
+        ("version_compatibility_status", None),
+        ("version_compatibility_status", "UNRESOLVED"),
+        ("strategy_id", None),
+        ("account_series_id", None),
+        ("reference_series_id", None),
+        ("observed_start", None),
+        ("observed_end", None),
+        ("observed_end", "2026-07-30garbage"),
+        ("observed_start", "2026-07-31"),
+        ("observed_end", "2026-09-18"),
+    ],
+)
+def test_c2_c4_descriptive_invalid_c2_metadata_blocks(tmp_path, field, value):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "strategy_id": "alpha",
+                "account_series_id": "account:alpha",
+                "reference_series_id": "benchmark:alpha",
+                "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "observed_start": "2026-07-01",
+                "observed_end": "2026-07-30",
+            }
+        )
+        if value is None:
+            row.pop(field, None)
+        else:
+            row[field] = value
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    blockers = [finding for finding in dated if finding.klass == checks.BLOCKER_AUTHORITY]
+    assert blockers
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "value"),
+    [
+        ("implementation_reconciliation_contract", "sha256_missing", None),
+        ("implementation_reconciliation_contract", "as_of_date_missing", None),
+        ("implementation_reconciliation_contract", "null", None),
+        ("implementation_return_attribution_contract", "schema_version", True),
+        ("implementation_return_attribution_contract", "sha256", "not-a-hash"),
+        ("implementation_return_attribution_contract", "size_bytes", 0),
+        ("implementation_return_attribution_contract", "strategy_count", 2),
+        ("implementation_return_attribution_contract", "as_of_date", "2026-08-09garbage"),
+        ("implementation_return_attribution_contract", "as_of_date", "2026-09-18"),
+    ],
+)
+def test_c2_c4_descriptive_invalid_c4_metadata_blocks(tmp_path, key, field, value):
+    def mutate(report):
+        metadata = _c2_c4_contract(key)
+        if field == "null":
+            report[key] = None
+        elif field == "sha256_missing":
+            metadata.pop("sha256")
+            report[key] = metadata
+        elif field == "as_of_date_missing":
+            metadata.pop("as_of_date")
+            report[key] = metadata
+        else:
+            metadata[field] = value
+            report[key] = metadata
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+def test_c2_c4_descriptive_historical_role_does_not_exempt_current_lens(tmp_path):
+    def mutate(report):
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+        report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["as_of_date"] = "2026-09-03"
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    dated = [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and finding.entity.startswith("decomposition:")
+    ]
+    assert dated
+    assert all(f.klass == checks.BLOCKER_AUTHORITY for f in dated)

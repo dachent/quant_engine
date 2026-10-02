@@ -5346,14 +5346,14 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
 
 def _dated_sections(
     ctx: Context,
-) -> Iterator[tuple[str, str, str, Any, Any, tuple[str, ...]]]:
-    """(entity, file, path, date, status, defects) for current-claim section dates."""
+) -> Iterator[tuple[str, str, str, Any, Any, tuple[str, ...], tuple[str, Any] | None]]:
+    """(entity, file, path, date, status, defects, optional date role)."""
 
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
     for position, row in enumerate(
         comparisons if isinstance(comparisons, list) else []
     ):
-        if isinstance(row, dict) and row.get("observed_end") is not None:
+        if isinstance(row, dict):
             yield (
                 f"benchmark:{row.get('strategy_id')}",
                 REPORT,
@@ -5361,6 +5361,7 @@ def _dated_sections(
                 row.get("observed_end"),
                 row.get("status"),
                 ("C2",),
+                ("c2_descriptive", row),
             )
     # The alias is only one published view. Check every mode, retaining a
     # divergent alias but avoiding duplicate findings for the same date claim.
@@ -5397,6 +5398,7 @@ def _dated_sections(
                 row.get("as_of_date"),
                 status,
                 ("C3",),
+                None,
             )
     factor = node(ctx.panel, "factor_analysis")
     if isinstance(factor, Mapping) and factor.get("as_of_date") is not None:
@@ -5407,14 +5409,24 @@ def _dated_sections(
             factor.get("as_of_date"),
             "AVAILABLE" if (factor.get("available_count") or 0) > 0 else "UNAVAILABLE",
             ("C3",),
+            None,
         )
     for key in (
         "implementation_reconciliation_contract",
         "implementation_return_attribution_contract",
     ):
-        value = node(ctx.report, key, "as_of_date")
-        if value is not None:
-            yield (key, REPORT, f"$.{key}.as_of_date", value, "AVAILABLE", ("C4",))
+        if key in ctx.report:
+            metadata = ctx.report[key]
+            value = metadata.get("as_of_date") if isinstance(metadata, Mapping) else None
+            yield (
+                key,
+                REPORT,
+                f"$.{key}.as_of_date",
+                value,
+                "AVAILABLE",
+                ("C4",),
+                ("c4_historical", (key, metadata)),
+            )
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         if row.get("live_boundary_observed_end") is not None:
             yield (
@@ -5424,15 +5436,119 @@ def _dated_sections(
                 row.get("live_boundary_observed_end"),
                 row.get("live_boundary_status"),
                 ("C5",),
+                None,
             )
+
+
+def _canonical_iso_day(value: Any) -> date | None:
+    if not isinstance(value, str) or len(value) != 10:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if value == parsed.isoformat() else None
+
+
+def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
+    kind, detail = role
+    if kind == "c2_descriptive":
+        row = detail
+        if status == "UNAVAILABLE":
+            return (
+                isinstance(row.get("strategy_id"), str)
+                and bool(row["strategy_id"].strip())
+                and all(
+                    key in row and row[key] is None
+                    for key in (
+                        "observed_start",
+                        "observed_end",
+                        "account_series_id",
+                        "reference_series_id",
+                    )
+                )
+            )
+        start = _canonical_iso_day(row.get("observed_start"))
+        end = _canonical_iso_day(row.get("observed_end"))
+        return (
+            status == "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"
+            and row.get("version_compatibility_status") == "PROVEN_COMPATIBLE"
+            and all(
+                isinstance(row.get(key), str) and bool(row[key].strip())
+                for key in ("strategy_id", "account_series_id", "reference_series_id")
+            )
+            and start is not None
+            and end is not None
+            and start <= end
+            and value == row.get("observed_end")
+        )
+    if kind == "c4_historical":
+        key, metadata = detail
+        identity = (
+            "reconciliation_id"
+            if key == "implementation_reconciliation_contract"
+            else "attribution_id"
+        )
+        return (
+            isinstance(metadata, Mapping)
+            and _canonical_iso_day(value) is not None
+            and value == metadata.get("as_of_date")
+            and isinstance(metadata.get("schema_version"), int)
+            and not isinstance(metadata.get("schema_version"), bool)
+            and metadata.get("schema_version") == 1
+            and isinstance(metadata.get(identity), str)
+            and bool(metadata[identity].strip())
+            and isinstance(metadata.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"]) is not None
+            and isinstance(metadata.get("size_bytes"), int)
+            and not isinstance(metadata.get("size_bytes"), bool)
+            and metadata["size_bytes"] > 0
+            and isinstance(metadata.get("strategy_count"), int)
+            and not isinstance(metadata.get("strategy_count"), bool)
+            and metadata["strategy_count"] == 3
+        )
+    return False
 
 
 def check_section_dates(ctx: Context) -> Iterator[Finding]:
     """C2-C5: a section's as-of must be the cutoff, or be labelled as not current."""
 
     cutoff = ctx.cutoff
-    for entity, file, path, value, status, defects in _dated_sections(ctx):
-        day = to_date(value)
+    for entity, file, path, value, status, defects, role in _dated_sections(ctx):
+        if role is not None and not _date_role_is_valid(role, status, value):
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "section has malformed or unrecognized date-role metadata",
+            )
+            continue
+        if (
+            role is not None
+            and role[0] == "c2_descriptive"
+            and status == "UNAVAILABLE"
+            and value is None
+        ):
+            continue
+        day = _canonical_iso_day(value) if role is not None else to_date(value)
+        if role is not None and day is None:
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "section does not declare a canonical ISO date",
+            )
+            continue
         if (
             entity.startswith("decomposition:")
             and is_available(status)
@@ -5458,6 +5574,8 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
         if day is None or day == cutoff:
             continue
         after = day > cutoff
+        if role is not None and not after:
+            continue
         bound = (
             verified_value_basis_bound(
                 ctx, "decomposition_lenses", entity.removeprefix("decomposition:"), day
