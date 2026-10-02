@@ -465,6 +465,21 @@ def test_financial_source_schema_is_bound_and_has_full_impact() -> None:
     ) == ["ledger", "baseline", "attribution", "analytics", "report", "panel"]
 
 
+def test_baseline_spec_schema_is_a_declared_baseline_generation_contract() -> None:
+    """The baseline's manually validated specification reaches all downstream stages."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    baseline = next(
+        flow for flow in graph["artifact_flows"] if flow["id"] == "baseline-generation"
+    )
+
+    assert "schemas/portfolio/baseline-spec.schema.json" in baseline["source_paths"]
+    assert "schemas/portfolio/baseline-spec.schema.json" in baseline["contracts"]
+    assert affected_stages(
+        graph, ["schemas/portfolio/baseline-spec.schema.json"]
+    ) == ["baseline", "attribution", "analytics", "report", "panel"]
+
+
 def test_graph_records_integrated_preparation_declaration() -> None:
     """The graph projects the executable bindings that checkpoint identity uses."""
 

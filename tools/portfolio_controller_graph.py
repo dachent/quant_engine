@@ -403,10 +403,15 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _RELEASE,
             _PREPARATION,
             "schemas/portfolio/baseline-catalog.schema.json",
+            # ``_load_spec`` reads the baseline spec JSON and applies its shape/
+            # version checks itself; this schema declares that manually validated
+            # input contract, rather than claiming a runtime schema-file import.
+            "schemas/portfolio/baseline-spec.schema.json",
         ),
         "contracts": (
             "contracts/portfolio-financial-mvp-source-v1.json",
             "schemas/portfolio/baseline-catalog.schema.json",
+            "schemas/portfolio/baseline-spec.schema.json",
         ),
         "producer": (_BASELINE, "stage_baseline"),
         "artifacts": ("portfolio-baseline.json", "generation.json"),
