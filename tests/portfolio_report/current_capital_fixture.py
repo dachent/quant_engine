@@ -474,7 +474,9 @@ def unlabeled_weight_paths(document: Any) -> list[str]:
     return found
 
 
-def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
+def cr2_custody_native_source(
+    tmp_path, *, missing_required_class=False, same_day_fill=False
+):
     """Build new native admission with unchanged validators.
 
     Explicit synthetic perimeter: materialized ACCOUNT_NAV for unused brokers;
@@ -597,6 +599,26 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
         "csv/wallet_currency_dispositions.csv": b"currency,dataset,disposition\n",
         "reports/request_manifest.jsonl": b"{}\n",
     }
+    if same_day_fill:
+        # This separate synthetic positive owns three captured funded NAV dates.
+        files["csv/wallet_deposits.csv"] = files["csv/wallet_deposits.csv"].replace(
+            b"2026-09-16", b"2026-09-15"
+        )
+        for name in ("daily_holdings.csv", "daily_portfolio_totals.csv"):
+            raw = (rr / "csv" / name).read_bytes()
+            first = raw.splitlines(keepends=True)[1].replace(
+                b"2026-09-16", b"2026-09-15"
+            )
+            files["csv/" + name] = (
+                raw.splitlines(keepends=True)[0]
+                + first
+                + b"".join(raw.splitlines(keepends=True)[1:])
+            )
+        files["csv/subscription_details.csv"] = (
+            (rr / "csv/subscription_details.csv")
+            .read_bytes()
+            .replace(b"2026-09-16", b"2026-09-15")
+        )
     bind(
         "matrixport",
         {a: (rr / a, b, "synthetic-native-capture") for a, b in files.items()},
@@ -612,6 +634,15 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
         }
         for r in rows
     ]
+    if same_day_fill:
+        # Separate authored synthetic capture, before response/proof/manifests.
+        # The original Sep16T23 scenario remains the default and is not relabeled.
+        for row in resp:
+            if row["type"] == "filled_txn":
+                row["item"]["time"] = "2026-09-14T23:00:00Z"
+            if row["type"] == "order":
+                row["item"]["time"] = "2026-09-14T23:00:00Z"
+                row["item"]["filled_at"] = "2026-09-14T23:00:00Z"
     resp.insert(
         0,
         {
@@ -619,7 +650,9 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
             "item": {
                 "amount": 110,
                 "amount_cents": 11000,
-                "created_at": "2026-09-17T00:00:00Z",
+                "created_at": "2026-09-14T00:00:00Z"
+                if same_day_fill
+                else "2026-09-17T00:00:00Z",
                 "destination_account_id": "synthetic-alpaca",
                 "id": "synthetic-deposit",
                 "origin_account_id": "synthetic-bank",
@@ -700,9 +733,32 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
                     sha256=hashlib.sha256(activity).hexdigest(), bytes=len(activity)
                 )
 
+    qfiles = {}
+    if same_day_fill:
+        price = b"time,value,cost_basis\n09/15/2026,100,100\n09/16/2026,100,100\n09/17/2026,100,100\n09/18/2026,999,100\n"
+        qfiles["source/csv/dashboard_Volatis_Strategy_pricehistory.csv"] = (
+            ar / "csv/dashboard_Volatis_Strategy_pricehistory.csv",
+            price,
+            "synthetic-native-capture",
+        )
+        (
+            pr / "conversion/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+        ).write_bytes(price)
+        original_qbcat = qbcat
+
+        def qbcat(c):
+            original_qbcat(c)
+            for d in c["datasets"]:
+                if (
+                    d["relative_path"]
+                    == "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+                ):
+                    d.update(sha256=hashlib.sha256(price).hexdigest(), bytes=len(price))
+
     bind(
         "quantbase",
         {
+            **qfiles,
             "source/csv/account_activity.csv": (ap, activity, "synthetic-source"),
             "source/capture/account-activity-response.json": (
                 ar / "capture/account-activity-response.json",
@@ -727,15 +783,21 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
     fxroot = root / "fx"
     fxday = date(2026, 9, 17)
     rates = b"date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-16,USDC,USD,0.99,yahoo,USDC-USD,Close,UTC_DAILY_CLOSE\n2026-09-16,USDT,USD,1.01,yahoo,USDT-USD,Close,UTC_DAILY_CLOSE\n2026-09-17,USDC,USD,0.99,yahoo,USDC-USD,Close,UTC_DAILY_CLOSE\n2026-09-17,USDT,USD,1.01,yahoo,USDT-USD,Close,UTC_DAILY_CLOSE\n"
+    if same_day_fill:
+        rates = rates.replace(
+            b"date,currency,base_currency,rate,provider,ticker,field,timing\n",
+            b"date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-15,USDC,USD,0.99,yahoo,USDC-USD,Close,UTC_DAILY_CLOSE\n2026-09-15,USDT,USD,1.01,yahoo,USDT-USD,Close,UTC_DAILY_CLOSE\n",
+        )
+    fx_start = "2026-09-15" if same_day_fill else "2026-09-16"
     fc = {
         "as_of_date": "2026-09-17",
         "catalog_schema_version": 1,
         "coverage": {
-            "expected_date_count": 2,
+            "expected_date_count": 3 if same_day_fill else 2,
             "known_gaps": [],
             "observed_end": "2026-09-17",
-            "observed_start": "2026-09-16",
-            "rate_count": 4,
+            "observed_start": fx_start,
+            "rate_count": 6 if same_day_fill else 4,
             "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
         "dataset": "history",
@@ -766,7 +828,7 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic exact UTC dates",
             fact_types=("FX_RATE",),
-            observed_start=date(2026, 9, 16),
+            observed_start=date.fromisoformat(fx_start),
             observed_end=fxday,
         ),
         artifacts=tuple(
@@ -806,7 +868,7 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
                 "sha256": fxref["manifest_sha256"],
             }
             source["interval"].update(
-                observed_start="2026-09-16", observed_end="2026-09-17"
+                observed_start=fx_start, observed_end="2026-09-17"
             )
     for provider, classes in {
         "ibkr": ["ACCOUNT_NAV"],
@@ -917,7 +979,7 @@ def cr2_custody_native_source(tmp_path, *, missing_required_class=False):
     }
 
 
-def cr2_custody_native_recipe(tmp_path, admitted):
+def cr2_custody_native_recipe(tmp_path, admitted, *, epoch_perimeter=False):
     """Bind admitted native source into real baseline template and recipe."""
     from pathlib import Path
     import sys
@@ -1010,6 +1072,48 @@ def cr2_custody_native_recipe(tmp_path, admitted):
                 "source_routes": ["synthetic-source"],
             }
         )
+    if epoch_perimeter:
+        # Authored synthetic assignment metadata only: no historical NAV, flows,
+        # anchors or retrieval coverage is asserted for these blocked intervals.
+        for index in range(10):
+            historical = index < 8
+            sid = ids[0] if historical else ids[index - 1]
+            if not historical:
+                pc["accounts"].append(
+                    {
+                        "account_id": f"synthetic-excluded-{index - 7}",
+                        "aliases": [f"ibkr | SYNTHETICEXCLUDED{index - 7}"],
+                        "name": "Synthetic excluded metadata-only account",
+                        "role": "INVESTMENT",
+                        "source_routes": ["synthetic-source"],
+                    }
+                )
+            pc["assignments"].append(
+                {
+                    "account_id": "account-schwab-a"
+                    if historical
+                    else f"synthetic-excluded-{index - 7}",
+                    "assignment_id": f"synthetic-blocked-history-{index + 1}",
+                    "effective_start": f"{2010 + index}-01-01",
+                    "effective_end": "2025-12-31"
+                    if index == 7
+                    else f"{2010 + index}-12-31",
+                    "mapping_status": "MAPPED",
+                    "observed_label": "Synthetic Strategy " + str(ids.index(sid) + 1),
+                    "source_classification": "SYNTHETIC_BLOCKED_METADATA_ONLY",
+                    "source_id": "synthetic-source",
+                    "strategy_id": sid,
+                }
+            )
+    if epoch_perimeter:
+        for assignment in pc["assignments"]:
+            assignment["pool_id"] = "synthetic-assignment-metadata"
+            assignment["pool_mapping_status"] = "MAPPED"
+            assignment["strategy_mapping_disposition"] = (
+                "STRATEGY_MAPPED"
+                if assignment["mapping_status"] == "MAPPED"
+                else "HISTORICAL_POOL_ONLY"
+            )
     raw = canonical_json_bytes(pc)
     pm = GenerationManifest.from_json_bytes((pg / "generation.json").read_bytes())
     arts = tuple(
@@ -1060,3 +1164,228 @@ def cr2_custody_native_recipe(tmp_path, admitted):
     recipe["baseline_spec"] = rf._file_definition(bs)
     rp.write_bytes(canonical_json_bytes(recipe))
     return (rp, bs)
+
+
+def cr2_custody_native_epoch(tmp_path, admitted, baseline_root, baseline_id):
+    """Construct native epoch authorities from the exact tiny admitted source.
+
+    Only two retained-static receipts are issued. Other included synthetic
+    intervals are BLOCKED, with no claimed historical NAV/flow coverage.
+    """
+    from pathlib import Path
+    import json
+    import hashlib
+    from quant_engine.core.contracts import canonical_json_bytes
+    import static_snapshot_coverage_receipts as snapshots
+    from stage_current_epoch_manifest import stage_current_epoch_manifest
+
+    root = Path(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    own = Path(__file__).resolve().parents[2]
+    bp = baseline_root / "generations" / baseline_id / "portfolio-baseline.json"
+    baseline_bytes = bp.read_bytes()
+    baseline = json.loads(baseline_bytes)
+    providers = {a["account_id"]: a["provider"] for a in baseline["accounts"]}
+    mapped = [a for a in baseline["assignments"] if a["mapping_status"] == "MAPPED"]
+    rows = []
+    for index, a in enumerate(sorted(mapped, key=lambda a: a["assignment_id"]), 1):
+        sid = a["strategy_id"]
+        disposition, reason = (
+            (
+                "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+                "ECHOTRADE_DEPRECATED_EFFECTIVE_2025_11_25",
+            )
+            if sid == "echotrade-growth-pivots"
+            else ("EXCLUDED_IMMATERIAL", "COMPOSER_OWNER_EXCLUDED_IMMATERIAL")
+            if sid == "composer-holy-grail"
+            else ("INCLUDED_PRODUCT_EPOCH", "CURRENT_PRODUCT_EPOCH")
+        )
+        rows.append(
+            {
+                **{
+                    k: a[k]
+                    for k in (
+                        "assignment_id",
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                },
+                "provider": providers[a["account_id"]],
+                "account_label": "Synthetic " + a["account_id"],
+                "last_four": None,
+                "product_epoch_disposition": disposition,
+                "owner_reason": reason,
+            }
+        )
+    counts = {
+        d: sum(r["product_epoch_disposition"] == d for r in rows)
+        for d in (
+            "INCLUDED_PRODUCT_EPOCH",
+            "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+            "EXCLUDED_IMMATERIAL",
+        )
+    }
+    crosswalk = {
+        "schema_version": 1,
+        "artifact_id": "account-strategy-current-epoch-crosswalk",
+        "as_of_date": baseline["as_of_date"],
+        "calculation_cutoff_date": "2026-09-17",
+        "disposition_counts": counts,
+        "rows": rows,
+        "selected_baseline": {
+            "generation_id": baseline_id,
+            "artifact_id": "normalized/portfolio-baseline.json",
+            "sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+            "size_bytes": len(baseline_bytes),
+            "as_of_date": baseline["as_of_date"],
+            "schema_name": "portfolio-baseline-catalog",
+            "schema_version": str(baseline["baseline_schema_version"]),
+        },
+    }
+    cp = root / "crosswalk.json"
+    cb = canonical_json_bytes(crosswalk)
+    cp.write_bytes(cb)
+    lp = admitted["generation"] / "provider-ledger.json"
+    lm = admitted["generation"] / "generation.json"
+    lb = lp.read_bytes()
+    ledger = json.loads(lb)
+    lid, la = snapshots._ledger_generation(ledger, json.loads(lm.read_bytes()), lb)
+    entries = snapshots._included_assignments(baseline, crosswalk, "2026-09-17")
+    receipt_paths, authority_rows = {}, []
+    for item in entries:
+        if item["assignment_id"] not in {"custody-matrixport", "custody-quantbase"}:
+            continue
+        receipt = snapshots._receipt_for_assignment(
+            item,
+            ledger=ledger,
+            ledger_generation_id=lid,
+            ledger_artifact=la,
+            baseline_bytes=baseline_bytes,
+            crosswalk_bytes=cb,
+            code_bytes=Path(snapshots.__file__).read_bytes(),
+            cutoff="2026-09-17",
+        )
+        rid = receipt["artifact_id"]
+        rb = canonical_json_bytes(receipt)
+        rp = root / (hashlib.sha256(rid.encode()).hexdigest() + ".json")
+        rp.write_bytes(rb)
+        receipt_paths[rid] = rp
+        authority_rows.append(
+            {
+                "artifact_id": rid,
+                "sha256": hashlib.sha256(rb).hexdigest(),
+                "size_bytes": len(rb),
+                "contract": {
+                    k: receipt[k]
+                    for k in (
+                        "coverage_mode",
+                        "account_id",
+                        "strategy_id",
+                        "requested_start",
+                        "requested_end",
+                        "provider_generation",
+                        "staged_inputs",
+                    )
+                },
+            }
+        )
+    ap = root / "receipt-authority.json"
+    ap.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+                "as_of_date": "2026-09-17",
+                "receipts": sorted(
+                    authority_rows, key=lambda r: r["artifact_id"].casefold()
+                ),
+            }
+        )
+    )
+    keys = ["account_id", "strategy_id", "effective_start", "effective_end"]
+    included = [
+        r for r in rows if r["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+    ]
+    records = [{k: r[k] for k in keys} for r in included]
+    digest = hashlib.sha256(
+        json.dumps(
+            sorted(
+                records,
+                key=lambda r: (
+                    r["account_id"],
+                    r["strategy_id"],
+                    r["effective_start"],
+                    str(r["effective_end"]),
+                ),
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    admissions = []
+    for row in included:
+        funded = row["assignment_id"] in {"custody-matrixport", "custody-quantbase"}
+        admission = {
+            **{k: row[k] for k in keys},
+            "status": "FUNDED" if funded else "BLOCKED",
+            "continuity_to_successor": False,
+        }
+        if funded:
+            navs = [
+                n
+                for n in ledger["nav_observations"]
+                if n["account_id"] == row["account_id"]
+                and n["nav"]["status"] == "AVAILABLE"
+            ]
+            admission.update(
+                authority_kind="LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                funded_nav_record_ids=[navs[0]["record_id"]],
+            )
+        else:
+            admission["reason"] = "SYNTHETIC_NO_ADMITTED_EPOCH_FACTS"
+        admissions.append(admission)
+    dp = root / "admission.json"
+    dp.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 2,
+                "policy_id": "MAPPED_EPOCH_ADMISSION_V2",
+                "policy_version": "2",
+                "artifact_id": "authority/mapped-epoch-admission.json",
+                "as_of_date": "2026-09-17",
+                "assignment_sha256": digest,
+                "admissions": admissions,
+            }
+        )
+    )
+    census_path = root / "membership-census.json"
+    census_path.write_bytes(admitted["contract"].read_bytes())
+    epoch_root = root / "generation"
+    result = stage_current_epoch_manifest(
+        provider_ledger_generation_root=admitted["ledger_root"],
+        provider_ledger_generation_id=lid,
+        baseline_generation_root=baseline_root,
+        baseline_generation_id=baseline_id,
+        flow_policy_path=own
+        / "contracts/account-strategy-flow-classification-policy-v1.json",
+        crosswalk_path=cp,
+        manifest_schema_path=own
+        / "schemas/portfolio/account-strategy-manifest.schema.json",
+        receipt_authority_path=ap,
+        admission_policy_path=dp,
+        membership_census_path=census_path,
+        receipt_paths=receipt_paths,
+        output_generation_root=epoch_root,
+    )
+    return {
+        "epoch_manifest_path": epoch_root
+        / "generations"
+        / result["generation_id"]
+        / "outputs/account-strategy-manifest.json",
+        "epoch_manifest_source_path": Path(result["source_receipt"]["path"]),
+        "epoch_crosswalk_path": cp,
+        "epoch_manifest_generation_root": epoch_root,
+    }

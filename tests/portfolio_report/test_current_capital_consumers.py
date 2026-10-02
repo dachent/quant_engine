@@ -1187,8 +1187,10 @@ def cr2_custody_native_world(tmp_path_factory):
     from portfolio_attended_preparation import _source_clock
 
     root = tmp_path_factory.mktemp("native")
-    admitted = fx.cr2_custody_native_source(root / "source")
-    recipe, template = fx.cr2_custody_native_recipe(root / "inputs", admitted)
+    admitted = fx.cr2_custody_native_source(root / "source", same_day_fill=True)
+    recipe, template = fx.cr2_custody_native_recipe(
+        root / "inputs", admitted, epoch_perimeter=True
+    )
     output = root / "baseline"
     result = builder.build_baseline(recipe, admitted["ledger_root"], output)
     catalog = json.loads(
@@ -1355,3 +1357,53 @@ def test_cr2_custody_native_missing_required_class_keeps_readiness_gate(tmp_path
         materializer.MaterializationError, match="not READY_FOR_COMPOSITION"
     ):
         fx.cr2_custody_native_source(tmp_path, missing_required_class=True)
+
+
+def test_cr2_custody_native_epoch_full_report_current_perimeter_gate(
+    cr2_custody_native_world,
+):
+    """The native full route requires genuinely bound fifteen mapped assignments."""
+    _root, _admitted, _recipe, _template, _output, catalog, _clock = (
+        cr2_custody_native_world
+    )
+    mapped = [a for a in catalog["assignments"] if a["mapping_status"] == "MAPPED"]
+    assert len(mapped) == 15, (
+        "native epoch crosswalk requires exactly fifteen mapped assignments"
+    )
+
+    epoch = fx.cr2_custody_native_epoch(
+        _root / "epoch",
+        _admitted,
+        _output,
+        json.loads(
+            next((_output / "generations").glob("*/generation.json")).read_bytes()
+        )["generation_id"],
+    )
+    # A genuine verified epoch bundle permits the full report caller to reach
+    # its current-capital gate. Missing current facts remain fail-closed.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="required strategy has no current capital: grizzlybears-vtma",
+    ):
+        reporter.build_report_data(
+            _output,
+            provider_ledger_root=_admitted["ledger_root"],
+            source_clock_path=_clock,
+            **epoch,
+        )
+
+
+def test_cr2_custody_original_cross_day_anchor_keeps_native_epoch_gate(tmp_path):
+    import portfolio_release_builder as builder
+    from tools.account_strategy_manifest import ManifestError
+
+    admitted = fx.cr2_custody_native_source(tmp_path / "source")
+    recipe, _template = fx.cr2_custody_native_recipe(
+        tmp_path / "inputs", admitted, epoch_perimeter=True
+    )
+    output = tmp_path / "baseline"
+    result = builder.build_baseline(recipe, admitted["ledger_root"], output)
+    with pytest.raises(ManifestError, match="economic fill date 2026-09-16 is outside"):
+        fx.cr2_custody_native_epoch(
+            tmp_path / "epoch", admitted, output, result["generation_id"]
+        )
