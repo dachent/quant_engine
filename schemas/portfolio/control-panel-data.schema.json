@@ -873,6 +873,64 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "panel_schema_version": {"const": 21},
+          "invested_capital": {"type": "object"}
+        },
+        "required": ["panel_schema_version", "invested_capital"]
+      },
+      "then": {
+        "properties": {
+          "invested_capital": {
+            "properties": {"status": {"const": "AVAILABLE"}}
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "panel_schema_version": {"const": 22},
+          "invested_capital": {"type": "object"}
+        },
+        "required": ["panel_schema_version", "invested_capital"]
+      },
+      "then": {
+        "properties": {
+          "invested_capital": {
+            "properties": {
+              "policy_readiness_provenance": {
+                "enum": ["READY", "REQUIRED_NOT_READY"]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "policy_readiness_provenance": {"const": "READY"}
+                  },
+                  "required": ["policy_readiness_provenance"]
+                },
+                "then": {"properties": {"status": {"const": "AVAILABLE"}}}
+              },
+              {
+                "if": {
+                  "properties": {
+                    "policy_readiness_provenance": {"const": "REQUIRED_NOT_READY"}
+                  },
+                  "required": ["policy_readiness_provenance"]
+                },
+                "then": {
+                  "properties": {"status": {"const": "REQUIRED_NOT_READY"}}
+                }
+              }
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -1004,7 +1062,7 @@
       "properties": {
         "schema_version": { "const": 1 },
         "outcome_id": { "const": "INVESTED_CAPITAL" },
-        "status": { "const": "AVAILABLE" },
+        "status": { "enum": ["AVAILABLE", "REQUIRED_NOT_READY"] },
         "evaluation_date": { "type": "string", "format": "date" },
         "complete_through": { "type": "string", "format": "date" },
         "period_start": { "type": "string", "format": "date" },

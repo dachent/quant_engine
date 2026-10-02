@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,6 +39,112 @@ fx = _load(
     "current_capital_fixture_panel",
     REPOSITORY_ROOT / "tests" / "portfolio_report" / "current_capital_fixture.py",
 )
+
+
+def _cr2_d1_status_schema() -> dict[str, Any]:
+    """Exercise the checked-in root schema's versioned status conditions."""
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    schema["required"] = ["panel_schema_version", "invested_capital"]
+    schema["additionalProperties"] = False
+    schema["properties"] = {
+        "panel_schema_version": schema["properties"]["panel_schema_version"],
+        "invested_capital": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["status", "policy_readiness_provenance"],
+            "properties": {
+                "status": {"enum": ["AVAILABLE", "REQUIRED_NOT_READY"]},
+                "policy_readiness_provenance": {"type": "string"},
+            },
+        },
+    }
+    return schema
+
+
+@pytest.mark.parametrize(
+    ("payload", "valid"),
+    [
+        (
+            {
+                "panel_schema_version": 21,
+                "invested_capital": {
+                    "status": "AVAILABLE",
+                    "policy_readiness_provenance": "LEGACY",
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "panel_schema_version": 21,
+                "invested_capital": {
+                    "status": "REQUIRED_NOT_READY",
+                    "policy_readiness_provenance": "REQUIRED_NOT_READY",
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "panel_schema_version": 22,
+                "invested_capital": {
+                    "status": "AVAILABLE",
+                    "policy_readiness_provenance": "READY",
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "panel_schema_version": 22,
+                "invested_capital": {
+                    "status": "REQUIRED_NOT_READY",
+                    "policy_readiness_provenance": "REQUIRED_NOT_READY",
+                },
+            },
+            True,
+        ),
+        (
+            {
+                "panel_schema_version": 22,
+                "invested_capital": {
+                    "status": "AVAILABLE",
+                    "policy_readiness_provenance": "REQUIRED_NOT_READY",
+                },
+            },
+            False,
+        ),
+        (
+            {
+                "panel_schema_version": 22,
+                "invested_capital": {
+                    "status": "REQUIRED_NOT_READY",
+                    "policy_readiness_provenance": "READY",
+                },
+            },
+            False,
+        ),
+    ],
+    ids=[
+        "v21-legacy",
+        "v21-blocked",
+        "v22-ready",
+        "v22-blocked",
+        "v22-blocked-mismatch",
+        "v22-ready-mismatch",
+    ],
+)
+def test_cr2_d1_panel_schema_versions_preserve_legacy_and_bind_status(
+    payload: dict[str, Any], valid: bool
+) -> None:
+    errors = list(Draft202012Validator(_cr2_d1_status_schema()).iter_errors(payload))
+
+    assert bool(errors) is not valid
 
 
 def _row(

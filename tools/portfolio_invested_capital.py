@@ -339,6 +339,9 @@ def calculate_invested_capital(
             or policy.get("gains_treatment") != "EXCLUDED"
         ):
             raise CapitalValidationError("invested-capital definition differs")
+        readiness = policy.get("policy_status")
+        if readiness not in {"READY", "REQUIRED_NOT_READY"}:
+            raise CapitalValidationError("policy readiness is unsupported")
         try:
             _validate_owner_decision_receipts(policy)
         except FinancialMvpContractError as exc:
@@ -619,7 +622,7 @@ def calculate_invested_capital(
         result = {
             "schema_version": 1,
             "outcome_id": "INVESTED_CAPITAL",
-            "status": "AVAILABLE",
+            "status": ("AVAILABLE" if readiness == "READY" else "REQUIRED_NOT_READY"),
             "evaluation_date": evaluation_date,
             "complete_through": complete_through,
             "period_start": start.isoformat(),
@@ -627,7 +630,7 @@ def calculate_invested_capital(
             "age_days": (evaluation - end).days,
             "policy_id": policy["policy_id"],
             "policy_sha256": _digest(policy),
-            "policy_readiness_provenance": policy.get("policy_status"),
+            "policy_readiness_provenance": readiness,
             "required_epochs": [
                 row for key, row in epochs.items() if key in required_ids
             ],

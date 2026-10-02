@@ -261,6 +261,46 @@ def test_governed_capital_replays_exact_thirteen_epoch_source_facts(tmp_path):
         capital.verify_governed_capital_result(result, input_path, contract_path)
 
 
+def test_cr2_d1_governed_result_preserves_blocked_policy_status_and_numeric_projection(
+    tmp_path,
+):
+    """A complete numeric result must not relabel a blocked policy as available."""
+
+    input_path, contract_path = _governed_case(tmp_path)
+
+    result = capital.build_governed_capital_result(input_path, contract_path)
+
+    assert result["policy_readiness_provenance"] == "REQUIRED_NOT_READY"
+    assert result["status"] == "REQUIRED_NOT_READY"
+    assert result["current_aggregate_usd"] == "1100"
+    assert result["missing_inputs"] == []
+    assert (
+        capital.verify_governed_capital_result(result, input_path, contract_path)
+        == result
+    )
+
+
+@pytest.mark.parametrize("readiness", [None, "UNKNOWN"])
+def test_cr2_d1_unknown_or_missing_policy_readiness_fails(readiness):
+    """Readiness is an authority enum, never a truthy availability default."""
+
+    case = _case()
+    if readiness is None:
+        case["policy"].pop("policy_status", None)
+    else:
+        case["policy"]["policy_status"] = readiness
+
+    with pytest.raises(capital.CapitalValidationError, match="policy readiness"):
+        capital.calculate_invested_capital(**case)
+
+
+def test_cr2_d1_ready_policy_remains_available():
+    case = _case()
+    case["policy"]["policy_status"] = "READY"
+
+    assert capital.calculate_invested_capital(**case)["status"] == "AVAILABLE"
+
+
 def test_required_epoch_accounts_are_bound_to_provenance_and_crosswalk():
     epochs = [
         {
@@ -789,7 +829,7 @@ def test_daily_capital_excludes_results_and_offsets_internal_transfers():
         _event("withdraw", "b-1", "2026-01-03", "EXTERNAL_WITHDRAWAL", "100"),
     ]
     result = capital.calculate_invested_capital(**case)
-    assert result["status"] == "AVAILABLE"
+    assert result["status"] == "REQUIRED_NOT_READY"
     # Day 1: 100+50. Day 2: only 20 of new owner cash. Day 3: 100 returned.
     assert [r["invested_capital_usd"] for r in result["daily_aggregate"]] == [
         "150",
