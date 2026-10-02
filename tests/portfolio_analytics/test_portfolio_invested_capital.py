@@ -1302,6 +1302,188 @@ def test_date_only_source_cannot_be_reported_as_exact_timestamp(tmp_path):
         capital.build_governed_capital_result(input_path, contract_path)
 
 
+def test_t5c_custody_requires_the_paired_selected_policy_decision():
+    case = _case()
+    case["required_epochs"] = [
+        {
+            "epoch_id": "custody-1",
+            "account_id": "custody-account",
+            "strategy_id": "A",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+    case["opening_basis"] = []
+    coverage = {
+        "account_id": "custody-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": "custody-1",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(coverage),
+        }
+    ]
+    deposit = {
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    anchor = {
+        "record_id": "custody-allocation",
+        "account_id": "custody-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "amount": {"value": "96", "currency": "USD", "status": "AVAILABLE"},
+    }
+    evidence = capital._digest(deposit)
+    case["events"] = [
+        _event(
+            "custody-deposit",
+            "custody-1",
+            "2026-01-01",
+            "EXTERNAL_CONTRIBUTION",
+            "100",
+            source_evidence_sha256=evidence,
+            fx_evidence_sha256=evidence,
+        )
+    ]
+    policy = deepcopy(case["policy"])
+    policy.pop("provider_custody_perimeter", None)
+    policy["owner_decision_receipts"].pop("PROVIDER_CUSTODY_PERIMETER", None)
+    with pytest.raises(
+        capital.CapitalValidationError, match="provider-custody perimeter undecided"
+    ):
+        capital._verify_selected_facts(
+            case,
+            {"provider_ledger": {"capital_anchors": [anchor], "flows": [deposit]}},
+            policy,
+        )
+
+
+def test_t5c_custody_deposit_is_capital_and_same_day_allocation_is_not():
+    case = _case()
+    case["required_epochs"] = [
+        {
+            "epoch_id": "custody-1",
+            "account_id": "custody-account",
+            "strategy_id": "A",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+    case["opening_basis"] = []
+    coverage = {
+        "account_id": "custody-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": "custody-1",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(coverage),
+        }
+    ]
+    deposit = {
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    anchor = {
+        "record_id": "custody-allocation",
+        "account_id": "custody-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "amount": {"value": "96", "currency": "USD", "status": "AVAILABLE"},
+    }
+    evidence = capital._digest(deposit)
+    case["events"] = [
+        _event(
+            "custody-deposit",
+            "custody-1",
+            "2026-01-01",
+            "EXTERNAL_CONTRIBUTION",
+            "100",
+            source_evidence_sha256=evidence,
+            fx_evidence_sha256=evidence,
+        )
+    ]
+    snapshots = {
+        "provider_ledger": {
+            "capital_anchors": [anchor],
+            "flows": [deposit],
+            "admissions": [coverage],
+        }
+    }
+    capital._verify_selected_facts(case, snapshots, case["policy"])
+    calculation_case = deepcopy(case)
+    calculation_case["opening_basis"] = [
+        _event(
+            "custody-open", "custody-1", "2026-01-01", "OPENING_CONTRIBUTED_BASIS", "0"
+        )
+    ]
+    assert (
+        capital.calculate_invested_capital(**calculation_case)["current_aggregate_usd"]
+        == "100"
+    )
+
+    before_deposit = deepcopy(anchor)
+    before_deposit["event_date"] = "2025-12-31"
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="custody allocation lacks qualifying deposit",
+    ):
+        capital._verify_selected_facts(
+            case,
+            {
+                "provider_ledger": {
+                    "capital_anchors": [before_deposit],
+                    "flows": [deposit],
+                    "admissions": [coverage],
+                }
+            },
+            case["policy"],
+        )
+
+    negative_cash = deepcopy(anchor)
+    negative_cash["amount"]["value"] = "101"
+    with pytest.raises(
+        capital.CapitalValidationError, match="provider-custody cash is negative"
+    ):
+        capital._verify_selected_facts(
+            case,
+            {
+                "provider_ledger": {
+                    "capital_anchors": [negative_cash],
+                    "flows": [deposit],
+                    "admissions": [coverage],
+                }
+            },
+            case["policy"],
+        )
+
+
 def _account_ledger_opening(epoch, sources):
     component_sha256s = sorted(capital._digest(row) for row in sources)
     descriptor = {
