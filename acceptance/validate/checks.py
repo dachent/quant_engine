@@ -2467,9 +2467,13 @@ def check_liquid_identity(ctx: Context) -> Iterator[Finding]:
 
 
 def _historical_snapshot(row: Mapping[str, Any]) -> bool:
-    day = to_date(row.get("as_of_date"))
+    raw_day = row.get("as_of_date")
+    day = to_date(raw_day)
     return (
-        day is not None
+        isinstance(raw_day, str)
+        and len(raw_day) == 10
+        and day is not None
+        and raw_day == day.isoformat()
         and row.get("weight_basis") == f"HISTORICAL_SNAPSHOT_{day:%Y_%m_%d}"
     )
 
@@ -4311,7 +4315,13 @@ def _policy_weights(
     if not isinstance(payload, dict) or payload.get("policy_id") != "PORT-DEPENDENCE-1":
         raise ValueError("dependence policy identity differs")
     day = node(payload, "allocation_authority", "as_of_date")
-    if to_date(day) is None:
+    parsed_day = to_date(day)
+    if (
+        not isinstance(day, str)
+        or len(day) != 10
+        or parsed_day is None
+        or day != parsed_day.isoformat()
+    ):
         raise ValueError("dependence policy allocation date is invalid")
     source = payload.get("series")
     if not isinstance(source, list) or not source:
@@ -5934,7 +5944,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 )
             )
         for position, row in enumerate(rows(report, "allocation_history")):
-            if row.get("scope") == "RESERVE":
+            if row.get("scope") == "RESERVE" and not _historical_snapshot(row):
                 out.append(
                     Observed(
                         "report:allocation_history.RESERVE",

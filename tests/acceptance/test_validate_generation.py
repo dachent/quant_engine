@@ -5008,3 +5008,43 @@ def test_n50_w27_n51_default_alias_date_dedup_preserves_divergence(tmp_path, cas
     ]
     assert len(dated) == 1
     assert dated[0].klass == checks.BLOCKER_AUTHORITY
+
+
+@pytest.mark.parametrize("surface", ["historical", "policy"])
+def test_n50_w27_n51_date_authority_requires_exact_iso(tmp_path, surface):
+    policy = _policy_fixture(tmp_path / "policy")
+
+    def mutate(report):
+        if surface == "historical":
+            report["allocation_history"][1]["as_of_date"] = CUTOFF + "garbage"
+
+    if surface == "policy":
+        path = policy / "contracts" / "portfolio-dependence-policy-v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["allocation_authority"]["as_of_date"] = "2026-08-16garbage"
+        path.write_bytes(_dump(payload))
+    found = run(build(tmp_path, Spec(report=[mutate])), repo_root=policy)
+    assert any(
+        f.check_id == "returns.allocation_weight_sets"
+        and f.klass == checks.BLOCKER_AUTHORITY
+        for f in found
+    )
+
+
+def test_n50_w27_n51_historical_reserve_is_not_current_oracle_view(tmp_path):
+    def mutate(report):
+        for row in report["allocation_history"]:
+            if row["scope"] == "RESERVE":
+                row["current_value_usd"] = "999"
+
+    found = run(
+        build(tmp_path, Spec(report=[mutate])),
+        [
+            {
+                "metric_id": "capital.reserve.cutoff",
+                "entity": "reserve",
+                "expected": "400",
+            }
+        ],
+    )
+    assert not [f for f in found if f.check_id == "expected.capital.reserve.cutoff"]
