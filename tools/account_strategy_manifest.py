@@ -1826,6 +1826,9 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
         if source_amount <= 0:
             raise ManifestError(f"capital anchor {record_id} amount is not positive")
+        event_date = _iso_date(
+            raw.get("event_date"), f"capital anchor {record_id}.event_date"
+        )
         if capital_type == "OPENING_CAPITAL_ANCHOR":
             opening_nav = raw.get("opening_nav")
             if (
@@ -1853,9 +1856,73 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
                 raise ManifestError(
                     f"capital anchor {record_id} opening_nav is not positive"
                 )
-            basis_amount = source_amount
+            event_fx = raw.get("event_time_fx")
+            if source_currency == accounting_currency:
+                if "event_time_fx" in raw:
+                    raise ManifestError(
+                        f"capital anchor {record_id} USD amount carries event FX"
+                    )
+                basis_amount = source_amount
+            else:
+                expected_fx_fields = {
+                    "base_currency",
+                    "currency",
+                    "date",
+                    "field",
+                    "generation_id",
+                    "provider",
+                    "rate",
+                    "source_artifact_id",
+                    "timing",
+                }
+                if (
+                    accounting_currency != "USD"
+                    or not isinstance(event_fx, Mapping)
+                    or set(event_fx) != expected_fx_fields
+                    or event_fx.get("base_currency") != accounting_currency
+                    or event_fx.get("currency") != source_currency
+                    or event_fx.get("date") != event_date
+                    or event_fx.get("field") != "Close"
+                    or event_fx.get("timing") != "UTC_DAILY_CLOSE"
+                ):
+                    raise ManifestError(
+                        f"capital anchor {record_id} event FX evidence differs"
+                    )
+                fx_generation_id = _generation_id(
+                    event_fx.get("generation_id"),
+                    f"capital anchor {record_id}.event_time_fx.generation_id",
+                )
+                if fx_generation_id != event_fx.get("generation_id"):
+                    raise ManifestError(
+                        f"capital anchor {record_id} event FX generation id is not canonical"
+                    )
+                provider = _require_nonempty_text(
+                    event_fx.get("provider"),
+                    f"capital anchor {record_id}.event_time_fx.provider",
+                )
+                source_artifact_id = _require_nonempty_text(
+                    event_fx.get("source_artifact_id"),
+                    f"capital anchor {record_id}.event_time_fx.source_artifact_id",
+                )
+                if (
+                    provider != event_fx.get("provider")
+                    or source_artifact_id != event_fx.get("source_artifact_id")
+                    or type(event_fx.get("rate")) is not str
+                ):
+                    raise ManifestError(
+                        f"capital anchor {record_id} event FX identity is not canonical"
+                    )
+                rate = _money(
+                    event_fx.get("rate"),
+                    f"capital anchor {record_id}.event_time_fx.rate",
+                )
+                if rate <= 0:
+                    raise ManifestError(
+                        f"capital anchor {record_id} event FX rate is not positive"
+                    )
+                basis_amount = source_amount * rate
         else:
-            if source_currency != accounting_currency:
+            if source_currency != accounting_currency or "event_time_fx" in raw:
                 raise ManifestError(
                     f"capital allocation {record_id} currency differs from accounting currency"
                 )
@@ -1895,9 +1962,7 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
                     raw.get("strategy_id"), f"capital anchor {record_id}.strategy_id"
                 ),
                 "capital_type": capital_type,
-                "event_date": _iso_date(
-                    raw.get("event_date"), f"capital anchor {record_id}.event_date"
-                ),
+                "event_date": event_date,
                 "nav_recognition_date": _iso_date(
                     raw.get("nav_recognition_date"),
                     f"capital anchor {record_id}.nav_recognition_date",
