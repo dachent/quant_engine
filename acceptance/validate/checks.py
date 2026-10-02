@@ -3120,6 +3120,46 @@ def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
     defect id is attached: none describes it.
     """
 
+    # A missing list is the legacy contract. An explicit list, even empty,
+    # declares this cross-table universe and must account for each funded epoch.
+    if isinstance(node(ctx.panel, "account_manifest", "rows"), list):
+        blocked = blocked_epochs(ctx)
+        for entries, match, skip, file, path in (
+            (
+                twr_rows(ctx),
+                _manifest_epoch,
+                blocked.skips_report_row,
+                REPORT,
+                "$.twr_mwr",
+            ),
+            (
+                manifest_rows(ctx),
+                _report_epoch,
+                blocked.skips_manifest_row,
+                PANEL,
+                "$.account_manifest.rows",
+            ),
+        ):
+            for position, row in entries:
+                partner = match(ctx, row)
+                if (
+                    skip(row)
+                    or partner.row is not None
+                    or partner.disagreement is not None
+                ):
+                    continue
+                yield _finding(
+                    "capital.account_identity",
+                    BLOCKER_AUTHORITY,
+                    "|".join(epoch_key(row)),
+                    {"epoch": epoch_identity(row)},
+                    "same whole epoch identity and admission kind in the other table",
+                    file,
+                    f"{path}[{position}]",
+                    (),
+                    "account epoch counterpart is missing from the other declared table",
+                )
+
     for item in epoch_disagreements(ctx):
         position, row = item.report
         panel_position, panel_row = item.panel

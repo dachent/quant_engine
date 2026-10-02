@@ -4902,3 +4902,36 @@ def test_validator_imports_no_production_builder() -> None:
             assert (
                 f"import {forbidden}" not in text and f"from {forbidden}" not in text
             ), path
+
+
+@pytest.mark.parametrize("side", ["panel_one", "panel_all", "report_one", "report_all"])
+def test_n50_w27_n51_missing_epoch_counterpart_blocks(tmp_path, side):
+    def change_report(report):
+        if side == "report_one":
+            report["twr_mwr"].pop(0)
+        elif side == "report_all":
+            report["twr_mwr"] = []
+
+    def change_panel(panel):
+        if side == "panel_one":
+            panel["account_manifest"]["rows"].pop(0)
+        elif side == "panel_all":
+            panel["account_manifest"]["rows"] = []
+
+    found = run(build(tmp_path, Spec(report=[change_report], panel=[change_panel])))
+    missing = [
+        f
+        for f in found
+        if f.check_id == "capital.account_identity"
+        and "counterpart is missing" in f.message
+    ]
+    assert len(missing) == (3 if side.endswith("all") else 1)
+    assert all(f.klass == checks.BLOCKER_AUTHORITY for f in missing)
+
+
+def test_n50_w27_n51_legacy_manifest_rows_absence_preserves_contract(tmp_path):
+    def remove(panel):
+        panel["account_manifest"].pop("rows")
+
+    found = run(build(tmp_path, Spec(panel=[remove])))
+    assert not [f for f in found if f.check_id == "capital.account_identity"]
