@@ -43,7 +43,8 @@ from test_portfolio_mvp2_vertical import assert_decomposition_vertical, fixture
 # contract, are properties of the world and not of the code under test.
 _LOAD_CONTRACT_RESIDUAL = (
     "narrowed synthetic authority: the real schema_errors on the accepted "
-    "contract bytes, then canonical outcome, census, strategy-perimeter and "
+    "contract bytes, then exact selected native-validated outcomes, live "
+    "_validate_outcomes, canonical census, strategy-perimeter and "
     "registry-hash equivalence.  It SKIPS validate_contract, which the real "
     "load_contract runs after the schema check.  validate_contract is "
     "non-transforming (it raises or returns dict(contract), "
@@ -524,7 +525,8 @@ def test_d1_fixture_native_ready_authority(tmp_path: Path) -> None:
     )
 
 
-def test_d1_fixture_status_only_ready_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("readiness", ["READY", "UNKNOWN", None])
+def test_d1_fixture_status_only_ready_is_rejected(tmp_path: Path, readiness) -> None:
     contract = json.loads(
         (
             fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
@@ -535,13 +537,17 @@ def test_d1_fixture_status_only_ready_is_rejected(tmp_path: Path) -> None:
         for row in contract["financial_outcomes"]
         if row["outcome_id"] == "INVESTED_CAPITAL"
     )
-    policy["policy_status"] = "READY"
-    path = fixture._write_json(tmp_path / "status-only.json", contract)
+    if readiness is None:
+        policy.pop("policy_status")
+    else:
+        policy["policy_status"] = readiness
+    path = fixture._write_json(tmp_path / "invalid-readiness.json", contract)
     with pytest.raises(financial.FinancialMvpContractError):
         financial.load_contract(path)
 
 
-def test_d1_fixture_receipt_pair_and_payload_are_live(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mutation", ["missing", "extra", "payload"])
+def test_d1_fixture_receipt_pair_and_payload_are_live(tmp_path: Path, mutation) -> None:
     authority = fixture.build_synthetic_ready_financial_authority(tmp_path)
     contract = json.loads(authority.read_bytes())
     policy = next(
@@ -549,24 +555,52 @@ def test_d1_fixture_receipt_pair_and_payload_are_live(tmp_path: Path) -> None:
         for row in contract["financial_outcomes"]
         if row["outcome_id"] == "INVESTED_CAPITAL"
     )
-    policy["owner_decision_receipts"].pop("PROVIDER_CUSTODY_PERIMETER")
+    receipts = policy["owner_decision_receipts"]
+    if mutation == "missing":
+        receipts.pop("PROVIDER_CUSTODY_PERIMETER")
+    elif mutation == "extra":
+        receipts["UNPAIRED"] = deepcopy(receipts["PROVIDER_CUSTODY_PERIMETER"])
+    else:
+        receipts["PROVIDER_CUSTODY_PERIMETER"]["payload_sha256"] = "0" * 64
     with pytest.raises(financial.FinancialMvpContractError):
         financial.load_contract(
-            fixture._write_json(tmp_path / "missing-receipt.json", contract)
+            fixture._write_json(tmp_path / "invalid-receipt.json", contract)
         )
 
 
-def test_d1_fixture_selected_authority_is_exact(tmp_path: Path) -> None:
-    authority = fixture.build_synthetic_ready_financial_authority(tmp_path)
-    assert (
-        hashlib.sha256(authority.read_bytes()).hexdigest()
-        != hashlib.sha256(
-            (
-                fixture.REPOSITORY_ROOT
-                / "contracts/portfolio-financial-mvp-source-v1.json"
-            ).read_bytes()
-        ).hexdigest()
+def test_d1_fixture_selected_authority_is_exact(tmp_path: Path, monkeypatch) -> None:
+    import portfolio_invested_capital as capital
+
+    authority = fixture.build_synthetic_ready_financial_authority(
+        tmp_path / "authority"
     )
+    expected = financial.load_contract(authority)
+    candidate = fixture._write_json(
+        tmp_path / "selected-world.json", deepcopy(expected)
+    )
+    native_validator = financial._validate_outcomes
+    native_receipts = capital._validate_owner_decision_receipts
+    native_calculator = capital.calculate_invested_capital
+    loader = fixture.install_synthetic_financial_authority(
+        monkeypatch, [candidate], financial_outcomes_authority_path=authority
+    )
+    assert loader(candidate)["financial_outcomes"] == expected["financial_outcomes"]
+    assert financial._validate_outcomes is native_validator
+    assert capital._validate_owner_decision_receipts is native_receipts
+    assert capital.calculate_invested_capital is native_calculator
+    # The repository RNR outcomes are another natively valid authority, but
+    # they are not the exact READY selection frozen by this fixture seam.
+    different = json.loads(
+        (
+            fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
+    native_validator(different["financial_outcomes"], allow_legacy_workbook=False)
+    changed = deepcopy(expected)
+    changed["financial_outcomes"] = different["financial_outcomes"]
+    fixture._write_json(candidate, changed)
+    with pytest.raises(AssertionError):
+        loader(candidate)
 
 
 def test_d1_fixture_default_authority_stays_blocked() -> None:
@@ -608,6 +642,15 @@ def test_d1_fixture_governed_numeric_projection_is_unchanged(tmp_path: Path) -> 
     )
     ready = capital.build_governed_capital_result(ready_input_path, ready_contract_path)
     assert (real["status"], ready["status"]) == ("REQUIRED_NOT_READY", "AVAILABLE")
+    selected_ledger = json.loads(
+        Path(capital.read_local_sidecar(input_path)["provider_ledger"]).read_bytes()
+    )
+    raw_total = sum(
+        (Decimal(row["amount"]["value"]) for row in selected_ledger["capital_anchors"]),
+        Decimal(0),
+    )
+    assert raw_total == Decimal("1100") == Decimal(ready["current_aggregate_usd"])
+    assert real["authority_profile"] == ready["authority_profile"] == "SYNTHETIC"
     for field in (
         "events",
         "source_bindings",
@@ -628,6 +671,8 @@ def test_d1_fixture_governed_numeric_projection_is_unchanged(tmp_path: Path) -> 
     )
     tampered = dict(ready)
     tampered["status"] = "REQUIRED_NOT_READY"
+    tampered.pop("result_id")
+    tampered["result_id"] = capital._digest(tampered)
     with pytest.raises(capital.CapitalValidationError, match="recomputation"):
         capital.verify_governed_capital_result(
             tampered, ready_input_path, ready_contract_path
