@@ -581,8 +581,57 @@ def test_d1_fixture_default_authority_stays_blocked() -> None:
     assert policy["policy_status"] == "REQUIRED_NOT_READY"
 
 
-def test_d1_fixture_governed_numeric_projection_is_unchanged() -> None:
-    assert Decimal("1100") == sum((Decimal("100") for _ in range(11)), Decimal(0))
+def test_d1_fixture_governed_numeric_projection_is_unchanged(tmp_path: Path) -> None:
+    capital_test = fixture._load(
+        "d1_fixture_capital_case",
+        "tests/portfolio_analytics/test_portfolio_invested_capital.py",
+    )
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    input_path, real_contract_path = capital_test._governed_case(real_root)
+    import portfolio_invested_capital as capital
+
+    real = capital.build_governed_capital_result(input_path, real_contract_path)
+    ready_contract_path = fixture.build_synthetic_ready_financial_authority(
+        tmp_path / "ready"
+    )
+    ready_contract = capital.load_contract(ready_contract_path)
+    inputs = json.loads(input_path.read_bytes())
+    inputs["product_contract_sha256"] = hashlib.sha256(
+        ready_contract_path.read_bytes()
+    ).hexdigest()
+    inputs["policy_sha256"] = capital.invested_capital_policy_digest(ready_contract)
+    ready_input_path = fixture._write_json(tmp_path / "ready-input.json", inputs)
+    capital.write_local_sidecar(
+        ready_input_path,
+        capital.read_local_sidecar(input_path),
+    )
+    ready = capital.build_governed_capital_result(ready_input_path, ready_contract_path)
+    assert (real["status"], ready["status"]) == ("REQUIRED_NOT_READY", "AVAILABLE")
+    for field in (
+        "events",
+        "source_bindings",
+        "required_epochs",
+        "daily_by_epoch",
+        "daily_by_strategy",
+        "daily_aggregate",
+        "current_by_strategy",
+        "current_aggregate_usd",
+        "missing_inputs",
+    ):
+        assert ready[field] == real[field]
+    assert (
+        capital.verify_governed_capital_result(
+            ready, ready_input_path, ready_contract_path
+        )
+        == ready
+    )
+    tampered = dict(ready)
+    tampered["status"] = "REQUIRED_NOT_READY"
+    with pytest.raises(capital.CapitalValidationError, match="recomputation"):
+        capital.verify_governed_capital_result(
+            tampered, ready_input_path, ready_contract_path
+        )
 
 
 def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
