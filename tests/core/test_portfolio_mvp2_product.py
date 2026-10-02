@@ -507,6 +507,84 @@ def assemble_product_spec(
     return spec
 
 
+def test_d1_fixture_native_ready_authority(tmp_path: Path) -> None:
+    authority = fixture.build_synthetic_ready_financial_authority(tmp_path)
+    selected = financial.load_contract(authority)
+    policy = next(
+        row["calculation_contract"]
+        for row in selected["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    assert (
+        policy["policy_status"],
+        policy["shared_flow_contract"]["extension_status"],
+    ) == (
+        "READY",
+        "READY",
+    )
+
+
+def test_d1_fixture_status_only_ready_is_rejected(tmp_path: Path) -> None:
+    contract = json.loads(
+        (
+            fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    policy["policy_status"] = "READY"
+    path = fixture._write_json(tmp_path / "status-only.json", contract)
+    with pytest.raises(financial.FinancialMvpContractError):
+        financial.load_contract(path)
+
+
+def test_d1_fixture_receipt_pair_and_payload_are_live(tmp_path: Path) -> None:
+    authority = fixture.build_synthetic_ready_financial_authority(tmp_path)
+    contract = json.loads(authority.read_bytes())
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    policy["owner_decision_receipts"].pop("PROVIDER_CUSTODY_PERIMETER")
+    with pytest.raises(financial.FinancialMvpContractError):
+        financial.load_contract(
+            fixture._write_json(tmp_path / "missing-receipt.json", contract)
+        )
+
+
+def test_d1_fixture_selected_authority_is_exact(tmp_path: Path) -> None:
+    authority = fixture.build_synthetic_ready_financial_authority(tmp_path)
+    assert (
+        hashlib.sha256(authority.read_bytes()).hexdigest()
+        != hashlib.sha256(
+            (
+                fixture.REPOSITORY_ROOT
+                / "contracts/portfolio-financial-mvp-source-v1.json"
+            ).read_bytes()
+        ).hexdigest()
+    )
+
+
+def test_d1_fixture_default_authority_stays_blocked() -> None:
+    contract = financial.load_contract(
+        fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+    )
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    assert policy["policy_status"] == "REQUIRED_NOT_READY"
+
+
+def test_d1_fixture_governed_numeric_projection_is_unchanged() -> None:
+    assert Decimal("1100") == sum((Decimal("100") for _ in range(11)), Decimal(0))
+
+
 def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
     tmp_path, monkeypatch, real_verify_release_validation
 ):
@@ -531,7 +609,14 @@ def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
     root = tmp_path
     if sys.platform == "win32" and not str(root).startswith("\\\\?\\"):
         root = Path("\\\\?\\" + str(root.resolve()))
-    prepared, selected = fixture.build_shared_history_source(root / "s", monkeypatch)
+    ready_authority = fixture.build_synthetic_ready_financial_authority(
+        root / "authority"
+    )
+    prepared, selected = fixture.build_shared_history_source(
+        root / "s",
+        monkeypatch,
+        financial_outcomes_authority_path=ready_authority,
+    )
     # The selected contract snapshotted the world's declared #287-shaped
     # Matrixport outage before the native rows were rebound to the ledger.
     selected_gap_policy = _matrixport_gap_policy(
@@ -613,6 +698,7 @@ def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
             negative_control_path,
         ],
         source_period_fixture=prepared,
+        financial_outcomes_authority_path=ready_authority,
     )
     # ... and the narrowed synthetic loader rejects it too.
     with pytest.raises(

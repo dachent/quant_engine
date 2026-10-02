@@ -665,15 +665,57 @@ def bind_native_history_sources(
     return epoch_hpr_receipts
 
 
+def build_synthetic_ready_financial_authority(root: Path) -> Path:
+    """Create and natively validate the fixture-only READY policy authority."""
+    import portfolio_financial_mvp_contract as financial
+
+    template_path = REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+    template_bytes = template_path.read_bytes()
+    contract = financial.load_contract(template_path)
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    policy["shared_flow_contract"]["extension_status"] = "READY"
+    policy["policy_status"] = "READY"
+    selected_path = _write_json(
+        root / "synthetic-ready-financial-mvp-contract.json", contract
+    )
+    assert template_path.read_bytes() == template_bytes
+    selected = financial.load_contract(selected_path)
+    financial._validate_outcomes(
+        selected["financial_outcomes"], allow_legacy_workbook=False
+    )
+    return selected_path
+
+
 def build_shared_history_source(
-    root: Path, monkeypatch: Any
+    root: Path,
+    monkeypatch: Any,
+    *,
+    financial_outcomes_authority_path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Path]]:
     """Prepare the existing history fixture from one selected account source set."""
     from copy import deepcopy
 
+    selected_outcomes: list[dict[str, Any]] | None = None
+    if financial_outcomes_authority_path is not None:
+        import portfolio_financial_mvp_contract as financial
+
+        selected = financial.load_contract(financial_outcomes_authority_path)
+        financial._validate_outcomes(
+            selected["financial_outcomes"], allow_legacy_workbook=False
+        )
+        selected_outcomes = deepcopy(selected["financial_outcomes"])
     history = plan_tests.history_tests
     history._install_synthetic_history_authority(monkeypatch)
-    prepared = _install_hybrid_source(history._history_fixture(root / "history"))
+    prepared = history._history_fixture(root / "history")
+    if selected_outcomes is not None:
+        contract = json.loads(prepared["contract_path"].read_bytes())
+        contract["financial_outcomes"] = selected_outcomes
+        _write_json(prepared["contract_path"], contract)
+    prepared = _install_hybrid_source(prepared)
     metadata = json.loads(prepared["provider_ledger_catalog_path"].read_bytes())[
         "strategy_evidence"
     ]
@@ -1116,6 +1158,7 @@ def install_synthetic_financial_authority(
     contract_paths: list[Path],
     *,
     source_period_fixture: dict[str, Any] | None = None,
+    financial_outcomes_authority_path: Path | None = None,
 ) -> Any:
     """Configure only fixture source identities; retain canonical financial rules.
 
@@ -1124,6 +1167,8 @@ def install_synthetic_financial_authority(
     With ``source_period_fixture`` the final numerical verifier also binds the
     synthetic source-period seams the layered history was built under.
     """
+    from copy import deepcopy
+
     import portfolio_financial_mvp_contract as financial
     import portfolio_invested_capital as capital
     import portfolio_current_dependence as current
@@ -1136,6 +1181,13 @@ def install_synthetic_financial_authority(
     )
     accepted_paths = {path.resolve() for path in contract_paths}
     original = financial.load_contract
+    expected_outcomes = deepcopy(canonical["financial_outcomes"])
+    if financial_outcomes_authority_path is not None:
+        selected = original(financial_outcomes_authority_path)
+        financial._validate_outcomes(
+            selected["financial_outcomes"], allow_legacy_workbook=False
+        )
+        expected_outcomes = deepcopy(selected["financial_outcomes"])
 
     def load_contract(
         contract_path: Path = financial.DEFAULT_CONTRACT, *args: Any, **kwargs: Any
@@ -1160,11 +1212,12 @@ def install_synthetic_financial_authority(
                 "financial MVP contract schema validation failed: "
                 + "; ".join(errors[:10])
             )
-        assert contract["financial_outcomes"] == canonical["financial_outcomes"]
+        assert contract["financial_outcomes"] == expected_outcomes
+        financial._validate_outcomes(
+            contract["financial_outcomes"], allow_legacy_workbook=False
+        )
         # Only provider-generation source identities vary in the synthetic census.
         # Every membership, epoch, strategy and provider-lane rule stays canonical.
-        from copy import deepcopy
-
         censuses = [
             deepcopy(value["current_census"]) for value in (contract, canonical)
         ]
