@@ -1178,3 +1178,180 @@ def test_cr2_custody_report_requires_source_authority_for_cash(tmp_path, full):
     root = full._published_baseline(tmp_path / "baseline", catalog)
     with pytest.raises(full.reporter.ReportValidationError, match="custody.*source"):
         full.reporter.build_report_data(root)
+
+
+@pytest.fixture(scope="module")
+def cr2_custody_native_world(tmp_path_factory):
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_release_builder as builder
+    from portfolio_attended_preparation import _source_clock
+
+    root = tmp_path_factory.mktemp("native")
+    admitted = fx.cr2_custody_native_source(root / "source")
+    recipe, template = fx.cr2_custody_native_recipe(root / "inputs", admitted)
+    output = root / "baseline"
+    result = builder.build_baseline(recipe, admitted["ledger_root"], output)
+    catalog = json.loads(
+        (
+            output / "generations" / result["generation_id"] / "portfolio-baseline.json"
+        ).read_bytes()
+    )
+    clock_path = root / "source-clock.json"
+    clock_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "source_phase": admitted["source_phase"],
+                "data_clock": _source_clock(admitted["source_phase"], "2026-09-17"),
+            }
+        )
+    )
+    return root, admitted, recipe, template, output, catalog, clock_path
+
+
+def test_cr2_custody_native_template_independent_report_and_panel(
+    cr2_custody_native_world,
+):
+    """Native producer and independent custody consumers; full epoch route stays required."""
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_baseline as baseline
+    import portfolio_control_panel as panel
+    import hashlib
+
+    root, admitted, _recipe, template, output, catalog, clock_path = (
+        cr2_custody_native_world
+    )
+    authority = reporter._source_clock_authority(clock_path)
+    reporter._verify_custody_current_capital(
+        catalog, output, admitted["ledger_root"], authority
+    )
+    rows = {r["strategy_id"]: r for r in catalog["current_capital"]["strategies"]}
+    assert rows["robuxio-crypto"]["derived_cash"][0]["current_value"]["value"] == "8.9"
+    assert rows["volatis-strategy"]["derived_cash"][0]["current_value"]["value"] == "7"
+    assert rows["robuxio-crypto"]["current_value"]["value"] == "119.9"
+    assert rows["volatis-strategy"]["current_value"]["value"] == "127"
+    assert reporter._current_capital(catalog) == catalog["current_capital"]
+    reporter._verify_current_capital_accounts(
+        catalog["current_capital"], reporter._accounts(catalog)
+    )
+    emitted = json.loads((output / "config/portfolio-baseline-spec.json").read_bytes())
+    assert emitted["provider_ledger"]["financial_mvp"] == admitted["financial_mvp"]
+
+    legacy_spec = deepcopy(emitted)
+    legacy_spec["provider_ledger"].pop("financial_mvp")
+    legacy_path = root / "legacy-spec.json"
+    legacy_path.write_bytes(canonical_json_bytes(legacy_spec))
+    legacy, _manifest, _raw = baseline.build_catalog(legacy_path)
+    preserved = {}
+    for field in (
+        "allocations",
+        "nav_observations",
+        "flows",
+        "transactions",
+        "strategy_returns",
+        "provider_strategy_returns",
+        "audit_snapshot",
+        "replay",
+    ):
+        left, right = (
+            canonical_json_bytes(catalog[field]),
+            canonical_json_bytes(legacy[field]),
+        )
+        assert left == right, field
+        preserved[field] = hashlib.sha256(left).hexdigest()
+    for strategy_id in rows:
+        other = next(
+            r
+            for r in legacy["current_capital"]["strategies"]
+            if r["strategy_id"] == strategy_id
+        )
+        assert canonical_json_bytes(
+            rows[strategy_id]["members"]
+        ) == canonical_json_bytes(other["members"])
+    (root / "qa-no-canonical-sha256.json").write_bytes(canonical_json_bytes(preserved))
+    expectations = panel._report_panel_expectations(
+        {
+            "portfolio_summary": reporter._portfolio_summary(
+                catalog,
+                strategy_product_controls=reporter._report_product_controls(catalog)[0],
+            ),
+            "strategy_summary": [{"strategy_id": "robuxio-crypto"}],
+            "account_summary": reporter._accounts(catalog),
+            "allocation_history": catalog["allocations"],
+            "custody_current_capital": catalog["current_capital"],
+        }
+    )
+    assert expectations["custody_current_capital"] == catalog["current_capital"]
+
+
+def test_cr2_custody_native_report_tamper_missing_authority_and_full_epoch_gate(
+    cr2_custody_native_world,
+):
+    _root, admitted, _recipe, _template, output, catalog, clock_path = (
+        cr2_custody_native_world
+    )
+    with pytest.raises(reporter.ReportValidationError, match="custody.*source"):
+        reporter._verify_custody_current_capital(
+            catalog, output, admitted["ledger_root"], None
+        )
+    altered = deepcopy(catalog)
+    row = next(
+        r
+        for r in altered["current_capital"]["strategies"]
+        if r["strategy_id"] == "robuxio-crypto"
+    )
+    row["derived_cash"][0]["current_value"]["value"] = "9.9"
+    with pytest.raises(reporter.ReportValidationError, match="custody"):
+        reporter._verify_custody_current_capital(
+            altered,
+            output,
+            admitted["ledger_root"],
+            reporter._source_clock_authority(clock_path),
+        )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="requires manifest, source receipt, and current epoch crosswalk",
+    ):
+        reporter.build_report_data(
+            output,
+            provider_ledger_root=admitted["ledger_root"],
+            source_clock_path=clock_path,
+        )
+
+
+def test_cr2_custody_native_selected_authority_relocation_and_mismatch(
+    cr2_custody_native_world,
+):
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_baseline as baseline
+
+    _root, admitted, _recipe, _template, output, catalog, _clock_path = (
+        cr2_custody_native_world
+    )
+    spec = json.loads((output / "config/portfolio-baseline-spec.json").read_bytes())
+    relocated = _root / "relocated"
+    relocated.mkdir()
+    for key in ("contract", "registry", "schema"):
+        old = Path(spec["provider_ledger"]["financial_mvp"][key + "_path"])
+        new = relocated / (key + ".json")
+        new.write_bytes(old.read_bytes())
+        spec["provider_ledger"]["financial_mvp"][key + "_path"] = str(new)
+    path = relocated / "spec.json"
+    path.write_bytes(canonical_json_bytes(spec))
+    shifted, _manifest, _raw = baseline.build_catalog(path)
+    assert canonical_json_bytes(shifted) == canonical_json_bytes(catalog)
+    spec["provider_ledger"]["financial_mvp"]["contract_sha256"] = "0" * 64
+    path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(
+        baseline.BaselineValidationError, match="selected custody authority"
+    ):
+        baseline.build_catalog(path)
+
+
+def test_cr2_custody_native_missing_required_class_keeps_readiness_gate(tmp_path):
+    import portfolio_pipeline_materialize as materializer
+
+    with pytest.raises(
+        materializer.MaterializationError, match="not READY_FOR_COMPOSITION"
+    ):
+        fx.cr2_custody_native_source(tmp_path, missing_required_class=True)
