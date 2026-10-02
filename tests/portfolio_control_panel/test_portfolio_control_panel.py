@@ -12908,6 +12908,166 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
     assert download["accountLabel"] in download["contextSummary"]
 
 
+def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The shipped QA reads source-clock declarations before opening the Data view."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    cutoff = data["meta"]["portfolio_as_of"]
+    clock = {
+        "selected_financial_cutoff": cutoff,
+        "latest_common_eod": cutoff,
+        "limiting_inputs": ["synthetic"],
+        "source_data_as_of": [
+            {
+                "source_id": "synthetic",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": cutoff,
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "timezone": "UTC",
+                "precision": "DATE",
+            }
+        ],
+    }
+    data["meta"]["source_clock"] = clock
+    data["limitations"].extend(panel._source_clock_display_lines(clock))
+    _write_dashboard_data_script(candidate, data)
+    common_eod = clock["latest_common_eod"]
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    assert node and runtime_node, "the pinned Node/Playwright runtime is required"
+    output = tmp_path / "native-browser-qa"
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    result = subprocess.run(
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "browser_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(output),
+            "--expected-calculation-cutoff",
+            cutoff,
+            "--expected-common-eod",
+            common_eod,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=150,
+    )
+    assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
+    manifests = list(output.glob("*/manifest.json"))
+    assert len(manifests) == 28
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
+        for path in manifests
+    )
+
+
+def test_g2_lazy_view_navigation_error_uses_visible_app_error_state(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A malformed lazy Weekly payload must leave READY and show the controlled error."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data_path = candidate / "data" / "dashboard_data.json"
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    data["weekly_returns"] = None
+    _write_dashboard_data_script(candidate, data)
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    assert node and runtime_node, "the pinned Node/Playwright runtime is required"
+    playwright_module = (
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+try {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.goto(pathToFileURL(process.env.G2_PANEL_HTML).href, { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+  await page.locator('[data-nav="weekly"]').click();
+  await page.waitForTimeout(200);
+  console.log(JSON.stringify(await page.evaluate(() => ({
+    appState: document.querySelector("#app")?.dataset.appState,
+    loadingHidden: document.querySelector("#loading-state")?.hidden,
+    errorHidden: document.querySelector("#error-state")?.hidden,
+    weeklyText: document.querySelector('[data-view="weekly"]')?.textContent?.trim(),
+  }))));
+  console.log(JSON.stringify({ pageErrors }));
+} finally { await browser.close(); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["G2_PANEL_HTML"] = str((candidate / "index.html").resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stderr
+    app = json.loads(result.stdout.splitlines()[0])
+    errors = json.loads(result.stdout.splitlines()[1])
+    assert app["appState"] == "error", app
+    assert app["loadingHidden"] is True and app["errorHidden"] is False, app
+    assert errors["pageErrors"] == []
+
+
 @pytest.mark.parametrize("payload_script", ["", "window.PORTFOLIO_DATA = null;\n"])
 def test_f2_f7_missing_or_null_payload_reaches_visible_guard(
     inputs: dict[str, Path], tmp_path: Path, payload_script: str

@@ -1507,6 +1507,11 @@
     $("#attribution-dispositions-table").innerHTML = tableMarkup([["Account / provider"], ["Effective interval"], ["Period"], ["Authority"], ["Disposition"]], attributionRows.length ? attributionRows : [emptyRow(5, "No attribution dispositions")]);
   }
 
+  function renderLimitations() {
+    if (!Array.isArray(data.limitations)) throw new Error("Dashboard limitations are missing or unsupported");
+    $("#limitations-list").innerHTML = data.limitations.map((item) => `<li>${safe(item)}</li>`).join("");
+  }
+
   function renderData() {
     const factRows = data.coverage.filter((row) => row.category === "FACT_COVERAGE");
     const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
@@ -1533,7 +1538,7 @@
     $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDateHtml(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
-    $("#limitations-list").innerHTML = data.limitations.map((item) => `<li>${safe(item)}</li>`).join("");
+    renderLimitations();
     const routes = {
       "full-systematic-hwm-unavailable": ["risk", "Qualify accepted daily NAV freshness across the governed HWM perimeter"],
       "current-strategy-attribution-partial": ["capital", "Adjudicate pool-only assignment intervals; current mapped positions remain valid"],
@@ -1571,9 +1576,26 @@
     dirtyViews.delete(name);
   }
 
+  function showAppError(error) {
+    console.error(error);
+    $("#loading-state").hidden = true;
+    $("#error-state").hidden = false;
+    $("#app").dataset.appState = "error";
+  }
+
+  function renderViewSafely(name) {
+    try {
+      renderView(name);
+      return true;
+    } catch (error) {
+      showAppError(error);
+      return false;
+    }
+  }
+
   function setView(name, updateHash = true) {
     const view = $(`[data-view="${name}"]`);
-    if (!view) return;
+    if (!view) return false;
     $$(".view").forEach((item) => { item.hidden = item !== view; item.classList.toggle("is-active", item === view); });
     $$('[data-nav]').forEach((button) => { const active = button.dataset.nav === name; button.classList.toggle("is-active", active); active ? button.setAttribute("aria-current", "page") : button.removeAttribute("aria-current"); });
     $("#page-title").textContent = VIEW_TITLES[name] || "Portfolio control";
@@ -1581,7 +1603,7 @@
     if (updateHash) history.replaceState(null, "", `#${name}`);
     window.scrollTo({ top: 0, behavior: "auto" });
     if (updateHash) $("#main-content").focus({ preventScroll: true });
-    renderView(name);
+    return renderViewSafely(name);
   }
 
   function populateContextControls() {
@@ -1601,7 +1623,7 @@
     $("#context-strategy").value = selectedContextStrategy;
     ["capital", "risk", "attribution"].forEach((view) => dirtyViews.add(view));
     const activeView = $$(".view").find((view) => view.classList.contains("is-active"));
-    if (activeView) renderView(activeView.dataset.view);
+    if (activeView) renderViewSafely(activeView.dataset.view);
   }
 
   function showToast(message) {
@@ -1778,21 +1800,19 @@
   function init() {
     try {
       if (!data || ![21, 22].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
+      renderLimitations();
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       populateContextControls();
       bindEvents(); bindEmbeddedDownloads();
       const requested = location.hash.slice(1);
-      setView($(`[data-view="${requested}"]`) ? requested : "command", false);
+      if (!setView($(`[data-view="${requested}"]`) ? requested : "command", false)) return;
       prepareScrollableTableRegions();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";
     } catch (error) {
-      console.error(error);
-      $("#loading-state").hidden = true;
-      $("#error-state").hidden = false;
-      $("#app").dataset.appState = "error";
+      showAppError(error);
     }
   }
 
