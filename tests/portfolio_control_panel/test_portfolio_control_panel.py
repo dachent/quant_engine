@@ -11727,6 +11727,60 @@ def test_account_manifest_producer_to_publish_blocked_seam(
     assert rebuilt["panel_id"] != built["panel_id"]
 
 
+def test_g2_render_reuse_publish_renders_once_while_public_verify_renders(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish may reuse its verified render, but standalone verification may not."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    original_rendered_files = panel._rendered_files
+    calls = 0
+
+    def count_rendered_files(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original_rendered_files(*args, **kwargs)
+
+    monkeypatch.setattr(panel, "_rendered_files", count_rendered_files)
+    verified = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    assert verified["all_passed"] is True
+    assert calls == 1
+
+    calls = 0
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
+    )
+    assert published["publication_state"] == "PUBLISHED"
+    assert calls == 1
+
+
 def test_financial_publish_rejects_manifest_change_after_verification(
     inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11752,7 +11806,7 @@ def test_financial_publish_rejects_manifest_change_after_verification(
     monkeypatch.setattr(panel, "verify_candidate", verify_then_change)
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="candidate changed after verification or source snapshot drifted",
+        match="publication input changed after final render: account_manifest",
     ):
         panel.publish_panel(
             inputs["report"],
@@ -11803,9 +11857,7 @@ def test_financial_publish_rejects_input_change_after_final_render(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    original_rendered_files = panel._rendered_files
     original_read_bytes = Path.read_bytes
-    calls = 0
     mutate_active = False
 
     baseline_generation_id = read_current(
@@ -11844,12 +11896,12 @@ def test_financial_publish_rejects_input_change_after_final_render(
     )
     mutation_path = mutation_paths[mutated_input].resolve()
 
-    def render_then_change(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls, mutate_active
-        result = original_rendered_files(*args, **kwargs)
-        calls += 1
-        if calls == 2:
-            mutate_active = True
+    original_validate_qa = panel.validate_qa
+
+    def validate_then_change(*args: Any, **kwargs: Any) -> Any:
+        nonlocal mutate_active
+        result = original_validate_qa(*args, **kwargs)
+        mutate_active = True
         return result
 
     def changed_read_bytes(path: Path) -> bytes:
@@ -11858,7 +11910,7 @@ def test_financial_publish_rejects_input_change_after_final_render(
             return b" " + content
         return content
 
-    monkeypatch.setattr(panel, "_rendered_files", render_then_change)
+    monkeypatch.setattr(panel, "validate_qa", validate_then_change)
     monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
     with pytest.raises(
         panel.ControlPanelValidationError,
@@ -11895,18 +11947,14 @@ def test_financial_publish_revalidates_private_qa_snapshot_after_final_render(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    original_rendered_files = panel._rendered_files
-    calls = 0
+    original_validate_qa = panel.validate_qa
 
-    def render_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        result = original_rendered_files(*args, **kwargs)
-        calls += 1
-        if calls == 2:
-            (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
+    def validate_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
+        result = original_validate_qa(*args, **kwargs)
+        (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
         return result
 
-    monkeypatch.setattr(panel, "_rendered_files", render_then_corrupt_qa)
+    monkeypatch.setattr(panel, "validate_qa", validate_then_corrupt_qa)
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="interaction.checks must be an array",
@@ -12724,6 +12772,140 @@ try {
             f"F2/F7 Node probe timed out; stdout={error.stdout!r}; stderr={error.stderr!r}"
         ) from error
     return json.loads(result.stdout)
+
+
+def _run_g2_lazy_view_probe(html: Path, download_path: Path) -> dict[str, object]:
+    """Exercise every routed view in Chromium with temporary renderer instrumentation."""
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    assert node and runtime_node, "the installed Node/Playwright runtime is required"
+    playwright_module = (
+        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    assert playwright_module.is_file() and Path(executable).is_file(), (
+        "the installed Playwright module and Chromium are required"
+    )
+    probe = r"""
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const htmlUrl = pathToFileURL(process.env.G2_PANEL_HTML).href;
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+try {
+  const results = [];
+  for (const view of views) {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.goto(`${htmlUrl}#${view}`, { waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready", null, { timeout: 12000 });
+    results.push(await page.evaluate((requested) => ({
+      active: document.querySelector(`[data-view="${requested}"]`)?.classList.contains("is-active") ?? false,
+      calls: window.__g2_render_calls ?? {},
+      state: document.querySelector("#app")?.dataset.appState ?? null,
+      view: requested,
+    }), view));
+    await page.close();
+  }
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.goto(`${htmlUrl}#weekly`, { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready", null, { timeout: 12000 });
+  const option = await page.locator('#context-account option:not([value="ALL"])').first();
+  const accountValue = await option.getAttribute("value");
+  const accountLabel = (await option.textContent())?.trim();
+  await page.locator("#context-account").selectOption(String(accountValue));
+  await page.locator('[data-nav="capital"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-view="capital"]')?.classList.contains("is-active"));
+  const contextSummary = (await page.locator("#context-summary").textContent())?.trim();
+  await page.locator('[data-nav="data"]').click();
+  const candidate = JSON.parse(await readFile(new URL("candidate.json", htmlUrl), "utf8"));
+  const pending = page.waitForEvent("download");
+  await page.locator('a[download][href="downloads/portfolio-report-data.json"]').click();
+  const download = await pending;
+  await download.saveAs(process.env.G2_DOWNLOAD_PATH);
+  const actualDownloadSha256 = createHash("sha256").update(await readFile(process.env.G2_DOWNLOAD_PATH)).digest("hex");
+  results.push({
+    accountLabel,
+    actualDownloadSha256,
+    contextSummary,
+    expectedDownloadSha256: candidate.artifact_sha256["downloads/portfolio-report-data.json"],
+  });
+  await page.close();
+  console.log(JSON.stringify(results));
+} finally { await browser.close(); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["G2_DOWNLOAD_PATH"] = str(download_path)
+    env["G2_PANEL_HTML"] = str(html.resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=90,
+    )
+    return {"results": json.loads(result.stdout)}
+
+
+def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A direct route renders once; hidden views wait until their route is opened."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    app_path = candidate / "app.js"
+    renderer = app_path.read_text(encoding="utf-8")
+    renderers = (
+        "renderCommand",
+        "renderCapital",
+        "renderRisk",
+        "renderSignals",
+        "renderAttribution",
+        "renderDependence",
+        "renderWeekly",
+        "renderCandidates",
+        "renderData",
+    )
+    for name in renderers:
+        marker = f"function {name}() {{"
+        assert renderer.count(marker) == 1
+        renderer = renderer.replace(
+            marker,
+            "function "
+            + name
+            + "() { window.__g2_render_calls = window.__g2_render_calls || {}; "
+            + f"window.__g2_render_calls.{name} = (window.__g2_render_calls.{name} || 0) + 1;",
+        )
+    app_path.write_text(renderer, encoding="utf-8")
+
+    evidence = _run_g2_lazy_view_probe(candidate / "index.html", tmp_path / "download.json")
+    routed = evidence["results"][:-1]
+    assert isinstance(routed, list)
+    for row in routed:
+        assert row["state"] == "ready"
+        assert row["active"] is True
+        assert row["calls"] == {"render" + row["view"].title(): 1}
+    download = evidence["results"][-1]
+    assert download["actualDownloadSha256"] == download["expectedDownloadSha256"]
+    assert download["accountLabel"] in download["contextSummary"]
 
 
 @pytest.mark.parametrize("payload_script", ["", "window.PORTFOLIO_DATA = null;\n"])

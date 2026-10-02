@@ -1549,6 +1549,28 @@
     $("#remediation-table").innerHTML = tableMarkup([["Exception"], ["State"], ["Required evidence"], ["Destination"]], remediationRows.length ? remediationRows : [emptyRow(4, "No material blocking exceptions")]);
   }
 
+  const viewRenderers = {
+    command: renderCommand,
+    capital: renderCapital,
+    risk: renderRisk,
+    signals: renderSignals,
+    attribution: renderAttribution,
+    dependence: renderDependence,
+    weekly: renderWeekly,
+    candidates: renderCandidates,
+    data: renderData,
+  };
+  const renderedViews = new Set();
+  const dirtyViews = new Set();
+
+  function renderView(name) {
+    const renderer = viewRenderers[name];
+    if (!renderer || (renderedViews.has(name) && !dirtyViews.has(name))) return;
+    renderer();
+    renderedViews.add(name);
+    dirtyViews.delete(name);
+  }
+
   function setView(name, updateHash = true) {
     const view = $(`[data-view="${name}"]`);
     if (!view) return;
@@ -1559,6 +1581,7 @@
     if (updateHash) history.replaceState(null, "", `#${name}`);
     window.scrollTo({ top: 0, behavior: "auto" });
     if (updateHash) $("#main-content").focus({ preventScroll: true });
+    renderView(name);
   }
 
   function populateContextControls() {
@@ -1576,9 +1599,9 @@
     $("#context-summary").textContent = `${account} · ${strategy}`;
     $("#context-account").value = selectedContextAccount;
     $("#context-strategy").value = selectedContextStrategy;
-    renderCapital();
-    renderRisk();
-    renderAttribution();
+    ["capital", "risk", "attribution"].forEach((view) => dirtyViews.add(view));
+    const activeView = $$(".view").find((view) => view.classList.contains("is-active"));
+    if (activeView) renderView(activeView.dataset.view);
   }
 
   function showToast(message) {
@@ -1759,11 +1782,12 @@
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       populateContextControls();
-      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); prepareScrollableTableRegions(); bindEvents(); bindEmbeddedDownloads();
-      $("#loading-state").hidden = true;
-      $("#app").dataset.appState = "ready";
+      bindEvents(); bindEmbeddedDownloads();
       const requested = location.hash.slice(1);
       setView($(`[data-view="${requested}"]`) ? requested : "command", false);
+      prepareScrollableTableRegions();
+      $("#loading-state").hidden = true;
+      $("#app").dataset.appState = "ready";
     } catch (error) {
       console.error(error);
       $("#loading-state").hidden = true;

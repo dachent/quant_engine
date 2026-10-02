@@ -11375,6 +11375,10 @@ def verify_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    _rendered_bundle: list[
+        tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -11416,6 +11420,8 @@ def verify_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
+    if _rendered_bundle is not None:
+        _rendered_bundle.append((expected, data, _))
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
     checks.append(
@@ -12778,6 +12784,9 @@ def publish_panel(
         raise ControlPanelValidationError(
             "publication requires financial mode or an exact verified account-manifest generation bundle"
         )
+    rendered_bundle: list[
+        tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
+    ] = []
     verification = verify_candidate(
         report_root,
         legacy_panel,
@@ -12817,6 +12826,7 @@ def publish_panel(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        _rendered_bundle=rendered_bundle,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -12826,45 +12836,9 @@ def publish_panel(
     _write_exact(
         qa_dir / "semantic-validation.json", canonical_json_bytes(verification)
     )
-    rendered_files, reproduced_data, input_paths = _rendered_files(
-        report_root,
-        legacy_panel,
-        template_root,
-        decomposition_root,
-        correlation_root,
-        strategy_evidence_path,
-        decomposition_lenses_root,
-        decomposition_plan_bundle,
-        weekly_returns_root,
-        freshness_health_path,
-        replication_root,
-        candidate_driver_map_path,
-        baseline_root,
-        hwm_portable_receipt,
-        hwm_portable_generation_bytes,
-        hwm_portable_calendar_bytes,
-        hwm_governed_result,
-        hwm_governed_generation_bytes,
-        hwm_governed_calendar_bytes,
-        hwm_governed_receipt_bytes,
-        dependence_selected_inputs_path=dependence_selected_inputs_path,
-        account_manifest_path=account_manifest_path,
-        financial_mode=financial_mode,
-        manifest_ledger_path=manifest_ledger_path,
-        manifest_ledger_identity_path=manifest_ledger_identity_path,
-        manifest_baseline_root=manifest_baseline_root,
-        manifest_classified_flows_path=manifest_classified_flows_path,
-        manifest_flow_coverage_path=manifest_flow_coverage_path,
-        manifest_classification_policy_path=manifest_classification_policy_path,
-        manifest_admission_policy_path=manifest_admission_policy_path,
-        account_manifest_generation_root=account_manifest_generation_root,
-        account_manifest_generation_id=account_manifest_generation_id,
-        manifest_membership_census_path=manifest_membership_census_path,
-        invested_capital_result=invested_capital_result,
-        invested_capital_input_generation_path=(invested_capital_input_generation_path),
-        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-        strategy_history_contract_path=strategy_history_contract_path,
-    )
+    if len(rendered_bundle) != 1:
+        raise ControlPanelValidationError("verified render bundle is unavailable")
+    rendered_files, reproduced_data, input_paths = rendered_bundle[0]
     reproduced_meta = _object(reproduced_data.get("meta"), "panel meta")
     authority_profile = reproduced_meta.get("account_manifest_authority_profile")
     manifest_verification = _object(
