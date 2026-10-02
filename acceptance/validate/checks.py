@@ -4919,15 +4919,40 @@ def _dated_sections(
                 row.get("status"),
                 ("C2",),
             )
+    # The alias is only one published view. Check every mode, retaining a
+    # divergent alias but avoiding duplicate findings for the same date claim.
+    lens_views: list[tuple[str, str, list[Any]]] = []
+    modes = node(ctx.report, "decomposition_lenses", "modes")
+    if isinstance(modes, Mapping):
+        for mode, mode_rows in modes.items():
+            if isinstance(mode_rows, list):
+                lens_views.append(
+                    (str(mode), f"$.decomposition_lenses.modes.{mode}", mode_rows)
+                )
     lenses = node(ctx.report, "decomposition_lenses", "lenses")
-    for position, row in enumerate(lenses if isinstance(lenses, list) else []):
-        if isinstance(row, dict):
+    if isinstance(lenses, list):
+        lens_views.append(("", "$.decomposition_lenses.lenses", lenses))
+    seen_dates: set[tuple[str, str, str]] = set()
+    for mode, prefix, view_rows in lens_views:
+        for position, row in enumerate(view_rows):
+            if not isinstance(row, dict):
+                continue
+            entity = (
+                f"decomposition:{row.get('lens_id')}:{mode or row.get('evidence_mode')}"
+            )
+            status = (
+                "AVAILABLE" if (row.get("available_count") or 0) > 0 else "UNAVAILABLE"
+            )
+            key = (entity, str(row.get("as_of_date")), status)
+            if key in seen_dates:
+                continue
+            seen_dates.add(key)
             yield (
-                f"decomposition:{row.get('lens_id')}:{row.get('evidence_mode')}",
+                entity,
                 REPORT,
-                f"$.decomposition_lenses.lenses[{position}].as_of_date",
+                f"{prefix}[{position}].as_of_date",
                 row.get("as_of_date"),
-                "AVAILABLE" if (row.get("available_count") or 0) > 0 else "UNAVAILABLE",
+                status,
                 ("C3",),
             )
     factor = node(ctx.panel, "factor_analysis")

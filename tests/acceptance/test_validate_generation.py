@@ -4935,3 +4935,74 @@ def test_n50_w27_n51_legacy_manifest_rows_absence_preserves_contract(tmp_path):
 
     found = run(build(tmp_path, Spec(panel=[remove])))
     assert not [f for f in found if f.check_id == "capital.account_identity"]
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_n50_w27_n51_hybrid_date_uses_its_own_published_mode(tmp_path, bounded):
+    def mutate(report):
+        lens = report["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"][0]
+        lens["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+        lens["as_of_date"] = "2026-09-03"
+        if bounded:
+            report["value_basis_bounds"] = {
+                "calculation_cutoff_date": CUTOFF,
+                "strategies": [
+                    {
+                        "strategy_id": "alpha",
+                        "effective_end": "2026-09-03",
+                        "account_ids": ["A1"],
+                    }
+                ],
+                "bounded_sections": [
+                    {
+                        "section": "decomposition_lenses",
+                        "entity": "ECONOMIC_FACTOR:LIVE_PLUS_BACKTEST",
+                        "date": "2026-09-03",
+                        "bounded_by": ["alpha"],
+                    }
+                ],
+            }
+
+    expected = (
+        [
+            {
+                "metric_id": "capital.strategy.cutoff",
+                "entity": "alpha",
+                "as_of": "2026-09-03",
+                "expected": "1100",
+            }
+        ]
+        if bounded
+        else None
+    )
+    found = run(build(tmp_path, Spec(report=[mutate])), expected)
+    dated = [
+        f
+        for f in found
+        if f.check_id == "dates.section_as_of_vs_cutoff"
+        and f.entity == "decomposition:ECONOMIC_FACTOR:LIVE_PLUS_BACKTEST"
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == (checks.NOT_READY if bounded else checks.BLOCKER_AUTHORITY)
+    assert ".modes.LIVE_PLUS_BACKTEST[0]." in dated[0].json_path
+
+
+@pytest.mark.parametrize("case", ["same_alias", "different_alias", "legacy_alias"])
+def test_n50_w27_n51_default_alias_date_dedup_preserves_divergence(tmp_path, case):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        section["lenses"][0]["as_of_date"] = "2026-09-03"
+        if case == "same_alias":
+            section["modes"]["LIVE_ONLY"][0]["as_of_date"] = "2026-09-03"
+        elif case == "legacy_alias":
+            section.pop("modes")
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    dated = [
+        f
+        for f in found
+        if f.check_id == "dates.section_as_of_vs_cutoff"
+        and f.entity == "decomposition:ECONOMIC_FACTOR:LIVE_ONLY"
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == checks.BLOCKER_AUTHORITY
