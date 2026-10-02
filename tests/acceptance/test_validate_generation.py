@@ -1404,7 +1404,9 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     ),
     "allocation_weights": (
         "returns.allocation_weight_sets",
-        checks.BLOCKER_INVARIANT,
+        # The POLICY component contradicts independent policy authority, rather
+        # than another displayed CURRENT weight set.
+        checks.BLOCKER_AUTHORITY,
         Spec(
             report=[
                 _set(
