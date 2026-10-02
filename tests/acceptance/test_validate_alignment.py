@@ -55,6 +55,7 @@ from test_validate_generation import (
     START,
     Spec,
     _manifest_row,
+    _policy_fixture,
     _twr_row,
     build,
 )
@@ -226,8 +227,9 @@ def _run(
         cutoff_source="test",
         expected=expected,
     )
-    if repo_root is not None:
-        context.repo_root = repo_root
+    context.repo_root = _policy_fixture(
+        repo_root if repo_root is not None else gen_dir.parent / "test-authority"
+    )
     return checks.run_checks(context)
 
 

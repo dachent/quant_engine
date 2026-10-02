@@ -137,6 +137,7 @@ def _strategy(strategy: str, name: str, value: str, weight: str) -> dict[str, An
         "lifecycle_status": "ACTIVE",
         "current_value_usd": value,
         "systematic_weight": weight,
+        "weight_basis": "CURRENT_CUTOFF",
         "account_live_cumulative_return": "0.1",
         "account_live_observed_start": PATH_START,
         "account_live_observed_end": CUTOFF,
@@ -262,6 +263,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "400",
                 "systematic_weight": None,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
             {
                 "allocation_id": "a",
@@ -270,6 +272,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "1100",
                 "systematic_weight": W_ALPHA,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
             {
                 "allocation_id": "b",
@@ -278,6 +281,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "5500",
                 "systematic_weight": W_BETA,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
         ],
         "portfolio_summary": [
@@ -403,10 +407,11 @@ def base_report() -> dict[str, Any]:
             },
         },
         "dependence_analysis": {
+            "weight_basis": "POLICY_PORT_DEPENDENCE_1",
             "mode_summaries": {
                 "LIVE_ONLY": mode,
                 "LIVE_PLUS_BACKTEST": copy.deepcopy(mode),
-            }
+            },
         },
         "implementation_reconciliation_contract": {"as_of_date": CUTOFF},
         "implementation_return_attribution_contract": {"as_of_date": CUTOFF},
@@ -713,15 +718,48 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     return gen_dir
 
 
+def _policy_fixture(root: Path, alpha: str = "1", beta: str = "5") -> Path:
+    """Independent policy constants; never derived from the observed report."""
+    path = root / "contracts" / "portfolio-dependence-policy-v1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        _dump(
+            {
+                "policy_id": "PORT-DEPENDENCE-1",
+                "allocation_authority": {"as_of_date": "2026-08-16"},
+                "series": [
+                    {
+                        "strategy_id": "alpha",
+                        "series_id": "Alpha",
+                        "allocation_weight": alpha,
+                    },
+                    {
+                        "strategy_id": "beta",
+                        "series_id": "Beta",
+                        "allocation_weight": beta,
+                    },
+                ],
+            }
+        )
+    )
+    return root
+
+
 def run(
-    gen_dir: Path, expected: list[dict[str, Any]] | None = None
+    gen_dir: Path,
+    expected: list[dict[str, Any]] | None = None,
+    *,
+    repo_root: Path | None = None,
 ) -> list[checks.Finding]:
+    if repo_root is None:
+        repo_root = _policy_fixture(gen_dir.parent / "test-authority")
     generation = load_generation(gen_dir)
     context = checks.Context(
         gen=generation,
         cutoff=checks.to_date(CUTOFF) or checks.date.today(),
         cutoff_source="test",
         expected=expected,
+        repo_root=repo_root,
     )
     return checks.run_checks(context)
 
@@ -811,6 +849,159 @@ def test_good_generation_with_matching_expected_has_no_findings(tmp_path: Path) 
         },
     ]
     assert run(build(tmp_path), expected) == []
+
+
+def test_n50_w27_n51_current_checks_ignore_labeled_historical_snapshot_and_policy_weights(
+    tmp_path: Path,
+) -> None:
+    """N50 (RED): historical snapshot values never stand in for cutoff capital."""
+
+    def historical_only(report: dict[str, Any]) -> None:
+        report["allocation_history"][1]["current_value_usd"] = "900"
+        report["allocation_history"][1]["systematic_weight"] = "0.5"
+        for mode in report["dependence_analysis"]["mode_summaries"].values():
+            for block in ("correlation_one", "central_case"):
+                for component in mode[block]["components"]:
+                    component["allocation_weight"] = "0.5"
+
+    expected = [
+        {
+            "metric_id": "capital.strategy.cutoff",
+            "entity": "alpha",
+            "as_of": CUTOFF,
+            "expected": "1100",
+        }
+    ]
+    findings = run(
+        build(tmp_path, Spec(report=[historical_only])),
+        expected,
+        repo_root=_policy_fixture(tmp_path / "equal-policy", "1", "1"),
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id
+        in (
+            "capital.allocation_sum",
+            "expected.capital.strategy.cutoff",
+            "returns.allocation_weight_sets",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "basis", [None, "UNLABELED_POLICY", "HISTORICAL_SNAPSHOT_2026_09_16"]
+)
+def test_n50_w27_n51_rejects_missing_or_unknown_historical_weight_labels(
+    tmp_path: Path, basis: str | None
+) -> None:
+    """N50 (RED): a dated snapshot must carry its exact historical basis label."""
+
+    def unlabel(report: dict[str, Any]) -> None:
+        row = report["allocation_history"][1]
+        if basis is None:
+            row.pop("weight_basis")
+        else:
+            row["weight_basis"] = basis
+
+    findings = run(build(tmp_path, Spec(report=[unlabel])))
+    assert [
+        finding.check_id
+        for finding in findings
+        if finding.check_id == "returns.allocation_weight_sets"
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode,block",
+    [
+        ("LIVE_ONLY", "correlation_one"),
+        ("LIVE_ONLY", "central_case"),
+        ("LIVE_PLUS_BACKTEST", "correlation_one"),
+        ("LIVE_PLUS_BACKTEST", "central_case"),
+    ],
+)
+def test_n50_w27_n51_policy_weight_is_checked_against_independent_authority(
+    tmp_path, mode, block
+):
+    def change(report):
+        report["dependence_analysis"]["mode_summaries"][mode][block]["components"][0][
+            "allocation_weight"
+        ] = "0.5"
+
+    found = run(build(tmp_path, Spec(report=[change])))
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "negative", "nan", "zero", "duplicate", "wrong_id"]
+)
+def test_n50_w27_n51_unusable_policy_fails_closed(tmp_path, fault):
+    root = _policy_fixture(tmp_path / "policy")
+    path = root / "contracts" / "portfolio-dependence-policy-v1.json"
+    data = json.loads(path.read_text())
+    if fault == "missing":
+        path.unlink()
+    else:
+        if fault in {"negative", "nan", "zero"}:
+            for row in data["series"]:
+                row["allocation_weight"] = {
+                    "negative": "-1",
+                    "nan": "NaN",
+                    "zero": "0",
+                }[fault]
+        elif fault == "duplicate":
+            data["series"].append(data["series"][0].copy())
+        else:
+            data["policy_id"] = "WRONG"
+        path.write_bytes(_dump(data))
+    found = run(build(tmp_path / "generation"), repo_root=root)
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_basis",
+        "unknown_basis",
+        "wrong_date",
+        "wrong_policy",
+        "wrong_normalization",
+    ],
+)
+def test_n50_w27_n51_dependence_basis_and_present_authority_fail_closed(
+    tmp_path, fault
+):
+    def change(report):
+        block = report["dependence_analysis"]
+        if fault == "missing_basis":
+            block.pop("weight_basis")
+        elif fault == "unknown_basis":
+            block["weight_basis"] = "UNKNOWN"
+        else:
+            block["weight_authority"] = {
+                "as_of_date": "2026-08-16",
+                "policy_id": "PORT-DEPENDENCE-1",
+                "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
+            }
+            key, value = {
+                "wrong_date": ("as_of_date", CUTOFF),
+                "wrong_policy": ("policy_id", "WRONG"),
+                "wrong_normalization": ("normalization", "NONE"),
+            }[fault]
+            block["weight_authority"][key] = value
+
+    found = run(build(tmp_path, Spec(report=[change])))
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
 
 
 def test_absolute_locator_scan_ignores_url_schemes() -> None:
@@ -4443,7 +4634,10 @@ def test_without_crosswalk_fails_closed_instead_of_self_reference(
     gen_dir = build(tmp_path)
     generation = load_generation(gen_dir, discover=False)
     context = checks.Context(
-        gen=generation, cutoff=checks.date(2026, 9, 17), cutoff_source="test"
+        gen=generation,
+        cutoff=checks.date(2026, 9, 17),
+        cutoff_source="test",
+        repo_root=_policy_fixture(tmp_path / "policy"),
     )
     findings = checks.run_checks(context)
     assert {(f.check_id, f.klass) for f in findings} == {

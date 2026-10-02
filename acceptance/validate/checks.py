@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+import json
 import math
 from pathlib import Path
 import re
@@ -2465,11 +2466,23 @@ def check_liquid_identity(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def _allocation_totals(ctx: Context) -> tuple[Decimal, Decimal | None, list[str]]:
+def _historical_snapshot(row: Mapping[str, Any]) -> bool:
+    day = to_date(row.get("as_of_date"))
+    return (
+        day is not None
+        and row.get("weight_basis") == f"HISTORICAL_SNAPSHOT_{day:%Y_%m_%d}"
+    )
+
+
+def _allocation_totals(
+    ctx: Context, *, current_only: bool = False
+) -> tuple[Decimal, Decimal | None, list[str]]:
     systematic = Decimal(0)
     reserve: Decimal | None = None
     dates: list[str] = []
     for row in rows(ctx.report, "allocation_history"):
+        if current_only and _historical_snapshot(row):
+            continue
         value = to_decimal(row.get("current_value_usd")) or Decimal(0)
         if row.get("scope") == "SYSTEMATIC":
             systematic += value
@@ -2482,7 +2495,13 @@ def _allocation_totals(ctx: Context) -> tuple[Decimal, Decimal | None, list[str]
 def check_allocation_sum(ctx: Context) -> Iterator[Finding]:
     if not rows(ctx.report, "allocation_history"):
         return
-    systematic, reserve, _ = _allocation_totals(ctx)
+    _allocation_systematic, reserve, _ = _allocation_totals(ctx, current_only=True)
+    systematic = sum(_current_capital_values(ctx).values(), Decimal(0))
+    for expected in ctx.expected or []:
+        if expected.get("metric_id") == "capital.portfolio.systematic.cutoff":
+            amount = to_decimal(expected.get("expected"))
+            if amount is not None:
+                systematic = amount
     for file, path, value in (
         (PANEL, "$.capital.systematic", node(ctx.panel, "capital", "systematic")),
         (
@@ -2502,7 +2521,7 @@ def check_allocation_sum(ctx: Context) -> Iterator[Finding]:
                 file,
                 path,
                 ("B6",),
-                "systematic total differs from the sum of its allocation rows",
+                "systematic total differs from current-cutoff capital authority",
             )
     panel_reserve = to_decimal(node(ctx.panel, "capital", "reserve"))
     if reserve is not None and panel_reserve is not None:
@@ -2967,6 +2986,7 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
         (position, row)
         for position, row in enumerate(rows(ctx.report, "allocation_history"))
         if (to_date(row.get("as_of_date")) or cutoff) < cutoff
+        and not _historical_snapshot(row)
     ]
     if stale_allocations:
         dates = sorted({str(row.get("as_of_date")) for _, row in stale_allocations})
@@ -4232,64 +4252,240 @@ def check_implied_flows(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
-    """B5: one current systematic weight per strategy across every view."""
+def _policy_weights(
+    ctx: Context,
+) -> tuple[dict[str, tuple[str, Decimal]], dict[str, str]]:
+    """Read independent policy authority once; never derive it from displayed weights."""
+    if "policy_weights" in ctx._cache:
+        return ctx._cache["policy_weights"]
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    payload = json.loads(
+        (root / "contracts" / "portfolio-dependence-policy-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if not isinstance(payload, dict) or payload.get("policy_id") != "PORT-DEPENDENCE-1":
+        raise ValueError("dependence policy identity differs")
+    day = node(payload, "allocation_authority", "as_of_date")
+    if to_date(day) is None:
+        raise ValueError("dependence policy allocation date is invalid")
+    source = payload.get("series")
+    if not isinstance(source, list) or not source:
+        raise ValueError("dependence policy series are absent")
+    declared: dict[str, tuple[str, Decimal]] = {}
+    strategies: set[str] = set()
+    for row in source:
+        if not isinstance(row, dict):
+            raise ValueError("dependence policy series is invalid")
+        series, strategy = row.get("series_id"), row.get("strategy_id")
+        weight = to_decimal(row.get("allocation_weight"))
+        if (
+            not isinstance(series, str)
+            or not series.strip()
+            or not isinstance(strategy, str)
+            or not strategy.strip()
+            or series in declared
+            or strategy in strategies
+            or weight is None
+            or weight < 0
+        ):
+            raise ValueError("dependence policy series identity or weight is invalid")
+        declared[series] = (strategy, weight)
+        strategies.add(strategy)
+    total = sum((weight for _, weight in declared.values()), Decimal(0))
+    if total <= 0:
+        raise ValueError("dependence policy weight total is not positive")
+    result = (
+        {
+            name: (strategy, weight / total)
+            for name, (strategy, weight) in declared.items()
+        },
+        {
+            "policy_id": "PORT-DEPENDENCE-1",
+            "as_of_date": str(day),
+            "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
+        },
+    )
+    ctx._cache["policy_weights"] = result
+    return result
 
+
+def _current_capital_values(ctx: Context) -> dict[str, Decimal]:
+    values = {
+        strategy: amount
+        for strategy, (amount, _) in cutoff_capital_by_strategy(ctx).items()
+    }
+    for row in ctx.expected or []:
+        if row.get("metric_id") == "capital.strategy.cutoff":
+            amount = to_decimal(row.get("expected"))
+            if amount is not None:
+                values[str(row.get("entity"))] = amount
+    return values
+
+
+def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
+    """B5: current shares and policy weights are distinct, independently checked sets."""
+    tolerance = Decimal("5e-8")
     names = strategy_names(ctx)
     by_name = {name: strategy for strategy, name in names.items()}
     sets: dict[str, dict[str, Decimal]] = {}
 
-    def put(view: str, strategy: str, value: Any) -> None:
-        amount = to_decimal(value)
-        if amount is not None:
-            sets.setdefault(strategy, {})[view] = amount
-
-    for row in rows(ctx.report, "allocation_history"):
-        if row.get("scope") == "SYSTEMATIC":
-            put(
-                "report.allocation_history.systematic_weight",
-                str(row.get("strategy_id")),
-                row.get("systematic_weight"),
-            )
-    for row in rows(ctx.report, "strategy_summary"):
-        put(
-            "report.strategy_summary.systematic_weight",
-            str(row.get("strategy_id")),
-            row.get("systematic_weight"),
+    def problem(
+        entity: str, shown: Any, expected: Any, path: str, message: str
+    ) -> Finding:
+        return _finding(
+            "returns.allocation_weight_sets",
+            BLOCKER_AUTHORITY,
+            entity,
+            shown,
+            expected,
+            REPORT,
+            path,
+            ("B5",),
+            message,
         )
-    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        for block in ("correlation_one", "central_case"):
-            components = node(
-                ctx.report,
-                "dependence_analysis",
-                "mode_summaries",
-                mode,
-                block,
-                "components",
-            )
-            for item in components if isinstance(components, list) else []:
-                if isinstance(item, dict):
-                    strategy = by_name.get(str(item.get("series_id")))
-                    if strategy is not None:
-                        put(
-                            f"report.dependence_analysis.{mode}.{block}.allocation_weight",
-                            strategy,
-                            item.get("allocation_weight"),
-                        )
-    totals = cutoff_capital_by_strategy(ctx)
-    grand = sum(amount for amount, _ in totals.values())
-    if grand:
-        for strategy, (amount, _) in totals.items():
+
+    for section in ("allocation_history", "strategy_summary"):
+        for position, row in enumerate(rows(ctx.report, section)):
+            if section == "allocation_history":
+                if row.get("scope") != "SYSTEMATIC" or _historical_snapshot(row):
+                    continue
+            strategy = str(row.get("strategy_id"))
+            basis = row.get("weight_basis")
+            path = f"$.{section}[{position}]"
+            if basis != "CURRENT_CUTOFF":
+                yield problem(
+                    strategy,
+                    basis,
+                    "CURRENT_CUTOFF or a correctly dated historical allocation",
+                    path + ".weight_basis",
+                    "current weight basis is missing or unrecognized",
+                )
+                continue
+            amount = to_decimal(row.get("systematic_weight"))
+            if amount is None:
+                if row.get("current_value_usd") is not None:
+                    yield problem(
+                        strategy,
+                        row.get("systematic_weight"),
+                        "finite current weight",
+                        path + ".systematic_weight",
+                        "available capital lacks a finite weight",
+                    )
+            else:
+                sets.setdefault(strategy, {})[f"report.{section}.systematic_weight"] = (
+                    amount
+                )
+    totals = _current_capital_values(ctx)
+    grand = sum(totals.values(), Decimal(0))
+    if grand > 0:
+        for strategy, amount in totals.items():
             sets.setdefault(strategy, {})["computed:cutoff_account_value_share"] = (
                 amount / grand
             )
+
+    dependence = node(ctx.report, "dependence_analysis")
+    modes = node(ctx.report, "dependence_analysis", "mode_summaries")
+    if isinstance(modes, dict) and modes:
+        basis = dependence.get("weight_basis") if isinstance(dependence, dict) else None
+        policy = None
+        if basis == "POLICY_PORT_DEPENDENCE_1":
+            try:
+                policy, authority = _policy_weights(ctx)
+            except (OSError, ValueError, TypeError, ArithmeticError) as exc:
+                yield problem(
+                    "policy",
+                    None,
+                    "usable independent PORT-DEPENDENCE-1 policy",
+                    "$.dependence_analysis.weight_basis",
+                    str(exc),
+                )
+            else:
+                shown_authority = dependence.get("weight_authority")
+                if "weight_authority" in dependence and shown_authority != authority:
+                    yield problem(
+                        "policy",
+                        shown_authority,
+                        authority,
+                        "$.dependence_analysis.weight_authority",
+                        "policy weight authority differs",
+                    )
+        elif basis != "CURRENT_CUTOFF":
+            yield problem(
+                "dependence",
+                basis,
+                "POLICY_PORT_DEPENDENCE_1 or CURRENT_CUTOFF",
+                "$.dependence_analysis.weight_basis",
+                "dependence weight basis is missing or unknown",
+            )
+        for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+            for block in ("correlation_one", "central_case"):
+                components = node(modes, mode, block, "components")
+                if not isinstance(components, list):
+                    continue
+                observed_names = []
+                for position, item in enumerate(components):
+                    if not isinstance(item, dict):
+                        yield problem(
+                            "dependence",
+                            item,
+                            "weight component object",
+                            "$.dependence_analysis",
+                            "weight component is invalid",
+                        )
+                        continue
+                    name = str(item.get("series_id"))
+                    observed_names.append(name)
+                    amount = to_decimal(item.get("allocation_weight"))
+                    path = f"$.dependence_analysis.mode_summaries.{mode}.{block}.components[{position}].allocation_weight"
+                    if basis == "POLICY_PORT_DEPENDENCE_1" and policy is not None:
+                        declared = policy.get(name)
+                        if (
+                            declared is None
+                            or by_name.get(name) != declared[0]
+                            or amount is None
+                            or abs(amount - declared[1]) > tolerance
+                        ):
+                            yield problem(
+                                name,
+                                item.get("allocation_weight"),
+                                declared[1] if declared else "declared policy series",
+                                path,
+                                "policy component differs from independent normalized policy weight",
+                            )
+                    elif basis == "CURRENT_CUTOFF":
+                        strategy = by_name.get(name)
+                        if strategy is None or amount is None:
+                            yield problem(
+                                name,
+                                item,
+                                "known current strategy with finite weight",
+                                path,
+                                "current component identity or weight is invalid",
+                            )
+                        else:
+                            sets.setdefault(strategy, {})[
+                                f"report.dependence_analysis.{mode}.{block}.allocation_weight"
+                            ] = amount
+                if policy is not None and (
+                    set(observed_names) != set(policy)
+                    or len(observed_names) != len(set(observed_names))
+                ):
+                    yield problem(
+                        mode + ":" + block,
+                        observed_names,
+                        sorted(policy),
+                        f"$.dependence_analysis.mode_summaries.{mode}.{block}.components",
+                        "policy component perimeter differs",
+                    )
     for strategy in sorted(sets):
         views = sets[strategy]
-        if len(views) < 2 or spread(list(views.values())) <= Decimal("1e-8"):
+        if len(views) < 2 or spread(list(views.values())) <= tolerance:
             continue
-        defects = ["B5"]
-        if "computed:cutoff_account_value_share" in views:
-            defects.append("B4")
         yield _finding(
             "returns.allocation_weight_sets",
             BLOCKER_INVARIANT,
@@ -4298,7 +4494,7 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
             "one current systematic weight per strategy",
             REPORT,
             "$.strategy_summary[*].systematic_weight",
-            defects,
+            ("B5", "B4"),
             f"current weight differs across views by {spread(list(views.values()))}",
         )
 
@@ -5635,7 +5831,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         )
                     )
         for position, row in enumerate(rows(report, "allocation_history")):
-            if row.get("strategy_id") == entity:
+            if row.get("strategy_id") == entity and not _historical_snapshot(row):
                 out.append(
                     Observed(
                         "report:allocation_history.current_value_usd",
