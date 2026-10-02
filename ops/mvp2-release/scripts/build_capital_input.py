@@ -240,10 +240,11 @@ def build_input_generation(
                 (capital._source_effect_usd(source_rows[item]) for item in components),
                 Decimal(0),
             )
+            exact_amount = capital._number(effect)
         opening_basis.append(
             {
                 "account_id": account_id,
-                "amount": capital._number(effect),
+                "amount": exact_amount,
                 "basis_scope": capital._ACCOUNT_LEDGER_BASIS_SCOPE,
                 "classification": "OPENING_CONTRIBUTED_BASIS",
                 "currency": "USD",
