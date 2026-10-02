@@ -585,11 +585,14 @@ def _crosswalk() -> dict[str, Any]:
 
 def _freshness() -> dict[str, Any]:
     return {
+        "as_of_date": "2026-09-17",
         "policies": [
             {
                 "policy_id": "daily-weekday-session",
                 "calendar": "WEEKDAY_SESSION",
                 "mode": "RECURRING",
+                "expected_interval_days": 1,
+                "grace_days": 2,
                 "stale_after_days": 5,
             },
             {"policy_id": "finite-history", "mode": "FINITE", "stale_after_days": None},
@@ -602,6 +605,7 @@ def _freshness() -> dict[str, Any]:
                 "lane": "ACCOUNT",
                 "fact_type": "strategy-returns",
                 "last_accepted_date": CUTOFF,
+                "evaluated_on": CUTOFF,
                 "state": "FRESH",
                 "policy_id": "daily-weekday-session",
                 "required_for_current": True,
@@ -616,6 +620,22 @@ def _dump(value: Any) -> bytes:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_freshness_operational_late_at_financial_cutoff_is_not_b12(tmp_path: Path) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "state"), "LATE"),
+                ]
+            ),
+        )
+    )
+    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
 
 
 def build(root: Path, spec: Spec | None = None) -> Path:

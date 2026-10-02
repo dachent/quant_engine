@@ -4796,16 +4796,29 @@ def _age(policy: Mapping[str, Any], last: date, cutoff: date) -> int:
 
 
 def check_freshness(ctx: Context) -> Iterator[Finding]:
-    """B12/D7: freshness states must be judged against the declared cutoff."""
+    """B12/D7: validate operating freshness separately from financial coverage."""
 
     cutoff = ctx.cutoff
     policies = _policies(ctx)
+    raw_evaluated = node(ctx.gen.freshness, "as_of_date")
+    try:
+        evaluated = date.fromisoformat(raw_evaluated) if isinstance(raw_evaluated, str) else None
+    except ValueError:
+        evaluated = None
+    if evaluated is None or evaluated.isoformat() != raw_evaluated:
+        yield _finding(
+            "dates.freshness_vs_cutoff", BLOCKER_AUTHORITY, "freshness-health",
+            raw_evaluated, "canonical operational as_of_date", FRESHNESS,
+            "$.as_of_date", ("B12",), "freshness operational clock is missing or invalid",
+        )
+        return
     reference = universe(ctx)
     active_strategies = reference.active_strategies if reference else None
     for position, row in enumerate(rows(ctx.gen.freshness, "assessments")):
         last = to_date(row.get("last_accepted_date"))
         state = row.get("state")
         policy = policies.get(str(row.get("policy_id")), {})
+        row_evaluated = row.get("evaluated_on")
         if last is None:
             continue
         entity = (
@@ -4838,35 +4851,42 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
             )
         if policy.get("mode") == "FINITE":
             continue
-        if last >= cutoff and state in ("STALE", "LATE"):
-            yield _finding(
-                "dates.freshness_vs_cutoff",
-                BLOCKER_INVARIANT,
-                entity,
-                {"state": state, "last_accepted_date": row.get("last_accepted_date")},
-                {"state": "FRESH", "declared_cutoff": cutoff},
-                FRESHNESS,
-                f"$.assessments[{position}].state",
-                ("B12",),
-                f"{state} although data is accepted through the declared cutoff (state "
-                "is computed against the evaluation date, not the cutoff)",
-            )
         stale_after = policy.get("stale_after_days")
+        grace = policy.get("grace_days")
+        interval = policy.get("expected_interval_days")
         if (
-            isinstance(stale_after, int)
-            and state == "FRESH"
-            and _age(policy, last, cutoff) > stale_after
+            row_evaluated != evaluated.isoformat()
+            or policy.get("calendar") not in {"CALENDAR_DAY", "WEEKDAY_SESSION"}
+            or not isinstance(stale_after, int)
+            or not isinstance(grace, int)
+            or not isinstance(interval, int)
+            or interval <= 0
         ):
             yield _finding(
                 "dates.freshness_vs_cutoff",
                 BLOCKER_AUTHORITY,
                 entity,
+                {"evaluated_on": row_evaluated, "policy": policy},
+                {"evaluated_on": evaluated.isoformat(), "policy": "complete recurring policy"},
+                FRESHNESS,
+                f"$.assessments[{position}]",
+                ("B12",),
+                "freshness operating clock or recurring policy is incomplete",
+            )
+            continue
+        age = _age(policy, last, evaluated)
+        expected_state = "STALE" if age > stale_after else "LATE" if age > grace else "FRESH"
+        if state != expected_state:
+            yield _finding(
+                "dates.freshness_vs_cutoff",
+                BLOCKER_AUTHORITY if state == "FRESH" and expected_state == "STALE" else BLOCKER_INVARIANT,
+                entity,
                 {"state": state, "last_accepted_date": row.get("last_accepted_date")},
-                {"state": "STALE", "stale_after_days": stale_after},
+                {"state": expected_state, "evaluated_on": evaluated},
                 FRESHNESS,
                 f"$.assessments[{position}].state",
                 ("D7",),
-                "stale source counted as current",
+                "freshness state differs from the declared operating policy and clock",
             )
     for position, row in enumerate(
         rows(node(ctx.report, "hwm_summary"), "uncovered_details")
@@ -4895,6 +4915,15 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
         end = to_date(row.get("hwm_freshness_observed_end"))
         state = row.get("hwm_freshness_state")
         if end is not None and end >= cutoff and state in ("STALE", "LATE"):
+            matching_account = any(
+                assessment.get("subject_id") == row.get("strategy_id")
+                and assessment.get("lane") == "ACCOUNT"
+                and assessment.get("state") == state
+                and to_date(assessment.get("last_accepted_date")) == end
+                for assessment in rows(ctx.gen.freshness, "assessments")
+            )
+            if matching_account:
+                continue
             yield _finding(
                 "dates.freshness_vs_cutoff",
                 BLOCKER_INVARIANT,
@@ -4903,11 +4932,11 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                     "hwm_freshness_state": state,
                     "hwm_freshness_observed_end": row.get("hwm_freshness_observed_end"),
                 },
-                {"hwm_freshness_state": "FRESH", "declared_cutoff": cutoff},
+                {"hwm_freshness_state": state, "lane": "ACCOUNT"},
                 REPORT,
                 f"$.strategy_summary[{position}].hwm_freshness_state",
                 ("B12",),
-                f"strategy freshness shown {state} although observed through the cutoff",
+                "strategy HWM freshness does not match its ACCOUNT health evidence",
             )
 
 
