@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "cd731019d30b9715545e56032e4d16280e6fbfd13e170a07a7ef7ad936a3073b"
+        "df83ee9d0ca6403ea8d3079945dbe3582063f0cccd9708ef3c3b06ef896d7460"
     )
 
 
@@ -2755,8 +2755,8 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         if value + date.resolution not in missing
     }
     assert unavailable == missing | omitted
-    assert source["readiness"] == "REQUIRED_NOT_READY"
-    assert source["blockers"] == [324, 318]
+    assert source["readiness"] == "READY"
+    assert source["blockers"] == []
     admission = source["admission"]
     # The three leverage facts left MVP-2's scope under the issue #396 deferral.
     assert admission["facts"] == [
@@ -3878,7 +3878,7 @@ def test_duplicate_source_and_unknown_consumer_fail() -> None:
 
 def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
     contract = copy.deepcopy(_contract())
-    contract["source_segments"][0]["blockers"] = []
+    contract["source_segments"][1]["blockers"] = []
     with pytest.raises(contract_tool.FinancialMvpContractError, match="lacks blocker"):
         _validate(contract)
 
@@ -4232,7 +4232,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # The affected product-data-class pins are then rederived from those changed
     # source identities; financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "cd1c53267f91175a3d13544add14195e20900a55c72238caf492f83d7af5ec6f"
+        "3c64be9b33a8c305f36c40a41ce4d42458d744db812b808e573f034b0a0854cc"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4269,7 +4269,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "cd1c53267f91175a3d13544add14195e20900a55c72238caf492f83d7af5ec6f"
+        "3c64be9b33a8c305f36c40a41ce4d42458d744db812b808e573f034b0a0854cc"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
@@ -4567,3 +4567,75 @@ def test_cr2_optional_custody_receipt_mutations_fail(field: str, value: object) 
     invested["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"][field] = value
     with pytest.raises(contract_tool.FinancialMvpContractError):
         _validate(contract)
+
+
+def test_repo_contract_binds_verified_provider_custody_authority() -> None:
+    """The checked-in product binds the owner-approved #330 decision and receipt."""
+
+    contract = _contract()
+    invested = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"]
+    assert isinstance(invested, dict)
+    decision = invested["provider_custody_perimeter"]
+    assert decision == {
+        "plain_language": (
+            "Owner cash moved into a provider-held cash or wallet account that funds "
+            "one governed strategy, where the provider buys that strategy's fund or "
+            "product from the account."
+        ),
+        "decision_status": "APPROVED",
+        "decision_authority": "OWNER_318",
+        "approval_evidence": (
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
+            "5957619019"
+        ),
+        "selected_treatment": (
+            "PROVIDER_ACCOUNT_ONLY_EXTERNAL_CAPITAL_DEPOSITS_AND_WITHDRAWALS_ARE_"
+            "THE_OWNER_EXTERNAL_FLOWS_AT_EVENT_TIME_FX; SLEEVE_CAPITAL_ANCHORS_ON_"
+            "THAT_ACCOUNT_ARE_ALLOCATIONS_INSIDE_THE_STRATEGY_WITH_ZERO_"
+            "INVESTED_CAPITAL_EFFECT; UNALLOCATED_ACCOUNT_CASH_IS_AN_EXPLICIT_"
+            "STRATEGY_CASH_LINE_NOT_RESERVE_NOT_DROPPED; SLEEVE_NAV_AND_ALLOCATION_"
+            "PATH_REMAIN_THE_RETURN_PATH; NEGATIVE_CASH_LINE_FAILS_CLOSED"
+        ),
+        "recommended_treatment": None,
+        "calculation_effect": (
+            "Invested capital changes only by deposits into and withdrawals from the "
+            "provider cash or wallet account (ledger flows with provider_account_scope "
+            "ACCOUNT_ONLY and capital_disposition EXTERNAL_CAPITAL), each converted "
+            "once at the accepted event-date FX. Fund purchases, allocations and "
+            "subscriptions from that account (OPENING_CAPITAL_ANCHOR and "
+            "STRATEGY_CAPITAL_ALLOCATION facts) move capital inside the strategy and "
+            "leave invested capital unchanged. The strategy's current capital is the "
+            "sleeve NAV plus the unallocated cash line, derived as admitted deposits "
+            "minus withdrawals minus sleeve allocations plus sleeve redemptions in USD "
+            "at their event-date FX and disclosed as derived because the account cash "
+            "balance is not an admitted observation. TWR, MWR, HWM and drawdown keep "
+            "the sleeve NAV and allocation path. A cash line below zero at any event "
+            "date fails closed."
+        ),
+        "examples": [
+            "An owner deposits 100 into the provider cash account and the provider "
+            "buys 96 of the strategy fund from it: invested capital is 100, the "
+            "strategy holds the fund plus a cash line of 4, and its gain is the fund "
+            "NAV minus 96."
+        ],
+    }
+    assert invested["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"] == {
+        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "evidence_url": (
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
+            "5957619019"
+        ),
+        "comment_id": 5957619019,
+        "digest_evidence_url": (
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
+            "5957763417"
+        ),
+        "digest_comment_id": 5957763417,
+        "approved_on": "2026-10-02",
+        "payload_sha256": "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2",
+    }
+    assert contract_tool.owner_decision_receipt_digests(contract)[
+        "PROVIDER_CUSTODY_PERIMETER"
+    ] == "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
