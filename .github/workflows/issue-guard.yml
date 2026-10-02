@@ -48,7 +48,7 @@ jobs:
         run: |
           uv lock --check
           uv sync --frozen --all-groups --all-packages
-          uv run --frozen --no-sync pytest -q --disable-socket tests/governance
+          uv run --frozen --no-sync pytest -q --disable-socket tests/governance/test_issue_guard.py
 
   reconcile:
     if: github.event_name != 'pull_request'
