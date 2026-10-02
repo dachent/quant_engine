@@ -12780,7 +12780,10 @@ def _run_g2_lazy_view_probe(html: Path, download_path: Path) -> dict[str, object
     runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
     assert node and runtime_node, "the installed Node/Playwright runtime is required"
     playwright_module = (
-        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
     )
     executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
         Path(os.environ.get("LOCALAPPDATA", ""))
@@ -12896,7 +12899,9 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         )
     app_path.write_text(renderer, encoding="utf-8")
 
-    evidence = _run_g2_lazy_view_probe(candidate / "index.html", tmp_path / "download.json")
+    evidence = _run_g2_lazy_view_probe(
+        candidate / "index.html", tmp_path / "download.json"
+    )
     routed = evidence["results"][:-1]
     assert isinstance(routed, list)
     for row in routed:
