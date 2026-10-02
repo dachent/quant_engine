@@ -156,7 +156,9 @@ def _epoch_receipts(
                 "epoch HPR receipt authority differs from selected provider generation"
             )
 
-        def bound_rows(catalog):
+        def bound_rows(
+            catalog: Mapping[str, Any],
+        ) -> list[tuple[Any, Any, tuple[Any, ...], Any]]:
             return sorted(
                 (
                     row.get("date"),

@@ -28,7 +28,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 
 from . import shell
 from .generation import (
@@ -4301,7 +4301,10 @@ def _policy_weights(
 ) -> tuple[dict[str, tuple[str, Decimal]], dict[str, str]]:
     """Read independent policy authority once; never derive it from displayed weights."""
     if "policy_weights" in ctx._cache:
-        return ctx._cache["policy_weights"]
+        return cast(
+            tuple[dict[str, tuple[str, Decimal]], dict[str, str]],
+            ctx._cache["policy_weights"],
+        )
     root = (
         ctx.repo_root
         if ctx.repo_root is not None
@@ -4508,8 +4511,8 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
                                 "policy component differs from independent normalized policy weight",
                             )
                     elif basis == "CURRENT_CUTOFF":
-                        strategy = by_name.get(name)
-                        if strategy is None or amount is None:
+                        matched_strategy = by_name.get(name)
+                        if matched_strategy is None or amount is None:
                             yield problem(
                                 name,
                                 item,
@@ -4518,7 +4521,7 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
                                 "current component identity or weight is invalid",
                             )
                         else:
-                            sets.setdefault(strategy, {})[
+                            sets.setdefault(matched_strategy, {})[
                                 f"report.dependence_analysis.{mode}.{block}.allocation_weight"
                             ] = amount
                 if policy is not None and (
@@ -4799,6 +4802,7 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
     """B12/D7: validate operating freshness separately from financial coverage."""
 
     cutoff = ctx.cutoff
+
     def canonical_day(value: Any) -> date | None:
         if not isinstance(value, str):
             return None
@@ -4915,7 +4919,7 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 type(interval) is int
                 and interval > 0
                 and type(stale_after) is int
-                and stale_after >= interval + grace
+                and stale_after >= interval + cast(int, grace)
             )
         elif mode == "FINITE":
             valid = valid and interval is None and stale_after is None
@@ -5090,7 +5094,9 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 )
             continue
         if mode == "FINITE":
-            expected_finite_state = "FINITE_COMPLETE" if last is not None else "UNAVAILABLE"
+            expected_finite_state = (
+                "FINITE_COMPLETE" if last is not None else "UNAVAILABLE"
+            )
             if state != expected_finite_state:
                 yield authority(
                     entity,
@@ -5125,7 +5131,9 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
         if state != expected_state:
             yield _finding(
                 "dates.freshness_vs_cutoff",
-                BLOCKER_AUTHORITY if state == "FRESH" and expected_state == "STALE" else BLOCKER_INVARIANT,
+                BLOCKER_AUTHORITY
+                if state == "FRESH" and expected_state == "STALE"
+                else BLOCKER_INVARIANT,
                 entity,
                 {"state": state, "last_accepted_date": row.get("last_accepted_date")},
                 {"state": expected_state, "evaluated_on": evaluated},
@@ -5211,7 +5219,10 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
             )
             continue
         selected_key = max(
-            (state_rank.get(str(assessment.get("state")), 6), str(assessment.get("lane")))
+            (
+                state_rank.get(str(assessment.get("state")), 6),
+                str(assessment.get("lane")),
+            )
             for assessment, _last in candidates
         )
         selected = [
@@ -5224,8 +5235,7 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
             == selected_key
         ]
         selected_values = {
-            (assessment.get("state"), last)
-            for assessment, last in selected
+            (assessment.get("state"), last) for assessment, last in selected
         }
         if len(selected_values) != 1:
             yield authority(
@@ -5253,7 +5263,10 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
         ):
             yield authority(
                 entity,
-                {"hwm_freshness_observed_end": raw_hwm_day, "nav_observed_end": raw_nav_day},
+                {
+                    "hwm_freshness_observed_end": raw_hwm_day,
+                    "nav_observed_end": raw_nav_day,
+                },
                 "canonical HWM and NAV observation dates",
                 f"{path}.hwm_freshness_observed_end",
                 "HWM evidence observation date is invalid",
@@ -5272,9 +5285,7 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
             and not truncated_at_boundary
         )
         expected_boundary_match = (
-            None
-            if nav_day is None or selected_day is None
-            else not boundary_mismatch
+            None if nav_day is None or selected_day is None else not boundary_mismatch
         )
         blockers = any(
             assessment.get("blocks_current_consumers") is True
@@ -5436,21 +5447,23 @@ def _dated_sections(
             ("C3",),
             None,
         )
-    for key in (
+    for metadata_key in (
         "implementation_reconciliation_contract",
         "implementation_return_attribution_contract",
     ):
-        if key in ctx.report:
-            metadata = ctx.report[key]
-            value = metadata.get("as_of_date") if isinstance(metadata, Mapping) else None
+        if metadata_key in ctx.report:
+            metadata = ctx.report[metadata_key]
+            value = (
+                metadata.get("as_of_date") if isinstance(metadata, Mapping) else None
+            )
             yield (
-                key,
+                metadata_key,
                 REPORT,
-                f"$.{key}.as_of_date",
+                f"$.{metadata_key}.as_of_date",
                 value,
                 "AVAILABLE",
                 ("C4",),
-                ("c4_historical", (key, metadata)),
+                ("c4_historical", (metadata_key, metadata)),
             )
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         if row.get("live_boundary_observed_end") is not None:
