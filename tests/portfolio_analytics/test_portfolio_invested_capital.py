@@ -1483,6 +1483,38 @@ def test_t5c_custody_deposit_is_capital_and_same_day_allocation_is_not():
             case["policy"],
         )
 
+    tiny_negative_deposit = deepcopy(deposit)
+    tiny_negative_deposit["amount"]["value"] = "99.99999999999999999999999999999"
+    tiny_negative_anchor = deepcopy(anchor)
+    tiny_negative_anchor["amount"]["value"] = "100"
+    tiny_positive_deposit = deepcopy(deposit)
+    tiny_positive_deposit["amount"]["value"] = "100.00000000000000000000000000002"
+    tiny_positive_anchor = deepcopy(anchor)
+    tiny_positive_anchor["amount"]["value"] = "100.00000000000000000000000000001"
+    for precision in (28, 80):
+        with localcontext() as context:
+            context.prec = precision
+            with pytest.raises(
+                capital.CapitalValidationError,
+                match="provider-custody cash is negative",
+            ):
+                capital._verify_provider_custody_perimeter(
+                    {
+                        "capital_anchors": [tiny_negative_anchor],
+                        "flows": [tiny_negative_deposit],
+                    },
+                    case["required_epochs"],
+                    case["policy"],
+                )
+            capital._verify_provider_custody_perimeter(
+                {
+                    "capital_anchors": [tiny_positive_anchor],
+                    "flows": [tiny_positive_deposit],
+                },
+                case["required_epochs"],
+                case["policy"],
+            )
+
 
 def _account_ledger_opening(epoch, sources):
     component_sha256s = sorted(capital._digest(row) for row in sources)

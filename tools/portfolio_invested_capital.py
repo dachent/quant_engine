@@ -101,8 +101,16 @@ def _capital_precision(events: Sequence[Mapping[str, Any]]) -> int:
     """Enough places for every exact amount-times-FX product and their sum."""
     widths = []
     for event in events:
-        amount = _decimal(event.get("amount"), "event amount").as_tuple()
-        rate = _decimal(event.get("fx_rate"), "event FX").as_tuple()
+        raw_amount = event.get("amount")
+        if isinstance(raw_amount, Mapping):
+            currency = raw_amount.get("currency")
+            raw_amount = raw_amount.get("value")
+            raw_fx = event.get("event_time_fx", {}) if currency != "USD" else {}
+            rate_value = raw_fx.get("rate", "1") if isinstance(raw_fx, Mapping) else "1"
+        else:
+            rate_value = event.get("fx_rate")
+        amount = _decimal(raw_amount, "event amount").as_tuple()
+        rate = _decimal(rate_value, "event FX").as_tuple()
         exponent = int(amount.exponent) + int(rate.exponent)
         widths.append((exponent, exponent + len(amount.digits) + len(rate.digits)))
     if not widths:
@@ -865,28 +873,37 @@ def _verify_provider_custody_perimeter(
         if any(not _is_provider_custody_external_flow(row) for row in flows):
             raise CapitalValidationError("unsupported provider-custody cash fact")
         qualifying = [row for row in flows if _is_provider_custody_external_flow(row)]
-        first_anchor = min(
-            _day(row.get("event_date"), "custody allocation date")
-            for row in account_anchors
-        )
-        if not any(
-            _source_effect_usd(row) > 0
-            and _day(row.get("event_date"), "custody deposit date") <= first_anchor
-            for row in qualifying
-        ):
-            raise CapitalValidationError("custody allocation lacks qualifying deposit")
-        dated_cash: dict[date, Decimal] = {}
-        for row in qualifying:
-            day = _day(row.get("event_date"), "custody cash date")
-            dated_cash[day] = dated_cash.get(day, Decimal(0)) + _source_effect_usd(row)
-        for row in account_anchors:
-            day = _day(row.get("event_date"), "custody allocation date")
-            dated_cash[day] = dated_cash.get(day, Decimal(0)) - _source_effect_usd(row)
-        balance = Decimal(0)
-        for day in sorted(dated_cash):
-            balance += dated_cash[day]
-            if balance < 0:
-                raise CapitalValidationError("provider-custody cash is negative")
+        with localcontext() as context:
+            context.prec = _capital_precision([*qualifying, *account_anchors])
+            context.rounding = ROUND_HALF_EVEN
+            first_anchor = min(
+                _day(row.get("event_date"), "custody allocation date")
+                for row in account_anchors
+            )
+            if not any(
+                _source_effect_usd(row) > 0
+                and _day(row.get("event_date"), "custody deposit date") <= first_anchor
+                for row in qualifying
+            ):
+                raise CapitalValidationError(
+                    "custody allocation lacks qualifying deposit"
+                )
+            dated_cash: dict[date, Decimal] = {}
+            for row in qualifying:
+                day = _day(row.get("event_date"), "custody cash date")
+                dated_cash[day] = dated_cash.get(day, Decimal(0)) + _source_effect_usd(
+                    row
+                )
+            for row in account_anchors:
+                day = _day(row.get("event_date"), "custody allocation date")
+                dated_cash[day] = dated_cash.get(day, Decimal(0)) - _source_effect_usd(
+                    row
+                )
+            balance = Decimal(0)
+            for day in sorted(dated_cash):
+                balance += dated_cash[day]
+                if balance < 0:
+                    raise CapitalValidationError("provider-custody cash is negative")
     return set(anchors_by_account)
 
 

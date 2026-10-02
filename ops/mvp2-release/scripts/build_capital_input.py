@@ -24,7 +24,7 @@ import hashlib
 import json
 import sys
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 
 _MAGNITUDE = {
@@ -231,10 +231,15 @@ def build_input_generation(
             "source_component_sha256s": components,
         }
         evidence = capital._digest(descriptor)
-        effect = sum(
-            (capital._source_effect_usd(source_rows[item]) for item in components),
-            Decimal(0),
-        )
+        with localcontext() as context:
+            context.prec = capital._capital_precision(
+                [source_rows[item] for item in components]
+            )
+            context.rounding = ROUND_HALF_EVEN
+            effect = sum(
+                (capital._source_effect_usd(source_rows[item]) for item in components),
+                Decimal(0),
+            )
         opening_basis.append(
             {
                 "account_id": account_id,
