@@ -198,6 +198,23 @@ def _verified_schema9_epoch_bundle(
     epoch_root = tmp_path
     for index in range(1):
         epoch_root /= f"independent-epoch-component-{index:02d}-abcdefghijk"
+    # Exercise Windows long-path reads even when the caller uses a short TEMP.
+    if sys.platform == "win32":
+        while (
+            len(
+                str(
+                    (
+                        epoch_root
+                        / "generations"
+                        / ("0" * 64)
+                        / "verification"
+                        / "independent-verification.json"
+                    ).resolve()
+                )
+            )
+            <= 260
+        ):
+            epoch_root /= "independent-epoch-long-path-component"
     crosswalk_payload = json.loads(
         (
             ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json"
