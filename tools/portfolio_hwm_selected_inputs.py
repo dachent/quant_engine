@@ -1107,11 +1107,8 @@ def _validate_hwm_return_parity(
         for row in ledger_strategy_returns
         if row.get("evidence_layer") == "ACCOUNT_LIVE"
     ]
-    # Synthetic unit fixtures predating the ledger strategy-return surface do not
-    # claim an ACCOUNT_LIVE path. Real selected ledgers must carry it, and once
-    # present every HWM strategy window is checked below.
     if not account_live:
-        return
+        raise SelectedHwmInputError("HWM return parity lacks ACCOUNT_LIVE ledger rows")
     hwm_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in hwm_returns:
         strategy_id = _text(row.get("strategy_id"), "HWM return strategy_id")
@@ -1811,12 +1808,10 @@ def _selected_hwm_source_rows(
         source_generation_sha256=source_generation_sha256,
         artifact_sha256s=artifact_sha256s,
     )
-    ledger_strategy_returns = _rows(
-        provider_ledger.get("strategy_returns", []), "ledger strategy_returns"
-    )
-    if any(
-        row.get("evidence_layer") == "ACCOUNT_LIVE" for row in ledger_strategy_returns
-    ):
+    if "strategy_returns" in provider_ledger:
+        ledger_strategy_returns = _rows(
+            provider_ledger["strategy_returns"], "ledger strategy_returns"
+        )
         _validate_hwm_return_parity(
             returns,
             ledger_strategy_returns,
