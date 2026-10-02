@@ -444,6 +444,7 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
         "panel_schema_version": 21,
         "meta": {
             "portfolio_as_of": CUTOFF,
+            "freshness_evaluated_on": CUTOFF,
             "report_generation_id": REPORT_GEN,
             "correlation_generation_id": "e" * 64,
             "decomposition_generation_id": "f" * 64,
@@ -595,7 +596,14 @@ def _freshness() -> dict[str, Any]:
                 "grace_days": 2,
                 "stale_after_days": 5,
             },
-            {"policy_id": "finite-history", "mode": "FINITE", "stale_after_days": None},
+            {
+                "policy_id": "finite-history",
+                "calendar": "CALENDAR_DAY",
+                "mode": "FINITE",
+                "expected_interval_days": None,
+                "grace_days": 0,
+                "stale_after_days": None,
+            },
         ],
         "assessments": [
             {
@@ -631,11 +639,269 @@ def test_freshness_operational_late_at_financial_cutoff_is_not_b12(tmp_path: Pat
                     _set(("as_of_date",), "2026-09-23"),
                     _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
                     _set(("assessments", 0, "state"), "LATE"),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+            ),
+        )
+    )
+    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+
+
+@pytest.mark.parametrize(
+    ("calendar", "last_accepted", "state"),
+    [
+        ("WEEKDAY_SESSION", "2026-09-18", "FRESH"),
+        ("CALENDAR_DAY", "2026-09-20", "FRESH"),
+    ],
+)
+def test_freshness_interval_plus_grace_remains_fresh(
+    tmp_path: Path, calendar: str, last_accepted: str, state: str
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "last_accepted_date"), last_accepted),
+                    _set(("assessments", 0, "state"), state),
+                    _set(("policies", 0, "calendar"), calendar),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+            ),
+        )
+    )
+    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "root-bool",
+        "root-trailing",
+        "row-clock-mismatch",
+        "observation-null",
+        "observation-bool",
+        "observation-trailing",
+        "observation-missing",
+        "unknown-mode",
+        "unknown-policy",
+        "bool-interval",
+        "bool-grace",
+        "negative-grace",
+        "contradictory-threshold",
+        "duplicate-policy",
+    ],
+)
+def test_freshness_rejects_malformed_clock_and_policy_metadata(
+    tmp_path: Path, case: str
+) -> None:
+    def mutate(health: dict[str, Any]) -> None:
+        row = health["assessments"][0]
+        policy = health["policies"][0]
+        if case == "root-bool":
+            health["as_of_date"] = True
+        elif case == "root-trailing":
+            health["as_of_date"] = "2026-09-17garbage"
+        elif case == "row-clock-mismatch":
+            row["evaluated_on"] = "2026-09-16"
+        elif case == "observation-null":
+            row["last_accepted_date"] = None
+        elif case == "observation-bool":
+            row["last_accepted_date"] = True
+        elif case == "observation-trailing":
+            row["last_accepted_date"] = "2026-09-17garbage"
+        elif case == "observation-missing":
+            row.pop("last_accepted_date")
+        elif case == "unknown-mode":
+            policy["mode"] = "UNKNOWN"
+        elif case == "unknown-policy":
+            row["policy_id"] = "unknown-policy"
+        elif case == "bool-interval":
+            policy["expected_interval_days"] = True
+        elif case == "bool-grace":
+            policy["grace_days"] = True
+        elif case == "negative-grace":
+            policy["grace_days"] = -1
+        elif case == "contradictory-threshold":
+            policy["stale_after_days"] = 1
+        else:
+            health["policies"].append(copy.deepcopy(policy))
+
+    findings = run(build(tmp_path, Spec(freshness=[mutate])))
+    freshness_findings = [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+    assert freshness_findings, case
+    assert any(finding.klass == checks.BLOCKER_AUTHORITY for finding in freshness_findings), case
+
+
+def test_freshness_rejects_panel_operational_clock_contradiction(tmp_path: Path) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "last_accepted_date"), "2026-09-17"),
+                    _set(("assessments", 0, "state"), "LATE"),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-20")],
+            ),
+        )
+    )
+    assert any(
+        finding.check_id == "dates.freshness_vs_cutoff"
+        and finding.klass == checks.BLOCKER_AUTHORITY
+        for finding in findings
+    )
+
+
+def test_freshness_allows_explicit_unavailable_null_observation(tmp_path: Path) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "provider_id"), "alpaca"),
+                    _set(("assessments", 0, "policy_id"), "finite-history"),
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), False),
+                    _set(("assessments", 0, "blocks_current_consumers"), False),
+                    _set(("assessments", 0, "escalation_required"), False),
                 ]
             ),
         )
     )
     assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+
+
+def test_freshness_allows_explicit_recurring_unavailable_null_observation(
+    tmp_path: Path,
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), False),
+                    _set(("assessments", 0, "blocks_current_consumers"), False),
+                    _set(("assessments", 0, "escalation_required"), False),
+                ]
+            ),
+        )
+    )
+    assert not [
+        finding for finding in findings
+        if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
+    ]
+
+
+def test_freshness_required_recurring_unavailable_retains_blocked_hwm_status(
+    tmp_path: Path,
+) -> None:
+    def report_mutation(report: dict[str, Any]) -> None:
+        report["strategy_summary"][0].update(
+            hwm_freshness_observed_end=None,
+            hwm_freshness_state="UNAVAILABLE",
+            hwm_freshness_status="BLOCKED",
+            hwm_freshness_boundary_matches_evidence=None,
+            nav_evidence_layer="ACCOUNT_LIVE",
+            nav_observed_end=None,
+        )
+
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), True),
+                    _set(("assessments", 0, "blocks_current_consumers"), True),
+                    _set(("assessments", 0, "escalation_required"), True),
+                ],
+                report=[report_mutation],
+            ),
+        )
+    )
+    assert not [
+        finding for finding in findings
+        if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "state", "last_accepted", "layer", "status"),
+    [
+        ("valid-late", "LATE", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
+        ("hwm-false-fresh", "FRESH", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
+        ("provider-does-not-bind-account", "LATE", "2026-09-17", "PROVIDER_LIVE", "ACCEPTED"),
+        ("stale-account-accepted", "STALE", "2026-09-03", "ACCOUNT_LIVE", "ACCEPTED"),
+    ],
+)
+def test_freshness_hwm_labels_bind_selected_lane_date_and_state(
+    tmp_path: Path,
+    case: str,
+    state: str,
+    last_accepted: str,
+    layer: str,
+    status: str,
+) -> None:
+    def health_mutation(health: dict[str, Any]) -> None:
+        health["as_of_date"] = "2026-09-23"
+        account = health["assessments"][0]
+        account.update(
+            evaluated_on="2026-09-23",
+            last_accepted_date=last_accepted,
+            state=state if state != "FRESH" else "LATE",
+        )
+        if case == "stale-account-accepted":
+            provider = copy.deepcopy(account)
+            provider.update(
+                lane="PROVIDER",
+                last_accepted_date="2026-09-17",
+                state="LATE",
+                required_for_current=False,
+            )
+            health["assessments"].append(provider)
+
+    def report_mutation(report: dict[str, Any]) -> None:
+        report["strategy_summary"][0].update(
+            hwm_freshness_observed_end=last_accepted,
+            hwm_freshness_state=state,
+            hwm_freshness_status=status,
+            hwm_freshness_boundary_matches_evidence=True,
+            nav_evidence_layer=layer,
+            nav_observed_end=last_accepted,
+        )
+
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[health_mutation],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+                report=[report_mutation],
+            ),
+        )
+    )
+    freshness_findings = [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+    if case == "valid-late":
+        assert not freshness_findings
+    else:
+        assert freshness_findings, case
 
 
 def build(root: Path, spec: Spec | None = None) -> Path:

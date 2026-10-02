@@ -4799,40 +4799,269 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
     """B12/D7: validate operating freshness separately from financial coverage."""
 
     cutoff = ctx.cutoff
-    policies = _policies(ctx)
+    def canonical_day(value: Any) -> date | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.isoformat() == value else None
+
+    def authority(
+        entity: str,
+        observed: Any,
+        expected: Any,
+        path: str,
+        message: str,
+    ) -> Finding:
+        return _finding(
+            "dates.freshness_vs_cutoff",
+            BLOCKER_AUTHORITY,
+            entity,
+            observed,
+            expected,
+            FRESHNESS,
+            path,
+            ("B12",),
+            message,
+        )
+
     raw_evaluated = node(ctx.gen.freshness, "as_of_date")
-    try:
-        evaluated = date.fromisoformat(raw_evaluated) if isinstance(raw_evaluated, str) else None
-    except ValueError:
-        evaluated = None
-    if evaluated is None or evaluated.isoformat() != raw_evaluated:
-        yield _finding(
-            "dates.freshness_vs_cutoff", BLOCKER_AUTHORITY, "freshness-health",
-            raw_evaluated, "canonical operational as_of_date", FRESHNESS,
-            "$.as_of_date", ("B12",), "freshness operational clock is missing or invalid",
+    evaluated = canonical_day(raw_evaluated)
+    if evaluated is None:
+        yield authority(
+            "freshness-health",
+            raw_evaluated,
+            "canonical operational as_of_date",
+            "$.as_of_date",
+            "freshness operational clock is missing or invalid",
         )
         return
+
+    panel_meta = node(ctx.panel, "meta")
+    if isinstance(panel_meta, Mapping) and "freshness_evaluated_on" in panel_meta:
+        panel_clock_raw = panel_meta.get("freshness_evaluated_on")
+        panel_clock = canonical_day(panel_clock_raw)
+        if panel_clock is None or panel_clock != evaluated:
+            yield authority(
+                "panel-freshness-clock",
+                {"freshness_evaluated_on": panel_clock_raw},
+                {"freshness_evaluated_on": evaluated.isoformat()},
+                "$.meta.freshness_evaluated_on",
+                "panel and freshness health operational clocks differ or are invalid",
+            )
+
+    raw_policies = node(ctx.gen.freshness, "policies")
+    policy_map: dict[str, dict[str, Any]] = {}
+    duplicate_policies: set[str] = set()
+    policy_rows = raw_policies if isinstance(raw_policies, list) else []
+    if not isinstance(raw_policies, list):
+        yield authority(
+            "freshness-health",
+            raw_policies,
+            "policy list",
+            "$.policies",
+            "freshness policy metadata is missing or malformed",
+        )
+    for position, policy in enumerate(policy_rows):
+        path = f"$.policies[{position}]"
+        if not isinstance(policy, Mapping):
+            yield authority(
+                "freshness-health",
+                policy,
+                "policy object",
+                path,
+                "freshness policy metadata is malformed",
+            )
+            continue
+        policy_id = policy.get("policy_id")
+        if not isinstance(policy_id, str) or not policy_id:
+            yield authority(
+                "freshness-health",
+                {"policy_id": policy_id},
+                "non-empty policy_id",
+                f"{path}.policy_id",
+                "freshness policy identity is missing or invalid",
+            )
+            continue
+        if policy_id in policy_map:
+            duplicate_policies.add(policy_id)
+            yield authority(
+                f"policy:{policy_id}",
+                {"policy_id": policy_id},
+                "unique policy_id",
+                path,
+                "freshness policy identity is duplicated",
+            )
+            continue
+        policy_map[policy_id] = dict(policy)
+
+        mode = policy.get("mode")
+        calendar = policy.get("calendar")
+        grace = policy.get("grace_days")
+        interval = policy.get("expected_interval_days")
+        stale_after = policy.get("stale_after_days")
+        valid = (
+            isinstance(mode, str)
+            and mode in {"FINITE", "RECURRING"}
+            and isinstance(calendar, str)
+            and calendar in {"CALENDAR_DAY", "WEEKDAY_SESSION"}
+            and type(grace) is int
+            and grace >= 0
+        )
+        if mode == "RECURRING":
+            valid = valid and (
+                type(interval) is int
+                and interval > 0
+                and type(stale_after) is int
+                and stale_after >= interval + grace
+            )
+        elif mode == "FINITE":
+            valid = valid and interval is None and stale_after is None
+        if not valid:
+            yield authority(
+                f"policy:{policy_id}",
+                dict(policy),
+                "valid policy mode, calendar, and numeric thresholds",
+                path,
+                "freshness policy metadata is invalid or contradictory",
+            )
+
+    for policy_id in duplicate_policies:
+        policy_map.pop(policy_id, None)
+
+    raw_assessments = node(ctx.gen.freshness, "assessments")
+    if not isinstance(raw_assessments, list):
+        yield authority(
+            "freshness-health",
+            raw_assessments,
+            "assessment list",
+            "$.assessments",
+            "freshness assessment metadata is missing or malformed",
+        )
+        return
+    health_rows = [row if isinstance(row, Mapping) else None for row in raw_assessments]
+    for position, row in enumerate(health_rows):
+        if row is None:
+            yield authority(
+                "freshness-health",
+                raw_assessments[position],
+                "assessment object",
+                f"$.assessments[{position}]",
+                "freshness assessment metadata is malformed",
+            )
+
     reference = universe(ctx)
     active_strategies = reference.active_strategies if reference else None
-    for position, row in enumerate(rows(ctx.gen.freshness, "assessments")):
-        last = to_date(row.get("last_accepted_date"))
-        state = row.get("state")
-        policy = policies.get(str(row.get("policy_id")), {})
-        row_evaluated = row.get("evaluated_on")
-        if last is None:
+    validated_health: list[tuple[Mapping[str, Any], date | None]] = []
+    for position, row in enumerate(health_rows):
+        if row is None:
             continue
+        path = f"$.assessments[{position}]"
+        state = row.get("state")
+        policy_id = row.get("policy_id")
         entity = (
             f"{row.get('provider_id')}:{row.get('subject_id')}:"
             f"{row.get('lane')}:{row.get('fact_type')}"
         )
+        if not isinstance(state, str) or state not in {
+            "FRESH",
+            "LATE",
+            "STALE",
+            "UNAVAILABLE",
+            "FINITE_COMPLETE",
+        }:
+            yield authority(
+                entity,
+                {"state": state},
+                "declared freshness state",
+                f"{path}.state",
+                "freshness assessment state is missing or invalid",
+            )
+            continue
+        row_evaluated_raw = row.get("evaluated_on")
+        row_evaluated = canonical_day(row_evaluated_raw)
+        if row_evaluated is None or row_evaluated != evaluated:
+            yield authority(
+                entity,
+                {"evaluated_on": row_evaluated_raw},
+                {"evaluated_on": evaluated.isoformat()},
+                f"{path}.evaluated_on",
+                "freshness row clock differs from its operational root",
+            )
+
+        policy = policy_map.get(policy_id) if isinstance(policy_id, str) else None
+        if policy is None:
+            yield authority(
+                entity,
+                {"policy_id": policy_id},
+                "a unique declared freshness policy",
+                f"{path}.policy_id",
+                "freshness assessment references an unknown or ambiguous policy",
+            )
+
+        required = row.get("required_for_current")
+        if type(required) is not bool:
+            yield authority(
+                entity,
+                {"required_for_current": required},
+                "boolean required_for_current",
+                f"{path}.required_for_current",
+                "freshness current-requirement metadata is invalid",
+            )
+
+        has_observation = "last_accepted_date" in row
+        raw_last = row.get("last_accepted_date")
+        last = canonical_day(raw_last)
+        observation_valid = False
+        if not has_observation:
+            yield authority(
+                entity,
+                {"last_accepted_date": "missing"},
+                "canonical date or explicit null with UNAVAILABLE state",
+                f"{path}.last_accepted_date",
+                "freshness observation date is missing",
+            )
+        elif raw_last is None:
+            observation_valid = state == "UNAVAILABLE"
+            if not observation_valid:
+                yield authority(
+                    entity,
+                    {"last_accepted_date": None, "state": state},
+                    "explicit null only with UNAVAILABLE state",
+                    f"{path}.last_accepted_date",
+                    "freshness observation date is null for a non-UNAVAILABLE state",
+                )
+        elif last is None:
+            yield authority(
+                entity,
+                {"last_accepted_date": raw_last},
+                "canonical ISO observation date",
+                f"{path}.last_accepted_date",
+                "freshness observation date is invalid",
+            )
+        else:
+            observation_valid = True
+            if last > evaluated:
+                yield authority(
+                    entity,
+                    {"last_accepted_date": raw_last},
+                    {"on_or_before_evaluated_on": evaluated.isoformat()},
+                    f"{path}.last_accepted_date",
+                    "freshness observation is later than its operational evaluation date",
+                )
+
+        if policy is None:
+            continue
+
         subject_is_retired = (
             row.get("subject_type") == "STRATEGY"
             and active_strategies is not None
             and str(row.get("subject_id")) not in active_strategies
         )
-        if row.get("required_for_current") is True and (
-            subject_is_retired or (policy.get("mode") == "FINITE" and last < cutoff)
-        ):
+        mode = policy.get("mode")
+        if required is True and (subject_is_retired or mode == "FINITE"):
             yield _finding(
                 "dates.freshness_vs_cutoff",
                 BLOCKER_AUTHORITY,
@@ -4849,33 +5078,50 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 ("D7",),
                 "a retired or finite, ended source is counted as required-current",
             )
-        if policy.get("mode") == "FINITE":
+
+        if not observation_valid:
+            if mode == "FINITE" and state != "UNAVAILABLE":
+                yield authority(
+                    entity,
+                    {"state": state, "last_accepted_date": raw_last},
+                    "UNAVAILABLE with explicit null observation for finite policy",
+                    path,
+                    "finite freshness state contradicts its missing observation",
+                )
             continue
-        stale_after = policy.get("stale_after_days")
-        grace = policy.get("grace_days")
-        interval = policy.get("expected_interval_days")
-        if (
-            row_evaluated != evaluated.isoformat()
-            or policy.get("calendar") not in {"CALENDAR_DAY", "WEEKDAY_SESSION"}
-            or not isinstance(stale_after, int)
-            or not isinstance(grace, int)
-            or not isinstance(interval, int)
-            or interval <= 0
-        ):
-            yield _finding(
-                "dates.freshness_vs_cutoff",
-                BLOCKER_AUTHORITY,
-                entity,
-                {"evaluated_on": row_evaluated, "policy": policy},
-                {"evaluated_on": evaluated.isoformat(), "policy": "complete recurring policy"},
-                FRESHNESS,
-                f"$.assessments[{position}]",
-                ("B12",),
-                "freshness operating clock or recurring policy is incomplete",
-            )
+        if mode == "FINITE":
+            expected_finite_state = "FINITE_COMPLETE" if last is not None else "UNAVAILABLE"
+            if state != expected_finite_state:
+                yield authority(
+                    entity,
+                    {"state": state, "last_accepted_date": raw_last},
+                    f"{expected_finite_state} with the matching finite observation state",
+                    f"{path}.state",
+                    "finite freshness state contradicts its observed history",
+                )
+            validated_health.append((row, last))
             continue
+
+        if mode != "RECURRING":
+            # The policy row already emitted an authority finding above.
+            continue
+        if last is None:
+            # An explicit null plus UNAVAILABLE is an honest absence. The owning
+            # producer carries its required/blocking semantics separately.
+            validated_health.append((row, None))
+            continue
+
+        interval = policy["expected_interval_days"]
+        grace = policy["grace_days"]
+        stale_after = policy["stale_after_days"]
         age = _age(policy, last, evaluated)
-        expected_state = "STALE" if age > stale_after else "LATE" if age > grace else "FRESH"
+        expected_state = (
+            "STALE"
+            if age > stale_after
+            else "LATE"
+            if age > interval + grace
+            else "FRESH"
+        )
         if state != expected_state:
             yield _finding(
                 "dates.freshness_vs_cutoff",
@@ -4884,32 +5130,190 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 {"state": state, "last_accepted_date": row.get("last_accepted_date")},
                 {"state": expected_state, "evaluated_on": evaluated},
                 FRESHNESS,
-                f"$.assessments[{position}].state",
+                f"{path}.state",
                 ("D7",),
                 "freshness state differs from the declared operating policy and clock",
             )
-    for position, row in enumerate(
-        rows(node(ctx.report, "hwm_summary"), "uncovered_details")
-    ):
-        last = to_date(row.get("last_accepted_date"))
+
+        validated_health.append((row, last))
+
+    # Mirror only the selected evidence identity needed to verify the report's
+    # copied HWM freshness. This is independent of the report builder and never
+    # substitutes PROVIDER evidence for an ACCOUNT_LIVE NAV path.
+    state_rank = {
+        "UNAVAILABLE": 5,
+        "STALE": 4,
+        "LATE": 3,
+        "FRESH": 2,
+        "FINITE_COMPLETE": 1,
+    }
+    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
+        # Some compact acceptance fixtures retain legacy HWM date labels but do
+        # not claim an evaluated HWM result. Require the complete operational
+        # status or a NAV endpoint before binding these copied labels.
         if (
-            last is not None
-            and last >= cutoff
-            and row.get("freshness_state") in ("STALE", "LATE")
+            row.get("hwm_freshness_status") is None
+            and row.get("nav_observed_end") is None
         ):
-            yield _finding(
-                "dates.freshness_vs_cutoff",
-                BLOCKER_INVARIANT,
-                f"hwm:{row.get('strategy_id')}",
+            continue
+        fields = (
+            "hwm_freshness_observed_end",
+            "hwm_freshness_state",
+            "hwm_freshness_status",
+            "nav_evidence_layer",
+        )
+        if not any(row.get(field) is not None for field in fields):
+            continue
+        entity = f"strategy:{row.get('strategy_id')}"
+        path = f"$.strategy_summary[{position}]"
+        layer = row.get("nav_evidence_layer")
+        eligible_lanes = (
+            {"PROVIDER"}
+            if layer == "PROVIDER_LIVE"
+            else {"ACCOUNT", "LEGACY"}
+            if layer == "ACCOUNT_LIVE"
+            else None
+        )
+        if eligible_lanes is None:
+            yield authority(
+                entity,
+                {"nav_evidence_layer": layer},
+                "ACCOUNT_LIVE or PROVIDER_LIVE evidence layer",
+                f"{path}.nav_evidence_layer",
+                "HWM freshness is not bound to a recognized NAV evidence lane",
+            )
+            continue
+        candidates = [
+            (assessment, last)
+            for assessment, last in validated_health
+            if assessment.get("subject_id") == row.get("strategy_id")
+            and assessment.get("subject_type") == "STRATEGY"
+            and assessment.get("lane") in eligible_lanes
+        ]
+        if not candidates:
+            if (
+                row.get("hwm_freshness_status") == "UNAVAILABLE"
+                and row.get("hwm_freshness_state") is None
+                and row.get("hwm_freshness_observed_end") is None
+                and row.get("nav_observed_end") is None
+            ):
+                continue
+            yield authority(
+                entity,
                 {
-                    "freshness_state": row.get("freshness_state"),
-                    "last_accepted_date": row.get("last_accepted_date"),
+                    "nav_evidence_layer": layer,
+                    "hwm_freshness_state": row.get("hwm_freshness_state"),
+                    "hwm_freshness_observed_end": row.get("hwm_freshness_observed_end"),
                 },
-                {"freshness_state": "FRESH", "declared_cutoff": cutoff},
-                REPORT,
-                f"$.hwm_summary.uncovered_details[{position}].freshness_state",
-                ("B12",),
-                "HWM sleeve excluded as stale although accepted through the cutoff",
+                "one matching health assessment in the selected evidence lane",
+                f"{path}.hwm_freshness_state",
+                "HWM freshness has no matching health evidence in its selected lane",
+            )
+            continue
+        selected_key = max(
+            (state_rank.get(str(assessment.get("state")), 6), str(assessment.get("lane")))
+            for assessment, _last in candidates
+        )
+        selected = [
+            (assessment, last)
+            for assessment, last in candidates
+            if (
+                state_rank.get(str(assessment.get("state")), 6),
+                str(assessment.get("lane")),
+            )
+            == selected_key
+        ]
+        selected_values = {
+            (assessment.get("state"), last)
+            for assessment, last in selected
+        }
+        if len(selected_values) != 1:
+            yield authority(
+                entity,
+                [
+                    {
+                        "lane": assessment.get("lane"),
+                        "state": assessment.get("state"),
+                        "last_accepted_date": last.isoformat() if last else None,
+                    }
+                    for assessment, last in selected
+                ],
+                "one unambiguous selected-lane freshness state and date",
+                f"{path}.hwm_freshness_state",
+                "HWM freshness evidence is ambiguous in the selected lane",
+            )
+            continue
+        selected_state, selected_day = next(iter(selected_values))
+        raw_hwm_day = row.get("hwm_freshness_observed_end")
+        hwm_day = canonical_day(raw_hwm_day) if raw_hwm_day is not None else None
+        raw_nav_day = row.get("nav_observed_end")
+        nav_day = canonical_day(raw_nav_day) if raw_nav_day is not None else None
+        if (raw_hwm_day is not None and hwm_day is None) or (
+            raw_nav_day is not None and nav_day is None
+        ):
+            yield authority(
+                entity,
+                {"hwm_freshness_observed_end": raw_hwm_day, "nav_observed_end": raw_nav_day},
+                "canonical HWM and NAV observation dates",
+                f"{path}.hwm_freshness_observed_end",
+                "HWM evidence observation date is invalid",
+            )
+            continue
+        truncated_at_boundary = (
+            nav_day is not None
+            and selected_day is not None
+            and nav_day == cutoff
+            and selected_day > nav_day
+        )
+        boundary_mismatch = (
+            nav_day is not None
+            and selected_day is not None
+            and nav_day != selected_day
+            and not truncated_at_boundary
+        )
+        expected_boundary_match = (
+            None
+            if nav_day is None or selected_day is None
+            else not boundary_mismatch
+        )
+        blockers = any(
+            assessment.get("blocks_current_consumers") is True
+            or assessment.get("state") in {"STALE", "UNAVAILABLE"}
+            for assessment, _last in candidates
+        )
+        expected_status = (
+            "BOUNDARY_MISMATCH"
+            if boundary_mismatch
+            else "BLOCKED"
+            if blockers
+            else "ACCEPTED"
+        )
+        mismatch = (
+            row.get("hwm_freshness_state") != selected_state
+            or hwm_day != selected_day
+            or row.get("hwm_freshness_status") != expected_status
+            or row.get("hwm_freshness_boundary_matches_evidence")
+            != expected_boundary_match
+        )
+        if mismatch:
+            yield authority(
+                entity,
+                {
+                    "hwm_freshness_state": row.get("hwm_freshness_state"),
+                    "hwm_freshness_observed_end": raw_hwm_day,
+                    "hwm_freshness_status": row.get("hwm_freshness_status"),
+                    "nav_evidence_layer": layer,
+                },
+                {
+                    "hwm_freshness_state": selected_state,
+                    "hwm_freshness_observed_end": (
+                        selected_day.isoformat() if selected_day else None
+                    ),
+                    "hwm_freshness_status": expected_status,
+                    "hwm_freshness_boundary_matches_evidence": expected_boundary_match,
+                },
+                f"{path}.hwm_freshness_state",
+                "strategy HWM freshness does not match its selected health lane, date, and state",
             )
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         end = to_date(row.get("hwm_freshness_observed_end"))
