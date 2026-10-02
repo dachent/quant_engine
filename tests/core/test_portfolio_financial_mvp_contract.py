@@ -4514,3 +4514,56 @@ def test_hand_edit_of_generated_view_is_detected(tmp_path: Path) -> None:
     summary.write_text("hand edited\n", encoding="utf-8")
     with pytest.raises(contract_tool.FinancialMvpContractError, match="view drift"):
         contract_tool.check_views(contract, tmp_path)
+
+
+def _cr2_optional_custody_contract() -> dict[str, object]:
+    contract = _contract()
+    invested = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"]
+    assert isinstance(invested, dict)
+    decision = copy.deepcopy(invested["negative_net_contributions"])
+    decision["plain_language"] = "Provider custody perimeter is explicitly approved."
+    invested["provider_custody_perimeter"] = decision
+    receipts = invested["owner_decision_receipts"]
+    assert isinstance(receipts, dict)
+    receipt = copy.deepcopy(receipts["NEGATIVE_NET_CONTRIBUTIONS"])
+    receipt["decision_id"] = "PROVIDER_CUSTODY_PERIMETER"
+    receipts["PROVIDER_CUSTODY_PERIMETER"] = receipt
+    receipt["payload_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"decision": decision})
+    ).hexdigest()
+    return contract
+
+
+def test_cr2_optional_custody_valid_six_pair_validates_schema_and_contract() -> None:
+    contract = _cr2_optional_custody_contract()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert list(Draft202012Validator(schema).iter_errors(contract)) == []
+    _validate(contract)
+
+
+def test_cr2_optional_custody_five_base_contract_still_validates() -> None:
+    _validate(_contract())
+
+
+@pytest.mark.parametrize("half", ("decision", "receipt"))
+def test_cr2_optional_custody_one_sided_pair_fails(half: str) -> None:
+    contract = _cr2_optional_custody_contract()
+    invested = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"]
+    assert isinstance(invested, dict)
+    if half == "decision":
+        invested["owner_decision_receipts"].pop("PROVIDER_CUSTODY_PERIMETER")
+    else:
+        invested.pop("provider_custody_perimeter")
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="custody"):
+        _validate(contract)
+
+
+@pytest.mark.parametrize("field,value", (("decision_id", "WRONG"), ("authority_issue", 318), ("payload_sha256", "0" * 64)))
+def test_cr2_optional_custody_receipt_mutations_fail(field: str, value: object) -> None:
+    contract = _cr2_optional_custody_contract()
+    invested = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"]
+    assert isinstance(invested, dict)
+    invested["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"][field] = value
+    with pytest.raises(contract_tool.FinancialMvpContractError):
+        _validate(contract)

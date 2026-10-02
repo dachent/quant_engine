@@ -60,13 +60,15 @@ DECOMPOSITION_LENSES: Final = (
 )
 EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
-OWNER_DECISION_IDS: Final = (
+REQUIRED_OWNER_DECISION_IDS: Final = (
     "MARGIN_AND_LEVERAGE",
     "PREDECESSOR_TRANSITION",
     "CORRECTION_REVERSAL",
     "NEGATIVE_NET_CONTRIBUTIONS",
     "FX_BASE_CURRENCY",
 )
+OPTIONAL_OWNER_DECISION_ID: Final = "PROVIDER_CUSTODY_PERIMETER"
+OWNER_DECISION_IDS: Final = (*REQUIRED_OWNER_DECISION_IDS, OPTIONAL_OWNER_DECISION_ID)
 REQUIRED_SOURCE_CLASSES: Final = frozenset(
     {
         "ACCOUNT_NAV",
@@ -2029,6 +2031,11 @@ def _owner_decision_payloads(
             "decision": policy.get("negative_net_contributions")
         },
         "FX_BASE_CURRENCY": {"decision": policy.get("fx_base_currency")},
+        **(
+            {OPTIONAL_OWNER_DECISION_ID: {"decision": policy["provider_custody_perimeter"]}}
+            if "provider_custody_perimeter" in policy
+            else {}
+        ),
     }
 
 
@@ -2050,16 +2057,26 @@ def _owner_decision_payload_digests(
     }
 
 
+def _active_owner_decision_ids(policy: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(_owner_decision_payloads(policy))
+
+
 def _validate_owner_decision_receipts(policy: Mapping[str, Any]) -> None:
     receipts = _object(
         policy.get("owner_decision_receipts"),
         "invested-capital owner_decision_receipts",
     )
-    _strict_keys(
-        receipts,
-        set(OWNER_DECISION_IDS),
-        "invested-capital owner_decision_receipts",
-    )
+    receipt_ids = set(receipts)
+    has_decision = "provider_custody_perimeter" in policy
+    has_receipt = OPTIONAL_OWNER_DECISION_ID in receipt_ids
+    if has_decision != has_receipt:
+        raise FinancialMvpContractError(
+            "provider custody decision and receipt must be paired"
+        )
+    active_ids = (*REQUIRED_OWNER_DECISION_IDS, *(
+        (OPTIONAL_OWNER_DECISION_ID,) if has_decision else ()
+    ))
+    _strict_keys(receipts, set(active_ids), "invested-capital owner_decision_receipts")
     payload_digests = _owner_decision_payload_digests(policy)
     treatments = _object(
         policy["classification_treatments"],
@@ -2081,6 +2098,11 @@ def _validate_owner_decision_receipts(policy: Mapping[str, Any]) -> None:
             policy["negative_net_contributions"]["approval_evidence"]
         },
         "FX_BASE_CURRENCY": {policy["fx_base_currency"]["approval_evidence"]},
+        **(
+            {OPTIONAL_OWNER_DECISION_ID: {policy["provider_custody_perimeter"]["approval_evidence"]}}
+            if has_decision
+            else {}
+        ),
     }
     receipt_keys = {
         "approved_on",
@@ -2093,7 +2115,7 @@ def _validate_owner_decision_receipts(policy: Mapping[str, Any]) -> None:
         "payload_sha256",
         "policy_owner_issue",
     }
-    for decision_id in OWNER_DECISION_IDS:
+    for decision_id in active_ids:
         receipt = _object(receipts[decision_id], f"owner receipt {decision_id}")
         _strict_keys(receipt, receipt_keys, f"owner receipt {decision_id}")
         if receipt["decision_id"] != decision_id:
@@ -2196,8 +2218,9 @@ def owner_receipt_evidence_record(
         policy["owner_decision_receipts"],
         "invested-capital owner_decision_receipts",
     )
-    selected_ids = tuple(decision_ids or OWNER_DECISION_IDS)
-    if not selected_ids or not set(selected_ids) <= set(OWNER_DECISION_IDS):
+    active_ids = _active_owner_decision_ids(policy)
+    selected_ids = tuple(decision_ids or active_ids)
+    if not selected_ids or not set(selected_ids) <= set(active_ids):
         raise FinancialMvpContractError("owner evidence decision set differs")
     approval_urls = {receipts[key]["evidence_url"] for key in selected_ids}
     approved_dates = {receipts[key]["approved_on"] for key in selected_ids}
@@ -2229,9 +2252,10 @@ def reconcile_owner_receipt_evidence(
         policy["owner_decision_receipts"],
         "invested-capital owner_decision_receipts",
     )
-    approval_comment_ids = {receipts[key]["comment_id"] for key in OWNER_DECISION_IDS}
+    active_ids = _active_owner_decision_ids(policy)
+    approval_comment_ids = {receipts[key]["comment_id"] for key in active_ids}
     digest_comment_ids = {
-        receipts[key]["digest_comment_id"] for key in OWNER_DECISION_IDS
+        receipts[key]["digest_comment_id"] for key in active_ids
     }
     required_comment_ids = approval_comment_ids | digest_comment_ids
     if set(comments) != required_comment_ids:
@@ -2251,7 +2275,7 @@ def reconcile_owner_receipt_evidence(
                 f"owner evidence comment was edited: {comment_id}"
             )
 
-    for decision_id in OWNER_DECISION_IDS:
+    for decision_id in active_ids:
         receipt = receipts[decision_id]
         approval_url = (
             "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
@@ -2279,7 +2303,7 @@ def reconcile_owner_receipt_evidence(
     for digest_comment_id in sorted(digest_comment_ids):
         decision_ids = tuple(
             decision_id
-            for decision_id in OWNER_DECISION_IDS
+            for decision_id in active_ids
             if receipts[decision_id]["digest_comment_id"] == digest_comment_id
         )
         record = _owner_receipt_record(comments[digest_comment_id].get("body"))
@@ -2300,7 +2324,7 @@ def reconcile_owner_receipt_evidence(
             record["decision_payload_sha256"],
             "owner digest comment decision_payload_sha256",
         )
-        if not record_digests or not set(record_digests) <= set(OWNER_DECISION_IDS):
+        if not record_digests or not set(record_digests) <= set(active_ids):
             raise FinancialMvpContractError("owner digest decision set differs")
         for recorded_id, recorded_digest in record_digests.items():
             _hash(recorded_digest, f"owner digest {recorded_id}")
@@ -2336,7 +2360,7 @@ def fetch_owner_evidence_comments(
     )
     comment_ids = {
         receipts[decision_id][field]
-        for decision_id in OWNER_DECISION_IDS
+        for decision_id in _active_owner_decision_ids(policy)
         for field in ("comment_id", "digest_comment_id")
     }
     comments: dict[int, dict[str, Any]] = {}
@@ -4744,9 +4768,7 @@ def _validate_outcomes(
             if contract.get("missing_infrastructure") != "FAIL_REQUIRED_OUTCOME":
                 raise FinancialMvpContractError("HWM absence rule differs")
         elif outcome_id == "INVESTED_CAPITAL":
-            _strict_keys(
-                contract,
-                {
+            invested_contract_keys = {
                     "change_control",
                     "classification_treatments",
                     "definition",
@@ -4766,8 +4788,11 @@ def _validate_outcomes(
                     "policy_schema_version",
                     "policy_status",
                     "shared_flow_contract",
-                },
-                "INVESTED_CAPITAL.calculation_contract",
+            }
+            if "provider_custody_perimeter" in contract:
+                invested_contract_keys.add("provider_custody_perimeter")
+            _strict_keys(
+                contract, invested_contract_keys, "INVESTED_CAPITAL.calculation_contract"
             )
             if row["owner_issue"] != 318:
                 raise FinancialMvpContractError(
@@ -4940,15 +4965,17 @@ def _validate_outcomes(
                     raise FinancialMvpContractError(
                         f"product-defined invested-capital treatment differs: {flow_class}"
                     )
+            global_decision_names = (
+                "flow_timing",
+                "fx_base_currency",
+                "negative_net_contributions",
+                *( ("provider_custody_perimeter",) if "provider_custody_perimeter" in contract else () ),
+            )
             global_decisions = {
                 name: _validate_policy_decision(
                     contract.get(name), f"invested-capital {name}"
                 )
-                for name in (
-                    "flow_timing",
-                    "fx_base_currency",
-                    "negative_net_contributions",
-                )
+                for name in global_decision_names
             }
             all_decisions = [*decisions.values(), *global_decisions.values()]
             _validate_leverage_accounting(
@@ -6831,7 +6858,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "|---|---|---|---|---|",
         ]
     )
-    for decision_id in OWNER_DECISION_IDS:
+    for decision_id in _active_owner_decision_ids(invested):
         receipt = _object(receipts[decision_id], f"owner receipt {decision_id}")
         lines.append(
             f"| {decision_id} | {receipt['approved_on']} | "
@@ -7290,7 +7317,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         "invested_capital_policy_sha256": invested_policy_digest,
         "owner_decision_receipts": {
             decision_id: receipts[decision_id]["payload_sha256"]
-            for decision_id in OWNER_DECISION_IDS
+            for decision_id in _active_owner_decision_ids(invested)
         },
         "history_corrections": history,
         "current_census": census,
