@@ -45,6 +45,7 @@
     "weekly_returns"
   ],
   "properties": {
+    "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital"},
     "panel_schema_version": { "enum": [21, 22] },
     "account_manifest": {
       "anyOf": [
@@ -934,6 +935,802 @@
     }
   ],
   "$defs": {
+    "custody_handoff_current_capital": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "currency",
+        "retained_excluded",
+        "reserve",
+        "strategies",
+        "systematic",
+        "total_liquid",
+        "valuation_date",
+        "weight_basis"
+      ],
+      "properties": {
+        "custody_authority": {
+          "$ref": "#/$defs/custody_handoff_custody_authority"
+        },
+        "basis": {
+          "const": "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE"
+        },
+        "currency": {
+          "const": "USD"
+        },
+        "retained_excluded": {
+          "$ref": "#/$defs/custody_handoff_current_aggregate"
+        },
+        "reserve": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/custody_handoff_current_aggregate"
+            },
+            {
+              "required": [
+                "members"
+              ]
+            }
+          ]
+        },
+        "strategies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/custody_handoff_current_strategy"
+          }
+        },
+        "systematic": {
+          "$ref": "#/$defs/custody_handoff_current_aggregate"
+        },
+        "total_liquid": {
+          "$ref": "#/$defs/custody_handoff_current_aggregate"
+        },
+        "valuation_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "weight_basis": {
+          "const": "CURRENT_CUTOFF"
+        }
+      }
+    },
+    "custody_handoff_custody_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger_generation_id",
+        "ledger_catalog_sha256",
+        "ledger_manifest_sha256",
+        "admission_receipt_sha256",
+        "contract_raw_sha256",
+        "contract_semantic_sha256",
+        "census_sha256",
+        "invested_capital_policy_sha256",
+        "census_id"
+      ],
+      "properties": {
+        "ledger_generation_id": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "ledger_catalog_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "ledger_manifest_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "admission_receipt_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "contract_raw_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "contract_semantic_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "census_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "invested_capital_policy_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "census_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "custody_handoff_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "custody_handoff_current_aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_date",
+        "components",
+        "current_value",
+        "reason",
+        "status"
+      ],
+      "properties": {
+        "as_of_date": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "current_value": {
+          "$ref": "#/$defs/custody_handoff_usd_amount"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/custody_handoff_reserve_member"
+          }
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/custody_handoff_capital_status"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "current_value": {
+                "properties": {
+                  "status": {
+                    "const": "AVAILABLE"
+                  }
+                }
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "NOT_READY_AT_CUTOFF"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "as_of_date": {
+                "type": "null"
+              },
+              "current_value": {
+                "properties": {
+                  "status": {
+                    "const": "UNAVAILABLE"
+                  }
+                }
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "custody_handoff_nullable_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date"
+    },
+    "custody_handoff_usd_amount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "status",
+        "value"
+      ],
+      "properties": {
+        "currency": {
+          "const": "USD"
+        },
+        "status": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "UNAVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "custody_handoff_reserve_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "as_of_date",
+        "authority",
+        "nav_record_id",
+        "provider",
+        "status",
+        "value"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "as_of_date": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "authority": {
+          "enum": [
+            "AUTHORITATIVE",
+            "NAV_NOT_AUTHORITATIVE",
+            "NO_NAV"
+          ]
+        },
+        "nav_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/custody_handoff_capital_status"
+        },
+        "value": {
+          "$ref": "#/$defs/custody_handoff_usd_amount"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "authority": {
+                "const": "AUTHORITATIVE"
+              },
+              "value": {
+                "properties": {
+                  "status": {
+                    "const": "AVAILABLE"
+                  }
+                }
+              },
+              "as_of_date": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "NOT_READY_AT_CUTOFF"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "authority": {
+                "enum": [
+                  "NAV_NOT_AUTHORITATIVE",
+                  "NO_NAV"
+                ]
+              },
+              "value": {
+                "properties": {
+                  "status": {
+                    "const": "UNAVAILABLE"
+                  }
+                }
+              },
+              "as_of_date": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "custody_handoff_capital_status": {
+      "enum": [
+        "AVAILABLE",
+        "NOT_READY_AT_CUTOFF"
+      ]
+    },
+    "custody_handoff_current_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_date",
+        "current_value",
+        "current_weight",
+        "members",
+        "reason",
+        "scope",
+        "status",
+        "strategy_id"
+      ],
+      "properties": {
+        "as_of_date": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "current_value": {
+          "$ref": "#/$defs/custody_handoff_usd_amount"
+        },
+        "current_weight": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/custody_handoff_current_member"
+          }
+        },
+        "derived_cash": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/custody_handoff_custody_cash"
+          }
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "scope": {
+          "enum": [
+            "SYSTEMATIC",
+            "RETAINED_EXCLUDED"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/custody_handoff_capital_status"
+        },
+        "strategy_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "as_of_date": {
+                "type": "string"
+              },
+              "current_value": {
+                "properties": {
+                  "status": {
+                    "const": "AVAILABLE"
+                  }
+                }
+              },
+              "members": {
+                "minItems": 1
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "NOT_READY_AT_CUTOFF"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "as_of_date": {
+                "type": "null"
+              },
+              "current_value": {
+                "properties": {
+                  "status": {
+                    "const": "UNAVAILABLE"
+                  }
+                }
+              },
+              "current_weight": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "RETAINED_EXCLUDED"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "current_weight": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "custody_handoff_current_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "as_of_date",
+        "assignment_ids",
+        "effective_end",
+        "effective_start",
+        "nav_record_id",
+        "source_key",
+        "status",
+        "value"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "as_of_date": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "assignment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "effective_end": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "effective_start": {
+          "$ref": "#/$defs/custody_handoff_nullable_date"
+        },
+        "nav_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/custody_handoff_capital_status"
+        },
+        "value": {
+          "$ref": "#/$defs/custody_handoff_usd_amount"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "AVAILABLE"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "properties": {
+                  "status": {
+                    "const": "AVAILABLE"
+                  }
+                }
+              },
+              "as_of_date": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "NOT_READY_AT_CUTOFF"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "properties": {
+                  "status": {
+                    "const": "UNAVAILABLE"
+                  }
+                }
+              },
+              "as_of_date": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "custody_handoff_custody_cash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "provider_id",
+        "as_of_date",
+        "basis",
+        "status",
+        "current_value",
+        "events"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "basis": {
+          "const": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
+        },
+        "status": {
+          "const": "AVAILABLE"
+        },
+        "current_value": {
+          "$ref": "#/$defs/custody_handoff_usd_amount"
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/custody_handoff_custody_cash_event"
+          }
+        }
+      }
+    },
+    "custody_handoff_custody_cash_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_date",
+        "record_id",
+        "event_sha256",
+        "native_currency",
+        "native_value",
+        "event_time_fx",
+        "signed_usd"
+      ],
+      "properties": {
+        "event_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_sha256": {
+          "$ref": "#/$defs/custody_handoff_sha256"
+        },
+        "native_currency": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_time_fx": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "base_currency",
+                "currency",
+                "date",
+                "field",
+                "generation_id",
+                "provider",
+                "rate",
+                "source_artifact_id",
+                "timing"
+              ],
+              "properties": {
+                "base_currency": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "currency": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "field": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "generation_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "provider": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rate": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "timing": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signed_usd": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "leverage_disclosure": {
       "type": "object",
       "additionalProperties": true,

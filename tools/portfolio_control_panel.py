@@ -3615,7 +3615,21 @@ def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
         raise ControlPanelValidationError(
             "accepted report portfolio dimensions must be non-empty"
         )
-    return {**_capital_summary(summary), "counts": counts}
+    result = {**_capital_summary(summary), "counts": counts}
+    custody = report.get("custody_current_capital")
+    if custody is not None:
+        from portfolio_report import _current_capital
+
+        try:
+            _current_capital({"current_capital": custody})
+        except (RuntimeError, ValueError) as exc:
+            raise ControlPanelValidationError(
+                f"custody current capital: {exc}"
+            ) from exc
+        if not isinstance(custody, dict) or not custody.get("custody_authority"):
+            raise ControlPanelValidationError("custody cash lacks admitted authority")
+        result["custody_current_capital"] = custody
+    return result
 
 
 def _fact_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -8338,7 +8352,15 @@ def _panel_data(
     )
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
-    _report_panel_expectations(report)
+    report_capital_expectations = _report_panel_expectations(report)
+    if report_capital_expectations.get("custody_current_capital") != (
+        baseline_catalog.get("current_capital")
+        if baseline_catalog.get("current_capital", {}).get("custody_authority")
+        else None
+    ):
+        raise ControlPanelValidationError(
+            "custody report differs from selected baseline"
+        )
     # The capital block the panel publishes is the governed baseline's current
     # capital as the report carried it; the report's rows are reconciled with the
     # baseline here and with the panel's own strategy rows below.
@@ -9441,6 +9463,15 @@ def _panel_data(
         ),
         "account_manifest": (
             dict(account_manifest) if account_manifest is not None else None
+        ),
+        **(
+            {
+                "custody_current_capital": report_capital_expectations[
+                    "custody_current_capital"
+                ]
+            }
+            if "custody_current_capital" in report_capital_expectations
+            else {}
         ),
         "capital": capital_parts["capital"],
         "capital_as_of": capital_parts["capital_as_of"],
@@ -11687,6 +11718,8 @@ def verify_candidate(
             data["capital"] == report_expectations["capital"]
             and data["capital_status"] == report_expectations["capital_status"]
             and data["capital_as_of"] == report_expectations["capital_as_of"]
+            and data.get("custody_current_capital")
+            == report_expectations.get("custody_current_capital")
             and not capital_problems,
             {
                 "actual": {

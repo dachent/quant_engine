@@ -1153,3 +1153,28 @@ def test_the_hwm_exception_coverage_row_says_it_shows_current_cutoff_weights(
     assert exception["uncovered_details"][0]["systematic_weight"] == "0.12"
     assert exception["weight_basis"] == "CURRENT_CUTOFF"
     assert fx.unlabeled_weight_paths(rows) == []
+
+
+def test_cr2_custody_report_preserves_member_equality_with_separate_cash():
+    owner = _baseline_test_fixture()
+    case = owner._cr2_custody_cash_case()
+    block = owner.baseline._build_current_capital(**case)
+    assert reporter._current_capital({"current_capital": block}) == block
+    reporter._verify_current_capital_accounts(
+        block,
+        [
+            {
+                "account_id": "acct-a1",
+                "latest_value_usd": "105",
+                "as_of_date": "2026-09-17",
+            }
+        ],
+    )
+
+
+def test_cr2_custody_report_requires_source_authority_for_cash(tmp_path, full):
+    catalog = fx.with_current_capital(full._baseline_catalog())
+    catalog["current_capital"]["custody_authority"] = {"ledger_generation_id": "a" * 64}
+    root = full._published_baseline(tmp_path / "baseline", catalog)
+    with pytest.raises(full.reporter.ReportValidationError, match="custody.*source"):
+        full.reporter.build_report_data(root)

@@ -595,11 +595,14 @@ def _provider_ledger(
     value: object,
     roots: Mapping[str, Path],
     baseline_as_of: date,
+    *,
+    custody_authority: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
     ref = _object(value, "provider_ledger")
     _strict_keys(
         ref,
-        {"catalog_sha256", "generation_id", "manifest_sha256", "root_id"},
+        {"catalog_sha256", "generation_id", "manifest_sha256", "root_id"}
+        | ({"financial_mvp"} if "financial_mvp" in ref else set()),
         "provider_ledger",
     )
     root_id = _identifier(ref["root_id"], "provider_ledger.root_id")
@@ -699,6 +702,56 @@ def _provider_ledger(
             schema_version=str(catalog_schema_version),
         ),
     )
+    if "financial_mvp" in ref:
+        authority, admission, policy = _selected_custody_authority(ref, generation_root)
+        approved_dates = [
+            _date(row["approved_on"], "owner receipt approved_on")
+            for row in policy["owner_decision_receipts"].values()
+        ]
+        authority_date = max(approved_dates)
+        additions = []
+        for name in ("contract", "registry", "schema"):
+            path = Path(ref["financial_mvp"][f"{name}_path"])
+            digest, size = hash_file(path)
+            additions.append(
+                SourceArtifact(
+                    artifact_id=f"authority/financial-mvp/{name}.json",
+                    sha256=digest,
+                    size_bytes=size,
+                    as_of_date=authority_date,
+                    schema_name=f"financial-mvp-admitted-{name}",
+                    schema_version="1",
+                )
+            )
+        receipt_path = generation_root / "admit-or-declare-receipt.json"
+        receipt_digest, receipt_size = hash_file(receipt_path)
+        additions.append(
+            SourceArtifact(
+                artifact_id="authority/provider-admission-receipt.json",
+                sha256=receipt_digest,
+                size_bytes=receipt_size,
+                as_of_date=provider_as_of,
+                schema_name="provider-admission-receipt",
+                schema_version="1",
+            )
+        )
+        artifacts = (*artifacts, *additions)
+        if "provider_custody_perimeter" in policy and custody_authority is not None:
+            custody_authority.update(
+                {
+                    "ledger_generation_id": generation_id,
+                    "ledger_catalog_sha256": actual_catalog_hash,
+                    "ledger_manifest_sha256": actual_manifest_hash,
+                    "admission_receipt_sha256": admission["receipt_sha256"],
+                    "contract_raw_sha256": authority["contract_raw_sha256"],
+                    "contract_semantic_sha256": authority["contract_semantic_sha256"],
+                    "census_id": authority["census_id"],
+                    "census_sha256": authority["census_sha256"],
+                    "invested_capital_policy_sha256": hashlib.sha256(
+                        canonical_json_bytes(policy)
+                    ).hexdigest(),
+                }
+            )
     links = [
         {
             "artifact_id": item.artifact_id,
@@ -706,11 +759,78 @@ def _provider_ledger(
             "schema_name": item.schema_name,
             "schema_version": item.schema_version,
             "sha256": item.sha256,
-            "source_key": "provider-ledger-generation",
+            "source_key": (
+                "selected-custody-authority"
+                if item.artifact_id.startswith("authority/")
+                else "provider-ledger-generation"
+            ),
         }
         for item in artifacts
     ]
     return catalog, artifacts, links
+
+
+def _selected_custody_authority(
+    ref: Mapping[str, Any],
+    generation_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Admit only the contract actually bound by the selected ledger receipt."""
+    from provider_ledger import _financial_mvp_authority
+    from portfolio_pipeline_materialize import _provider_admission_authority
+
+    try:
+        authority = _financial_mvp_authority({"financial_mvp": ref["financial_mvp"]})
+        admission = _provider_admission_authority(
+            generation_root,
+            authority["contract"],
+            contract_raw_sha256=authority["contract_raw_sha256"],
+            contract_semantic_sha256=authority["contract_semantic_sha256"],
+            census_sha256=authority["census_sha256"],
+        )
+        for key in ("generation_id", "catalog_sha256", "manifest_sha256"):
+            if admission[key] != ref[key]:
+                raise BaselineValidationError(
+                    "selected custody admission identity differs"
+                )
+        outcomes = authority["contract"]["financial_outcomes"]
+        policy = next(
+            row["calculation_contract"]
+            for row in outcomes
+            if row["outcome_id"] == "INVESTED_CAPITAL"
+        )
+        decision = policy.get("provider_custody_perimeter")
+        if decision is not None:
+            from portfolio_financial_mvp_contract import OPTIONAL_OWNER_DECISION_ID
+
+            treatment = (
+                "PROVIDER_ACCOUNT_ONLY_EXTERNAL_CAPITAL_DEPOSITS_AND_WITHDRAWALS_ARE_"
+                "THE_OWNER_EXTERNAL_FLOWS_AT_EVENT_TIME_FX; SLEEVE_CAPITAL_ANCHORS_ON_"
+                "THAT_ACCOUNT_ARE_ALLOCATIONS_INSIDE_THE_STRATEGY_WITH_ZERO_"
+                "INVESTED_CAPITAL_EFFECT; UNALLOCATED_ACCOUNT_CASH_IS_AN_EXPLICIT_"
+                "STRATEGY_CASH_LINE_NOT_RESERVE_NOT_DROPPED; SLEEVE_NAV_AND_ALLOCATION_"
+                "PATH_REMAIN_THE_RETURN_PATH; NEGATIVE_CASH_LINE_FAILS_CLOSED"
+            )
+            if (
+                admission["admission_gate_status"] != "PASS"
+                or admission["product_readiness"] != "READY_FOR_COMPOSITION"
+            ):
+                raise BaselineValidationError(
+                    "selected custody source is not READY_FOR_COMPOSITION"
+                )
+            if policy["policy_status"] != "READY":
+                raise BaselineValidationError("selected custody policy is not READY")
+            if (
+                decision["decision_status"] != "APPROVED"
+                or decision["decision_authority"] != "OWNER_318"
+                or decision["selected_treatment"] != treatment
+                or OPTIONAL_OWNER_DECISION_ID not in policy["owner_decision_receipts"]
+            ):
+                raise BaselineValidationError(
+                    "selected custody decision is not approved treatment"
+                )
+        return authority, admission, policy
+    except (RuntimeError, ValueError, KeyError, StopIteration, OSError) as exc:
+        raise BaselineValidationError(f"selected custody authority: {exc}") from exc
 
 
 def _roots(value: object) -> dict[str, Path]:
@@ -2399,6 +2519,156 @@ def _strategy_members(
     return members
 
 
+def _derived_custody_cash(
+    provider_catalog: Mapping[str, Any],
+    valuation_date: date,
+) -> dict[str, list[dict[str, Any]]]:
+    """Derive separate cash components from the selected raw admitted events."""
+    from portfolio_invested_capital import _source_effect_usd
+
+    flows = _objects(provider_catalog.get("flows"), "custody flows")
+    anchors = _objects(
+        provider_catalog.get("capital_anchors"), "custody capital anchors"
+    )
+    identities = [
+        _text(row.get("record_id"), "custody record_id") for row in [*flows, *anchors]
+    ]
+    if len(set(identities)) != len(identities):
+        raise BaselineValidationError("custody duplicate source record ID")
+    admissions = _validated_provider_admissions(provider_catalog)
+    owner_flows = [
+        row
+        for row in flows
+        if row.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and row.get("capital_disposition") == "EXTERNAL_CAPITAL"
+    ]
+    if any(row.get("flow_type") != "DEPOSIT_OR_WITHDRAWAL" for row in owner_flows):
+        raise BaselineValidationError(
+            "custody external account flow type is unsupported"
+        )
+    accounts = sorted(
+        {
+            (str(row.get("provider_id")), str(row.get("account_id")))
+            for row in owner_flows
+        }
+    )
+    components: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for provider_id, account_id in accounts:
+        held = [
+            row
+            for row in anchors
+            if row.get("provider_id") == provider_id
+            and row.get("account_id") == account_id
+            and row.get("mapping_status") == "MAPPED"
+            and _date(row.get("event_date"), "custody event date") <= valuation_date
+        ]
+        strategy_ids = {row.get("strategy_id") for row in held}
+        if len(strategy_ids) != 1 or None in strategy_ids:
+            raise BaselineValidationError("custody account strategy set is not unique")
+        strategy_id = _text(next(iter(strategy_ids)), "custody strategy_id")
+        selected = [
+            (row, "flows", Decimal(1))
+            for row in owner_flows
+            if row.get("provider_id") == provider_id
+            and row.get("account_id") == account_id
+        ]
+        selected.extend((row, "capital_anchors", Decimal(-1)) for row in held)
+        if any(
+            row.get("provider_id") == provider_id
+            and row.get("account_id") == account_id
+            and str(row.get("flow_type", "")).startswith("TRANSFER:INTERNAL")
+            for row in flows
+        ):
+            raise BaselineValidationError(
+                "custody ambiguous internal cash movement lacks admitted sleeve semantics"
+            )
+        movements: dict[date, list[Decimal]] = defaultdict(list)
+        events = []
+        for row, fact_type, sign in selected:
+            day = _date(row.get("event_date"), "custody event date")
+            if day > valuation_date:
+                continue
+            if row.get("evidence_layer") != "ACCOUNT_LIVE" or not any(
+                item.provider_id == provider_id
+                and item.account_id == account_id
+                and item.fact_type == fact_type
+                and item.disposition is AdmissionDisposition.AUTHORITATIVE
+                and item.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
+                and item.effective_start <= day <= item.effective_end
+                for item in admissions
+            ):
+                raise BaselineValidationError(
+                    "custody event lacks authoritative account admission"
+                )
+            amount = _object(row.get("amount"), "custody amount")
+            fx = row.get("event_time_fx")
+            if fx is not None:
+                fx = _object(fx, "custody event FX")
+                if (
+                    fx.get("currency") != amount.get("currency")
+                    or fx.get("base_currency") != "USD"
+                    or fx.get("date") != day.isoformat()
+                    or not all(
+                        isinstance(fx.get(key), str) and fx[key]
+                        for key in (
+                            "generation_id",
+                            "source_artifact_id",
+                            "provider",
+                            "field",
+                            "timing",
+                        )
+                    )
+                    or (_decimal(fx.get("rate"), "custody FX rate") or Decimal(0)) <= 0
+                    or _SHA256.fullmatch(str(fx.get("generation_id"))) is None
+                    or (
+                        amount.get("currency") == "USD"
+                        and _decimal(fx.get("rate"), "USD FX") != 1
+                    )
+                ):
+                    raise BaselineValidationError("custody event FX identity differs")
+            try:
+                with localcontext() as context:
+                    context.prec = 100
+                    value = _source_effect_usd(row) * sign
+            except (RuntimeError, ValueError) as exc:
+                raise BaselineValidationError(f"custody event FX: {exc}") from exc
+            movements[day].append(value)
+            events.append(
+                {
+                    "event_date": day.isoformat(),
+                    "record_id": row["record_id"],
+                    "event_sha256": hashlib.sha256(
+                        canonical_json_bytes(row)
+                    ).hexdigest(),
+                    "native_currency": amount["currency"],
+                    "native_value": amount["value"],
+                    "event_time_fx": fx,
+                    "signed_usd": decimal_text(value),
+                }
+            )
+        balance = Decimal(0)
+        for day in sorted(movements):
+            balance = _exact_sum([balance, *movements[day]])
+            if balance < 0:
+                raise BaselineValidationError(
+                    f"custody negative dated closing cash: {account_id} {day}"
+                )
+        components[strategy_id].append(
+            {
+                "account_id": account_id,
+                "provider_id": provider_id,
+                "as_of_date": max(movements).isoformat(),
+                "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
+                "status": _CAPITAL_AVAILABLE,
+                "current_value": _capital_amount(balance),
+                "events": sorted(
+                    events, key=lambda row: (row["event_date"], row["record_id"])
+                ),
+            }
+        )
+    return dict(components)
+
+
 def _build_current_capital(
     *,
     valuation_date: date,
@@ -2408,6 +2678,8 @@ def _build_current_capital(
     nav: Sequence[Mapping[str, Any]],
     provider_admissions: Sequence[Mapping[str, Any]],
     policy_exclusions: Mapping[str, date],
+    provider_catalog: Mapping[str, Any] | None = None,
+    custody_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish the current capital view from NAV facts at ``valuation_date``."""
 
@@ -2437,6 +2709,15 @@ def _build_current_capital(
     latest = _latest_usd_navs(nav, valuation_date)
     vd = valuation_date.isoformat()
 
+    cash = {}
+    if custody_authority:
+        if provider_catalog is None:
+            raise BaselineValidationError("custody raw provider catalog is missing")
+        cash = _derived_custody_cash(provider_catalog, valuation_date)
+        if set(cash) - set(strategy_ids):
+            raise BaselineValidationError(
+                "custody cash references an unregistered strategy"
+            )
     rows: list[dict[str, Any]] = []
     claimed: dict[str, str] = {}
     for strategy_id in strategy_ids:
@@ -2493,8 +2774,25 @@ def _build_current_capital(
                 + ", ".join(missing)
             )
         else:
-            value = _exact_sum(values)
-            as_of = min(days)
+            value = _exact_sum(
+                [
+                    *values,
+                    *[
+                        _decimal(item["current_value"]["value"], "custody cash")
+                        or Decimal(0)
+                        for item in cash.get(strategy_id, [])
+                    ],
+                ]
+            )
+            as_of = min(
+                [
+                    *days,
+                    *[
+                        _date(item["as_of_date"], "custody cash as_of_date")
+                        for item in cash.get(strategy_id, [])
+                    ],
+                ]
+            )
         rows.append(
             {
                 "as_of_date": as_of.isoformat() if as_of is not None else None,
@@ -2509,6 +2807,8 @@ def _build_current_capital(
                 "strategy_id": strategy_id,
             }
         )
+        if strategy_id in cash:
+            rows[-1]["derived_cash"] = cash[strategy_id]
 
     def component(scope: str) -> list[dict[str, Any]]:
         return [row for row in rows if row["scope"] == scope]
@@ -2626,6 +2926,7 @@ def _build_current_capital(
         )
 
     return {
+        **({"custody_authority": dict(custody_authority)} if custody_authority else {}),
         "basis": _CURRENT_CAPITAL_BASIS,
         "currency": "USD",
         "retained_excluded": retained,
@@ -2867,6 +3168,7 @@ def _current_capital_checks(
     assignments: Sequence[Mapping[str, Any]],
     nav: Sequence[Mapping[str, Any]],
     provider_admissions: Sequence[Mapping[str, Any]],
+    provider_catalog: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile the published block with an independent recompute.
 
@@ -2885,6 +3187,7 @@ def _current_capital_checks(
             assignments,
             nav,
             provider_admissions,
+            provider_catalog,
         )
     except BaselineValidationError as exc:
         return [
@@ -2904,6 +3207,7 @@ def _reconcile_current_capital(
     assignments: Sequence[Mapping[str, Any]],
     nav: Sequence[Mapping[str, Any]],
     provider_admissions: Sequence[Mapping[str, Any]],
+    provider_catalog: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rows = _objects(current_capital.get("strategies"), "current_capital.strategies")
     scopes = {
@@ -2916,6 +3220,46 @@ def _reconcile_current_capital(
         nav=nav,
         valuation_date=valuation_date,
     )
+    if current_capital.get("custody_authority"):
+        if provider_catalog is None:
+            raise BaselineValidationError(
+                "custody reconciliation lacks raw provider catalog"
+            )
+        cash = _derived_custody_cash(provider_catalog, valuation_date)
+        for row in rows:
+            strategy_id = str(row["strategy_id"])
+            expected = cash.get(strategy_id, [])
+            if row.get("derived_cash", []) != expected:
+                raise BaselineValidationError(
+                    "custody cash differs from raw event recompute"
+                )
+            value, day, accounts = recomputed[strategy_id]
+            if value is not None:
+                value = _exact_sum(
+                    [
+                        value,
+                        *[
+                            _decimal(
+                                item["current_value"]["value"],
+                                "recomputed custody cash",
+                            )
+                            or Decimal(0)
+                            for item in expected
+                        ],
+                    ]
+                )
+                day = min(
+                    [
+                        day,
+                        *[
+                            _date(item["as_of_date"], "custody date")
+                            for item in expected
+                        ],
+                    ]
+                )
+                recomputed[strategy_id] = (value, day, accounts)
+    elif any(row.get("derived_cash") for row in rows):
+        raise BaselineValidationError("custody cash lacks selected authority")
     capital_check = _strategy_capital_check(rows, scopes, recomputed, valuation_date)
     identity_check = _capital_identity_check(
         current_capital,
@@ -4618,6 +4962,7 @@ def build_catalog(
     # Every provider-ledger flow, admitted or not: used only to annotate the dated
     # audit reserve with what moved after it was observed, never as a capital fact.
     reference_flows: list[dict[str, Any]] = []
+    custody_authority: dict[str, Any] = {}
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -4650,7 +4995,7 @@ def build_catalog(
         )
     elif spec["schema_version"] == SPEC_SCHEMA_VERSION:
         provider_catalog, provider_artifacts, provider_links = _provider_ledger(
-            spec["provider_ledger"], roots, as_of
+            spec["provider_ledger"], roots, as_of, custody_authority=custody_authority
         )
         (
             nav,
@@ -4792,12 +5137,15 @@ def build_catalog(
         nav=nav,
         provider_admissions=provider_admissions,
         policy_exclusions=_hwm_policy_exclusions(),
+        provider_catalog=provider_catalog if custody_authority else None,
+        custody_authority=custody_authority or None,
     )
     current_checks = _current_capital_checks(
         current_capital,
         assignments=assignments,
         nav=nav,
         provider_admissions=provider_admissions,
+        provider_catalog=provider_catalog if custody_authority else None,
     )
     if any(check["status"] == "FAIL" for check in current_checks):
         raise BaselineValidationError(
@@ -4976,6 +5324,10 @@ def build_catalog(
     semantic_provenance = semantic_spec.get("provenance")
     if isinstance(semantic_provenance, dict) and "root" in semantic_provenance:
         semantic_provenance["root"] = "root-id:provenance"
+    selected_financial = semantic_spec.get("provider_ledger", {}).get("financial_mvp")
+    if isinstance(selected_financial, dict):
+        for name in ("contract", "registry", "schema"):
+            selected_financial[f"{name}_path"] = f"authority-id:financial-mvp-{name}"
     semantic_spec_bytes = canonical_json_bytes(semantic_spec)
     spec_artifact = SourceArtifact(
         artifact_id="config/portfolio-baseline-semantic-spec.json",

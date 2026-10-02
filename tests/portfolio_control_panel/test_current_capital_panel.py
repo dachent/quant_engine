@@ -445,3 +445,20 @@ def test_the_hwm_exception_coverage_row_says_it_shows_current_cutoff_weights(
     assert exception["uncovered_details"][0]["systematic_weight"] == "0.12"
     assert exception["weight_basis"] == "CURRENT_CUTOFF"
     assert fx.unlabeled_weight_paths(rows) == []
+
+
+def test_cr2_custody_panel_expectations_preserve_validated_cash_component():
+    owner = _load(
+        "cr2_custody_panel_baseline_fixture",
+        REPOSITORY_ROOT / "tests/portfolio_baseline/test_portfolio_baseline.py",
+    )
+    block = owner.baseline._build_current_capital(**owner._cr2_custody_cash_case())
+    report = _report(_summary())
+    report["custody_current_capital"] = block
+    expectations = panel._report_panel_expectations(report)
+    assert expectations["custody_current_capital"] == block
+    report["custody_current_capital"]["strategies"][0]["derived_cash"][0][
+        "current_value"
+    ]["value"] = "5"
+    with pytest.raises(panel.ControlPanelValidationError, match="custody|members"):
+        panel._report_panel_expectations(report)

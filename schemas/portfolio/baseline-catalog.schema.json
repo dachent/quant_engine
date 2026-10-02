@@ -352,6 +352,192 @@
     }
   ],
   "$defs": {
+    "custody_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger_generation_id",
+        "ledger_catalog_sha256",
+        "ledger_manifest_sha256",
+        "admission_receipt_sha256",
+        "contract_raw_sha256",
+        "contract_semantic_sha256",
+        "census_sha256",
+        "invested_capital_policy_sha256",
+        "census_id"
+      ],
+      "properties": {
+        "ledger_generation_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ledger_catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ledger_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "admission_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "census_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "invested_capital_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "census_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "custody_cash_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_date",
+        "record_id",
+        "event_sha256",
+        "native_currency",
+        "native_value",
+        "event_time_fx",
+        "signed_usd"
+      ],
+      "properties": {
+        "event_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "native_currency": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_time_fx": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "base_currency",
+                "currency",
+                "date",
+                "field",
+                "generation_id",
+                "provider",
+                "rate",
+                "source_artifact_id",
+                "timing"
+              ],
+              "properties": {
+                "base_currency": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "currency": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "field": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "generation_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "provider": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rate": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "timing": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signed_usd": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "custody_cash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "provider_id",
+        "as_of_date",
+        "basis",
+        "status",
+        "current_value",
+        "events"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "basis": {
+          "const": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
+        },
+        "status": {
+          "const": "AVAILABLE"
+        },
+        "current_value": {
+          "$ref": "#/$defs/usd_amount"
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/custody_cash_event"
+          }
+        }
+      }
+    },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "usd_amount": {
       "type": "object",
@@ -483,6 +669,7 @@
         "current_value": {"$ref": "#/$defs/usd_amount"},
         "current_weight": {"type": ["string", "null"], "minLength": 1},
         "members": {"type": "array", "items": {"$ref": "#/$defs/current_member"}},
+        "derived_cash": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/custody_cash"}},
         "reason": {"type": ["string", "null"], "minLength": 1},
         "scope": {"enum": ["SYSTEMATIC", "RETAINED_EXCLUDED"]},
         "status": {"$ref": "#/$defs/capital_status"},
@@ -566,6 +753,7 @@
         "weight_basis"
       ],
       "properties": {
+        "custody_authority": {"$ref": "#/$defs/custody_authority"},
         "basis": {"const": "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE"},
         "currency": {"const": "USD"},
         "retained_excluded": {"$ref": "#/$defs/current_aggregate"},
