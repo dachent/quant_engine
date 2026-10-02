@@ -5547,6 +5547,41 @@ def test_c2_c4_descriptive_unavailable_missing_null_field_blocks(tmp_path):
     assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
 
 
+@pytest.mark.parametrize("row", [None, True, 7, "malformed", [], {}])
+def test_c2_c4_descriptive_non_object_comparison_blocks(tmp_path, row):
+    def mutate(report):
+        report["strategy_attribution"]["benchmark_comparisons"][0] = row
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    json_path = (
+        "$.strategy_attribution.benchmark_comparisons[0].observed_end"
+        if isinstance(row, dict)
+        else "$.strategy_attribution.benchmark_comparisons[0]"
+    )
+    assert any(
+        f.klass == checks.BLOCKER_AUTHORITY
+        and f.defect_ids == ("C2",)
+        and f.json_path == json_path
+        for f in dated
+    )
+
+
+@pytest.mark.parametrize("value", [None, {}, "malformed"])
+def test_c2_c4_descriptive_present_malformed_comparisons_container_blocks(
+    tmp_path, value
+):
+    def mutate(report):
+        report["strategy_attribution"]["benchmark_comparisons"] = value
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(
+        f.klass == checks.BLOCKER_AUTHORITY
+        and f.defect_ids == ("C2",)
+        and f.json_path == "$.strategy_attribution.benchmark_comparisons"
+        for f in dated
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

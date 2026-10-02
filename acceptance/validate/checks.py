@@ -5350,19 +5350,44 @@ def _dated_sections(
     """(entity, file, path, date, status, defects, optional date role)."""
 
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
+    attribution = node(ctx.report, "strategy_attribution")
+    if (
+        isinstance(attribution, Mapping)
+        and "benchmark_comparisons" in attribution
+        and not isinstance(comparisons, list)
+    ):
+        yield (
+            "benchmark:comparisons-container",
+            REPORT,
+            "$.strategy_attribution.benchmark_comparisons",
+            None,
+            None,
+            ("C2",),
+            ("c2_malformed", comparisons),
+        )
     for position, row in enumerate(
         comparisons if isinstance(comparisons, list) else []
     ):
-        if isinstance(row, dict):
+        if not isinstance(row, dict):
             yield (
-                f"benchmark:{row.get('strategy_id')}",
+                f"benchmark:malformed:{position}",
                 REPORT,
-                f"$.strategy_attribution.benchmark_comparisons[{position}].observed_end",
-                row.get("observed_end"),
-                row.get("status"),
+                f"$.strategy_attribution.benchmark_comparisons[{position}]",
+                None,
+                None,
                 ("C2",),
-                ("c2_descriptive", row),
+                ("c2_malformed", row),
             )
+            continue
+        yield (
+            f"benchmark:{row.get('strategy_id')}",
+            REPORT,
+            f"$.strategy_attribution.benchmark_comparisons[{position}].observed_end",
+            row.get("observed_end"),
+            row.get("status"),
+            ("C2",),
+            ("c2_descriptive", row),
+        )
     # The alias is only one published view. Check every mode, retaining a
     # divergent alias but avoiding duplicate findings for the same date claim.
     lens_views: list[tuple[str, str, list[Any]]] = []
@@ -5452,6 +5477,8 @@ def _canonical_iso_day(value: Any) -> date | None:
 
 def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
     kind, detail = role
+    if kind == "c2_malformed":
+        return False
     if kind == "c2_descriptive":
         row = detail
         if status == "UNAVAILABLE":
