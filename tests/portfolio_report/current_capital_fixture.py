@@ -979,7 +979,9 @@ def cr2_custody_native_source(
     }
 
 
-def cr2_custody_native_recipe(tmp_path, admitted, *, epoch_perimeter=False):
+def cr2_custody_native_recipe(
+    tmp_path, admitted, *, epoch_perimeter=False, complete_perimeter=False
+):
     """Bind admitted native source into real baseline template and recipe."""
     from pathlib import Path
     import sys
@@ -1072,17 +1074,142 @@ def cr2_custody_native_recipe(tmp_path, admitted, *, epoch_perimeter=False):
                 "source_routes": ["synthetic-source"],
             }
         )
+    if complete_perimeter:
+        # Independently authored COMPLETE synthetic capture, before final source
+        # pins/provenance identities. All current amounts are native raw NAV.
+        import csv
+        import io
+
+        source_root = Path(b["roots"]["synthetic"])
+        rows_by_key = {
+            "schwab-nav": [],
+            "ibkr-ledger": [],
+            "attribution-diagnostic": [],
+        }
+        additions = [
+            ("account-schwab-b", "SYNTH-B", "Schwab", "grizzlybears-vtma", "41"),
+            ("synthetic-qsi", "SYNTH-Q", "Schwab", "qsi", "10"),
+            ("synthetic-tt", "SYNTH-T", "Schwab", "tt-portfolio", "20"),
+            ("synthetic-eu", "SYNTH-E", "IBRK", "p123-eu", "50"),
+        ]
+        for aid, alias, provider, sid, value in additions:
+            if aid != "account-schwab-b":
+                pc["accounts"].append(
+                    {
+                        "account_id": aid,
+                        "aliases": [provider + " | " + alias],
+                        "name": "SYNTHETIC COMPLETE " + sid,
+                        "role": "INVESTMENT",
+                        "source_routes": ["synthetic-source"],
+                    }
+                )
+            pc["assignments"].append(
+                {
+                    "account_id": aid,
+                    "assignment_id": "complete-" + sid,
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "mapping_status": "MAPPED",
+                    "observed_label": "Synthetic Strategy " + str(ids.index(sid) + 1),
+                    "source_classification": "SYNTHETIC_COMPLETE_RAW_NAV",
+                    "source_id": "synthetic-source",
+                    "strategy_id": sid,
+                }
+            )
+            for day in ("2026-09-15", "2026-09-16", "2026-09-17"):
+                if provider == "Schwab":
+                    rows_by_key["schwab-nav"].append(
+                        {"account": alias, "date": day, "nav": value}
+                    )
+                else:
+                    rows_by_key["ibkr-ledger"].append(
+                        {
+                            "account": alias,
+                            "date": day,
+                            "starting_value": value,
+                            "ending_value": value,
+                            "twr": "0",
+                            "external_flow": "0",
+                            "transfer_flow": "0",
+                            "source_file": "SYNTHETIC_COMPLETE.xml",
+                        }
+                    )
+                rows_by_key["attribution-diagnostic"].append(
+                    {
+                        "institution": provider,
+                        "account": alias,
+                        "date": day,
+                        "nav": value,
+                        "note": "SYNTHETIC COMPLETE captured observation",
+                    }
+                )
+        # Explicit observed zero reserve, not a fill of unavailable real facts.
+        pc["accounts"].append(
+            {
+                "account_id": "synthetic-reserve",
+                "aliases": ["Schwab | SYNTH-R"],
+                "name": "SYNTHETIC COMPLETE zero reserve",
+                "role": "RESERVE",
+                "source_routes": ["synthetic-source"],
+            }
+        )
+        pc["assignments"].append(
+            {
+                "account_id": "synthetic-reserve",
+                "assignment_id": "complete-reserve",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+                "mapping_status": "UNMAPPED",
+                "strategy_id": None,
+                "observed_label": "General",
+                "source_classification": "SYNTHETIC_COMPLETE_RAW_NAV",
+                "source_id": "synthetic-source",
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            }
+        )
+        for day in ("2026-09-15", "2026-09-16", "2026-09-17"):
+            rows_by_key["schwab-nav"].append(
+                {"account": "SYNTH-R", "date": day, "nav": "0"}
+            )
+            rows_by_key["attribution-diagnostic"].append(
+                {
+                    "institution": "Schwab",
+                    "account": "SYNTH-R",
+                    "date": day,
+                    "nav": "0",
+                    "note": "SYNTHETIC COMPLETE captured zero",
+                }
+            )
+        for key, additions_raw in rows_by_key.items():
+            ref = b["sources"][key]
+            path = source_root / ref["relative_path"]
+            reader = csv.DictReader(io.StringIO(path.read_text()))
+            headers, original = reader.fieldnames, list(reader)
+            out = io.StringIO(newline="")
+            writer = csv.DictWriter(out, fieldnames=headers, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(original + additions_raw)
+            raw = out.getvalue().encode()
+            path.write_bytes(raw)
+            ref.update(
+                expected_sha256=hashlib.sha256(raw).hexdigest(), as_of_date="2026-09-17"
+            )
+        pc["assumptions"].append(
+            "SYNTHETIC_COMPLETE_RAW_NAV; newly authored test facts only; no real unavailable coverage relabeled"
+        )
     if epoch_perimeter:
         # Authored synthetic assignment metadata only: no historical NAV, flows,
         # anchors or retrieval coverage is asserted for these blocked intervals.
-        for index in range(10):
-            historical = index < 8
-            sid = ids[0] if historical else ids[index - 1]
+        historical_count = 4 if complete_perimeter else 8
+        for index in range(historical_count + 2):
+            historical = index < historical_count
+            excluded_number = index - historical_count + 1
+            sid = ids[0] if historical else ids[6 + excluded_number]
             if not historical:
                 pc["accounts"].append(
                     {
-                        "account_id": f"synthetic-excluded-{index - 7}",
-                        "aliases": [f"ibkr | SYNTHETICEXCLUDED{index - 7}"],
+                        "account_id": f"synthetic-excluded-{excluded_number}",
+                        "aliases": [f"ibkr | SYNTHETICEXCLUDED{excluded_number}"],
                         "name": "Synthetic excluded metadata-only account",
                         "role": "INVESTMENT",
                         "source_routes": ["synthetic-source"],
@@ -1092,11 +1219,11 @@ def cr2_custody_native_recipe(tmp_path, admitted, *, epoch_perimeter=False):
                 {
                     "account_id": "account-schwab-a"
                     if historical
-                    else f"synthetic-excluded-{index - 7}",
+                    else f"synthetic-excluded-{excluded_number}",
                     "assignment_id": f"synthetic-blocked-history-{index + 1}",
                     "effective_start": f"{2010 + index}-01-01",
                     "effective_end": "2025-12-31"
-                    if index == 7
+                    if index == historical_count - 1
                     else f"{2010 + index}-12-31",
                     "mapping_status": "MAPPED",
                     "observed_label": "Synthetic Strategy " + str(ids.index(sid) + 1),
@@ -1112,7 +1239,9 @@ def cr2_custody_native_recipe(tmp_path, admitted, *, epoch_perimeter=False):
             assignment["strategy_mapping_disposition"] = (
                 "STRATEGY_MAPPED"
                 if assignment["mapping_status"] == "MAPPED"
-                else "HISTORICAL_POOL_ONLY"
+                else assignment.get(
+                    "strategy_mapping_disposition", "HISTORICAL_POOL_ONLY"
+                )
             )
     raw = canonical_json_bytes(pc)
     pm = GenerationManifest.from_json_bytes((pg / "generation.json").read_bytes())

@@ -7112,7 +7112,15 @@ def build_report_data(
             baseline_root=baseline_root,
             provider_ledger_root=provider_ledger_root,
             calculation_cutoff_date=calculation_cutoff_date,
-            financial_input_contract_path=financial_input_contract_path,
+            financial_input_contract_path=(
+                _source_clock_file_path(
+                    source_clock_authority[0].get("financial_input_contract"),
+                    "financial input contract",
+                )
+                if invested_capital_input_generation_path is None
+                and _current_capital(catalog).get("custody_authority")
+                else financial_input_contract_path
+            ),
         )
     governed_hwm_proof = (
         _report_governed_hwm_proof(
