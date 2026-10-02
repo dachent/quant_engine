@@ -7399,6 +7399,8 @@ def test_financial_product_direct_publish_requires_private_stage_without_new_fla
     assert pointer.read_bytes() == b"prior accepted pointer"
     assert list(output_root.iterdir()) == [pointer]
     assert not qa.exists()
+
+
 def _n52_current_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> dict[str, Any]:
@@ -7424,9 +7426,9 @@ def test_schema2_weight_labels_preserve_schema1(
 
     report = _n52_current_report(tmp_path, monkeypatch)
     schema = json.loads(
-        (REPOSITORY_ROOT / "schemas" / "portfolio" / "report-data.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "report-data.schema.json"
+        ).read_text(encoding="utf-8")
     )
     validator = Draft202012Validator(schema)
     assert report["report_schema_version"] == 2
@@ -7442,7 +7444,10 @@ def test_schema2_weight_labels_preserve_schema1(
         del broken["portfolio_summary"][row_index][field]
         errors = list(validator.iter_errors(broken))
         assert errors
-        assert any(list(error.absolute_path)[:2] == ["portfolio_summary", row_index] for error in errors)
+        assert any(
+            list(error.absolute_path)[:2] == ["portfolio_summary", row_index]
+            for error in errors
+        )
     for field, value in (
         ("weight_basis", "CURRENT_CUTOFF"),
         ("weight_authority", {"policy_id": "WRONG", "normalization": "WRONG"}),
@@ -7456,7 +7461,11 @@ def test_schema2_weight_labels_preserve_schema1(
     legacy["portfolio_summary"][row_index].pop("weight_authority", None)
     assert not list(validator.iter_errors(legacy))
     non_stress = deepcopy(report)
-    other = next(row for row in non_stress["portfolio_summary"] if row["metric"] != "Correlation-one stress")
+    other = next(
+        row
+        for row in non_stress["portfolio_summary"]
+        if row["metric"] != "Correlation-one stress"
+    )
     other.pop("weight_basis", None)
     other.pop("weight_authority", None)
     assert not list(validator.iter_errors(non_stress))
@@ -7467,9 +7476,7 @@ def test_schema2_publication_records_matching_report_version(tmp_path: Path) -> 
     built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
     candidate = Path(built["candidate_dir"])
     published_root = tmp_path / "published"
-    reporter.publish_report(
-        baseline_root, candidate, None, None, None, published_root
-    )
+    reporter.publish_report(baseline_root, candidate, None, None, None, published_root)
     pointer = read_current(published_root)
     generation = published_root / "generations" / pointer.generation_id
     manifest = json.loads((generation / "generation.json").read_bytes())

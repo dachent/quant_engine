@@ -12360,6 +12360,8 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
         report,
         "report capital differs from the governed baseline current capital",
     )
+
+
 def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
     for version in (1, 2):
         value = _report()
@@ -12385,7 +12387,9 @@ def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
         value["report_schema_version"] = version
         root = tmp_path / f"rejected-{version!s}"
         _publish_report(root, tmp_path / f"rejected-{version!s}.json", value)
-        with pytest.raises(panel.ControlPanelValidationError, match="schema is unsupported"):
+        with pytest.raises(
+            panel.ControlPanelValidationError, match="schema is unsupported"
+        ):
             panel._current_report(root)
 
 
@@ -12497,9 +12501,7 @@ def test_panel_schema22_publication_records_input_report_version(
             **financial,
         )
         generation = (
-            version_inputs["output"]
-            / "generations"
-            / published["generation_id"]
+            version_inputs["output"] / "generations" / published["generation_id"]
         )
         manifest = json.loads((generation / "generation.json").read_bytes())
         dashboard = json.loads(
@@ -12539,9 +12541,7 @@ def test_renderer_accepts_panel_schema21_and22(
     candidate = Path(built["candidate_dir"])
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     candidate_renderer = (candidate / "app.js").read_text(encoding="utf-8")
-    assert candidate_renderer.replace("\r\n", "\n") == renderer.replace(
-        "\r\n", "\n"
-    )
+    assert candidate_renderer.replace("\r\n", "\n") == renderer.replace("\r\n", "\n")
 
     node = shutil.which("node")
     runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
@@ -12649,7 +12649,10 @@ def _run_f2_f7_browser_probe(html: Path) -> dict[str, object]:
     if not node or not runtime_node:
         pytest.skip("Chromium runtime is not available for F2/F7 browser proof")
     playwright_module = (
-        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
     )
     executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
         Path(os.environ.get("LOCALAPPDATA", ""))
@@ -12702,7 +12705,9 @@ try {
     env["F2_F7_HTML"] = str(html.resolve())
     renderer_path = html.parent / "app.js"
     template_renderer = panel.DEFAULT_TEMPLATE_ROOT / "app.js"
-    assert renderer_path.read_text(encoding="utf-8") == template_renderer.read_text(encoding="utf-8"), "candidate is not bound to the assigned app.js"
+    assert renderer_path.read_text(encoding="utf-8") == template_renderer.read_text(
+        encoding="utf-8"
+    ), "candidate is not bound to the assigned app.js"
     try:
         result = subprocess.run(
             [node, "--input-type=module", "-e", probe],
@@ -12715,7 +12720,9 @@ try {
             timeout=45,
         )
     except subprocess.TimeoutExpired as error:
-        raise AssertionError(f"F2/F7 Node probe timed out; stdout={error.stdout!r}; stderr={error.stderr!r}") from error
+        raise AssertionError(
+            f"F2/F7 Node probe timed out; stdout={error.stdout!r}; stderr={error.stderr!r}"
+        ) from error
     return json.loads(result.stdout)
 
 
@@ -12724,11 +12731,16 @@ def test_f2_f7_missing_or_null_payload_reaches_visible_guard(
     inputs: dict[str, Path], tmp_path: Path, payload_script: str
 ) -> None:
     built = panel.build_candidate(
-        inputs["report"], inputs["legacy"], inputs["output"],
-        freshness_health_path=inputs["freshness"], baseline_root=inputs["baseline"],
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
-    (candidate / "data" / "dashboard_data.js").write_text(payload_script, encoding="utf-8")
+    (candidate / "data" / "dashboard_data.js").write_text(
+        payload_script, encoding="utf-8"
+    )
 
     evidence = _run_f2_f7_browser_probe(candidate / "index.html")
 
@@ -12736,7 +12748,9 @@ def test_f2_f7_missing_or_null_payload_reaches_visible_guard(
     assert evidence["loadingHidden"] is True, evidence
     assert evidence["errorHidden"] is False, evidence
     assert "could not be loaded" in evidence["errorText"], evidence
-    assert any("missing or unsupported" in message for message in evidence["consoleErrors"]), evidence
+    assert any(
+        "missing or unsupported" in message for message in evidence["consoleErrors"]
+    ), evidence
     assert evidence["pageErrors"] == [], evidence
 
 
@@ -12744,8 +12758,11 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     built = panel.build_candidate(
-        inputs["report"], inputs["legacy"], inputs["output"],
-        freshness_health_path=inputs["freshness"], baseline_root=inputs["baseline"],
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     data_path = candidate / "data" / "dashboard_data.json"
@@ -12770,7 +12787,9 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     assert evidence["injectedPositionNodes"] == 0, evidence
     assert evidence["probeValue"] is None, evidence
     assert evidence["allocationRows"][0]["dateText"] == "Aug 16, 2026", evidence
-    assert evidence["allocationRows"][0]["weightBasis"] == "Current cutoff weights", evidence
+    assert evidence["allocationRows"][0]["weightBasis"] == "Current cutoff weights", (
+        evidence
+    )
     assert evidence["allocationRows"][1]["dateText"] == hostile_date, evidence
     assert evidence["positionDateTexts"][0] == position_attack, evidence
     assert evidence["pageErrors"] == [], evidence

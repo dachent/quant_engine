@@ -1042,10 +1042,9 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         raise ControlPanelValidationError(
             "portfolio report data is not readable JSON"
         ) from exc
-    if (
-        isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2}
-    ):
+    if isinstance(report.get("report_schema_version"), bool) or report.get(
+        "report_schema_version"
+    ) not in {1, 2}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1125,10 +1124,9 @@ def _report_candidate(
     if candidate.name != sha256:
         raise ControlPanelValidationError("report candidate directory identity differs")
     report = _json_from_bytes(content, "report candidate data")
-    if (
-        isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2}
-    ):
+    if isinstance(report.get("report_schema_version"), bool) or report.get(
+        "report_schema_version"
+    ) not in {1, 2}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -12971,10 +12969,9 @@ def publish_panel(
             "bound publication report snapshot is invalid JSON"
         ) from exc
     retained_report_schema_version = retained_report.get("report_schema_version")
-    if (
-        isinstance(retained_report_schema_version, bool)
-        or retained_report_schema_version not in {1, 2}
-    ):
+    if isinstance(
+        retained_report_schema_version, bool
+    ) or retained_report_schema_version not in {1, 2}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )

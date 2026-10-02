@@ -647,7 +647,9 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def test_freshness_operational_late_at_financial_cutoff_is_not_b12(tmp_path: Path) -> None:
+def test_freshness_operational_late_at_financial_cutoff_is_not_b12(
+    tmp_path: Path,
+) -> None:
     findings = run(
         build(
             tmp_path,
@@ -661,7 +663,11 @@ def test_freshness_operational_late_at_financial_cutoff_is_not_b12(tmp_path: Pat
             ),
         )
     )
-    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -689,7 +695,11 @@ def test_freshness_interval_plus_grace_remains_fresh(
             ),
         )
     )
-    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -753,10 +763,14 @@ def test_freshness_rejects_malformed_clock_and_policy_metadata(
         if finding.check_id == "dates.freshness_vs_cutoff"
     ]
     assert freshness_findings, case
-    assert any(finding.klass == checks.BLOCKER_AUTHORITY for finding in freshness_findings), case
+    assert any(
+        finding.klass == checks.BLOCKER_AUTHORITY for finding in freshness_findings
+    ), case
 
 
-def test_freshness_rejects_panel_operational_clock_contradiction(tmp_path: Path) -> None:
+def test_freshness_rejects_panel_operational_clock_contradiction(
+    tmp_path: Path,
+) -> None:
     findings = run(
         build(
             tmp_path,
@@ -795,7 +809,11 @@ def test_freshness_allows_explicit_unavailable_null_observation(tmp_path: Path) 
             ),
         )
     )
-    assert not [finding for finding in findings if finding.check_id == "dates.freshness_vs_cutoff"]
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
 
 
 def test_freshness_allows_explicit_recurring_unavailable_null_observation(
@@ -816,7 +834,8 @@ def test_freshness_allows_explicit_recurring_unavailable_null_observation(
         )
     )
     assert not [
-        finding for finding in findings
+        finding
+        for finding in findings
         if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
     ]
 
@@ -850,7 +869,8 @@ def test_freshness_required_recurring_unavailable_retains_blocked_hwm_status(
         )
     )
     assert not [
-        finding for finding in findings
+        finding
+        for finding in findings
         if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
     ]
 
@@ -860,7 +880,13 @@ def test_freshness_required_recurring_unavailable_retains_blocked_hwm_status(
     [
         ("valid-late", "LATE", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
         ("hwm-false-fresh", "FRESH", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
-        ("provider-does-not-bind-account", "LATE", "2026-09-17", "PROVIDER_LIVE", "ACCEPTED"),
+        (
+            "provider-does-not-bind-account",
+            "LATE",
+            "2026-09-17",
+            "PROVIDER_LIVE",
+            "ACCEPTED",
+        ),
         ("stale-account-accepted", "STALE", "2026-09-03", "ACCOUNT_LIVE", "ACCEPTED"),
     ],
 )
@@ -5352,9 +5378,7 @@ def test_n50_w27_n51_available_decomposition_date_fails_closed(
     def mutate(report):
         section = report["decomposition_lenses"]
         row = (
-            section["lenses"][0]
-            if surface == "alias"
-            else section["modes"][surface][0]
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
         )
         if case == "missing":
             row.pop("as_of_date", None)
@@ -5385,9 +5409,7 @@ def test_n50_w27_n51_available_decomposition_canonical_cutoff_is_valid(
     def mutate(report):
         section = report["decomposition_lenses"]
         row = (
-            section["lenses"][0]
-            if surface == "alias"
-            else section["modes"][surface][0]
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
         )
         row["as_of_date"] = CUTOFF
 
@@ -5401,15 +5423,11 @@ def test_n50_w27_n51_available_decomposition_canonical_cutoff_is_valid(
 
 
 @pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
-def test_n50_w27_n51_unavailable_decomposition_date_may_be_absent(
-    tmp_path, surface
-):
+def test_n50_w27_n51_unavailable_decomposition_date_may_be_absent(tmp_path, surface):
     def mutate(report):
         section = report["decomposition_lenses"]
         row = (
-            section["lenses"][0]
-            if surface == "alias"
-            else section["modes"][surface][0]
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
         )
         row["available_count"] = 0
         row.pop("as_of_date", None)
@@ -5452,12 +5470,19 @@ def _c2_c4_date_findings(found):
         finding
         for finding in found
         if finding.check_id == "dates.section_as_of_vs_cutoff"
-        and ("benchmark:" in finding.entity or finding.entity.startswith("implementation_"))
+        and (
+            "benchmark:" in finding.entity
+            or finding.entity.startswith("implementation_")
+        )
     ]
 
 
 def _c2_c4_contract(key, as_of_date="2026-08-03"):
-    identity_key = "reconciliation_id" if key == "implementation_reconciliation_contract" else "attribution_id"
+    identity_key = (
+        "reconciliation_id"
+        if key == "implementation_reconciliation_contract"
+        else "attribution_id"
+    )
     return {
         "as_of_date": as_of_date,
         identity_key: "a" * 64,
@@ -5500,7 +5525,9 @@ def test_c2_c4_descriptive_absent_optional_contracts_remain_absent(tmp_path):
         report.pop("implementation_return_attribution_contract")
 
     found = run(build(tmp_path, Spec(report=[mutate])))
-    assert not [f for f in _c2_c4_date_findings(found) if f.entity.startswith("implementation_")]
+    assert not [
+        f for f in _c2_c4_date_findings(found) if f.entity.startswith("implementation_")
+    ]
 
 
 def test_c2_c4_descriptive_unavailable_null_comparisons_remain_valid(tmp_path):
@@ -5625,7 +5652,9 @@ def test_c2_c4_descriptive_invalid_c2_metadata_blocks(tmp_path, field, value):
         )
 
     dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
-    blockers = [finding for finding in dated if finding.klass == checks.BLOCKER_AUTHORITY]
+    blockers = [
+        finding for finding in dated if finding.klass == checks.BLOCKER_AUTHORITY
+    ]
     assert blockers
 
 
@@ -5639,7 +5668,11 @@ def test_c2_c4_descriptive_invalid_c2_metadata_blocks(tmp_path, field, value):
         ("implementation_return_attribution_contract", "sha256", "not-a-hash"),
         ("implementation_return_attribution_contract", "size_bytes", 0),
         ("implementation_return_attribution_contract", "strategy_count", 2),
-        ("implementation_return_attribution_contract", "as_of_date", "2026-08-09garbage"),
+        (
+            "implementation_return_attribution_contract",
+            "as_of_date",
+            "2026-08-09garbage",
+        ),
         ("implementation_return_attribution_contract", "as_of_date", "2026-09-18"),
     ],
 )
@@ -5657,6 +5690,7 @@ def test_c2_c4_descriptive_invalid_c4_metadata_blocks(tmp_path, key, field, valu
         else:
             metadata[field] = value
             report[key] = metadata
+
     dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
     assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
 
@@ -5669,7 +5703,9 @@ def test_c2_c4_descriptive_historical_role_does_not_exempt_current_lens(tmp_path
         report["implementation_return_attribution_contract"] = _c2_c4_contract(
             "implementation_return_attribution_contract"
         )
-        report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["as_of_date"] = "2026-09-03"
+        report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["as_of_date"] = (
+            "2026-09-03"
+        )
 
     found = run(build(tmp_path, Spec(report=[mutate])))
     dated = [

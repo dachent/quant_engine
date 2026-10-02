@@ -2032,7 +2032,11 @@ def _owner_decision_payloads(
         },
         "FX_BASE_CURRENCY": {"decision": policy.get("fx_base_currency")},
         **(
-            {OPTIONAL_OWNER_DECISION_ID: {"decision": policy["provider_custody_perimeter"]}}
+            {
+                OPTIONAL_OWNER_DECISION_ID: {
+                    "decision": policy["provider_custody_perimeter"]
+                }
+            }
             if "provider_custody_perimeter" in policy
             else {}
         ),
@@ -2073,9 +2077,10 @@ def _validate_owner_decision_receipts(policy: Mapping[str, Any]) -> None:
         raise FinancialMvpContractError(
             "provider custody decision and receipt must be paired"
         )
-    active_ids = (*REQUIRED_OWNER_DECISION_IDS, *(
-        (OPTIONAL_OWNER_DECISION_ID,) if has_decision else ()
-    ))
+    active_ids = (
+        *REQUIRED_OWNER_DECISION_IDS,
+        *((OPTIONAL_OWNER_DECISION_ID,) if has_decision else ()),
+    )
     _strict_keys(receipts, set(active_ids), "invested-capital owner_decision_receipts")
     payload_digests = _owner_decision_payload_digests(policy)
     treatments = _object(
@@ -2099,7 +2104,11 @@ def _validate_owner_decision_receipts(policy: Mapping[str, Any]) -> None:
         },
         "FX_BASE_CURRENCY": {policy["fx_base_currency"]["approval_evidence"]},
         **(
-            {OPTIONAL_OWNER_DECISION_ID: {policy["provider_custody_perimeter"]["approval_evidence"]}}
+            {
+                OPTIONAL_OWNER_DECISION_ID: {
+                    policy["provider_custody_perimeter"]["approval_evidence"]
+                }
+            }
             if has_decision
             else {}
         ),
@@ -2254,9 +2263,7 @@ def reconcile_owner_receipt_evidence(
     )
     active_ids = _active_owner_decision_ids(policy)
     approval_comment_ids = {receipts[key]["comment_id"] for key in active_ids}
-    digest_comment_ids = {
-        receipts[key]["digest_comment_id"] for key in active_ids
-    }
+    digest_comment_ids = {receipts[key]["digest_comment_id"] for key in active_ids}
     required_comment_ids = approval_comment_ids | digest_comment_ids
     if set(comments) != required_comment_ids:
         raise FinancialMvpContractError("owner evidence comment set differs")
@@ -4769,30 +4776,32 @@ def _validate_outcomes(
                 raise FinancialMvpContractError("HWM absence rule differs")
         elif outcome_id == "INVESTED_CAPITAL":
             invested_contract_keys = {
-                    "change_control",
-                    "classification_treatments",
-                    "definition",
-                    "distinct_from",
-                    "flow_classifications",
-                    "flow_timing",
-                    "frequency",
-                    "fx_base_currency",
-                    "gains_treatment",
-                    "internal_transfer_aggregate_effect",
-                    "leverage_accounting",
-                    "missing_history",
-                    "negative_net_contributions",
-                    "owner_decision_receipts",
-                    "policy_id",
-                    "policy_owner_issue",
-                    "policy_schema_version",
-                    "policy_status",
-                    "shared_flow_contract",
+                "change_control",
+                "classification_treatments",
+                "definition",
+                "distinct_from",
+                "flow_classifications",
+                "flow_timing",
+                "frequency",
+                "fx_base_currency",
+                "gains_treatment",
+                "internal_transfer_aggregate_effect",
+                "leverage_accounting",
+                "missing_history",
+                "negative_net_contributions",
+                "owner_decision_receipts",
+                "policy_id",
+                "policy_owner_issue",
+                "policy_schema_version",
+                "policy_status",
+                "shared_flow_contract",
             }
             if "provider_custody_perimeter" in contract:
                 invested_contract_keys.add("provider_custody_perimeter")
             _strict_keys(
-                contract, invested_contract_keys, "INVESTED_CAPITAL.calculation_contract"
+                contract,
+                invested_contract_keys,
+                "INVESTED_CAPITAL.calculation_contract",
             )
             if row["owner_issue"] != 318:
                 raise FinancialMvpContractError(
@@ -4969,7 +4978,11 @@ def _validate_outcomes(
                 "flow_timing",
                 "fx_base_currency",
                 "negative_net_contributions",
-                *( ("provider_custody_perimeter",) if "provider_custody_perimeter" in contract else () ),
+                *(
+                    ("provider_custody_perimeter",)
+                    if "provider_custody_perimeter" in contract
+                    else ()
+                ),
             )
             global_decisions = {
                 name: _validate_policy_decision(

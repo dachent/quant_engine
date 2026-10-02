@@ -4559,7 +4559,10 @@ def test_cr2_optional_custody_one_sided_pair_fails(half: str) -> None:
         _validate(contract)
 
 
-@pytest.mark.parametrize("field,value", (("decision_id", "WRONG"), ("authority_issue", 318), ("payload_sha256", "0" * 64)))
+@pytest.mark.parametrize(
+    "field,value",
+    (("decision_id", "WRONG"), ("authority_issue", 318), ("payload_sha256", "0" * 64)),
+)
 def test_cr2_optional_custody_receipt_mutations_fail(field: str, value: object) -> None:
     contract = _cr2_optional_custody_contract()
     invested = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"]
@@ -4585,8 +4588,7 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "decision_status": "APPROVED",
         "decision_authority": "OWNER_318",
         "approval_evidence": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
-            "5957619019"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957619019"
         ),
         "selected_treatment": (
             "PROVIDER_ACCOUNT_ONLY_EXTERNAL_CAPITAL_DEPOSITS_AND_WITHDRAWALS_ARE_"
@@ -4624,18 +4626,19 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "authority_issue": 330,
         "policy_owner_issue": 318,
         "evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
-            "5957619019"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957619019"
         ),
         "comment_id": 5957619019,
         "digest_evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-"
-            "5957763417"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957763417"
         ),
         "digest_comment_id": 5957763417,
         "approved_on": "2026-10-02",
         "payload_sha256": "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2",
     }
-    assert contract_tool.owner_decision_receipt_digests(contract)[
-        "PROVIDER_CUSTODY_PERIMETER"
-    ] == "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
+    assert (
+        contract_tool.owner_decision_receipt_digests(contract)[
+            "PROVIDER_CUSTODY_PERIMETER"
+        ]
+        == "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
+    )

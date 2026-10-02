@@ -220,7 +220,8 @@ def build_health(
                     lane=lane_name.upper(),
                     coverage_status="AVAILABLE" if observed_end else "UNAVAILABLE",
                     required_for_current=(
-                        lane_name == "account" and policy.mode is FreshnessMode.RECURRING
+                        lane_name == "account"
+                        and policy.mode is FreshnessMode.RECURRING
                     ),
                 )
             )
