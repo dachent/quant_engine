@@ -5031,6 +5031,100 @@ def test_n50_w27_n51_date_authority_requires_exact_iso(tmp_path, surface):
     )
 
 
+@pytest.mark.parametrize(
+    ("case", "value"),
+    [
+        ("missing", None),
+        ("null", None),
+        ("boolean", True),
+        ("malformed", "not-a-date"),
+        ("invalid_calendar", "2026-99-99"),
+        ("trailing_garbage", CUTOFF + "garbage"),
+    ],
+)
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_available_decomposition_date_fails_closed(
+    tmp_path, surface, case, value
+):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0]
+            if surface == "alias"
+            else section["modes"][surface][0]
+        )
+        if case == "missing":
+            row.pop("as_of_date", None)
+        else:
+            row["as_of_date"] = value
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    path_fragment = (
+        ".lenses[0].as_of_date"
+        if surface == "alias"
+        else f".modes.{surface}[0].as_of_date"
+    )
+    dated = [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and path_fragment in finding.json_path
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == checks.BLOCKER_AUTHORITY
+    assert dated[0].defect_ids == ("C3",)
+
+
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_available_decomposition_canonical_cutoff_is_valid(
+    tmp_path, surface
+):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0]
+            if surface == "alias"
+            else section["modes"][surface][0]
+        )
+        row["as_of_date"] = CUTOFF
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and finding.entity.startswith("decomposition:")
+    ]
+
+
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_unavailable_decomposition_date_may_be_absent(
+    tmp_path, surface
+):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0]
+            if surface == "alias"
+            else section["modes"][surface][0]
+        )
+        row["available_count"] = 0
+        row.pop("as_of_date", None)
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    path_fragment = (
+        ".lenses[0].as_of_date"
+        if surface == "alias"
+        else f".modes.{surface}[0].as_of_date"
+    )
+    assert not [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and path_fragment in finding.json_path
+    ]
+
+
 def test_n50_w27_n51_historical_reserve_is_not_current_oracle_view(tmp_path):
     def mutate(report):
         for row in report["allocation_history"]:

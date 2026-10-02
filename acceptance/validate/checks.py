@@ -5000,6 +5000,28 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
     cutoff = ctx.cutoff
     for entity, file, path, value, status, defects in _dated_sections(ctx):
         day = to_date(value)
+        if (
+            entity.startswith("decomposition:")
+            and is_available(status)
+            and (
+                not isinstance(value, str)
+                or len(value) != 10
+                or day is None
+                or value != day.isoformat()
+            )
+        ):
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "available decomposition section does not declare a canonical ISO date",
+            )
+            continue
         if day is None or day == cutoff:
             continue
         after = day > cutoff
