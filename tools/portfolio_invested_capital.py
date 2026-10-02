@@ -812,6 +812,16 @@ def _is_provider_custody_external_flow(source: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_generic_opening_owner_capital(source: Mapping[str, Any]) -> bool:
+    """Keep the legacy opening-purchase rows outside custody cash accounting."""
+    return (
+        source.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and source.get("capital_type") == "OPENING_CONTRIBUTED_BASIS"
+        and source.get("flow_type") == "EXTERNAL_CONTRIBUTION"
+        and source.get("capital_disposition") is None
+    )
+
+
 def _verify_provider_custody_perimeter(
     ledger: Mapping[str, Any],
     epochs: Sequence[Mapping[str, Any]],
@@ -825,6 +835,44 @@ def _verify_provider_custody_perimeter(
         in {"OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"}
     ]
     if not anchors:
+        return set()
+    strategies_by_account: dict[str, set[str]] = {}
+    for epoch in epochs:
+        account_id = epoch.get("account_id")
+        strategy_id = epoch.get("strategy_id")
+        if isinstance(account_id, str) and isinstance(strategy_id, str):
+            strategies_by_account.setdefault(account_id, set()).add(strategy_id)
+    anchors_by_account: dict[str, list[Mapping[str, Any]]] = {}
+    for anchor in anchors:
+        account_id = _text(anchor.get("account_id"), "custody anchor account")
+        if account_id not in strategies_by_account:
+            continue
+        account_flows = [
+            row
+            for row in ledger.get("flows", [])
+            if row.get("account_id") == account_id
+        ]
+        has_custody_marker = any(
+            row.get("provider_account_scope") == "ACCOUNT_ONLY"
+            and row.get("capital_disposition") == "EXTERNAL_CAPITAL"
+            for row in account_flows
+        )
+        generic_statement_anchor = (
+            anchor.get("provider_account_scope") == "STATEMENT_ACCOUNT"
+            or anchor.get("mapping_basis")
+            == "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE"
+        )
+        generic_account_flows = bool(account_flows) and all(
+            row.get("provider_account_scope") == "STATEMENT_ACCOUNT"
+            or _is_generic_opening_owner_capital(row)
+            for row in account_flows
+        )
+        if not has_custody_marker and (
+            generic_statement_anchor or generic_account_flows
+        ):
+            continue
+        anchors_by_account.setdefault(account_id, []).append(anchor)
+    if not anchors_by_account:
         return set()
     decision = policy.get("provider_custody_perimeter")
     receipt = policy.get("owner_decision_receipts", {}).get(
@@ -843,18 +891,6 @@ def _verify_provider_custody_perimeter(
         raise CapitalValidationError(
             "provider-custody perimeter receipt differs"
         ) from exc
-    strategies_by_account: dict[str, set[str]] = {}
-    for epoch in epochs:
-        account_id = epoch.get("account_id")
-        strategy_id = epoch.get("strategy_id")
-        if isinstance(account_id, str) and isinstance(strategy_id, str):
-            strategies_by_account.setdefault(account_id, set()).add(strategy_id)
-    anchors_by_account: dict[str, list[Mapping[str, Any]]] = {}
-    for anchor in anchors:
-        account_id = _text(anchor.get("account_id"), "custody anchor account")
-        if account_id not in strategies_by_account:
-            continue
-        anchors_by_account.setdefault(account_id, []).append(anchor)
     for account_id, account_anchors in anchors_by_account.items():
         anchor_strategies = {
             _text(row.get("strategy_id"), "custody anchor strategy")

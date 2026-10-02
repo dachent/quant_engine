@@ -265,6 +265,57 @@ def test_governed_capital_replays_exact_thirteen_epoch_source_facts(tmp_path):
         capital.verify_governed_capital_result(result, input_path, contract_path)
 
 
+def test_t5c_custody_governed_builder_and_verifier_keep_generic_opening_flow(
+    tmp_path,
+):
+    input_path, contract_path = _governed_case(tmp_path)
+    arguments = json.loads(input_path.read_bytes())
+    ledger_path = tmp_path / "provider-ledger.json"
+    ledger = json.loads(ledger_path.read_bytes())
+    opening = next(
+        row
+        for row in ledger["capital_anchors"]
+        if row.get("capital_type") == "OPENING_CONTRIBUTED_BASIS"
+    )
+    ledger["capital_anchors"].remove(opening)
+    generic_opening = {
+        **opening,
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "provider_account_scope": "ACCOUNT_ONLY",
+    }
+    ledger["flows"].append(generic_opening)
+    ledger["capital_anchors"].append(
+        {
+            **opening,
+            "record_id": "synthetic-generic-opening-nav-anchor",
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+            "authority_profile": "SYNTHETIC",
+        }
+    )
+    digest = capital._digest(generic_opening)
+    for event in arguments["opening_basis"]:
+        if event["event_id"] == opening["record_id"]:
+            event["source_evidence_sha256"] = digest
+            event["fx_evidence_sha256"] = digest
+            break
+    else:
+        raise AssertionError("selected opening source has no admitted event")
+
+    ledger_path.write_bytes(capital._canonical(ledger))
+    arguments["source_bindings"]["provider_ledger"] = capital._file_binding(
+        ledger_path
+    )[0]
+    input_path.write_bytes(capital._canonical(arguments))
+
+    result = capital.build_governed_capital_result(input_path, contract_path)
+    assert result["current_aggregate_usd"] == "1100"
+    assert (
+        capital.verify_governed_capital_result(result, input_path, contract_path)
+        == result
+    )
+
+
 def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path):
     """Native constructor preserves exact pre-epoch basis under caller contexts."""
     from quant_engine.core import GenerationManifest
@@ -1719,6 +1770,153 @@ def test_t5c_custody_deposit_is_capital_and_same_day_allocation_is_not():
                 case["required_epochs"],
                 case["policy"],
             )
+
+
+def test_t5c_custody_perimeter_preserves_generic_opening_owner_capital():
+    case = _case()
+    epoch = case["required_epochs"][0]
+    epoch.update(account_id="generic-account", effective_start="2026-01-01")
+    case["required_epochs"] = [epoch]
+    case["opening_basis"] = []
+    case["events"] = []
+    generic_coverage = {
+        "account_id": "generic-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": epoch["epoch_id"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(generic_coverage),
+        }
+    ]
+    generic_opening = {
+        "record_id": "generic-opening-owner-capital",
+        "account_id": "generic-account",
+        "strategy_id": None,
+        "capital_type": "OPENING_CONTRIBUTED_BASIS",
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    generic_anchor = {
+        "record_id": "generic-opening-anchor",
+        "account_id": "generic-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+        "authority_profile": "SYNTHETIC",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    generic_ledger = {
+        "capital_anchors": [generic_anchor],
+        "flows": [generic_opening],
+        "admissions": [generic_coverage],
+    }
+
+    # The same native guard is called by the input producer and by the
+    # independent selected-facts verifier. Generic opening owner-capital rows
+    # are not provider-custody deposits and keep their established treatment.
+    assert (
+        capital._verify_provider_custody_perimeter(
+            generic_ledger, case["required_epochs"], case["policy"]
+        )
+        == set()
+    )
+    source_digest = capital._digest(generic_opening)
+    case["opening_basis"] = [
+        _event(
+            "generic-opening-owner-capital",
+            epoch["epoch_id"],
+            "2026-01-01",
+            "OPENING_CONTRIBUTED_BASIS",
+            "100",
+            source_evidence_sha256=source_digest,
+            fx_evidence_sha256=source_digest,
+        )
+    ]
+    capital._verify_selected_facts(
+        case, {"provider_ledger": generic_ledger}, case["policy"]
+    )
+
+    statement_anchor = {
+        **generic_anchor,
+        "record_id": "statement-opening-anchor",
+        "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+    }
+    statement_flow = {
+        **generic_opening,
+        "record_id": "statement-dividend",
+        "capital_type": None,
+        "flow_type": "DIVIDEND_INTEREST_REINVESTMENT",
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+    }
+    assert (
+        capital._verify_provider_custody_perimeter(
+            {"capital_anchors": [statement_anchor], "flows": [statement_flow]},
+            case["required_epochs"],
+            case["policy"],
+        )
+        == set()
+    )
+
+    custody_anchor = {
+        **generic_anchor,
+        "record_id": "custody-opening-anchor",
+        "account_id": "custody-account",
+    }
+    custody_epoch = {**epoch, "account_id": "custody-account"}
+    custody_deposit = {
+        **generic_opening,
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "capital_type": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+    }
+    custody_ledger = {
+        "capital_anchors": [custody_anchor],
+        "flows": [custody_deposit],
+    }
+    assert capital._verify_provider_custody_perimeter(
+        custody_ledger, [custody_epoch], case["policy"]
+    ) == {"custody-account"}
+
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="custody allocation lacks qualifying deposit",
+    ):
+        capital._verify_provider_custody_perimeter(
+            {"capital_anchors": [custody_anchor], "flows": []},
+            [custody_epoch],
+            case["policy"],
+        )
+
+    unsupported_transfer = {
+        **custody_deposit,
+        "record_id": "custody-transfer",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "capital_disposition": None,
+    }
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="unsupported provider-custody cash fact",
+    ):
+        capital._verify_provider_custody_perimeter(
+            {
+                "capital_anchors": [custody_anchor],
+                "flows": [custody_deposit, unsupported_transfer],
+            },
+            [custody_epoch],
+            case["policy"],
+        )
 
 
 def _account_ledger_opening(epoch, sources):
