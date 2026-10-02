@@ -6640,7 +6640,14 @@ def test_t5b_event_fx_converts_foreign_opening_amount_and_preserves_nav(
     """Convert the anchor basis at event FX; keep opening_nav as the return start."""
     fx = Decimal("1.0002319812774658")
     anchors = manifest_module.parse_capital_anchors(
-        {"accounting_currency": "USD", "capital_anchors": [_t5b_usdt_opening_anchor()]}
+        {
+            "accounting_currency": "USD",
+            "portfolio_fx_generation": {
+                "generation_id": "f" * 64,
+                "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+            },
+            "capital_anchors": [_t5b_usdt_opening_anchor()],
+        }
     )
     stats = manifest_module.analyze_epoch(
         {
@@ -6689,6 +6696,9 @@ def test_t5b_event_fx_converts_foreign_opening_amount_and_preserves_nav(
         "boolean-rate",
         "nonfinite-rate",
         "source-identity",
+        "alternate-generation",
+        "alternate-provider",
+        "alternate-artifact",
     ],
 )
 def test_t5b_event_fx_rejects_missing_or_mismatched_evidence(
@@ -6709,13 +6719,26 @@ def test_t5b_event_fx_rejects_missing_or_mismatched_evidence(
         anchor["event_time_fx"]["rate"] = True
     elif mutation == "nonfinite-rate":
         anchor["event_time_fx"]["rate"] = "Infinity"
+    elif mutation == "alternate-generation":
+        anchor["event_time_fx"]["generation_id"] = "e" * 64
+    elif mutation == "alternate-provider":
+        anchor["event_time_fx"]["provider"] = "alternate-provider"
+    elif mutation == "alternate-artifact":
+        anchor["event_time_fx"]["source_artifact_id"] = "alternate-rates.csv"
     else:
         anchor["event_time_fx"]["generation_id"] = "not-a-generation"
     raw = deepcopy(anchor)
 
     with pytest.raises(manifest_module.ManifestError):
         manifest_module.parse_capital_anchors(
-            {"accounting_currency": "USD", "capital_anchors": [raw]}
+            {
+                "accounting_currency": "USD",
+                "portfolio_fx_generation": {
+                    "generation_id": "f" * 64,
+                    "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+                },
+                "capital_anchors": [raw],
+            }
         )
 
 

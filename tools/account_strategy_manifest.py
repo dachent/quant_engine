@@ -1904,9 +1904,26 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
                     event_fx.get("source_artifact_id"),
                     f"capital anchor {record_id}.event_time_fx.source_artifact_id",
                 )
+                selected_fx = ledger.get("portfolio_fx_generation")
+                if (
+                    not isinstance(selected_fx, Mapping)
+                    or set(selected_fx) != {"generation_id", "selection"}
+                    or selected_fx.get("selection")
+                    != "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT"
+                ):
+                    raise ManifestError(
+                        f"capital anchor {record_id} selected FX generation is invalid"
+                    )
+                selected_fx_generation_id = _generation_id(
+                    selected_fx.get("generation_id"),
+                    "ledger portfolio FX generation id",
+                )
                 if (
                     provider != event_fx.get("provider")
                     or source_artifact_id != event_fx.get("source_artifact_id")
+                    or provider != "yahoo"
+                    or source_artifact_id != "rates.csv"
+                    or fx_generation_id != selected_fx_generation_id
                     or type(event_fx.get("rate")) is not str
                 ):
                     raise ManifestError(

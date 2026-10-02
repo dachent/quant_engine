@@ -5109,8 +5109,23 @@ def _mixed_normalized_facts(
                     or _SHA256.fullmatch(fx_generation) is None
                 ):
                     _fail()
-                _fact_text(event_fx.get("provider"))
-                _fact_text(event_fx.get("source_artifact_id"))
+                selected_fx = ledger.get("portfolio_fx_generation")
+                if (
+                    not isinstance(selected_fx, dict)
+                    or set(selected_fx) != {"generation_id", "selection"}
+                    or selected_fx.get("selection")
+                    != "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT"
+                ):
+                    _fail()
+                selected_fx_generation = selected_fx.get("generation_id")
+                if (
+                    type(selected_fx_generation) is not str
+                    or _SHA256.fullmatch(selected_fx_generation) is None
+                    or fx_generation != selected_fx_generation
+                    or _fact_text(event_fx.get("provider")) != "yahoo"
+                    or _fact_text(event_fx.get("source_artifact_id")) != "rates.csv"
+                ):
+                    _fail()
                 rate_value = event_fx.get("rate")
                 if type(rate_value) is not str:
                     _fail()
@@ -5424,6 +5439,11 @@ def _verify_mixed_calculation_bridge(
         "flows": projected_flows,
         "capital_anchors": projected_anchors,
     }
+    selected_ledger = _strict_object(selected.provider_ledger.contents)
+    if "portfolio_fx_generation" in selected_ledger:
+        calculation_ledger["portfolio_fx_generation"] = selected_ledger[
+            "portfolio_fx_generation"
+        ]
     ledger_bytes = canonical_json_bytes(calculation_ledger)
     ledger_artifact = _subject_artifact(
         ledger_bytes,

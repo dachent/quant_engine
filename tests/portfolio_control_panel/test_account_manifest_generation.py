@@ -27342,6 +27342,10 @@ def test_t5b_event_fx_mixed_opening_anchor_converts_basis_not_performance_nav(
 
     base = _mixed_composer_selected_inputs(perimeter_module)
     ledger_payload = base.provider_ledger.json_object()
+    ledger_payload["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
     anchor = ledger_payload["capital_anchors"][0]
     anchor["amount"] = {
         "currency": "USDT",
@@ -27550,6 +27554,70 @@ def test_t5b_event_fx_mixed_opening_anchor_converts_basis_not_performance_nav(
             verifier_module._mixed_normalized_facts(
                 _mixed_verifier_inputs(verifier_module, invalid_selected)
             )
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "replacement"),
+    [
+        ("generation_id", "e" * 64),
+        ("provider", "alternate-provider"),
+        ("source_artifact_id", "alternate-rates.csv"),
+    ],
+)
+def test_t5b_event_fx_rejects_valid_alternate_identity_on_selected_route(
+    perimeter_module: Any,
+    verifier_module: Any,
+    identity_field: str,
+    replacement: str,
+) -> None:
+    """Selected FX identity changes cannot be re-signed into the candidate ledger."""
+    base = _mixed_composer_selected_inputs(perimeter_module)
+    ledger_payload = base.provider_ledger.json_object()
+    ledger_payload["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
+    anchor = ledger_payload["capital_anchors"][0]
+    anchor["amount"] = {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    anchor["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": anchor["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1.0002319812774658",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
+    selected = _mixed_selected_with_ledger(perimeter_module, base, ledger_payload)
+
+    altered_ledger = selected.provider_ledger.json_object()
+    altered_ledger["capital_anchors"][0]["event_time_fx"][identity_field] = replacement
+    altered_selected = _mixed_selected_with_ledger(
+        perimeter_module, selected, altered_ledger
+    )
+    # The existing selected ledger manifest is rebuilt around the altered
+    # candidate while receipt, policy, schema, and membership snapshots stay fixed.
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._mixed_normalized_facts(
+            _mixed_verifier_inputs(verifier_module, altered_selected)
+        )
+    try:
+        payloads = perimeter_module.build_account_manifest_payloads(altered_selected)
+    except (
+        perimeter_module.AccountAssignmentPerimeterError,
+        perimeter_module.ManifestError,
+    ):
+        return
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, altered_selected), payloads
+        )
 
 
 @pytest.mark.parametrize("lineage_edge", ["schema_relabel", "authority_removal"])
