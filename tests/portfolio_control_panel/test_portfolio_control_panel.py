@@ -12360,3 +12360,138 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
         report,
         "report capital differs from the governed baseline current capital",
     )
+
+
+def _run_f2_f7_browser_probe(html: Path) -> dict[str, object]:
+    """Run the real current panel bundle in Chromium and capture boot/render state."""
+
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    if not node or not runtime_node:
+        pytest.skip("Chromium runtime is not available for F2/F7 browser proof")
+    playwright_module = (
+        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    if not playwright_module.exists() or not Path(executable).exists():
+        pytest.skip("Playwright module or Chromium executable is not available")
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+process.stderr.write("stage:launch:start\n");
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, timeout: 12000 });
+process.stderr.write("stage:launch:complete\n");
+try {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const pageErrors = [];
+  const consoleErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  process.stderr.write("stage:goto:start\n");
+  await page.goto(pathToFileURL(process.env.F2_F7_HTML).href + "#capital", { waitUntil: "domcontentloaded", timeout: 12000 });
+  process.stderr.write("stage:goto:domcontentloaded\n");
+  await page.waitForFunction(() => ["ready", "error"].includes(document.querySelector("#app")?.dataset.appState), null, { timeout: 12000 });
+  process.stderr.write("stage:state:complete\n");
+  const evidence = await page.evaluate(() => ({
+    state: document.querySelector("#app")?.dataset.appState ?? null,
+    loadingHidden: document.querySelector("#loading-state")?.hidden ?? null,
+    errorHidden: document.querySelector("#error-state")?.hidden ?? null,
+    errorText: document.querySelector("#error-state")?.textContent?.trim() ?? "",
+    portfolioAsOf: document.querySelector("#portfolio-as-of")?.textContent?.trim() ?? "",
+    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[7]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[7]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
+    positionDateTexts: Array.from(document.querySelectorAll("#position-table tbody tr"), row => row.cells[5]?.firstChild?.textContent?.trim() ?? ""),
+    injectedPositionNodes: document.querySelectorAll("#position-table [data-f2-f7-position-probe]").length,
+    injectedDateScripts: document.querySelectorAll("#allocation-table script[data-f2-f7-probe]").length,
+    probeValue: window.__date_probe ?? null,
+    positionSearchPresent: Boolean(document.querySelector("#position-search")),
+  }));
+  evidence.pageErrors = pageErrors;
+  evidence.consoleErrors = consoleErrors;
+  console.log(JSON.stringify(evidence));
+  process.stderr.write("stage:probe:complete\n");
+} finally { process.stderr.write("stage:close:start\n"); await browser.close(); process.stderr.write("stage:close:complete\n"); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["F2_F7_HTML"] = str(html.resolve())
+    renderer_path = html.parent / "app.js"
+    template_renderer = panel.DEFAULT_TEMPLATE_ROOT / "app.js"
+    assert renderer_path.read_text(encoding="utf-8") == template_renderer.read_text(encoding="utf-8"), "candidate is not bound to the assigned app.js"
+    try:
+        result = subprocess.run(
+            [node, "--input-type=module", "-e", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f"F2/F7 Node probe timed out; stdout={error.stdout!r}; stderr={error.stderr!r}") from error
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("payload_script", ["", "window.PORTFOLIO_DATA = null;\n"])
+def test_f2_f7_missing_or_null_payload_reaches_visible_guard(
+    inputs: dict[str, Path], tmp_path: Path, payload_script: str
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"], inputs["legacy"], inputs["output"],
+        freshness_health_path=inputs["freshness"], baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    (candidate / "data" / "dashboard_data.js").write_text(payload_script, encoding="utf-8")
+
+    evidence = _run_f2_f7_browser_probe(candidate / "index.html")
+
+    assert evidence["state"] == "error", evidence
+    assert evidence["loadingHidden"] is True, evidence
+    assert evidence["errorHidden"] is False, evidence
+    assert "could not be loaded" in evidence["errorText"], evidence
+    assert any("missing or unsupported" in message for message in evidence["consoleErrors"]), evidence
+    assert evidence["pageErrors"] == [], evidence
+
+
+def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"], inputs["legacy"], inputs["output"],
+        freshness_health_path=inputs["freshness"], baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data_path = candidate / "data" / "dashboard_data.json"
+    payload = json.loads(data_path.read_text(encoding="utf-8"))
+    assert payload["panel_schema_version"] == 21
+    assert len(payload["allocations"]) >= 2
+    payload["allocations"][0]["as_of_date"] = "2026-08-16"
+    payload["allocations"][0]["weight_basis"] = "CURRENT_CUTOFF"
+    hostile_date = "</td><script data-f2-f7-probe>window.__date_probe=1</script><td>"
+    payload["allocations"][1]["as_of_date"] = hostile_date
+    position_attack = "</td><span data-f2-f7-position-probe>injected</span><td>"
+    assert payload["positions"]
+    payload["positions"][0]["as_of_date"] = position_attack
+    _write_dashboard_data_script(candidate, payload)
+
+    evidence = _run_f2_f7_browser_probe(candidate / "index.html")
+
+    assert evidence["state"] == "ready", evidence
+    assert evidence["portfolioAsOf"], evidence
+    assert evidence["positionSearchPresent"] is True, evidence
+    assert evidence["injectedDateScripts"] == 0, evidence
+    assert evidence["injectedPositionNodes"] == 0, evidence
+    assert evidence["probeValue"] is None, evidence
+    assert evidence["allocationRows"][0]["dateText"] == "Aug 16, 2026", evidence
+    assert evidence["allocationRows"][0]["weightBasis"] == "Current cutoff weights", evidence
+    assert evidence["allocationRows"][1]["dateText"] == hostile_date, evidence
+    assert evidence["positionDateTexts"][0] == position_attack, evidence
+    assert evidence["pageErrors"] == [], evidence
