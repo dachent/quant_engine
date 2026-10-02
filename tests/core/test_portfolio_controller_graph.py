@@ -475,9 +475,13 @@ def test_baseline_spec_schema_is_a_declared_baseline_generation_contract() -> No
 
     assert "schemas/portfolio/baseline-spec.schema.json" in baseline["source_paths"]
     assert "schemas/portfolio/baseline-spec.schema.json" in baseline["contracts"]
-    assert affected_stages(
-        graph, ["schemas/portfolio/baseline-spec.schema.json"]
-    ) == ["baseline", "attribution", "analytics", "report", "panel"]
+    assert affected_stages(graph, ["schemas/portfolio/baseline-spec.schema.json"]) == [
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ]
 
 
 def test_graph_records_integrated_preparation_declaration() -> None:
