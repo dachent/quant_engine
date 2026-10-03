@@ -2785,7 +2785,9 @@ def derive(
     add_not_derivable(
         output,
         "capital.reserve.cutoff",
-        "reserve",
+        "reserve-capital"
+        if "matrixport_generation_manifest" in input_paths
+        else "reserve",
         reserve_reason,
     )
     add_not_derivable(
