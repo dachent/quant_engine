@@ -2080,7 +2080,9 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                     "native Matrixport request manifest is malformed"
                 ) from error
             digest = (
-                request.get("request_sha256") if isinstance(request, dict) else None
+                request.get("request_hash", request.get("request_sha256"))
+                if isinstance(request, dict)
+                else None
             )
             if (
                 not isinstance(request, dict)
