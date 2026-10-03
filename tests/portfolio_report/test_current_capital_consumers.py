@@ -1465,6 +1465,60 @@ def test_cr2_custody_structural_complete_current_required(
     assert report["custody_current_capital"] == catalog["current_capital"]
 
 
+def test_cr2_custody_report_schema_accepts_native_handoff(
+    cr2_custody_structural_complete_world,
+):
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
+
+
+def test_cr2_custody_report_schema_rejects_invalid_authority_hash(
+    cr2_custody_structural_complete_world,
+):
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    report["custody_current_capital"]["custody_authority"]["contract_raw_sha256"] = (
+        "not-a-sha256"
+    )
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = list(
+        Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(report)
+    )
+    assert any(
+        list(error.absolute_path)
+        == ["custody_current_capital", "custody_authority", "contract_raw_sha256"]
+        for error in errors
+    )
+
+
 def test_cr2_custody_structural_complete_raw_facts_unchanged(
     cr2_custody_structural_complete_world,
 ):
