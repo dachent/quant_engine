@@ -107,9 +107,7 @@ def test_selected_account_source_projects_history_from_the_same_daily_navs(tmp_p
         paths["generation"].parent / "outputs/account-strategy-manifest.json"
     )
     manifest = json.loads(manifest_path.read_bytes())
-    manifest_module = fixture._load(
-        "tools.account_strategy_manifest", "tools/account_strategy_manifest.py"
-    )
+    manifest_module = importlib.import_module("tools.account_strategy_manifest")
     manifest_module.validate_manifest_schema(manifest)
     from copy import deepcopy
 

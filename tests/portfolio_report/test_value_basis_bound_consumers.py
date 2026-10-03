@@ -1188,6 +1188,7 @@ def test_publish_reads_the_dependence_generation_again_at_the_bounded_end(
             "as_of_date": "2026-01-03",
             "baseline": {"generation_id": baseline_ref["generation_id"]},
             "calculation_cutoff_date": "2026-01-04",
+            "report_schema_version": full.reporter.REPORT_SCHEMA_VERSION,
             "strategy_history_contract": {"as_of_date": history_end},
             "strategy_summary": [],
             "twr_mwr": [],
@@ -1964,7 +1965,7 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     assert "value_basis_bounds" not in report
     assert len(content) == 34412
     assert hashlib.sha256(content).hexdigest() == (
-        "14e9800fc654825eb831650fae4bad3510fdcbb50244ee2be0b938306161c33a"
+        "be07aae5f33b896f4b541af5b6c53b3cca3373770bcbb4a4ca952827f4e4e2f3"
     )
 
 
@@ -2005,6 +2006,7 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     undone["account_summary"] = [
         row for row in undone["account_summary"] if row not in funding
     ]
+    undone["report_schema_version"] = 1
     content = canonical_json_bytes(undone)
     # The published synthetic baseline now carries its `current_capital` block and the
     # funding accounts, so its catalog bytes and generation identity differ from v1's;

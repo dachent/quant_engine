@@ -21909,6 +21909,21 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
         "status": "AVAILABLE",
         "value": "499",
     }
+    ledger["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
+    ledger["capital_anchors"][0]["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": ledger["capital_anchors"][0]["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
     payloads = perimeter_module.build_account_manifest_payloads(selected)
