@@ -3367,3 +3367,47 @@ def test_selected_fx_guard_requires_rate_for_successful_usdc_custody_date(
         ValueError, match="selected FX rates lack a raw custody event date"
     ):
         derivation.selected_fx_covers_custody_event_dates(rates_path, deposits, [], [])
+
+
+@pytest.mark.parametrize("fee_type", ["PARTNER_SUB_FEE", "AUM_FEE"])
+def test_oracle_v3_b_native_complete_fee_journal_uses_provider_type_field(fee_type):
+    """Known COMPLETE fee journals use the provider's native `type` field."""
+    derivation = load_derivation_module()
+
+    result = derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-native-fee-journal",
+                "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "journal",
+                "status": "COMPLETE",
+                "type": fee_type,
+                "amount": "2",
+                "created_at": "2026-09-01T13:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-01T14:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {}, "USDT": {}},
+    )
+
+    assert result["volatis-strategy"] == {
+        "invested": Decimal("100"),
+        "cash": Decimal("4"),
+        "allocation": Decimal("96"),
+    }

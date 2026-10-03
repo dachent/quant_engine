@@ -1226,7 +1226,7 @@ def raw_custody_capital(
             "COMPLETE",
         }:
             source_type = (
-                row.get("source_type")
+                (row.get("source_type") or row.get("type"))
                 if row.get("status") == "COMPLETE"
                 else row.get("type")
             )
