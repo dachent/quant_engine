@@ -2169,6 +2169,236 @@ def test_oracle_v3_b_matrixport_fx_converts_the_cutoff_date():
     assert observations == [(date(2026, 9, 17), Decimal("9.90"))]
 
 
+def test_oracle_v3_b_matrixport_subscription_flow_drives_public_fund_mwr():
+    """Opening NAV allocation is excluded; later confirmed subscription is a positive fund flow."""
+    derivation = load_derivation_module()
+    observations = [
+        (date(2026, 1, 1), Decimal("100")),
+        (date(2027, 1, 1), Decimal("150")),
+        (date(2028, 1, 1), Decimal("176")),
+    ]
+    subscriptions = [
+        {
+            "subscription_time_utc": "2025-12-01T12:00:00+00:00",
+            "confirm_nav_time_utc": "2026-01-01T00:00:00+00:00",
+            "subscription_currency": "USDT",
+            "subscription_amount": "100",
+            "subscription_share": "100",
+        },
+        {
+            "subscription_time_utc": "2026-12-15T12:00:00+00:00",
+            "confirm_nav_time_utc": "2027-01-01T00:00:00+00:00",
+            "subscription_currency": "USDT",
+            "subscription_amount": "50",
+            "subscription_share": "50",
+        },
+    ]
+
+    flows, count = derivation.matrixport_raw_flows(
+        [],
+        observations,
+        fx_rates={date(2027, 1, 1): Decimal("1")},
+        opening_date=observations[0][0],
+        subscription_rows=subscriptions,
+        fx_rates_by_currency={
+            "USDT": {
+                date(2026, 1, 1): Decimal("1"),
+                date(2027, 1, 1): Decimal("1"),
+            }
+        },
+    )
+    mwr = derivation.xirr(
+        [(observations[0][0], -observations[0][1])]
+        + [(occurred_on, -amount) for occurred_on, amount in flows.items()]
+        + [(observations[-1][0], observations[-1][1])]
+    )
+
+    assert flows == {date(2027, 1, 1): Decimal("50")}
+    assert count == 1
+    assert mwr is not None
+    assert abs(mwr - Decimal("0.10")) < Decimal("0.00000000000000000001")
+
+
+@pytest.mark.parametrize(
+    ("effective_start", "nav_rows", "subscription_rows", "expected_flows"),
+    [
+        (
+            "2026-01-01",
+            [
+                ("2026-02-01", "1"),
+                ("2026-06-01", "1"),
+                ("2026-09-01", "2"),
+            ],
+            [("2026-02-01", "100"), ("2026-06-01", "50")],
+            [(date(2026, 6, 1), Decimal("50"))],
+        ),
+        (
+            "2026-01-02",
+            [
+                ("2026-01-31", "1"),
+                ("2026-02-01", "1"),
+                ("2026-06-01", "2"),
+            ],
+            [("2026-01-31", "100"), ("2026-02-01", "50")],
+            [(date(2026, 2, 1), Decimal("50"))],
+        ),
+    ],
+)
+def test_oracle_v3_b_public_derive_uses_accepted_window_opening_for_matrixport_mwr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effective_start: str,
+    nav_rows: list[tuple[str, str]],
+    subscription_rows: list[tuple[str, str]],
+    expected_flows: list[tuple[date, Decimal]],
+):
+    """Public account MWR uses the same accepted opening as its NAV window."""
+    derivation = load_derivation_module()
+    role_paths = write_manifest_role_fixtures(tmp_path)
+    role_paths["provider-ledger.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    role_paths["account-strategy-current-epoch-crosswalk.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [
+                    {
+                        **included_row("account-m", "strategy-m"),
+                        "provider": "MATRIXPORT",
+                        "effective_start": effective_start,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    role_paths["nav_daily.csv"].write_text(
+        "day_timestamp_utc,nav,product_id\n"
+        + "".join(f"{day}T00:00:00+00:00,{nav},fund-m\n" for day, nav in nav_rows),
+        encoding="utf-8",
+    )
+    role_paths["wallet_deposits.csv"].write_text(
+        "transaction_id,state,currency,amount,created_at_utc\n"
+        + "".join(
+            f"deposit-{index},confirmed,USDT,{amount},{day}T01:00:00+00:00\n"
+            for index, (day, amount) in enumerate(subscription_rows)
+        ),
+        encoding="utf-8",
+    )
+    role_paths["wallet_bills.csv"].write_text(
+        "currency,direction,amount,timestamp_utc\n", encoding="utf-8"
+    )
+    role_paths["yfinance-history.json"].write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDT-USD", "Date": day, "Close": 1}
+                    for day, _ in nav_rows
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    native_paths = {
+        "matrixport_subscription_details": tmp_path / "subscription_details.csv",
+        "matrixport_generation_manifest": tmp_path / "generation.json",
+        "matrixport_generation_catalog": tmp_path / "catalog.json",
+        "matrixport_owner_flow_coverage": tmp_path / "coverage.csv",
+        "matrixport_owner_flow_request_manifest": tmp_path / "requests.jsonl",
+    }
+    native_paths["matrixport_subscription_details"].write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc,"
+        "subscription_share,confirm_nav,status,source_endpoint\n"
+        + "".join(
+            f"{amount},{day}T00:00:00+00:00,order-{index},fund-m,{amount},USDT,"
+            f"{date.fromisoformat(day) - date.resolution}T00:00:00+00:00,"
+            f"{amount},1,300,/strategy/api/v2/order\n"
+            for index, (day, amount) in enumerate(subscription_rows)
+        ),
+        encoding="utf-8",
+    )
+    for path, contents in (
+        (native_paths["matrixport_generation_manifest"], "{}"),
+        (native_paths["matrixport_generation_catalog"], "{}"),
+        (native_paths["matrixport_owner_flow_coverage"], ""),
+        (native_paths["matrixport_owner_flow_request_manifest"], ""),
+    ):
+        path.write_text(contents, encoding="utf-8")
+    rates_path = tmp_path / "rates.csv"
+    rates_path.write_text(
+        "date,currency,base_currency,rate,provider,ticker,field,timing\n"
+        + "".join(
+            f"{day},USDT,USD,1,synthetic,USDT-USD,Close,EOD\n"
+            for day in sorted(
+                {
+                    candidate
+                    for subscription_day, _ in subscription_rows
+                    for candidate in (
+                        subscription_day,
+                        (
+                            date.fromisoformat(subscription_day) - date.resolution
+                        ).isoformat(),
+                    )
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        derivation,
+        "native_matrixport_input_paths",
+        lambda manifest, qe_root: native_paths,
+    )
+    monkeypatch.setattr(
+        derivation,
+        "v3_authority_paths",
+        lambda manifest, qe_root: {"fx_daily_rates": rates_path},
+    )
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": [
+            *[unpinned_entry(path) for path in role_paths.values()],
+            *[unpinned_entry(path) for path in native_paths.values()],
+        ],
+    }
+
+    output = derivation.derive(tmp_path, manifest)
+    assert any(
+        row["metric_id"] == "mwr.account" and row["entity"] == "account-m"
+        for row in output["metrics"]
+    ), output["not_derivable"]
+    account_mwr = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "mwr.account" and row["entity"] == "account-m"
+    )
+    opening_date = date.fromisoformat(nav_rows[0][0])
+    opening_value = Decimal(subscription_rows[0][1])
+    ending_date = date.fromisoformat(nav_rows[-1][0])
+    ending_value = Decimal(nav_rows[-1][1]) * sum(
+        Decimal(amount) for _, amount in subscription_rows
+    )
+    expected_mwr = derivation.xirr(
+        [(opening_date, -opening_value)]
+        + [(occurred_on, -amount) for occurred_on, amount in expected_flows]
+        + [(ending_date, ending_value)]
+    )
+    assert expected_mwr is not None
+    assert Decimal(account_mwr["value"]) == Decimal(derivation.ratio(expected_mwr))
+
+
 def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocation():
     """R8 keeps a provider account's owner funding distinct from its fund buy."""
     derivation = load_derivation_module()

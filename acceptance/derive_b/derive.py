@@ -973,17 +973,24 @@ def matrixport_raw_flows(
     subscription_rows: Iterable[dict[str, str]] | None = None,
     fx_rates_by_currency: dict[str, dict[date, Decimal]] | None = None,
 ) -> tuple[dict[date, Decimal], int]:
-    """Place raw confirmed wallet deposits at the first subsequent raw NAV point.
+    """Place raw confirmed wallet deposits and fund subscriptions into flows.
 
     A confirmed USDT/USDC deposit with no raw NAV point after it (raw
     observations stop at the admitted FX boundary) is not converted into a
     flow; it is recorded in deposits_skipped as (date, signed raw amount) for
-    per-account disclosure, and flows values are unchanged.
+    per-account disclosure, and flows values are unchanged. A subscription
+    recognized on or before the opening accepted NAV is already embedded in
+    that opening value and is excluded; later confirmed subscriptions are
+    positive fund contributions at their NAV-recognition-date FX.
     """
     dates = sorted(observed_on for observed_on, _ in observations)
     flows: dict[date, Decimal] = defaultdict(Decimal)
     count = 0
     for row in deposit_rows:
+        if subscription_rows is not None:
+            # Native subscription details are the fund-flow authority; wallet
+            # deposits remain custody-only and cannot substitute for a fund flow.
+            continue
         if row.get("state") not in (
             {"confirmed", "completed"} if allow_completed else {"confirmed"}
         ) or row.get("currency") not in {
@@ -1023,13 +1030,16 @@ def matrixport_raw_flows(
             recognized_on = datetime.fromisoformat(
                 row["confirm_nav_time_utc"].replace("Z", "+00:00")
             ).date()
+            if opening_date is not None and recognized_on <= opening_date:
+                continue
             currency = str(row["subscription_currency"])
             rate = (fx_rates_by_currency or {}).get(currency, {}).get(recognized_on)
             if rate is None and currency == "USDT":
                 rate = (fx_rates or {}).get(recognized_on)
             if rate is None:
                 raise ValueError("no admitted FX for subscription recognition")
-            flows[recognized_on] -= Decimal(row["subscription_amount"]) * rate
+            flows[recognized_on] += Decimal(row["subscription_amount"]) * rate
+            count += 1
     return dict(flows), count
 
 
@@ -1515,11 +1525,19 @@ def raw_provider_data(
                             + " yields no observations"
                         )
                     if values:
+                        opening_date = membership_starts.get(account_id)
+                        if subscription_rows is not None and opening_date is not None:
+                            accepted_window = window_observations(
+                                values, opening_date, None
+                            )
+                            opening_date = (
+                                accepted_window[0][0] if accepted_window else None
+                            )
                         cash_flows, count = matrixport_raw_flows(
                             deposit_rows,
                             values,
                             fx_rates,
-                            membership_starts.get(account_id),
+                            opening_date,
                             deposits_skipped,
                             event_date_fx,
                             subscription_rows is not None,
