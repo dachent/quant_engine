@@ -760,6 +760,32 @@ def test_matrixport_raw_nav_uses_subscription_bill_units_and_embeds_opening_fund
     assert (flows, count) == ({}, 0)
 
 
+def test_matrixport_native_subscription_nav_uses_observation_date_fx():
+    """Native subscription NAV is converted with the selected raw-date FX close."""
+    derivation = load_derivation_module()
+    observations = derivation.matrixport_raw_observations(
+        [
+            {"day_timestamp_utc": "2026-09-02T00:00:00+00:00", "nav": "1"},
+            {"day_timestamp_utc": "2026-09-15T00:00:00+00:00", "nav": "1.5"},
+        ],
+        [],
+        [],
+        "account-m",
+        {date(2026, 9, 2): Decimal("1"), date(2026, 9, 15): Decimal("1.1")},
+        subscription_rows=[
+            {
+                "confirm_nav_time_utc": "2026-09-02T00:00:00+00:00",
+                "subscription_share": "10",
+            }
+        ],
+    )
+
+    assert observations == [
+        (date(2026, 9, 2), Decimal("10")),
+        (date(2026, 9, 15), Decimal("16.50")),
+    ]
+
+
 def test_derive_has_no_reporting_manifest_dependency(tmp_path: Path):
     """A missing reporting-generation manifest must not block the independent oracle."""
     derivation = load_derivation_module()

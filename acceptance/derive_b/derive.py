@@ -944,11 +944,7 @@ def matrixport_raw_observations(
                 ),
                 Decimal("0"),
             )
-            rate = (
-                Decimal("1")
-                if subscription_rows is not None
-                else (fx_rates or {}).get(observed_on)
-            )
+            rate = (fx_rates or {}).get(observed_on)
             if units == 0:
                 continue
             if rate is None:
