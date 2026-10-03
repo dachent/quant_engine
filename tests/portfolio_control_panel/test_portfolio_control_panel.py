@@ -4334,7 +4334,12 @@ def test_current_analytics_walks_a_long_finalized_generation(
         )
         if len(str(candidate_artifact.absolute())) > 270:
             break
-    long_component.mkdir(parents=True)
+    storage_component = (
+        Path(f"\\\\?\\{long_component.absolute()}")
+        if sys.platform == "win32"
+        else long_component
+    )
+    storage_component.mkdir(parents=True)
     root = long_component.joinpath(*([".."] * parent_count))
     artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
     assert len(str(artifact_path.absolute())) > 270
