@@ -1821,14 +1821,47 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
         raise ManifestError("v3 selected rates lack exact cutoff USDC/USDT closes")
     native = native_matrixport_input_paths(manifest, qe_root)
     if native:
+        declared_by_basename: dict[str, set[str]] = defaultdict(set)
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                declared_by_basename[Path(entry["path"]).name].add(entry["path"])
+
+        def declared_artifact(basename: str) -> Path:
+            candidates = declared_by_basename.get(basename, set())
+            if len(candidates) != 1:
+                raise ManifestError(
+                    f"native Matrixport artifact {basename!r} must have one declared path"
+                )
+            return resolve_input_path(qe_root, next(iter(candidates)))
+
         generation_path = native["matrixport_generation_manifest"]
         subscription_path = native["matrixport_subscription_details"]
         catalog_path = native["matrixport_generation_catalog"]
         coverage_path = native["matrixport_owner_flow_coverage"]
         request_path = native["matrixport_owner_flow_request_manifest"]
+        artifact_paths = {
+            "csv/nav_daily.csv": declared_artifact("nav_daily.csv"),
+            "csv/wallet_deposits.csv": declared_artifact("wallet_deposits.csv"),
+            "csv/wallet_bills.csv": declared_artifact("wallet_bills.csv"),
+            "csv/wallet_currency_dispositions.csv": declared_artifact(
+                "wallet_currency_dispositions.csv"
+            ),
+            "csv/subscription_details.csv": subscription_path,
+            "csv/coverage.csv": coverage_path,
+            "reports/request_manifest.jsonl": request_path,
+            "normalized/generation-catalog.json": catalog_path,
+        }
         try:
             native_generation = json.loads(generation_path.read_text("utf-8"))
             catalog = json.loads(catalog_path.read_text("utf-8"))
+            with artifact_paths["csv/nav_daily.csv"].open(
+                encoding="utf-8-sig", newline=""
+            ) as handle:
+                nav_rows = list(csv.DictReader(handle))
+            with artifact_paths["csv/wallet_deposits.csv"].open(
+                encoding="utf-8-sig", newline=""
+            ) as handle:
+                deposit_rows = list(csv.DictReader(handle))
             with subscription_path.open(encoding="utf-8-sig", newline="") as handle:
                 subscriptions = list(csv.DictReader(handle))
             with coverage_path.open(encoding="utf-8-sig", newline="") as handle:
@@ -1853,6 +1886,9 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
             or matrixport_selection.get("generation_id") != generation_id
             or not isinstance(source_run_id, str)
             or matrixport_selection.get("source_run_id") != source_run_id
+            or matrixport_selection.get("generation_manifest_sha256")
+            != file_sha256(generation_path)
+            or matrixport_selection.get("catalog_sha256") != file_sha256(catalog_path)
             or catalog.get("catalog_schema_version") != 2
             or catalog.get("provider_id") != "matrixport"
             or not isinstance(catalog.get("observed_boundary_date"), str)
@@ -1889,14 +1925,7 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                 ),
                 None,
             )
-            selected_path = {
-                "csv/subscription_details.csv": subscription_path,
-                "csv/coverage.csv": coverage_path,
-                "reports/request_manifest.jsonl": request_path,
-                "normalized/generation-catalog.json": catalog_path,
-            }.get(artifact_id)
-            if selected_path is None:
-                continue
+            selected_path = artifact_paths[artifact_id]
             schema = artifact.get("schema") if isinstance(artifact, dict) else None
             if (
                 not isinstance(artifact, dict)
@@ -1926,6 +1955,9 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
             subscriptions[0]
         ):
             raise ManifestError("native Matrixport subscription schema is incomplete")
+        required_nav_fields = {"day_timestamp_utc", "nav", "product_id"}
+        if not nav_rows or not required_nav_fields.issubset(nav_rows[0]):
+            raise ManifestError("native Matrixport NAV schema is incomplete")
         for row in subscriptions:
             try:
                 subscribed = datetime.fromisoformat(
@@ -1945,20 +1977,46 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                     or row["status"] != "300"
                 ):
                     raise ValueError("invalid confirmed subscription")
+                recognition_date = confirmed.astimezone(timezone.utc).date()
+                matching_navs = [
+                    nav
+                    for nav in nav_rows
+                    if nav.get("product_id") == row["product_id"]
+                    and datetime.fromisoformat(
+                        nav["day_timestamp_utc"].replace("Z", "+00:00")
+                    )
+                    .astimezone(timezone.utc)
+                    .date()
+                    == recognition_date
+                    and Decimal(nav["nav"]) == Decimal(row["confirm_nav"])
+                ]
+                if not matching_navs:
+                    raise ValueError(
+                        "confirmation NAV is not bound to recognition-day NAV"
+                    )
             except (KeyError, ValueError, DecimalException) as error:
                 raise ManifestError(
                     f"native Matrixport subscription is invalid: {error}"
                 ) from error
-        if len(coverage_rows) != 2:
-            raise ManifestError(
-                "native Matrixport owner-flow coverage must contain deposits and withdrawals"
-            )
         expected_endpoints = {
             "GET https://mapi.matrixport.com/mapi/v1/wallet/deposits": 1,
             "GET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals": 0,
         }
+        selected_coverage: dict[str, dict[str, str]] = {}
         for row in coverage_rows:
             endpoint = row.get("endpoint")
+            if endpoint not in expected_endpoints:
+                continue
+            if endpoint in selected_coverage:
+                raise ManifestError(
+                    "native Matrixport owner-flow coverage has duplicate endpoints"
+                )
+            selected_coverage[endpoint] = row
+        if set(selected_coverage) != set(expected_endpoints):
+            raise ManifestError(
+                "native Matrixport owner-flow coverage lacks required endpoints"
+            )
+        for endpoint, row in selected_coverage.items():
             try:
                 raw_rows = json.loads(row["details_json"])["raw_rows"]
             except (KeyError, TypeError, json.JSONDecodeError) as error:
@@ -1970,12 +2028,52 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                 or row.get("status") != "complete_to_observed_boundary"
                 or row.get("terminal_reason")
                 != "structured_parameter_rejections_dispositioned"
-                or raw_rows != expected_endpoints[endpoint]
                 or not row.get("updated_at_utc")
             ):
                 raise ManifestError(
                     "native Matrixport owner-flow coverage is incomplete"
                 )
+            if endpoint.endswith("/withdrawals") and raw_rows != 0:
+                raise ManifestError("native Matrixport withdrawals are not empty")
+        required_deposit_fields = {
+            "transaction_id",
+            "state",
+            "currency",
+            "amount",
+            "created_at_utc",
+        }
+        if not deposit_rows or not required_deposit_fields.issubset(deposit_rows[0]):
+            raise ManifestError("native Matrixport deposit schema is incomplete")
+        deposit_ids: set[str] = set()
+        for row in deposit_rows:
+            try:
+                transaction_id = row["transaction_id"]
+                timestamp = datetime.fromisoformat(
+                    row["created_at_utc"].replace("Z", "+00:00")
+                )
+                amount = Decimal(row["amount"])
+                if (
+                    not transaction_id
+                    or transaction_id in deposit_ids
+                    or row["state"] != "completed"
+                    or row["currency"] not in {"USDC", "USDT"}
+                    or timestamp.tzinfo is None
+                    or amount <= 0
+                ):
+                    raise ValueError("invalid native owner deposit")
+                deposit_ids.add(transaction_id)
+            except (KeyError, ValueError, DecimalException) as error:
+                raise ManifestError(
+                    f"native Matrixport owner deposit is invalid: {error}"
+                ) from error
+        if json.loads(
+            selected_coverage[
+                "GET https://mapi.matrixport.com/mapi/v1/wallet/deposits"
+            ]["details_json"]
+        )["raw_rows"] != len(deposit_rows):
+            raise ManifestError(
+                "native Matrixport deposit coverage count is not source-bound"
+            )
         if not request_lines:
             raise ManifestError("native Matrixport request manifest is empty")
         for line in request_lines:
