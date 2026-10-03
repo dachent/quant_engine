@@ -944,7 +944,11 @@ def matrixport_raw_observations(
                 ),
                 Decimal("0"),
             )
-            rate = (fx_rates or {}).get(observed_on)
+            rate = (
+                Decimal("1")
+                if subscription_rows is not None
+                else (fx_rates or {}).get(observed_on)
+            )
             if units == 0:
                 continue
             if rate is None:
@@ -970,6 +974,8 @@ def matrixport_raw_flows(
     deposits_skipped: list[tuple[date, Decimal]] | None = None,
     event_date_fx: bool = False,
     allow_completed: bool = False,
+    subscription_rows: Iterable[dict[str, str]] | None = None,
+    fx_rates_by_currency: dict[str, dict[date, Decimal]] | None = None,
 ) -> tuple[dict[date, Decimal], int]:
     """Place raw confirmed wallet deposits at the first subsequent raw NAV point.
 
@@ -1001,7 +1007,9 @@ def matrixport_raw_flows(
             if deposits_skipped is not None and occurred_on <= CUTOFF:
                 deposits_skipped.append((occurred_on, Decimal(amount)))
             continue
-        if target == dates[0] or (opening_date is not None and target <= opening_date):
+        if (not allow_completed and target == dates[0]) or (
+            opening_date is not None and target <= opening_date and not allow_completed
+        ):
             continue
         value = Decimal(amount)
         if row["currency"] == "USDT":
@@ -1014,6 +1022,18 @@ def matrixport_raw_flows(
             value *= rate
         flows[target] += value
         count += 1
+    if subscription_rows is not None:
+        for row in subscription_rows:
+            recognized_on = datetime.fromisoformat(
+                row["confirm_nav_time_utc"].replace("Z", "+00:00")
+            ).date()
+            currency = str(row["subscription_currency"])
+            rate = (fx_rates_by_currency or {}).get(currency, {}).get(recognized_on)
+            if rate is None and currency == "USDT":
+                rate = (fx_rates or {}).get(recognized_on)
+            if rate is None:
+                raise ValueError("no admitted FX for subscription recognition")
+            flows[recognized_on] -= Decimal(row["subscription_amount"]) * rate
     return dict(flows), count
 
 
@@ -1507,6 +1527,13 @@ def raw_provider_data(
                             deposits_skipped,
                             event_date_fx,
                             subscription_rows is not None,
+                            subscription_rows,
+                            {
+                                "USDC": stablecoin_usd_fx_rates(
+                                    qe_root / fx_path, "USDC-USD", fx_last_admitted_date
+                                ),
+                                "USDT": fx_rates,
+                            },
                         )
             except (OSError, ValueError, KeyError) as error:
                 failures[account_id] = {
