@@ -2568,10 +2568,8 @@
    "outcome_id": "AS_HELD_COMPOSITE_HWM",
    "owner_issue": 324,
    "product_requirement": "REQUIRED",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    324
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "accepted_statuses": [
     "AVAILABLE"
    ],
@@ -2598,10 +2596,8 @@
    "outcome_id": "INVESTED_CAPITAL",
    "owner_issue": 318,
    "product_requirement": "REQUIRED",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    324
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "accepted_statuses": [
     "AVAILABLE"
    ],
@@ -2613,7 +2609,7 @@
    "calculation_contract": {
     "policy_id": "PORT-INVESTED-CAPITAL-1",
     "policy_schema_version": 1,
-    "policy_status": "REQUIRED_NOT_READY",
+    "policy_status": "READY",
     "policy_owner_issue": 318,
     "shared_flow_contract": {
      "current_policy_id": "PORT-PERF-1",
@@ -2622,7 +2618,7 @@
      "conformance_vectors_path": "contracts/portfolio-performance-policy-v1.json",
      "conformance_vectors_sha256": "12862e2f53604807a338f027394d10ed50983365b9a91a2cc82adc5c0efe5c14",
      "extension_authority_issue": 324,
-     "extension_status": "REQUIRED_NOT_READY"
+     "extension_status": "READY"
     },
     "change_control": {
      "authoritative_edit_location": "financial_outcomes[outcome_id=INVESTED_CAPITAL].calculation_contract",
