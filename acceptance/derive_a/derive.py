@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import DERIVATION, SCHEMA
 from .numerics import (
@@ -653,7 +653,7 @@ def load_inputs_manifest(data: bytes, label: str) -> InputsManifest:
 
 
 def _load_inputs_manifest_v3(
-    document: Mapping[str, Any], entries: object, data: bytes, label: str
+    document: Mapping[str, Any], entries: Sequence[object], data: bytes, label: str
 ) -> InputsManifest:
     """Resolve a ``qe-cp-acceptance-inputs/3`` manifest by authority family.
 
@@ -3424,7 +3424,9 @@ def _custody_facts(
             files[QB_ACTIVITY].data, files[QB_ACCOUNTS].data, source.flows.flows, cutoff
         )
         failures.extend(unsupported)
-        inputs = (QB_ACTIVITY, QB_ACCOUNTS) if native_transfers else (QB_ACTIVITY,)
+        inputs: tuple[str, ...] = (
+            (QB_ACTIVITY, QB_ACCOUNTS) if native_transfers else (QB_ACTIVITY,)
+        )
     elif source.provider == "MATRIXPORT":
         if native is not None:
             events, native_failures = _matrixport_native_cash_events(native, fx, cutoff)
@@ -3640,7 +3642,7 @@ def _derive(
                 authority.observed_start,
                 authority.observed_end,
                 authority.generation,
-                manifest.path,
+                cast(InputsManifest, manifest).path,
             )
             sources = _account_sources(
                 crosswalk, ledger, files, None, cutoff, fx_v3=fx_v3, native=native
