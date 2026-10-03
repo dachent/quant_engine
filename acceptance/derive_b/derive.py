@@ -2051,7 +2051,7 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                 if (
                     not transaction_id
                     or transaction_id in deposit_ids
-                    or row["state"] != "completed"
+                    or row["state"] not in {"confirmed", "completed"}
                     or row["currency"] not in {"USDC", "USDT"}
                     or timestamp.tzinfo is None
                     or amount <= 0
