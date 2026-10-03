@@ -1218,8 +1218,17 @@ def test_finality_requires_selected_native_sources_and_account_scope(
         ledger._validate_observed_finality_evidence("schwab", substituted)
 
 
+@pytest.mark.parametrize(
+    ("field", "expected_message"),
+    (
+        ("observed_inventory_count", "counts or digests"),
+        ("observed_admitted_item_count", "counts or digests"),
+        ("historical_admitted_item_count", "historical comparison"),
+        ("historical_admitted_item_set_sha256", "historical comparison"),
+    ),
+)
 def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, expected_message: str
 ) -> None:
     """Exercise the real stage/verify producer seam with existing synthetic inputs.
 
@@ -1402,8 +1411,12 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     ledger.verify_candidate(spec_path, str(staged["generation_id"]))
 
     tampered = copy.deepcopy(receipt)
-    tampered["run_observation"]["providers"][0]["observed_inventory_count"] += 1
-    with pytest.raises(ProviderAdmissionError, match="counts or digests"):
+    observed = tampered["run_observation"]["providers"][0]
+    if field.endswith("_sha256"):
+        observed[field] = "0" * 64
+    else:
+        observed[field] += 1
+    with pytest.raises(ProviderAdmissionError, match=expected_message):
         ledger.validate_admit_or_declare_receipt(
             tampered,
             product_authority=authority,
@@ -2442,14 +2455,14 @@ QE_LEDGER_SPEC_PATH = os.environ.get("QE_LEDGER_SPEC_PATH", "")
     not QE_LEDGER_SPEC_PATH or not Path(QE_LEDGER_SPEC_PATH).is_file(),
     reason="QE_LEDGER_SPEC_PATH does not name a mounted provider-ledger spec",
 )
-def test_receipt_reproduces_every_contract_admitted_set() -> None:
-    """Producer-output regression (PR #387 review): run the governed
-    admit-or-declare derivation against the mounted estate and require the
-    receipt's per-provider admitted sets to reproduce the contract's
-    dataset_disposition_policy pins. build_catalog itself enforces the
-    upstream-inventory, data-class-set, and admitted-set digest gates against
-    these pins; this test re-runs that producer on live generations so the
-    pinned literals cannot drift silently alongside the contract."""
+def test_receipt_reproduces_observed_and_historical_admitted_sets() -> None:
+    """Mounted receipt preserves observed run facts and historical policy pins.
+
+    A run-observation receipt may legitimately differ from the historical
+    policy's admitted count. The receipt must bind its current disposition
+    result to the observation while retaining the policy count and digest.
+    Legacy receipts without a run observation keep direct policy equality.
+    """
 
     import collections
 
@@ -2467,13 +2480,46 @@ def test_receipt_reproduces_every_contract_admitted_set() -> None:
             encoding="utf-8"
         )
     )
+    policies = {
+        str(segment["source_id"]): policy
+        for segment in contract["source_segments"]
+        if (
+            policy := (segment.get("admission") or {}).get("dataset_disposition_policy")
+        )
+    }
+    observations = receipt.get("run_observation")
+    if observations is None:
+        checked = 0
+        for segment_id, policy in policies.items():
+            assert admitted_counts[segment_id] == policy["admitted_item_count"], (
+                segment_id
+            )
+            checked += 1
+        assert checked >= 7
+        return
+
+    providers_by_segment = {
+        str(provider["source_segment_id"]): str(provider["provider_id"])
+        for provider in receipt["provider_generations"]
+    }
+    observed_by_provider = {
+        str(row["provider_id"]): row for row in observations["providers"]
+    }
+    assert set(observed_by_provider) == {
+        str(provider["provider_id"]) for provider in receipt["provider_generations"]
+    }
     checked = 0
-    for segment in contract["source_segments"]:
-        policy = (segment.get("admission") or {}).get("dataset_disposition_policy")
-        if not policy:
-            continue
-        segment_id = str(segment["source_id"])
-        assert admitted_counts[segment_id] == policy["admitted_item_count"], segment_id
+    for segment_id, policy in policies.items():
+        provider_id = providers_by_segment[segment_id]
+        observed = observed_by_provider[provider_id]
+        assert admitted_counts[segment_id] == observed["observed_admitted_item_count"]
+        assert (
+            observed["historical_admitted_item_count"] == policy["admitted_item_count"]
+        )
+        assert (
+            observed["historical_admitted_item_set_sha256"]
+            == policy["admitted_item_set_sha256"]
+        )
         checked += 1
     assert checked >= 7
 

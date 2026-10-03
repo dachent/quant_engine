@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+from browser_runtime import resolve_browser_runtime
 
 SCRIPT = (
     Path(__file__).parents[2]
@@ -127,27 +128,12 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
     tmp_path: Path,
 ) -> None:
     """Exercise the real harness, including failure on an authority-only suffix mutation."""
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
-        pytest.skip("Node or CODEX_MCP_NODE_PATH runtime is unavailable")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not playwright_module.exists() or not Path(executable).exists():
-        pytest.skip("Playwright module or Chromium executable is unavailable")
-
     repo = Path(__file__).parents[2]
+    runtime = resolve_browser_runtime(repo)
+    if runtime is None:
+        pytest.skip("Chromium runtime is unavailable")
+    node, playwright_module, executable = runtime
+
     dashboard_manifest = _synthetic_epoch_manifest()
     external_data = _synthetic_epoch_manifest()
     dashboard_bytes = json.dumps(dashboard_manifest, indent=2).encode("utf-8")

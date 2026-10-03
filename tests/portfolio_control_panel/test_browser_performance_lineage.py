@@ -12,6 +12,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+from browser_runtime import resolve_browser_runtime
 
 REPO = Path(__file__).parents[2]
 PANEL_ROOT = REPO / "apps" / "portfolio-control-panel"
@@ -44,26 +45,7 @@ def _quadratic_loss(matrix: dict[str, object], inputs: list[Decimal]) -> Decimal
 
 
 def _browser_runtime() -> tuple[str, str, str] | None:
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-        if runtime_node
-        else None
-    )
-    if not node or not module or not module.exists() or not Path(executable).exists():
-        return None
-    return node, str(module), executable
+    return resolve_browser_runtime(REPO)
 
 
 def _write_dashboard(candidate: Path, data: dict[str, object]) -> None:

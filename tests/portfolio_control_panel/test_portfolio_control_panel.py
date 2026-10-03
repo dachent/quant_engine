@@ -33,6 +33,7 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
+from browser_runtime import require_browser_runtime, resolve_browser_runtime
 from tools.account_strategy_manifest import (
     build_manifest_candidate,
     validate_manifest_schema,
@@ -4318,9 +4319,23 @@ def test_current_analytics_walks_a_long_finalized_generation(
         physical_root, "decomposition.json", _decomposition(), "long-lens"
     )
     pointer = read_current(physical_root)
-    long_component = physical_root / ("long-root-" + "x" * 100)
-    long_component.mkdir()
-    root = long_component / ".."
+    long_component = physical_root
+    segment = "long-root-" + "x" * 100
+    parent_count = 0
+    while True:
+        long_component /= segment
+        parent_count += 1
+        candidate_root = long_component.joinpath(*([".."] * parent_count))
+        candidate_artifact = (
+            candidate_root
+            / "generations"
+            / pointer.generation_id
+            / "decomposition.json"
+        )
+        if len(str(candidate_artifact.absolute())) > 270:
+            break
+    long_component.mkdir(parents=True)
+    root = long_component.joinpath(*([".."] * parent_count))
     artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
     assert len(str(artifact_path.absolute())) > 270
 
@@ -10274,27 +10289,10 @@ def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
 def _run_rendered_epoch_manifest_probe(html: Path) -> dict[str, object]:
     """Exercise the shipped static page in Chromium and return its DOM evidence."""
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    if not playwright_module.exists():
-        pytest.skip("Playwright module is not available for rendered browser proof")
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not Path(executable).exists():
-        pytest.skip("Chromium executable is not available for rendered browser proof")
+    node, playwright_module, executable = runtime
     probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
@@ -10373,25 +10371,10 @@ def _run_interaction_qa(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     """Run the shipped Chromium acceptance harness against one candidate."""
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not playwright_module.exists() or not executable:
-        pytest.skip("Playwright module or Chromium executable is not available")
+    node, playwright_module, executable = runtime
     output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
@@ -12591,25 +12574,7 @@ def test_renderer_accepts_panel_schema21_and22(
     candidate_renderer = (candidate / "app.js").read_text(encoding="utf-8")
     assert candidate_renderer.replace("\r\n", "\n") == renderer.replace("\r\n", "\n")
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    assert node and runtime_node, "the installed Node/Playwright runtime is required"
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    assert playwright_module.is_file() and Path(executable).is_file(), (
-        "the installed Playwright module and Chromium are required"
-    )
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
     for version in (21, 22, 23):
@@ -12692,25 +12657,10 @@ def test_renderer_accepts_panel_schema21_and22(
 def _run_f2_f7_browser_probe(html: Path) -> dict[str, object]:
     """Run the real current panel bundle in Chromium and capture boot/render state."""
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
         pytest.skip("Chromium runtime is not available for F2/F7 browser proof")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not playwright_module.exists() or not Path(executable).exists():
-        pytest.skip("Playwright module or Chromium executable is not available")
+    node, playwright_module, executable = runtime
     probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
@@ -12776,25 +12726,7 @@ try {
 
 def _run_g2_lazy_view_probe(html: Path, download_path: Path) -> dict[str, object]:
     """Exercise every routed view in Chromium with temporary renderer instrumentation."""
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    assert node and runtime_node, "the installed Node/Playwright runtime is required"
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    assert playwright_module.is_file() and Path(executable).is_file(), (
-        "the installed Playwright module and Chromium are required"
-    )
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
     probe = r"""
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -12951,24 +12883,10 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     data["limitations"].extend(panel._source_clock_display_lines(clock))
     _write_dashboard_data_script(candidate, data)
     common_eod = clock["latest_common_eod"]
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    assert node and runtime_node, "the pinned Node/Playwright runtime is required"
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
     output = tmp_path / "native-browser-qa"
     env = dict(os.environ)
-    env["PLAYWRIGHT_MODULE"] = str(
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
+    env["PLAYWRIGHT_MODULE"] = playwright_module
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
     result = subprocess.run(
         [
@@ -13015,22 +12933,7 @@ def test_g2_lazy_view_navigation_error_uses_visible_app_error_state(
     data = json.loads(data_path.read_text(encoding="utf-8"))
     data["weekly_returns"] = None
     _write_dashboard_data_script(candidate, data)
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    assert node and runtime_node, "the pinned Node/Playwright runtime is required"
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
     probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);

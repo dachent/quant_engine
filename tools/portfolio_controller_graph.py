@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -675,7 +676,9 @@ def _relative(path: Path) -> str:
     return path.as_posix()
 
 
-def _required_paths(repo_root: Path) -> list[str]:
+def _required_paths(
+    repo_root: Path, reader: _CurrentGraphSourceReader | None = None
+) -> list[str]:
     paths = [
         "tools/portfolio_controller_graph.py",
         _CORE,
@@ -689,7 +692,9 @@ def _required_paths(repo_root: Path) -> list[str]:
     ]
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)
-        bindings = _preparation_stage_bindings(repo_root)
+        bindings = _preparation_stage_bindings(
+            reader or _CurrentGraphSourceReader(repo_root)
+        )
         for binding_kind in ("code", "policy"):
             stage_bindings = bindings[binding_kind]
             if not isinstance(stage_bindings, Mapping):
@@ -718,6 +723,38 @@ def _tree(repo_root: Path, relative_path: str) -> ast.Module:
         raise ControllerGraphError(
             f"cannot parse controller source: {relative_path}"
         ) from exc
+
+
+class _CurrentGraphSourceReader:
+    """Read and parse one current graph's source without repeated AST parsing."""
+
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        self._trees: dict[tuple[str, bytes], ast.Module] = {}
+
+    def tree(self, relative_path: str) -> ast.Module:
+        path = self.repo_root / relative_path
+        if not path.is_file():
+            raise ControllerGraphError(
+                f"required controller source is absent: {relative_path}"
+            )
+        try:
+            source = path.read_bytes()
+            digest = hashlib.sha256(source).digest()
+            key = (relative_path, digest)
+            cached = self._trees.get(key)
+            if cached is not None:
+                return cached
+            text = io.TextIOWrapper(
+                io.BytesIO(source), encoding="utf-8", newline=None
+            ).read()
+            tree = ast.parse(text, filename=relative_path)
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            raise ControllerGraphError(
+                f"cannot parse controller source: {relative_path}"
+            ) from exc
+        self._trees[key] = tree
+        return tree
 
 
 def _top_level_function(
@@ -752,13 +789,13 @@ def _endpoint_function(
 
 
 def _require_attribute_call(
-    repo_root: Path,
+    reader: _CurrentGraphSourceReader,
     relative_path: str,
     function_name: str,
     attribute: str,
     relationship: str,
 ) -> None:
-    function = _top_level_function(_tree(repo_root, relative_path), function_name)
+    function = _top_level_function(reader.tree(relative_path), function_name)
     if not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -920,10 +957,10 @@ def _module_imports(tree: ast.Module) -> set[str]:
 
 
 def _stage_declarations(
-    repo_root: Path,
+    reader: _CurrentGraphSourceReader,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    core = _tree(repo_root, _CORE)
-    materializer = _tree(repo_root, _MATERIALIZER)
+    core = reader.tree(_CORE)
+    materializer = reader.tree(_MATERIALIZER)
     core_order = _literal_assignment(core, "_PORTFOLIO_STAGE_ORDER")
     core_dependencies = _literal_assignment(core, "_PORTFOLIO_STAGE_DEPENDENCIES")
     materializer_order = _literal_assignment(materializer, "STAGES")
@@ -959,13 +996,13 @@ def _stage_declarations(
 
 
 def _require_calls(
-    repo_root: Path,
+    reader: _CurrentGraphSourceReader,
     relative_path: str,
     function_name: str,
     calls: Iterable[str],
 ) -> None:
     observed = _function_calls(
-        _top_level_function(_tree(repo_root, relative_path), function_name)
+        _top_level_function(reader.tree(relative_path), function_name)
     )
     missing = sorted(set(calls) - observed)
     if missing:
@@ -985,11 +1022,11 @@ def _require_tool_call(
 
 
 def _preparation_stage_dependencies(
-    repo_root: Path,
+    reader: _CurrentGraphSourceReader,
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     """Record the mandatory executable predecessor declaration."""
 
-    preparation = _tree(repo_root, _PREPARATION)
+    preparation = reader.tree(_PREPARATION)
     declared = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
     if not isinstance(declared, dict):
         raise ControllerGraphError(
@@ -1022,10 +1059,11 @@ def _preparation_stage_dependencies(
     }, edges
 
 
-def _preparation_stage_bindings(repo_root: Path) -> dict[str, object]:
+def _preparation_stage_bindings(reader: _CurrentGraphSourceReader) -> dict[str, object]:
     """Project the same runtime declarations that preparation hashes on reuse."""
 
-    preparation = _tree(repo_root, _PREPARATION)
+    repo_root = reader.repo_root
+    preparation = reader.tree(_PREPARATION)
     dependencies = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
     code = _literal_assignment(preparation, "_PREPARATION_STAGE_CODE")
     policy = _literal_assignment(preparation, "_PREPARATION_STAGE_POLICY")
@@ -1060,7 +1098,7 @@ def _preparation_stage_bindings(repo_root: Path) -> dict[str, object]:
             raise ControllerGraphError("preparation runtime path is absent")
         if alias != "layered_history_repository_dependencies":
             return [candidate.as_posix()]
-        target = _tree(repo_root, candidate.as_posix())
+        target = reader.tree(candidate.as_posix())
         declared_paths = _literal_assignment(
             target, "LAYERED_HISTORY_REPOSITORY_DEPENDENCIES"
         )
@@ -1124,9 +1162,10 @@ def _preparation_stage_bindings(repo_root: Path) -> dict[str, object]:
 
 
 def _critical_relationships(
-    repo_root: Path,
+    reader: _CurrentGraphSourceReader,
 ) -> tuple[list[dict[str, object]], dict[str, object], dict[str, object]]:
-    materializer = _tree(repo_root, _MATERIALIZER)
+    repo_root = reader.repo_root
+    materializer = reader.tree(_MATERIALIZER)
     main_calls = _function_calls(_top_level_function(materializer, "main"))
     imports = _module_imports(materializer)
     if "portfolio_attended_preparation" not in imports:
@@ -1139,7 +1178,7 @@ def _critical_relationships(
         raise ControllerGraphError("attended preparation entrypoint calls are absent")
     if not (repo_root / _PREPARATION).is_file():
         raise ControllerGraphError("attended preparation implementation is absent")
-    preparation_tree = _tree(repo_root, _PREPARATION)
+    preparation_tree = reader.tree(_PREPARATION)
     _top_level_function(preparation_tree, "plan_attended_inputs")
     _top_level_function(preparation_tree, "prepare_attended_inputs")
     _require_local_route_calls(
@@ -1173,7 +1212,7 @@ def _critical_relationships(
         "attended preparation producer route",
     )
     _require_local_route_calls(
-        _tree(repo_root, _HWM_SELECTED),
+        reader.tree(_HWM_SELECTED),
         "derive_selected_hwm_calendar_authority",
         {
             "_selected_hwm_source_rows",
@@ -1195,7 +1234,7 @@ def _critical_relationships(
         "governed HWM verifier invocation",
     )
     _require_calls(
-        repo_root,
+        reader,
         _PREPARATION,
         "_rebuild_layered_history",
         {
@@ -1205,7 +1244,7 @@ def _critical_relationships(
         },
     )
     _require_attribute_call(
-        repo_root,
+        reader,
         _ACCOUNT_MANIFEST,
         "stage_account_manifest_generation",
         "verify",
@@ -1223,16 +1262,16 @@ def _critical_relationships(
         {"_retained_public_factor_capture"},
         "retained public factor capture production route",
     )
-    _require_calls(repo_root, _DEPENDENCE, "write_source", {"build_source"})
-    _require_calls(repo_root, _DECOMPOSITION_PLAN, "write_bundle", {"build_bundle"})
+    _require_calls(reader, _DEPENDENCE, "write_source", {"build_source"})
+    _require_calls(reader, _DECOMPOSITION_PLAN, "write_bundle", {"build_bundle"})
     _require_calls(
-        repo_root,
+        reader,
         _EPOCH_MANIFEST,
         "stage_current_epoch_manifest",
         {"account_manifest_generation.stage_account_manifest_generation"},
     )
     _require_calls(
-        repo_root,
+        reader,
         _CAPITAL_INPUT,
         "main",
         {
@@ -1242,42 +1281,42 @@ def _critical_relationships(
         },
     )
     _require_calls(
-        repo_root, _PROVIDER_LEDGER, "main", {"stage_candidate", "verify_candidate"}
+        reader, _PROVIDER_LEDGER, "main", {"stage_candidate", "verify_candidate"}
     )
-    _require_calls(repo_root, _BASELINE, "main", {"stage_baseline"})
-    _require_calls(repo_root, _ATTRIBUTION, "publish_catalog", {"stage_catalog"})
+    _require_calls(reader, _BASELINE, "main", {"stage_baseline"})
+    _require_calls(reader, _ATTRIBUTION, "publish_catalog", {"stage_catalog"})
     preparation_dependencies, preparation_edges = _preparation_stage_dependencies(
-        repo_root
+        reader
     )
-    preparation_bindings = _preparation_stage_bindings(repo_root)
-    _require_calls(repo_root, _MATERIALIZER, "_attended_stage_command", {"str"})
+    preparation_bindings = _preparation_stage_bindings(reader)
+    _require_calls(reader, _MATERIALIZER, "_attended_stage_command", {"str"})
     command_source = (repo_root / _MATERIALIZER).read_text(encoding="utf-8")
     if "portfolio_release_builder.py" not in command_source:
         raise ControllerGraphError("materializer release-producer command is absent")
-    _require_calls(repo_root, _RELEASE, "main", {"build_stage"})
-    _require_calls(repo_root, _RELEASE, "publish_panel", {"_stage_panel_qa"})
+    _require_calls(reader, _RELEASE, "main", {"build_stage"})
+    _require_calls(reader, _RELEASE, "publish_panel", {"_stage_panel_qa"})
     _require_calls(
-        repo_root, _MATERIALIZER, "_attended_start_or_resume", {"_attended_bind_qa"}
+        reader, _MATERIALIZER, "_attended_start_or_resume", {"_attended_bind_qa"}
     )
     _require_calls(
-        repo_root,
+        reader,
         _MATERIALIZER,
         "_attended_completed_stage_root",
         {"_attended_completed_panel"},
     )
     _require_calls(
-        repo_root,
+        reader,
         _MATERIALIZER,
         "_attended_completed_panel",
         {"panel._current_panel_qa"},
     )
     _require_calls(
-        repo_root,
+        reader,
         _MATERIALIZER,
         "_attended_completed_report",
         {"panel._current_report"},
     )
-    release_tree = _tree(repo_root, _RELEASE)
+    release_tree = reader.tree(_RELEASE)
     _require_local_route_calls(
         release_tree,
         "_verify_current_plan_upstream_evidence",
@@ -1323,8 +1362,8 @@ def _critical_relationships(
         "--provider-ledger-root",
         "freshness producer CLI target",
     )
-    _require_calls(repo_root, _FRESHNESS, "main", {"write_health"})
-    _require_calls(repo_root, _FRESHNESS, "write_health", {"build_health"})
+    _require_calls(reader, _FRESHNESS, "main", {"write_health"})
+    _require_calls(reader, _FRESHNESS, "write_health", {"build_health"})
     _require_tool_call(
         baseline_builder,
         "portfolio_baseline.py",
@@ -1361,8 +1400,8 @@ def _critical_relationships(
         "build",
         "panel candidate build CLI target/subcommand",
     )
-    report_tree = _tree(repo_root, _REPORT)
-    panel_tree = _tree(repo_root, _PANEL)
+    report_tree = reader.tree(_REPORT)
+    panel_tree = reader.tree(_PANEL)
     _top_level_function(report_tree, "build_candidate")
     _top_level_function(report_tree, "verify_candidate")
     _top_level_function(panel_tree, "build_candidate")
@@ -1379,7 +1418,7 @@ def _critical_relationships(
         {"_freshness_health"},
         "panel freshness consumer route",
     )
-    core_tree = _tree(repo_root, _CORE)
+    core_tree = reader.tree(_CORE)
     _require_local_route_calls(
         core_tree,
         "execute_pipeline",
@@ -1568,7 +1607,7 @@ def _critical_relationships(
     return relationships, preparation_dependencies, preparation_bindings
 
 
-def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
+def _artifact_flows(reader: _CurrentGraphSourceReader) -> list[dict[str, object]]:
     """Bind the MVP's declared artifacts to real producers, consumers and checks.
 
     This projection intentionally remains smaller than the mapper's full static
@@ -1577,6 +1616,7 @@ def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
     native runner and existing owner gate.
     """
 
+    repo_root = reader.repo_root
     flows: list[dict[str, object]] = []
     for spec in _ARTIFACT_FLOW_SPECS:
         flow = dict(spec)
@@ -1607,7 +1647,7 @@ def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
             path, symbol = endpoint
             if not isinstance(path, str) or not isinstance(symbol, str):
                 raise ControllerGraphError("artifact-flow endpoint differs")
-            _endpoint_function(_tree(repo_root, path), symbol)
+            _endpoint_function(reader.tree(path), symbol)
         if not artifacts or not consumers or not validators or not writers or not sinks:
             raise ControllerGraphError("artifact-flow consumer or validator is absent")
         if not stages or not all(stage in _STAGE_ORDER for stage in stages):
@@ -1726,11 +1766,12 @@ def _explicit_mapper_evidence(repo_root: Path, path: Path) -> dict[str, str]:
 
 def _current_graph(repo_root: Path) -> dict[str, object]:
     repo_root = repo_root.resolve()
-    dependencies, materializer_dependencies = _stage_declarations(repo_root)
+    reader = _CurrentGraphSourceReader(repo_root)
+    dependencies, materializer_dependencies = _stage_declarations(reader)
     relationships, preparation_dependencies, preparation_bindings = (
-        _critical_relationships(repo_root)
+        _critical_relationships(reader)
     )
-    artifact_flows = _artifact_flows(repo_root)
+    artifact_flows = _artifact_flows(reader)
     preparation_paths: set[str] = set()
     for binding_kind in ("code", "policy"):
         stage_bindings = preparation_bindings[binding_kind]
@@ -1744,7 +1785,7 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
             assert isinstance(source_paths, list)
             flow["source_paths"] = sorted(set(source_paths) | preparation_paths)
     source_files = {
-        path: _sha256(repo_root / path) for path in _required_paths(repo_root)
+        path: _sha256(repo_root / path) for path in _required_paths(repo_root, reader)
     }
     edges = [
         {"from": dependency, "to": stage, "kind": "stage-dependency"}

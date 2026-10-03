@@ -2238,7 +2238,21 @@ def test_reads_ordinary_source_producer_layouts(tmp_path: Path, field: str) -> N
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows path limit")
 def test_reads_ordinary_source_child_past_windows_path_limit(tmp_path: Path) -> None:
-    parent = tmp_path / ("long-source-" + "x" * 80)
+    parent = tmp_path
+    segment = "long-source-" + "x" * 80
+    while (
+        len(
+            str(
+                parent
+                / "provider-ledger"
+                / "generations"
+                / ("0" * 64)
+                / "generation.json"
+            )
+        )
+        <= 260
+    ):
+        parent /= segment
     extended_parent = Path("\\\\?\\" + str(parent.absolute()))
     path, manifest, payloads = _ordinary_source(extended_parent, "provider-ledger")
     ordinary_path = Path(str(path)[4:])
