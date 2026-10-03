@@ -3423,7 +3423,13 @@ def _mp_native_refresh_generation(root: Path, manifest: dict[str, Any]) -> None:
 
 
 def _manifest_tree_native_matrixport(
-    root: Path, *, code: str = "2855", bill_amount: str = "50"
+    root: Path,
+    *,
+    code: str = "2855",
+    bill_amount: str = "50",
+    deposit_state: str = "confirmed",
+    subscription_currency: str = "USDT",
+    **overrides: Any,
 ) -> dict[str, Any]:
     crosswalk = copy.deepcopy(V3_CROSSWALK_ROWS)
     for row in crosswalk:
@@ -3440,7 +3446,7 @@ def _manifest_tree_native_matrixport(
         + _bill(bill_amount, "USDT", "2", "2026-01-02T12:00:00", code)
     )
     manifest = _manifest_tree_v3(
-        root, bills=bills, crosswalk_rows=crosswalk, sleeves=sleeves
+        root, bills=bills, crosswalk_rows=crosswalk, sleeves=sleeves, **overrides
     )
     _repin(
         root,
@@ -3452,14 +3458,14 @@ def _manifest_tree_native_matrixport(
                     "amount": "200",
                     "created_at_utc": "2026-01-02T09:00:00+00:00",
                     "currency": "USDC",
-                    "state": "confirmed",
+                    "state": deposit_state,
                     "transaction_id": "synthetic-d1",
                 },
                 {
                     "amount": "200",
                     "created_at_utc": "2026-01-02T10:00:00+00:00",
                     "currency": "USDC",
-                    "state": "confirmed",
+                    "state": deposit_state,
                     "transaction_id": "synthetic-d2",
                 },
             ]
@@ -3496,7 +3502,7 @@ def _manifest_tree_native_matrixport(
                 {
                     "actual_subscription_amount": "90",
                     "subscription_amount": "90",
-                    "subscription_currency": "USDT",
+                    "subscription_currency": subscription_currency,
                     "subscription_share": "60",
                     "confirm_nav": "1.5",
                     "product_id": "synthetic-product",
@@ -4085,3 +4091,106 @@ def test_v3_native_quantbase_unknown_journal_fails_closed(
     assert ("weight.strategy.cutoff", "volatis-strategy") in missing
     # Never a partial numeric total or a zero stand-in.
     assert ("capital.strategy_cash.cutoff", "volatis-strategy") not in metrics
+
+
+# ------------- v3 native Matrixport source interface: states and FX currency
+#
+# SYNTHETIC: states, currencies, and dates below are invented fixture facts.
+
+
+@pytest.mark.parametrize("state", ["completed", "confirmed", "success"])
+def test_v3_native_matrixport_deposit_states_admitted(
+    tmp_path: Path, state: str
+) -> None:
+    # The admitted normalized terminal states all derive the same owner funding.
+    metrics = _index(
+        _run_v3(
+            tmp_path, _manifest_tree_native_matrixport(tmp_path, deposit_state=state)
+        )
+    )
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "robuxio-crypto")]["value"]
+        == "200.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "robuxio-crypto")]["value"] == (
+        "110.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "robuxio-crypto")]["value"] == "209.00"
+
+
+def test_v3_native_matrixport_unknown_deposit_state_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest_tree_native_matrixport(tmp_path, deposit_state="pending")
+    with pytest.raises(sources.InputError, match="confirmed deposit"):
+        _run_v3(tmp_path, manifest)
+
+
+def test_v3_native_matrixport_usdc_subscription_uses_selected_fx(
+    tmp_path: Path,
+) -> None:
+    # Source-declared USDC subscription: the 90 USDC original amount converts
+    # at the selected USDC-USD closes (0.5): the custody allocation at the
+    # 01-02 event date is 45 (cash 200 - 45 = 155); the fund flow uses the
+    # 01-04 recognition-date close; units still come from the native shares.
+    metrics = _index(
+        _run_v3(
+            tmp_path,
+            _manifest_tree_native_matrixport(tmp_path, subscription_currency="USDC"),
+        )
+    )
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "robuxio-crypto")]["value"]
+        == "200.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "robuxio-crypto")]["value"] == (
+        "155.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "robuxio-crypto")]["value"] == "254.00"
+    # Units/NAV are currency-independent: the fund-only path is unchanged.
+    assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "99.00"
+    assert metrics[("twr.account", "acct-mp")]["value"] == "0.100000000000"
+
+
+def test_v3_native_matrixport_usdt_subscription_still_selected(
+    tmp_path: Path,
+) -> None:
+    metrics = _index(_run_v3(tmp_path, _manifest_tree_native_matrixport(tmp_path)))
+    assert metrics[("capital.strategy_cash.cutoff", "robuxio-crypto")]["value"] == (
+        "110.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "robuxio-crypto")]["value"] == "209.00"
+
+
+def test_v3_native_matrixport_unsupported_subscription_currency_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest_tree_native_matrixport(tmp_path, subscription_currency="EUR")
+    with pytest.raises(sources.InputError, match="subscription currency"):
+        _run_v3(tmp_path, manifest)
+
+
+def test_v3_native_matrixport_missing_selected_fx_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # A USDC subscription whose selected USDC-USD authority lacks the original
+    # 01-02 event date: the custody allocation cannot convert, so the custody
+    # rows and dependent totals fail closed (no interpolation or parity).
+    manifest = _manifest_tree_native_matrixport(
+        tmp_path,
+        subscription_currency="USDC",
+        usdc_closes={d: 0.5 for d in DAYS if d != "2026-01-02"},
+    )
+    document = _run_v3(tmp_path, manifest)
+    metrics = _index(document)
+    missing = _reasons(document)
+    assert (
+        "no pinned USDC-USD close on 2026-01-02"
+        in missing[("capital.strategy_cash.cutoff", "robuxio-crypto")]
+    )
+    assert ("invested_capital.strategy.cutoff", "robuxio-crypto") in missing
+    assert ("capital.strategy.cutoff", "robuxio-crypto") in missing
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in missing
+    assert ("capital.strategy_cash.cutoff", "robuxio-crypto") not in metrics
+    # The fund-only path (USDT product NAV) is unaffected.
+    assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "99.00"

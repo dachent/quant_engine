@@ -216,6 +216,8 @@ MP_NATIVE_WALLET_ENDPOINTS = (
 )
 MP_NATIVE_ORDER_ENDPOINT = "/strategy/api/v2/order"
 MP_NATIVE_TERMINAL_STATUS = "300"
+# Native wallet deposits admit these normalized terminal states.
+MP_NATIVE_DEPOSIT_STATES = frozenset({"completed", "confirmed", "success"})
 
 V3_SINGLETON_FAMILY_ROLES = {
     "financial_source_contract": MVP_CONTRACT,
@@ -2564,7 +2566,7 @@ def _v3_native_matrixport(
         moment = _utc_timestamp(row.get("created_at_utc"))
         txid = row.get("transaction_id", "")
         if (
-            row.get("state") != "confirmed"
+            row.get("state") not in MP_NATIVE_DEPOSIT_STATES
             or amount is None
             or amount <= 0
             or not row.get("currency")
@@ -2629,11 +2631,11 @@ def _v3_native_matrixport(
             raise InputError(
                 f"{tag}: native subscription row {row.get('order_id')!r} does not parse"
             )
-        if row.get("subscription_currency") != MATRIXPORT_PRODUCT_CURRENCY:
+        currency = row.get("subscription_currency", "")
+        if currency not in FX_TICKER_BY_CURRENCY:
             raise InputError(
-                f"{tag}: subscription currency "
-                f"{row.get('subscription_currency')!r} is not "
-                f"{MATRIXPORT_PRODUCT_CURRENCY}"
+                f"{tag}: subscription currency {currency!r} is not a supported "
+                "currency with a selected FX authority"
             )
         if row.get("product_id") != product:
             raise InputError(
@@ -2654,7 +2656,7 @@ def _v3_native_matrixport(
                 confirm_day,
                 shares,
                 amount,
-                MATRIXPORT_PRODUCT_CURRENCY,
+                currency,
                 confirm_nav,
                 str(row.get("order_id")),
             )
@@ -2753,9 +2755,9 @@ def _matrixport_source_native(
     missing_fx: list[dt.date] = []
     missing_mapping: list[dt.date] = []
     for sub in native.subscriptions:
-        rate = fx.rate(MATRIXPORT_PRODUCT_CURRENCY, sub.recognition_day)
+        rate = fx.rate(sub.currency, sub.recognition_day)
         if rate is None:
-            if fx.close(MATRIXPORT_PRODUCT_CURRENCY, sub.recognition_day) is None:
+            if fx.close(sub.currency, sub.recognition_day) is None:
                 missing_fx.append(sub.recognition_day)
             else:
                 missing_mapping.append(sub.recognition_day)
