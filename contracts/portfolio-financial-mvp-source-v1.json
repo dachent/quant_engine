@@ -4005,7 +4005,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
      "product_data_class_count": 9,
-     "product_data_class_set_sha256": "9b94724ff0b983b83b8f920ceedd0cd8ff691f34cbeb15d0603c7fc3e88c6ac9",
+     "product_data_class_set_sha256": "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f",
      "admitted_item_count": 25,
      "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
      "allowed_exclusion_reasons": [
@@ -4122,7 +4122,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 2,
-     "product_data_class_set_sha256": "58a28c6e71f75ed76a4548806906cf01dd9192a2d10f25679e5df4b1b62a8183",
+     "product_data_class_set_sha256": "6d516d502accb2120a79612f80a1c9739cddd40b28c2923b3cbea9c7fcd59532",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
@@ -4297,7 +4297,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
      "product_data_class_count": 3,
-     "product_data_class_set_sha256": "ae460ceb04d7a53821ab8b40eda9579e766f1e33c28df76719acdccb30f918c0",
+     "product_data_class_set_sha256": "ecd774f302b55db00ccdba59aded6bb8025d44f4a9c8e28aeb04f65254215e69",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [
@@ -4419,7 +4419,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "84091cab83bf027885fa37553ad7951330839c4004bf5221bd51d56b626e4075",
+     "product_data_class_set_sha256": "a359c2ff31769dcfd4d7cd9959f3854d30c01749ac11500e8ac56c5070a0e9a0",
      "admitted_item_count": 22,
      "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
      "allowed_exclusion_reasons": [
