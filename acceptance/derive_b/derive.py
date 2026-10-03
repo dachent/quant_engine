@@ -812,7 +812,7 @@ def quantbase_sleeve_flows(
         if row.get("type") not in {"BUY", "SELL", "MAX_S"}:
             continue
         if (
-            row.get("created_to_cover_fees") == "True"
+            str(row.get("created_to_cover_fees", "")).strip().lower() == "true"
             or row.get("is_rebalance") == "True"
         ):
             continue
@@ -1092,7 +1092,7 @@ def selected_fx_covers_custody_event_dates(
         if (
             row.get("state")
             in (
-                {"confirmed", "completed"}
+                {"confirmed", "completed", "success"}
                 if subscription_rows is not None
                 else {"confirmed"}
             )
@@ -1158,43 +1158,97 @@ def raw_custody_capital(
         events[strategy_id][occurred_on][kind] += amount
 
     def event_date(timestamp: str) -> date:
-        return (
-            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            .astimezone(timezone.utc)
-            .date()
-        )
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("custody event timestamp lacks timezone")
+        return parsed.astimezone(timezone.utc).date()
 
+    admitted_transfer_rows: dict[str, dict[str, str]] = {}
+    linked_provider_identity: str | None = None
     for row in quantbase_rows:
+        if row.get("activity_type") == "transfer":
+            if row.get("status") != "C":
+                continue
+            transfer_type = row.get("type")
+            if transfer_type not in {"DEPOSIT", "WITHDRAWAL"}:
+                raise ValueError("unsupported Quantbase owner transfer type")
+            transfer_id = str(row.get("id") or "").strip()
+            linked_identity = str(
+                row.get(
+                    "destination_account_id"
+                    if transfer_type == "DEPOSIT"
+                    else "origin_account_id"
+                )
+                or ""
+            ).strip()
+            if not transfer_id or not linked_identity:
+                raise ValueError(
+                    "completed Quantbase owner transfer lacks id or linked account"
+                )
+            previous = admitted_transfer_rows.get(transfer_id)
+            if previous is not None:
+                if previous != row:
+                    raise ValueError("conflicting duplicate Quantbase transfer id")
+                continue
+            admitted_transfer_rows[transfer_id] = dict(row)
+            if linked_provider_identity is None:
+                linked_provider_identity = linked_identity
+            elif linked_provider_identity != linked_identity:
+                raise ValueError(
+                    "completed Quantbase owner transfers have conflicting linked accounts"
+                )
+            timestamp = row.get("time") or row.get("filled_at") or row.get("created_at")
+            amount = row.get("amount")
+            amount_cents = row.get("amount_cents")
+            if not timestamp or amount in (None, "") or amount_cents in (None, ""):
+                raise ValueError(
+                    "completed Quantbase owner transfer lacks timestamp, amount, or cents"
+                )
+            value = Decimal(str(amount))
+            cents = Decimal(str(amount_cents))
+            if value <= 0 or cents != cents.to_integral_value() or cents != value * 100:
+                raise ValueError(
+                    "completed Quantbase owner transfer amount/cents mismatch"
+                )
+            occurred_on = event_date(timestamp)
+            if occurred_on > CUTOFF:
+                continue
+            if transfer_type == "DEPOSIT":
+                add("volatis-strategy", occurred_on, "owner", value)
+            else:
+                add("volatis-strategy", occurred_on, "owner", value)
+                events["volatis-strategy"][occurred_on]["owner"] -= value * 2
+            continue
         timestamp = row.get("time") or row.get("filled_at") or row.get("created_at")
         amount = row.get("amount")
-        if (
-            row.get("activity_type") == "transfer"
-            and row.get("type") in {"DEPOSIT", "WITHDRAWAL"}
-            and (not timestamp or amount in (None, ""))
-        ):
-            raise ValueError(
-                "recognized Quantbase owner transfer lacks timestamp or amount"
+        if row.get("activity_type") == "journal" and row.get("status") in {
+            "C",
+            "COMPLETE",
+        }:
+            source_type = (
+                row.get("source_type")
+                if row.get("status") == "COMPLETE"
+                else row.get("type")
             )
+            if source_type not in {"PARTNER_SUB_FEE", "AUM_FEE"}:
+                raise ValueError("unknown completed Quantbase custody journal")
+            continue
         if not timestamp or amount in (None, ""):
             continue
         occurred_on = event_date(timestamp)
         if occurred_on > CUTOFF:
             continue
         value = Decimal(str(amount))
-        if row.get("activity_type") == "transfer":
-            transfer_type = row.get("type")
-            if transfer_type not in {"DEPOSIT", "WITHDRAWAL"}:
-                raise ValueError("unsupported Quantbase owner transfer type")
-            add("volatis-strategy", occurred_on, "owner", abs(value))
-            if transfer_type == "WITHDRAWAL":
-                events["volatis-strategy"][occurred_on]["owner"] -= abs(value) * 2
-        elif row.get("activity_type") == "filled_txn" and row.get("fund") == "107":
+        if row.get("activity_type") == "filled_txn" and row.get("fund") == "107":
             if row.get("type") == "BUY":
                 add("volatis-strategy", occurred_on, "allocation", abs(value))
+            elif row.get("type") == "SELL":
+                if str(row.get("created_to_cover_fees", "")).strip().lower() != "true":
+                    raise ValueError("unsupported completed Quantbase SELL/redemption")
 
     for row in matrixport_deposit_rows:
         valid_states = (
-            {"confirmed", "completed"}
+            {"confirmed", "completed", "success"}
             if matrixport_subscription_rows is not None
             else {"confirmed"}
         )
@@ -1228,6 +1282,11 @@ def raw_custody_capital(
     else:
         allocation_rows = matrixport_bill_rows
     for row in allocation_rows:
+        if matrixport_subscription_rows is None:
+            tx_type = str(row.get("tx_type", "")).strip()
+            if not tx_type:
+                raise ValueError("unsupported relevant Matrixport wallet event")
+            raise ValueError("unsupported relevant Matrixport wallet event")
         # The raw subscription leg is the USDT direction-2 bill.  The USDC
         # direction-1/2 records are wallet conversion legs, not owner flows or
         # sleeve allocations; treating them as redemptions would invent cash.
@@ -1985,6 +2044,10 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                     or not row["product_id"]
                     or confirmed <= subscribed
                     or row["subscription_currency"] not in {"USDC", "USDT"}
+                    or Decimal(row["actual_subscription_amount"]) <= 0
+                    or Decimal(row["subscription_amount"]) <= 0
+                    or Decimal(row["actual_subscription_amount"])
+                    != Decimal(row["subscription_amount"])
                     or Decimal(row["subscription_share"]) <= 0
                     or Decimal(row["confirm_nav"]) <= 0
                     or row["source_endpoint"] != "/strategy/api/v2/order"
@@ -2069,7 +2132,7 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                 if (
                     not transaction_id
                     or transaction_id in deposit_ids
-                    or row["state"] not in {"confirmed", "completed"}
+                    or row["state"] not in {"confirmed", "completed", "success"}
                     or row["currency"] not in {"USDC", "USDT"}
                     or timestamp.tzinfo is None
                     or amount <= 0
@@ -2123,6 +2186,7 @@ def derive(
     input_paths = default_input_paths()
     schema_v3 = False
     authority_paths: list[Path] = []
+    authority_family_paths: dict[str, Path] = {}
     convention_notes = [
         "ITD is the only window emitted: contracts/portfolio-performance-policy-v1.json has no window-id field beyond its synthetic cases.",
         "TWR uses contracts/portfolio-performance-policy-v1.json:twr_cases[case_id=date_only_end_of_day]: (ending value - same-date external flow) / prior value, compounded and not annualized.",
@@ -2138,9 +2202,10 @@ def derive(
         schema_v3 = inputs_manifest.get("schema") == INPUT_MANIFEST_SCHEMA_V3
         if schema_v3:
             input_paths.update(native_matrixport_input_paths(inputs_manifest, qe_root))
-            authority_paths = list(
-                v3_authority_paths(inputs_manifest, qe_root).values()
-            )
+            authority_family_paths = v3_authority_paths(inputs_manifest, qe_root)
+            if "fx_daily_rates" not in authority_family_paths:
+                raise ManifestError("v3 selected FX daily-rates authority is missing")
+            authority_paths = list(authority_family_paths.values())
         convention_notes.append(
             "Inputs were selected by the supplied qe-cp-acceptance-inputs manifest; "
             "every declared sha256/bytes pin was verified fail-closed before "
@@ -2245,8 +2310,9 @@ def derive(
                     encoding="utf-8-sig", newline=""
                 ) as handle:
                     matrixport_subscriptions = list(csv.DictReader(handle))
+            rates_authority = authority_family_paths.get("fx_daily_rates")
             selected_fx_covers_custody_event_dates(
-                next(path for path in authority_paths if path.name == "rates.csv"),
+                rates_authority,
                 matrixport_deposits,
                 matrixport_bills,
                 matrixport_subscriptions,
@@ -2803,9 +2869,7 @@ def derive(
     add_not_derivable(
         output,
         "capital.reserve.cutoff",
-        "reserve-capital"
-        if "matrixport_generation_manifest" in input_paths
-        else "reserve",
+        "reserve-capital" if schema_v3 else "reserve",
         reserve_reason,
     )
     add_not_derivable(

@@ -2408,7 +2408,11 @@ def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocatio
             {
                 "activity_type": "transfer",
                 "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-1",
                 "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
                 "created_at": "2026-09-01T12:00:00+00:00",
             },
             {
@@ -2423,6 +2427,7 @@ def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocatio
                 "type": "SELL",
                 "fund": "107",
                 "amount": "-7",
+                "created_to_cover_fees": "True",
                 "time": "2026-09-02T13:00:00+00:00",
             },
         ],
@@ -2439,35 +2444,33 @@ def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocatio
 
 
 def test_oracle_v3_b_raw_custody_capital_uses_each_matrixport_event_date_fx():
-    """USDC funding and the USDT subscription use their separate raw close dates."""
+    """An unclassified non-native bill cannot reach the old FX allocation path."""
     derivation = load_derivation_module()
 
-    result = derivation.raw_custody_capital(
-        [],
-        [
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [
+                {
+                    "state": "confirmed",
+                    "currency": "USDC",
+                    "amount": "100",
+                    "created_at_utc": "2026-09-01T12:00:00+00:00",
+                }
+            ],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
             {
-                "state": "confirmed",
-                "currency": "USDC",
-                "amount": "100",
-                "created_at_utc": "2026-09-01T12:00:00+00:00",
-            }
-        ],
-        [
-            {
-                "currency": "USDT",
-                "direction": "2",
-                "amount": "96",
-                "timestamp_utc": "2026-09-02T12:00:00+00:00",
-            }
-        ],
-        {
-            "USDC": {date(2026, 9, 1): Decimal("1")},
-            "USDT": {date(2026, 9, 2): Decimal("1.01")},
-        },
-    )
-
-    assert result["robuxio-crypto"]["invested"] == Decimal("100")
-    assert result["robuxio-crypto"]["cash"] == Decimal("3.04")
+                "USDC": {date(2026, 9, 1): Decimal("1")},
+                "USDT": {date(2026, 9, 2): Decimal("1.01")},
+            },
+        )
 
 
 @pytest.mark.parametrize(
@@ -2508,7 +2511,11 @@ def test_oracle_v3_b_quantbase_unsupported_transfer_with_funding_still_fails():
                 {
                     "activity_type": "transfer",
                     "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-1",
                     "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
                     "created_at": "2026-09-01T12:00:00+00:00",
                 },
                 {
@@ -2521,7 +2528,11 @@ def test_oracle_v3_b_quantbase_unsupported_transfer_with_funding_still_fails():
                 {
                     "activity_type": "transfer",
                     "type": "INTERNAL_TRANSFER",
+                    "status": "C",
+                    "id": "transfer-1",
                     "amount": "4",
+                    "amount_cents": "400",
+                    "destination_account_id": "provider-account-1",
                     "created_at": "2026-09-02T12:00:00+00:00",
                 },
             ],
@@ -2529,6 +2540,248 @@ def test_oracle_v3_b_quantbase_unsupported_transfer_with_funding_still_fails():
             [],
             {"USDC": {}, "USDT": {}},
         )
+
+
+def test_oracle_v3_b_quantbase_completed_transfer_requires_admitted_identity_and_cents():
+    derivation = load_derivation_module()
+    base = {
+        "activity_type": "transfer",
+        "type": "DEPOSIT",
+        "status": "C",
+        "id": "deposit-1",
+        "amount": "100",
+        "amount_cents": "10000",
+        "destination_account_id": "provider-account-1",
+        "created_at": "2026-09-01T12:00:00+00:00",
+    }
+    for invalid in (
+        {**base, "amount_cents": "9999"},
+        {**base, "destination_account_id": ""},
+    ):
+        with pytest.raises(ValueError):
+            derivation.raw_custody_capital([invalid], [], [], {"USDC": {}, "USDT": {}})
+    with pytest.raises(ValueError, match="linked accounts"):
+        derivation.raw_custody_capital(
+            [
+                base,
+                {
+                    **base,
+                    "id": "deposit-2",
+                    "destination_account_id": "provider-account-2",
+                },
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_quantbase_conflicting_transfer_id_fails_and_noncompleted_is_zero():
+    derivation = load_derivation_module()
+    row = {
+        "activity_type": "transfer",
+        "type": "DEPOSIT",
+        "status": "C",
+        "id": "deposit-1",
+        "amount": "100",
+        "amount_cents": "10000",
+        "destination_account_id": "provider-account-1",
+        "created_at": "2026-09-01T12:00:00+00:00",
+    }
+    with pytest.raises(ValueError, match="conflicting"):
+        derivation.raw_custody_capital(
+            [row, {**row, "amount": "101", "amount_cents": "10100"}],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+    result = derivation.raw_custody_capital(
+        [{**row, "status": "P"}], [], [], {"USDC": {}, "USDT": {}}
+    )
+    assert result == {}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"activity_type": "journal", "status": "C", "type": "UNKNOWN"},
+        {
+            "activity_type": "filled_txn",
+            "status": "C",
+            "type": "SELL",
+            "fund": "107",
+            "amount": "-7",
+            "time": "2026-09-02T13:00:00+00:00",
+        },
+    ],
+)
+def test_oracle_v3_b_unknown_journal_and_generic_sell_fail_custody(row):
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError):
+        derivation.raw_custody_capital(
+            [
+                {
+                    "activity_type": "transfer",
+                    "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-1",
+                    "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                },
+                {
+                    "activity_type": "filled_txn",
+                    "type": "BUY",
+                    "fund": "107",
+                    "amount": "96",
+                    "time": "2026-09-01T13:00:00+00:00",
+                },
+                row,
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_non_native_relevant_bill_is_not_an_allocation():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "tx_type": "UNKNOWN",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
+            {"USDC": {}, "USDT": {date(2026, 9, 2): Decimal("1")}},
+        )
+
+
+def test_oracle_v3_b_completed_transfer_rejects_naive_timestamp_before_local_timezone():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="timezone"):
+        derivation.raw_custody_capital(
+            [
+                {
+                    "activity_type": "transfer",
+                    "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-naive-time",
+                    "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-01T12:00:00",
+                }
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+@pytest.mark.parametrize("fee_type", ["PARTNER_SUB_FEE", "AUM_FEE"])
+def test_oracle_v3_b_native_fee_journal_is_outside_custody_formula(fee_type):
+    derivation = load_derivation_module()
+    result = derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-fee-journal",
+                "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "journal",
+                "status": "COMPLETE",
+                "source_type": fee_type,
+                "amount": "2",
+                "created_at": "2026-09-01T13:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-01T14:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "SELL",
+                "fund": "107",
+                "amount": "-1",
+                "created_to_cover_fees": " true ",
+                "time": "2026-09-01T15:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {}, "USDT": {}},
+    )
+    assert result["volatis-strategy"] == {
+        "invested": Decimal("100"),
+        "cash": Decimal("4"),
+        "allocation": Decimal("96"),
+    }
+
+
+def test_oracle_v3_b_non_native_bill_without_tx_type_fails_closed():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "tx_type": " ",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
+            {"USDC": {}, "USDT": {date(2026, 9, 2): Decimal("1")}},
+        )
+
+
+def test_oracle_v3_b_native_success_wallet_deposit_is_admitted_for_custody():
+    derivation = load_derivation_module()
+    result = derivation.raw_custody_capital(
+        [],
+        [
+            {
+                "state": "success",
+                "currency": "USDT",
+                "amount": "100",
+                "created_at_utc": "2026-09-01T12:00:00+00:00",
+            }
+        ],
+        [],
+        {
+            "USDC": {},
+            "USDT": {
+                date(2026, 9, 1): Decimal("1.01"),
+                date(2026, 9, 2): Decimal("1"),
+            },
+        },
+        [
+            {
+                "subscription_time_utc": "2026-09-02T12:00:00+00:00",
+                "subscription_amount": "100",
+            }
+        ],
+    )
+    assert result["robuxio-crypto"]["invested"] == Decimal("101")
 
 
 def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
@@ -2608,10 +2861,10 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
             }
         ),
         "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n09/17/2026,105\n",
-        "account_activity.csv": "activity_type,type,fund,amount,created_at,time\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        "account_activity.csv": "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,,C,deposit-1,10000,provider-account-1\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
         "nav_daily.csv": "day_timestamp_utc,nav\n2026-09-02T00:00:00Z,1\n",
         "wallet_deposits.csv": "state,currency,amount,created_at_utc\nconfirmed,USDC,10,2026-09-01T00:00:00Z\n",
-        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\nUSDT,2,10,2026-09-01T01:00:00Z\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
         "yfinance-history.json": json.dumps(
             {
                 "rows": [
@@ -2712,14 +2965,11 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
     assert values[("capital.strategy_cash.cutoff", "volatis-strategy")] == "4.00"
     assert values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
-    assert values[("invested_capital.strategy.cutoff", "robuxio-crypto")] == "10.00"
-    assert values[("capital.strategy_cash.cutoff", "robuxio-crypto")] == "0.00"
-    assert values[("capital.strategy.cutoff", "robuxio-crypto")] == "10.00"
 
     rates_path = paths["rates.csv"]
     admitted_rates = rates_path.read_text(encoding="utf-8")
     rates_path.write_text(
-        admitted_rates.replace("2026-09-01,USDT,USD,1,x,USDT-USD,Close,x\n", ""),
+        admitted_rates.replace("2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n", ""),
         encoding="utf-8",
     )
     generation["artifacts"][1].update(
@@ -3038,3 +3288,82 @@ def test_derive_keeps_raw_last_date_when_all_nav_rows_are_fx_unconverted(
     assert derivation.MATRIXPORT_NAV_PATH.as_posix() in {
         item["path"] for item in output["inputs"]
     }
+
+
+def test_quantbase_fee_created_sells_are_not_sleeve_external_flows():
+    """Native fee-funded SELL rows do not become external sleeve flows."""
+    derivation = load_derivation_module()
+
+    flow_data = derivation.quantbase_sleeve_flows(
+        [
+            {
+                "activity_type": "filled_txn",
+                "id": "ordinary-buy",
+                "fund": "107",
+                "type": "BUY",
+                "amount": "50",
+                "time": "2026-01-01T10:00:00Z",
+                "created_to_cover_fees": "False",
+                "is_rebalance": "False",
+            },
+            {
+                "activity_type": "filled_txn",
+                "id": "fee-sell-lowercase",
+                "fund": "107",
+                "type": "SELL",
+                "amount": "-2",
+                "time": "2026-01-01T11:00:00Z",
+                "created_to_cover_fees": "true",
+                "is_rebalance": "False",
+            },
+            {
+                "activity_type": "filled_txn",
+                "id": "fee-sell-spaced",
+                "fund": "107",
+                "type": "SELL",
+                "amount": "-3",
+                "time": "2026-01-01T12:00:00Z",
+                "created_to_cover_fees": " true ",
+                "is_rebalance": "False",
+            },
+        ],
+        [
+            (date(2026, 1, 1), Decimal("100")),
+            (date(2026, 1, 2), Decimal("150")),
+            (date(2026, 1, 3), Decimal("165")),
+        ],
+    )
+
+    assert flow_data.cash_flows == {date(2026, 1, 1): Decimal("50")}
+    assert flow_data.twr_beginning_flows == {date(2026, 1, 1): Decimal("50")}
+    assert flow_data.count == 1
+
+
+def test_selected_fx_guard_requires_rate_for_successful_usdc_custody_date(
+    tmp_path: Path,
+):
+    """A successful admitted deposit needs its own normalized event-date FX row."""
+    derivation = load_derivation_module()
+    rates_path = tmp_path / "rates.csv"
+    rates_path.write_text(
+        "date,currency,ticker\n2026-09-01,USDC,USDC-USD\n",
+        encoding="utf-8",
+    )
+    deposits = [
+        {
+            "state": "success",
+            "currency": "USDC",
+            "amount": "10",
+            "created_at_utc": "2026-09-01T00:00:00Z",
+        }
+    ]
+
+    # The admitted date is a positive control; removing only its normalized row
+    # must fail closed even though raw FX may still contain that date.
+    derivation.selected_fx_covers_custody_event_dates(rates_path, deposits, [], [])
+    rates_path.write_text("date,currency,ticker\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="selected FX rates lack a raw custody event date"
+    ):
+        derivation.selected_fx_covers_custody_event_dates(rates_path, deposits, [], [])
