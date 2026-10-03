@@ -269,6 +269,20 @@ WEIGHT_METRIC = "weight.strategy.cutoff"
 QUANTBASE_CUSTODY_KNOWN_TYPES = frozenset(
     {"filled_txn", "order", "dividend", "deposit", "withdrawal"}
 )
+# Native Quantbase owner funding is a completed transfer: the custody account
+# is identified by destination_account_id (deposit) or origin_account_id
+# (withdrawal).
+QUANTBASE_TRANSFER_TYPES = {
+    "DEPOSIT": "destination_account_id",
+    "WITHDRAWAL": "origin_account_id",
+}
+# Known internal fee journals (activity_type journal, status COMPLETE, type
+# PARTNER_SUB_FEE/AUM_FEE) are investment results outside the owner/allocation
+# legs: the owner cash residual is DERIVED (admitted deposits - withdrawals -
+# sleeve allocations + admitted redemptions), so no journal-to-sale pairing,
+# cash-neutrality, or namespace reconciliation is required of them. Any other
+# journal row (or the fee types on a non-journal row) fails R8 closed.
+QUANTBASE_FEE_JOURNAL_TYPES = frozenset({"PARTNER_SUB_FEE", "AUM_FEE"})
 # A raw Matrixport stablecoin debit is an owner withdrawal only when its
 # tx_type says so; any other unpaired non-conversion bill is unsupported.
 MATRIXPORT_WITHDRAWAL_TX_TYPES = frozenset({"withdrawal"})
@@ -3097,42 +3111,154 @@ def _convert_event(
 
 
 def _quantbase_cash_events(
-    activity: bytes, allocations: Sequence[Flow], cutoff: dt.date
-) -> tuple[list[CashEvent], list[str]]:
+    activity: bytes, accounts: bytes, allocations: Sequence[Flow], cutoff: dt.date
+) -> tuple[list[CashEvent], list[str], bool]:
     """R8 owner funding + allocation events for the Quantbase custody account.
 
-    Deposits/withdrawals are account-level owner flows in USD; the sleeve
-    BUY/SELL fills (already parsed into ``allocations``) move cash into/out of
-    the fund. Any other activity type on or before the cutoff is an
-    unsupported custody event and fails the derivation closed.
+    Legacy deposits/withdrawals keep their existing semantics (account-level
+    owner flows in USD, dated by ``time``). The native owner-funding schema is
+    a completed transfer: ``activity_type`` transfer with ``type``
+    DEPOSIT/WITHDRAWAL, status C, the original aware UTC timestamp in
+    ``created_at`` (``time``/``filled_at`` may be blank), a positive USD
+    ``amount`` with ``amount_cents`` integral and exactly ``amount * 100``, a
+    nonempty source ``id``, and the custody account identified by
+    ``destination_account_id`` (deposit) or ``origin_account_id``
+    (withdrawal) inside the pinned accounts.csv scope. Identical source events
+    are deduplicated; a conflicting duplicate identity, a malformed qualifying
+    event, an unknown subtype, or an ambiguous account scope fails closed.
+    Completed native fee journals (activity_type journal, status COMPLETE,
+    type PARTNER_SUB_FEE/AUM_FEE) are known internal fees -- investment
+    results outside the owner/allocation legs that never enter the DERIVED
+    cash residual; any other journal row fails closed explicitly. Sleeve
+    BUY/SELL fills
+    (already parsed into ``allocations``) move cash into/out of the fund. The
+    third return value reports whether any native transfer row was seen (the
+    accounts.csv scope binding was consulted).
     """
 
     events: list[CashEvent] = []
     unsupported: list[str] = []
+    scope = {row.get("id", "") for row in csv_rows(accounts) if row.get("id")}
+    native_seen = False
+    seen_native: dict[str, tuple[str, ...]] = {}
+    bound_ids: set[str] = set()
     for row in csv_rows(activity):
         kind = row.get("activity_type", "")
+        subtype = row.get("type", "")
         record = f"quantbase:{kind}:{row.get('id')}"
-        day = iso_date(row.get("time"))
-        if day is not None and day > cutoff:
+        time_day = iso_date(row.get("time"))
+        if time_day is not None and time_day > cutoff:
             continue
-        if kind in ("deposit", "withdrawal"):
+        if subtype in QUANTBASE_FEE_JOURNAL_TYPES or kind == "journal":
+            # Known internal fees (completed native journals of the two admitted
+            # types) are investment results: never owner funding, allocations,
+            # or redemptions, and never part of the DERIVED cash residual. The
+            # qualification is exact (journal kind + COMPLETE status + known
+            # fee type); anything else fails closed -- no blanket journal skip.
+            if (
+                kind == "journal"
+                and subtype in QUANTBASE_FEE_JOURNAL_TYPES
+                and row.get("status", "") == "COMPLETE"
+            ):
+                continue
+            day = time_day or iso_date(row.get("created_at"))
+            if day is None or day <= cutoff:
+                unsupported.append(
+                    f"{record}: activity_type {kind!r} type {subtype!r} status "
+                    f"{row.get('status', '')!r} is not an admitted internal fee "
+                    "journal (journal kind, COMPLETE status, and a known fee "
+                    "type are required)"
+                )
+            continue
+        if kind == "transfer":
+            moment = _utc_timestamp(row.get("created_at"))
+            day = moment.date() if moment is not None else None
+            if day is not None and day > cutoff:
+                continue
+            if subtype not in QUANTBASE_TRANSFER_TYPES:
+                unsupported.append(
+                    f"{record}: activity_type 'transfer' type {subtype!r} is not "
+                    "a recognized custody event"
+                )
+                continue
+            native_seen = True
             amount = decimal_or_none(row.get("amount"))
-            if day is None or amount is None or amount <= 0:
+            cents = decimal_or_none(row.get("amount_cents"))
+            custody_id = row.get(QUANTBASE_TRANSFER_TYPES[subtype], "")
+            source_id = row.get("id", "")
+            if (
+                not source_id
+                or day is None
+                or amount is None
+                or amount <= 0
+                or cents is None
+                or cents != cents.to_integral_value()
+                or cents != amount * 100
+                or row.get("status", "") != "C"
+                or not custody_id
+            ):
+                unsupported.append(
+                    f"{record}: malformed qualifying owner transfer (source id, "
+                    "aware UTC created_at, positive amount, integral "
+                    "amount_cents == amount * 100, completed status C, and a "
+                    "custody account id are all required)"
+                )
+                continue
+            if custody_id not in scope:
+                unsupported.append(
+                    f"{record}: custody account {custody_id!r} is outside the "
+                    "admitted account scope"
+                )
+                continue
+            bound_ids.add(custody_id)
+            fingerprint = (
+                subtype,
+                str(amount),
+                str(cents),
+                row.get("status", ""),
+                row.get("created_at", ""),
+                custody_id,
+            )
+            if source_id in seen_native:
+                if seen_native[source_id] != fingerprint:
+                    unsupported.append(
+                        f"{record}: conflicting duplicate source identity {source_id!r}"
+                    )
+                continue
+            seen_native[source_id] = fingerprint
+            events.append(
+                CashEvent(
+                    day,
+                    amount if subtype == "DEPOSIT" else -amount,
+                    "deposit" if subtype == "DEPOSIT" else "withdrawal",
+                    record,
+                )
+            )
+        elif kind in ("deposit", "withdrawal"):
+            amount = decimal_or_none(row.get("amount"))
+            if time_day is None or amount is None or amount <= 0:
                 unsupported.append(f"{record} does not parse as an owner {kind}")
                 continue
             events.append(
-                CashEvent(day, amount if kind == "deposit" else -amount, kind, record)
+                CashEvent(
+                    time_day, amount if kind == "deposit" else -amount, kind, record
+                )
             )
         elif kind not in QUANTBASE_CUSTODY_KNOWN_TYPES:
             unsupported.append(
                 f"{record}: activity_type {kind!r} is not a recognized custody event"
             )
+    if len(bound_ids) > 1:
+        unsupported.append(
+            f"native owner transfers bind multiple custody accounts "
+            f"{sorted(bound_ids)} (ambiguous account scope)"
+        )
     for flow in allocations:
         if flow.event_date <= cutoff:
             events.append(
                 CashEvent(flow.event_date, -flow.amount, "allocation", flow.record_id)
             )
-    return events, unsupported
+    return events, unsupported, native_seen
 
 
 def _matrixport_cash_events(
@@ -3292,11 +3418,11 @@ def _custody_facts(
                     f"{u.record_id} ({u.reason})" for u in source.flows.unusable[:3]
                 )
             )
-        events, unsupported = _quantbase_cash_events(
-            files[QB_ACTIVITY].data, source.flows.flows, cutoff
+        events, unsupported, native_transfers = _quantbase_cash_events(
+            files[QB_ACTIVITY].data, files[QB_ACCOUNTS].data, source.flows.flows, cutoff
         )
         failures.extend(unsupported)
-        inputs = (QB_ACTIVITY,)
+        inputs = (QB_ACTIVITY, QB_ACCOUNTS) if native_transfers else (QB_ACTIVITY,)
     elif source.provider == "MATRIXPORT":
         if native is not None:
             events, native_failures = _matrixport_native_cash_events(native, fx, cutoff)

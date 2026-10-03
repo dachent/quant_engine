@@ -1447,6 +1447,11 @@ ACTIVITY_COLUMNS = [
     "time",
     "transaction",
     "type",
+    "amount_cents",
+    "status",
+    "created_at",
+    "destination_account_id",
+    "origin_account_id",
 ]
 ACTIVITY_HEADER = ",".join(ACTIVITY_COLUMNS) + "\n"
 
@@ -1886,7 +1891,7 @@ def _manifest_tree_v3(root: Path, **overrides: Any) -> dict[str, Any]:
         json.dumps(_crosswalk(rows=overrides.get("crosswalk_rows", V3_CROSSWALK_ROWS))),
     )
     put("nav", MP_NAV_V3)
-    put("accounts", "id,funds\nx,[]\n")
+    put("accounts", overrides.get("qb_accounts", "id,funds\nx,[]\n"))
     put("activity", overrides.get("activity", V3_ACTIVITY))
     put("deposits", overrides.get("deposits", V3_MP_DEPOSITS))
     put("bills", overrides.get("bills", MP_BILLS_HEADER + V3_BASE_BILLS))
@@ -3790,3 +3795,293 @@ def test_v3_detached_native_selection_metadata_remains_rejected(
         derive.load_inputs_manifest(
             json.dumps(manifest).encode(), "detached-native-authority"
         )
+
+
+# ----------------------- v3 native Quantbase owner funding (activity_type transfer)
+#
+# SYNTHETIC: every transfer row, account id and amount below is invented. The
+# native source contract for owner funding: activity_type=transfer, type
+# DEPOSIT/WITHDRAWAL, completed status C, original event timestamp created_at
+# (aware UTC), amount in USD with amount_cents exactly amount*100 integral,
+# nonempty source id, and a consistent custody account binding. Expected
+# values are arithmetic from the invented fixture, not another implementation.
+
+NATIVE_QB_ACCOUNTS = "id,funds\nsynthetic-custody,[]\n"
+NATIVE_QB_DEPOSIT_ROW = _activity_row(
+    activity_type="transfer",
+    type="DEPOSIT",
+    amount="137",
+    amount_cents="13700",
+    status="C",
+    created_at="2026-01-02T11:37:00Z",
+    id="synthetic-native-deposit",
+    destination_account_id="synthetic-custody",
+    origin_account_id="synthetic-bank",
+)
+NATIVE_QB_BUY_ROWS = _activity_row(
+    activity_type="filled_txn",
+    amount="96",
+    filled="Y",
+    fund="7",
+    fund_title="Demo Fund",
+    id="15",
+    time="2026-01-03T02:00:00Z",
+    type="BUY",
+) + _activity_row(
+    activity_type="order",
+    executed="Y",
+    filled_at="2026-01-03T20:00:00Z",
+    fund="7",
+    id="906",
+    transaction="15",
+)
+
+
+def _native_qb_manifest(
+    root: Path, transfer_rows: str, accounts: str = NATIVE_QB_ACCOUNTS
+) -> Any:
+    return _manifest_tree_v3(
+        root,
+        activity=ACTIVITY_HEADER + transfer_rows + NATIVE_QB_BUY_ROWS,
+        qb_accounts=accounts,
+    )
+
+
+def test_v3_native_quantbase_transfer_deposit_is_owner_funding(
+    tmp_path: Path,
+) -> None:
+    # Completed native DEPOSIT 137 on 2026-01-02; fund allocation 96; observed
+    # member NAV 105 -> invested 137, cash 41, strategy capital 146; the
+    # account stays the observed NAV 105 and fund-only returns never see cash.
+    document = _run_v3(tmp_path, _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW))
+    metrics = _index(document)
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "volatis-strategy")]["value"]
+        == "137.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "volatis-strategy")]["value"] == (
+        "41.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "volatis-strategy")]["value"] == "146.00"
+    assert metrics[("capital.account.cutoff", "acct-qb")]["value"] == "105.00"
+    assert metrics[("twr.account", "acct-qb")]["value"] == "0.093750000000"
+    assert metrics[("capital.portfolio.systematic.cutoff", "portfolio")]["value"] == (
+        "2276.00"  # 1320 + 605 + 146 + 205
+    )
+
+
+def test_v3_native_quantbase_transfer_withdrawal_reduces_owner_funding(
+    tmp_path: Path,
+) -> None:
+    # A completed withdrawal of 17 on 2026-01-05 from the same custody account:
+    # invested 137 - 17 = 120, cash 137 - 17 - 96 = 24, strategy capital 129.
+    withdrawal = _activity_row(
+        activity_type="transfer",
+        type="WITHDRAWAL",
+        amount="17",
+        amount_cents="1700",
+        status="C",
+        created_at="2026-01-05T08:00:00Z",
+        id="synthetic-native-withdrawal",
+        destination_account_id="synthetic-bank",
+        origin_account_id="synthetic-custody",
+    )
+    document = _run_v3(
+        tmp_path, _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW + withdrawal)
+    )
+    metrics = _index(document)
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "volatis-strategy")]["value"]
+        == "120.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "volatis-strategy")]["value"] == (
+        "24.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "volatis-strategy")]["value"] == "129.00"
+    assert metrics[("twr.account", "acct-qb")]["value"] == "0.093750000000"
+
+
+def test_v3_native_quantbase_duplicate_source_event_counts_once(
+    tmp_path: Path,
+) -> None:
+    document = _run_v3(
+        tmp_path,
+        _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW + NATIVE_QB_DEPOSIT_ROW),
+    )
+    metrics = _index(document)
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "volatis-strategy")]["value"]
+        == "137.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "volatis-strategy")]["value"] == (
+        "41.00"
+    )
+
+
+def test_v3_native_quantbase_conflicting_duplicate_identity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    conflict = NATIVE_QB_DEPOSIT_ROW.replace(",137,", ",138,").replace(
+        ",13700,", ",13800,"
+    )
+    document = _run_v3(
+        tmp_path, _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW + conflict)
+    )
+    missing = _reasons(document)
+    assert (
+        "conflicting duplicate source identity"
+        in missing[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    )
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in missing
+    assert ("weight.strategy.cutoff", "volatis-strategy") in missing
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"created_at": "2026-01-02T11:37:00"}, "malformed"),  # naive timestamp
+        ({"amount_cents": "13701"}, "malformed"),  # amount_cents != amount * 100
+        ({"amount_cents": "13700.5"}, "malformed"),  # non-integral cents
+        ({"status": "P"}, "malformed"),  # not the completed status C
+        (
+            {"destination_account_id": "other-account"},
+            "outside the admitted account scope",
+        ),
+        (
+            {"type": "INTERNAL"},
+            "not a recognized custody event",
+        ),
+    ],
+)
+def test_v3_native_quantbase_malformed_transfer_fails_closed(
+    tmp_path: Path, fields: dict[str, str], message: str
+) -> None:
+    row = {
+        "activity_type": "transfer",
+        "type": "DEPOSIT",
+        "amount": "137",
+        "amount_cents": "13700",
+        "status": "C",
+        "created_at": "2026-01-02T11:37:00Z",
+        "id": "synthetic-native-deposit",
+        "destination_account_id": "synthetic-custody",
+        "origin_account_id": "synthetic-bank",
+    }
+    row.update(fields)
+    document = _run_v3(tmp_path, _native_qb_manifest(tmp_path, _activity_row(**row)))
+    metrics = _index(document)
+    missing = _reasons(document)
+    assert message in missing[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    assert ("invested_capital.strategy.cutoff", "volatis-strategy") in missing
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in missing
+    assert ("weight.strategy.cutoff", "volatis-strategy") in missing
+    # Never a partial numeric total or a zero stand-in.
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") not in metrics
+
+
+def test_v3_native_quantbase_split_custody_binding_fails_closed(
+    tmp_path: Path,
+) -> None:
+    second = _activity_row(
+        activity_type="transfer",
+        type="DEPOSIT",
+        amount="5",
+        amount_cents="500",
+        status="C",
+        created_at="2026-01-03T08:00:00Z",
+        id="synthetic-native-deposit-2",
+        destination_account_id="synthetic-custody-2",
+        origin_account_id="synthetic-bank",
+    )
+    accounts = "id,funds\nsynthetic-custody,[]\nsynthetic-custody-2,[]\n"
+    missing = _reasons(
+        _run_v3(
+            tmp_path,
+            _native_qb_manifest(
+                tmp_path, NATIVE_QB_DEPOSIT_ROW + second, accounts=accounts
+            ),
+        )
+    )
+    assert (
+        "ambiguous account scope"
+        in missing[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    )
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in missing
+
+
+@pytest.mark.parametrize("fee_type", ["PARTNER_SUB_FEE", "AUM_FEE"])
+def test_v3_native_quantbase_known_fee_journal_is_an_investment_result(
+    tmp_path: Path, fee_type: str
+) -> None:
+    # Approved policy: the owner cash residual is DERIVED (admitted deposits
+    # minus withdrawals minus sleeve allocations plus admitted redemptions).
+    # A completed native fee journal (activity_type=journal, status=COMPLETE,
+    # known fee type, invented amount 3, unrelated journal namespace) is an
+    # internal investment result: no owner withdrawal, no allocation, no
+    # residual change. All expectations are arithmetic from invented fixtures.
+    journal = _activity_row(
+        activity_type="journal",
+        type=fee_type,
+        amount="3",
+        amount_cents="300",
+        status="COMPLETE",
+        created_at="2026-01-06T00:00:00Z",
+        id="synthetic-fee-journal",
+        account_id="synthetic-fee-namespace",
+    )
+    document = _run_v3(
+        tmp_path, _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW + journal)
+    )
+    metrics = _index(document)
+    assert (
+        metrics[("invested_capital.strategy.cutoff", "volatis-strategy")]["value"]
+        == "137.00"
+    )
+    assert metrics[("capital.strategy_cash.cutoff", "volatis-strategy")]["value"] == (
+        "41.00"
+    )
+    assert metrics[("capital.strategy.cutoff", "volatis-strategy")]["value"] == "146.00"
+    assert metrics[("capital.account.cutoff", "acct-qb")]["value"] == "105.00"
+    assert metrics[("twr.account", "acct-qb")]["value"] == "0.093750000000"
+    assert metrics[("capital.portfolio.systematic.cutoff", "portfolio")]["value"] == (
+        "2276.00"
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"type": "OTHER_FEE"},
+        {"status": "C"},
+        {"activity_type": "transfer"},
+    ],
+)
+def test_v3_native_quantbase_unknown_journal_fails_closed(
+    tmp_path: Path, fields: dict[str, str]
+) -> None:
+    # The fee exemption is exact, never a blanket journal skip: an unknown fee
+    # type, a non-COMPLETE journal, or a known fee type on a non-journal
+    # (transfer) row all fail closed with dependent totals/weights withheld.
+    row = {
+        "activity_type": "journal",
+        "type": "PARTNER_SUB_FEE",
+        "amount": "3",
+        "amount_cents": "300",
+        "status": "COMPLETE",
+        "created_at": "2026-01-06T00:00:00Z",
+        "id": "synthetic-fee-journal",
+    }
+    row.update(fields)
+    document = _run_v3(
+        tmp_path,
+        _native_qb_manifest(tmp_path, NATIVE_QB_DEPOSIT_ROW + _activity_row(**row)),
+    )
+    metrics = _index(document)
+    missing = _reasons(document)
+    reason = missing[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    assert "not an admitted internal fee journal" in reason
+    assert ("invested_capital.strategy.cutoff", "volatis-strategy") in missing
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in missing
+    assert ("weight.strategy.cutoff", "volatis-strategy") in missing
+    # Never a partial numeric total or a zero stand-in.
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") not in metrics
