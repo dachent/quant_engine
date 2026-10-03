@@ -1855,7 +1855,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         Spec(
             report=[
                 _set(
-                    ("implementation_reconciliation_contract", "as_of_date"),
+                    ("decomposition_lenses", "modes", "LIVE_ONLY", 0, "as_of_date"),
                     "2026-08-03",
                 )
             ]
@@ -2096,15 +2096,32 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         Spec(
             report=[
                 _set(
-                    ("strategy_attribution", "benchmark_comparisons", 1, "status"),
-                    "UNAVAILABLE",
+                    (
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "available_count",
+                    ),
+                    0,
                 ),
                 _set(
                     (
-                        "strategy_attribution",
-                        "benchmark_comparisons",
-                        1,
-                        "observed_end",
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "unavailable_count",
+                    ),
+                    2,
+                ),
+                _set(
+                    (
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "as_of_date",
                     ),
                     "2026-07-30",
                 ),
@@ -5119,7 +5136,10 @@ def _cli(*args: str) -> int:
 
 
 def test_cli_good_exits_zero_and_writes_contract_document(tmp_path: Path) -> None:
-    gen_dir = build(tmp_path)
+    def use_current_cutoff_weights(report: dict[str, Any]) -> None:
+        report["dependence_analysis"]["weight_basis"] = "CURRENT_CUTOFF"
+
+    gen_dir = build(tmp_path, Spec(report=[use_current_cutoff_weights]))
     assert _cli(str(gen_dir)) == 0
     out = gen_dir.parent.parent / "validation" / GEN / "findings.json"
     raw = out.read_bytes()
