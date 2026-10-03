@@ -82,6 +82,15 @@ V3_AUTHORITY_FAMILIES = frozenset(
         "provider_capital_owner_receipt_b_response",
     }
 )
+NATIVE_MATRIXPORT_FAMILIES = frozenset(
+    {
+        "matrixport_generation_manifest",
+        "matrixport_subscription_details",
+        "matrixport_generation_catalog",
+        "matrixport_owner_flow_coverage",
+        "matrixport_owner_flow_request_manifest",
+    }
+)
 
 
 class ManifestError(ValueError):
@@ -227,6 +236,38 @@ def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str
                     f"(expected {expected_sha256}, found {actual_sha256})"
                 )
     return resolved
+
+
+def native_matrixport_input_paths(
+    manifest: dict[str, object], qe_root: Path
+) -> dict[str, Path]:
+    """Resolve the five native Matrixport interface families as one set."""
+    entries = manifest.get("inputs")
+    if not isinstance(entries, list):
+        raise ManifestError("inputs manifest inputs must be a list")
+    family_entries: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("family"), str):
+            family_entries[entry["family"]].append(entry)
+    present = NATIVE_MATRIXPORT_FAMILIES.intersection(family_entries)
+    if present and present != NATIVE_MATRIXPORT_FAMILIES:
+        raise ManifestError(
+            "native Matrixport interface families must be admitted together"
+        )
+    if not present:
+        return {}
+    result: dict[str, Path] = {}
+    for family in sorted(NATIVE_MATRIXPORT_FAMILIES):
+        selected = family_entries[family]
+        if len(selected) != 1:
+            raise ManifestError(
+                f"native Matrixport family {family!r} must have exactly one entry"
+            )
+        raw_path = selected[0].get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ManifestError(f"native Matrixport family {family!r} lacks a path")
+        result[family] = resolve_input_path(qe_root, raw_path)
+    return result
 
 
 class FlowData:
@@ -813,9 +854,11 @@ def quantbase_sleeve_flows(
 
 
 def matrixport_subscription_units(
-    nav_rows: Iterable[dict[str, str]], bill_rows: Iterable[dict[str, str]]
+    nav_rows: Iterable[dict[str, str]],
+    bill_rows: Iterable[dict[str, str]],
+    subscription_rows: Iterable[dict[str, str]] | None = None,
 ) -> list[tuple[date, Decimal]]:
-    """Derive active units from each raw USDT subscription debit and confirm NAV."""
+    """Derive active units from confirmed subscriptions and recognition NAV."""
     nav_points = sorted(
         (
             datetime.fromisoformat(
@@ -830,6 +873,17 @@ def matrixport_subscription_units(
         and row.get("nav") not in (None, "")
     )
     subscriptions: list[tuple[date, Decimal]] = []
+    source_rows = subscription_rows
+    if source_rows is not None:
+        return [
+            (
+                datetime.fromisoformat(
+                    row["confirm_nav_time_utc"].replace("Z", "+00:00")
+                ).date(),
+                Decimal(row["subscription_share"]),
+            )
+            for row in source_rows
+        ]
     for row in bill_rows:
         if row.get("currency") != "USDT" or row.get("direction") != "2":
             continue
@@ -857,6 +911,7 @@ def matrixport_raw_observations(
     fx_unconverted: list[date] | None = None,
     raw_nav_dates: list[date] | None = None,
     fx_last_admitted_date: date = FX_LAST_ADMITTED_DATE,
+    subscription_rows: Iterable[dict[str, str]] | None = None,
 ) -> list[tuple[date, Decimal]]:
     """Use raw Matrixport subscription units and USD-converted NAV, never ledger values.
 
@@ -868,7 +923,9 @@ def matrixport_raw_observations(
     last converted value ends earlier at the FX boundary.
     """
     nav_rows = list(nav_rows)
-    subscriptions = matrixport_subscription_units(nav_rows, bill_rows)
+    subscriptions = matrixport_subscription_units(
+        nav_rows, bill_rows, subscription_rows
+    )
     observations: list[tuple[date, Decimal]] = []
     for row in nav_rows:
         timestamp = row.get("day_timestamp_utc") or row.get("timestamp_utc")
@@ -912,6 +969,7 @@ def matrixport_raw_flows(
     opening_date: date | None = None,
     deposits_skipped: list[tuple[date, Decimal]] | None = None,
     event_date_fx: bool = False,
+    allow_completed: bool = False,
 ) -> tuple[dict[date, Decimal], int]:
     """Place raw confirmed wallet deposits at the first subsequent raw NAV point.
 
@@ -924,7 +982,9 @@ def matrixport_raw_flows(
     flows: dict[date, Decimal] = defaultdict(Decimal)
     count = 0
     for row in deposit_rows:
-        if row.get("state") != "confirmed" or row.get("currency") not in {
+        if row.get("state") not in (
+            {"confirmed", "completed"} if allow_completed else {"confirmed"}
+        ) or row.get("currency") not in {
             "USDC",
             "USDT",
         }:
@@ -982,6 +1042,7 @@ def selected_fx_covers_custody_event_dates(
     rates_path: Path,
     deposit_rows: Iterable[dict[str, str]],
     bill_rows: Iterable[dict[str, str]],
+    subscription_rows: Iterable[dict[str, str]] | None = None,
 ) -> None:
     """Require selected normalized FX rows for every raw custody event date."""
     with rates_path.open(encoding="utf-8-sig", newline="") as handle:
@@ -1003,21 +1064,41 @@ def selected_fx_covers_custody_event_dates(
         currency = row.get("currency")
         timestamp = row.get("created_at_utc") or row.get("created_at")
         if (
-            row.get("state") == "confirmed"
+            row.get("state")
+            in (
+                {"confirmed", "completed"}
+                if subscription_rows is not None
+                else {"confirmed"}
+            )
             and currency in {"USDC", "USDT"}
             and timestamp
             and row.get("amount") not in (None, "")
         ):
             required.append((utc_date(timestamp), str(currency), f"{currency}-USD"))
-    for row in bill_rows:
+    for row in bill_rows if subscription_rows is None else subscription_rows:
         timestamp = row.get("timestamp_utc") or row.get("timestamp")
+        if subscription_rows is not None:
+            timestamp = row.get("subscription_time_utc")
         if (
-            row.get("currency") == "USDT"
-            and row.get("direction") == "2"
+            (
+                subscription_rows is not None
+                or (row.get("currency") == "USDT" and row.get("direction") == "2")
+            )
             and timestamp
-            and row.get("amount") not in (None, "")
+            and (
+                row.get("subscription_amount")
+                if subscription_rows is not None
+                else row.get("amount")
+            )
+            not in (None, "")
         ):
-            required.append((utc_date(timestamp), "USDT", "USDT-USD"))
+            required.append(
+                (
+                    utc_date(timestamp),
+                    str(row.get("subscription_currency", "USDT")),
+                    f"{row.get('subscription_currency', 'USDT')}-USD",
+                )
+            )
     missing = [
         item
         for item in required
@@ -1032,6 +1113,7 @@ def raw_custody_capital(
     matrixport_deposit_rows: Iterable[dict[str, str]],
     matrixport_bill_rows: Iterable[dict[str, str]],
     fx_rates: dict[str, dict[date, Decimal]],
+    matrixport_subscription_rows: Iterable[dict[str, str]] | None = None,
 ) -> dict[str, dict[str, Decimal]]:
     """Derive R8 owner capital and unallocated cash from raw custody events.
 
@@ -1085,7 +1167,12 @@ def raw_custody_capital(
                 add("volatis-strategy", occurred_on, "allocation", abs(value))
 
     for row in matrixport_deposit_rows:
-        if row.get("state") != "confirmed" or row.get("currency") not in {
+        valid_states = (
+            {"confirmed", "completed"}
+            if matrixport_subscription_rows is not None
+            else {"confirmed"}
+        )
+        if row.get("state") not in valid_states or row.get("currency") not in {
             "USDC",
             "USDT",
         }:
@@ -1102,20 +1189,43 @@ def raw_custody_capital(
             raise ValueError("missing event-date FX for Matrixport deposit")
         add("robuxio-crypto", occurred_on, "owner", Decimal(str(amount)) * rate)
 
-    for row in matrixport_bill_rows:
+    if matrixport_subscription_rows is not None:
+        for row in matrixport_bill_rows:
+            if str(row.get("tx_type", "")).upper() in {
+                "TRANSFER",
+                "REDEMPTION",
+                "WITHDRAWAL",
+                "DEPOSIT",
+            }:
+                raise ValueError("unsupported native Matrixport wallet event")
+        allocation_rows = matrixport_subscription_rows
+    else:
+        allocation_rows = matrixport_bill_rows
+    for row in allocation_rows:
         # The raw subscription leg is the USDT direction-2 bill.  The USDC
         # direction-1/2 records are wallet conversion legs, not owner flows or
         # sleeve allocations; treating them as redemptions would invent cash.
-        if row.get("currency") != "USDT" or row.get("direction") != "2":
+        if matrixport_subscription_rows is None and (
+            row.get("currency") != "USDT" or row.get("direction") != "2"
+        ):
             continue
-        timestamp = row.get("timestamp_utc") or row.get("timestamp")
-        amount = row.get("amount")
+        timestamp = (
+            row.get("subscription_time_utc")
+            if matrixport_subscription_rows is not None
+            else row.get("timestamp_utc") or row.get("timestamp")
+        )
+        amount = (
+            row.get("subscription_amount")
+            if matrixport_subscription_rows is not None
+            else row.get("amount")
+        )
         if not timestamp or amount in (None, ""):
             continue
         occurred_on = event_date(timestamp)
         if occurred_on > CUTOFF:
             continue
-        rate = fx_rates["USDT"].get(occurred_on)
+        currency = str(row.get("subscription_currency", "USDT"))
+        rate = fx_rates[currency].get(occurred_on)
         if rate is None:
             raise ValueError("missing event-date FX for Matrixport subscription")
         value = Decimal(str(amount)) * rate
@@ -1224,6 +1334,7 @@ def raw_provider_data(
     matrixport_deposits_path = paths["matrixport_deposits"]
     matrixport_bills_path = paths["matrixport_bills"]
     fx_path = paths["fx"]
+    matrixport_subscription_path = paths.get("matrixport_subscription_details")
     providers = {
         str(row["account_id"]): str(row.get("provider", "")).upper()
         for row in crosswalk_rows
@@ -1356,6 +1467,14 @@ def raw_provider_data(
                 ):
                     deposit_rows = list(csv.DictReader(deposit_handle))
                     bill_rows = list(csv.DictReader(bill_handle))
+                    subscription_rows = None
+                    if matrixport_subscription_path is not None:
+                        with (qe_root / matrixport_subscription_path).open(
+                            encoding="utf-8-sig", newline=""
+                        ) as subscription_handle:
+                            subscription_rows = list(
+                                csv.DictReader(subscription_handle)
+                            )
                     fx_rates = usdt_usd_fx_rates(
                         qe_root / fx_path, fx_last_admitted_date
                     )
@@ -1371,6 +1490,7 @@ def raw_provider_data(
                         fx_unconverted,
                         raw_nav_dates,
                         fx_last_admitted_date,
+                        subscription_rows,
                     )
                     if not values and not raw_nav_dates:
                         raise ValueError(
@@ -1386,6 +1506,7 @@ def raw_provider_data(
                             membership_starts.get(account_id),
                             deposits_skipped,
                             event_date_fx,
+                            subscription_rows is not None,
                         )
             except (OSError, ValueError, KeyError) as error:
                 failures[account_id] = {
@@ -1671,6 +1792,186 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
         }
     if cutoff_tickers != {"USDC-USD", "USDT-USD"}:
         raise ManifestError("v3 selected rates lack exact cutoff USDC/USDT closes")
+    native = native_matrixport_input_paths(manifest, qe_root)
+    if native:
+        generation_path = native["matrixport_generation_manifest"]
+        subscription_path = native["matrixport_subscription_details"]
+        catalog_path = native["matrixport_generation_catalog"]
+        coverage_path = native["matrixport_owner_flow_coverage"]
+        request_path = native["matrixport_owner_flow_request_manifest"]
+        try:
+            native_generation = json.loads(generation_path.read_text("utf-8"))
+            catalog = json.loads(catalog_path.read_text("utf-8"))
+            with subscription_path.open(encoding="utf-8-sig", newline="") as handle:
+                subscriptions = list(csv.DictReader(handle))
+            with coverage_path.open(encoding="utf-8-sig", newline="") as handle:
+                coverage_rows = list(csv.DictReader(handle))
+            request_lines = request_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, json.JSONDecodeError, UnicodeError) as error:
+            raise ManifestError(
+                f"native Matrixport source is unreadable: {error}"
+            ) from error
+        selection = manifest.get("generation_selection_evidence", {})
+        matrixport_selection = (
+            selection.get("matrixport") if isinstance(selection, dict) else None
+        )
+        if not isinstance(matrixport_selection, dict):
+            raise ManifestError("native Matrixport generation selection is missing")
+        generation_id = native_generation.get("generation_id")
+        source_run_id = catalog.get("source_run_id")
+        if (
+            native_generation.get("manifest_schema_version") != 1
+            or native_generation.get("provider_id") not in (None, "matrixport")
+            or not isinstance(generation_id, str)
+            or matrixport_selection.get("generation_id") != generation_id
+            or not isinstance(source_run_id, str)
+            or matrixport_selection.get("source_run_id") != source_run_id
+            or catalog.get("catalog_schema_version") != 2
+            or catalog.get("provider_id") != "matrixport"
+            or not isinstance(catalog.get("observed_boundary_date"), str)
+            or catalog["observed_boundary_date"] <= CUTOFF.isoformat()
+            or matrixport_selection.get("qualification") != "STAGED_COMPLETE"
+            or matrixport_selection.get("finalized_through") != CUTOFF.isoformat()
+            or not matrixport_selection.get("finality_evidence_sha256_verified_V")
+        ):
+            raise ManifestError(
+                "native Matrixport generation/catalog selection is not bound"
+            )
+        artifacts = native_generation.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ManifestError("native Matrixport generation lacks artifacts")
+        expected_artifacts = {
+            "csv/nav_daily.csv": ("matrixport-canonical-csv", "1"),
+            "csv/wallet_deposits.csv": ("matrixport-canonical-csv", "1"),
+            "csv/wallet_bills.csv": ("matrixport-canonical-csv", "1"),
+            "csv/wallet_currency_dispositions.csv": ("matrixport-canonical-csv", "1"),
+            "csv/subscription_details.csv": ("matrixport-canonical-csv", "1"),
+            "csv/coverage.csv": ("matrixport-canonical-csv", "1"),
+            "reports/request_manifest.jsonl": ("matrixport-acceptance-jsonl", "1"),
+            "normalized/generation-catalog.json": (
+                "matrixport-generation-catalog",
+                "2",
+            ),
+        }
+        for artifact_id, (schema_name, schema_version) in expected_artifacts.items():
+            artifact = next(
+                (
+                    item
+                    for item in artifacts
+                    if isinstance(item, dict) and item.get("artifact_id") == artifact_id
+                ),
+                None,
+            )
+            selected_path = {
+                "csv/subscription_details.csv": subscription_path,
+                "csv/coverage.csv": coverage_path,
+                "reports/request_manifest.jsonl": request_path,
+                "normalized/generation-catalog.json": catalog_path,
+            }.get(artifact_id)
+            if selected_path is None:
+                continue
+            schema = artifact.get("schema") if isinstance(artifact, dict) else None
+            if (
+                not isinstance(artifact, dict)
+                or not isinstance(schema, dict)
+                or schema.get("name") != schema_name
+                or schema.get("version") != schema_version
+                or artifact.get("sha256") != file_sha256(selected_path)
+                or artifact.get("size_bytes") != selected_path.stat().st_size
+            ):
+                raise ManifestError(
+                    f"native Matrixport artifact is not bound: {artifact_id}"
+                )
+        required_subscription_fields = {
+            "actual_subscription_amount",
+            "confirm_nav_time_utc",
+            "order_id",
+            "product_id",
+            "subscription_amount",
+            "subscription_currency",
+            "subscription_time_utc",
+            "subscription_share",
+            "confirm_nav",
+            "status",
+            "source_endpoint",
+        }
+        if not subscriptions or not required_subscription_fields.issubset(
+            subscriptions[0]
+        ):
+            raise ManifestError("native Matrixport subscription schema is incomplete")
+        for row in subscriptions:
+            try:
+                subscribed = datetime.fromisoformat(
+                    row["subscription_time_utc"].replace("Z", "+00:00")
+                )
+                confirmed = datetime.fromisoformat(
+                    row["confirm_nav_time_utc"].replace("Z", "+00:00")
+                )
+                if (
+                    not row["order_id"]
+                    or not row["product_id"]
+                    or confirmed <= subscribed
+                    or row["subscription_currency"] not in {"USDC", "USDT"}
+                    or Decimal(row["subscription_share"]) <= 0
+                    or Decimal(row["confirm_nav"]) <= 0
+                    or row["source_endpoint"] != "/strategy/api/v2/order"
+                    or row["status"] != "300"
+                ):
+                    raise ValueError("invalid confirmed subscription")
+            except (KeyError, ValueError, DecimalException) as error:
+                raise ManifestError(
+                    f"native Matrixport subscription is invalid: {error}"
+                ) from error
+        if len(coverage_rows) != 2:
+            raise ManifestError(
+                "native Matrixport owner-flow coverage must contain deposits and withdrawals"
+            )
+        expected_endpoints = {
+            "GET https://mapi.matrixport.com/mapi/v1/wallet/deposits": 1,
+            "GET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals": 0,
+        }
+        for row in coverage_rows:
+            endpoint = row.get("endpoint")
+            try:
+                raw_rows = json.loads(row["details_json"])["raw_rows"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise ManifestError(
+                    "native Matrixport coverage details are malformed"
+                ) from error
+            if (
+                endpoint not in expected_endpoints
+                or row.get("status") != "complete_to_observed_boundary"
+                or row.get("terminal_reason")
+                != "structured_parameter_rejections_dispositioned"
+                or raw_rows != expected_endpoints[endpoint]
+                or not row.get("updated_at_utc")
+            ):
+                raise ManifestError(
+                    "native Matrixport owner-flow coverage is incomplete"
+                )
+        if not request_lines:
+            raise ManifestError("native Matrixport request manifest is empty")
+        for line in request_lines:
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ManifestError(
+                    "native Matrixport request manifest is malformed"
+                ) from error
+            digest = (
+                request.get("request_sha256") if isinstance(request, dict) else None
+            )
+            if (
+                not isinstance(request, dict)
+                or not request.get("request_id")
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ManifestError(
+                    "native Matrixport request manifest lacks request pins"
+                )
+        by_family.update(native)
     return by_family
 
 
@@ -1695,6 +1996,7 @@ def derive(
         input_paths = manifest_input_paths(inputs_manifest, qe_root)
         schema_v3 = inputs_manifest.get("schema") == INPUT_MANIFEST_SCHEMA_V3
         if schema_v3:
+            input_paths.update(native_matrixport_input_paths(inputs_manifest, qe_root))
             authority_paths = list(
                 v3_authority_paths(inputs_manifest, qe_root).values()
             )
@@ -1796,10 +2098,17 @@ def derive(
                 encoding="utf-8-sig", newline=""
             ) as handle:
                 matrixport_bills = list(csv.DictReader(handle))
+            matrixport_subscriptions = None
+            if "matrixport_subscription_details" in input_paths:
+                with (qe_root / input_paths["matrixport_subscription_details"]).open(
+                    encoding="utf-8-sig", newline=""
+                ) as handle:
+                    matrixport_subscriptions = list(csv.DictReader(handle))
             selected_fx_covers_custody_event_dates(
                 next(path for path in authority_paths if path.name == "rates.csv"),
                 matrixport_deposits,
                 matrixport_bills,
+                matrixport_subscriptions,
             )
             custody_capital = raw_custody_capital(
                 quantbase_events,
@@ -1813,6 +2122,7 @@ def derive(
                         qe_root / input_paths["fx"], "USDT-USD", CUTOFF
                     ),
                 },
+                matrixport_subscriptions,
             )
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
             custody_capital_error = f"R8 raw custody capital is not derivable: {error}"
