@@ -2267,6 +2267,19 @@ def derive(
     excluded_accounts.update(excluded_account_ids(crosswalk["rows"]))
     membership_starts = current_membership_starts(crosswalk["rows"])
     active_strategy_ids = active_included_strategy_ids(crosswalk["rows"])
+    crosswalk_capital_failures = (
+        set(
+            active_included_strategy_ids(
+                [
+                    row
+                    for row in crosswalk["rows"]
+                    if str(row["account_id"]) in crosswalk_problems
+                ]
+            )
+        )
+        if schema_v3
+        else set()
+    )
     providers = {
         str(row["account_id"]): str(row.get("provider", "")).upper()
         for row in crosswalk["rows"]
@@ -2730,6 +2743,7 @@ def derive(
             if (
                 custody_capital_error is not None
                 or custody is None
+                or strategy_id in crosswalk_capital_failures
                 or len(members) != 1
                 or members.intersection(missing_included)
             ):
@@ -2774,7 +2788,14 @@ def derive(
         }
         if strategy_id in custody_failures:
             continue
-        if not members:
+        if strategy_id in crosswalk_capital_failures:
+            add_not_derivable(
+                output,
+                "capital.strategy.cutoff",
+                strategy_id,
+                "one or more included account mappings is ambiguous at cutoff",
+            )
+        elif not members:
             add_not_derivable(
                 output,
                 "capital.strategy.cutoff",
@@ -2803,12 +2824,14 @@ def derive(
                     ).isoformat(),
                 )
             )
-    if missing_included or custody_failures:
+    if missing_included or custody_failures or crosswalk_capital_failures:
         add_not_derivable(
             output,
             "capital.portfolio.systematic.cutoff",
             "portfolio",
-            "one or more included accounts lacks a cutoff value or required custody cash is not derivable",
+            "one or more included account mappings is ambiguous at cutoff"
+            if crosswalk_capital_failures
+            else "one or more included accounts lacks a cutoff value or required custody cash is not derivable",
         )
     else:
         metrics.append(
@@ -2821,7 +2844,12 @@ def derive(
             )
         )
     if schema_v3:
-        if missing_included or custody_failures or aggregate["systematic"] <= 0:
+        if (
+            missing_included
+            or custody_failures
+            or crosswalk_capital_failures
+            or aggregate["systematic"] <= 0
+        ):
             reason = (
                 "strategy weights require every included cutoff capital value and "
                 "a positive systematic total"

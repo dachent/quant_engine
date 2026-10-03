@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "df83ee9d0ca6403ea8d3079945dbe3582063f0cccd9708ef3c3b06ef896d7460"
+        "ca57bd25568878efa197dc436b35ad0e087800ec0ea5ec00fcf268c42939a6a7"
     )
 
 
@@ -1104,7 +1104,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
             ),
             "product_data_class_set_sha256": (
-                "9b94724ff0b983b83b8f920ceedd0cd8ff691f34cbeb15d0603c7fc3e88c6ac9"
+                "9f9c5f50e9cc0c9fdbc7123197897e20a4c7ab444cca73caad37aeda88a8943f"
             ),
             # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
             # each statement account's capital events on their own recognition
@@ -4230,9 +4230,10 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # historical generation, inventory or admitted-item pins. The held-workbook
     # correction removes only that consumer from the historical source rows.
     # The affected product-data-class pins are then rederived from those changed
-    # source identities; financial facts and admission membership stay unchanged.
+    # source identities, including the four verified source-class bindings;
+    # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "3c64be9b33a8c305f36c40a41ce4d42458d744db812b808e573f034b0a0854cc"
+        "87f5b37308e9bbba262f5bccf0fc716bf3cf1be4c6669c71363a3649b50a0a5e"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4269,7 +4270,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "3c64be9b33a8c305f36c40a41ce4d42458d744db812b808e573f034b0a0854cc"
+        "87f5b37308e9bbba262f5bccf0fc716bf3cf1be4c6669c71363a3649b50a0a5e"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

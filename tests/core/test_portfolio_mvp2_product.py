@@ -537,6 +537,16 @@ def test_d1_fixture_status_only_ready_is_rejected(tmp_path: Path, readiness) -> 
         for row in contract["financial_outcomes"]
         if row["outcome_id"] == "INVESTED_CAPITAL"
     )
+    unapproved = policy["classification_treatments"]["IN_KIND_FUNDING"]
+    unapproved.update(
+        {
+            "approval_evidence": None,
+            "decision_authority": "OWNER_318",
+            "decision_status": "OWNER_DECISION_REQUIRED",
+            "recommended_treatment": "EXCLUDE_UNTIL_APPROVED",
+            "selected_treatment": None,
+        }
+    )
     if readiness is None:
         policy.pop("policy_status")
     else:
@@ -588,22 +598,22 @@ def test_d1_fixture_selected_authority_is_exact(tmp_path: Path, monkeypatch) -> 
     assert financial._validate_outcomes is native_validator
     assert capital._validate_owner_decision_receipts is native_receipts
     assert capital.calculate_invested_capital is native_calculator
-    # The repository RNR outcomes are another natively valid authority, but
-    # they are not the exact READY selection frozen by this fixture seam.
-    different = json.loads(
-        (
-            fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
-        ).read_bytes()
-    )
-    native_validator(different["financial_outcomes"], allow_legacy_workbook=False)
     changed = deepcopy(expected)
-    changed["financial_outcomes"] = different["financial_outcomes"]
+    changed_policy = next(
+        row["calculation_contract"]
+        for row in changed["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    changed_policy["classification_treatments"]["IN_KIND_FUNDING"][
+        "calculation_effect"
+    ] += " Fixture mutation."
+    native_validator(changed["financial_outcomes"], allow_legacy_workbook=False)
     fixture._write_json(candidate, changed)
     with pytest.raises(AssertionError):
         loader(candidate)
 
 
-def test_d1_fixture_default_authority_stays_blocked() -> None:
+def test_d1_fixture_default_authority_is_ready() -> None:
     contract = financial.load_contract(
         fixture.REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     )
@@ -612,7 +622,10 @@ def test_d1_fixture_default_authority_stays_blocked() -> None:
         for row in contract["financial_outcomes"]
         if row["outcome_id"] == "INVESTED_CAPITAL"
     )
-    assert policy["policy_status"] == "REQUIRED_NOT_READY"
+    assert (
+        policy["policy_status"],
+        policy["shared_flow_contract"]["extension_status"],
+    ) == ("READY", "READY")
 
 
 def test_d1_fixture_governed_numeric_projection_is_unchanged(tmp_path: Path) -> None:
@@ -641,7 +654,7 @@ def test_d1_fixture_governed_numeric_projection_is_unchanged(tmp_path: Path) -> 
         capital.read_local_sidecar(input_path),
     )
     ready = capital.build_governed_capital_result(ready_input_path, ready_contract_path)
-    assert (real["status"], ready["status"]) == ("REQUIRED_NOT_READY", "AVAILABLE")
+    assert (real["status"], ready["status"]) == ("AVAILABLE", "AVAILABLE")
     selected_ledger = json.loads(
         Path(capital.read_local_sidecar(input_path)["provider_ledger"]).read_bytes()
     )

@@ -15,6 +15,7 @@ import sys
 import pytest
 
 import portfolio_invested_capital as capital
+import portfolio_financial_mvp_contract as financial
 
 
 def _case():
@@ -66,6 +67,26 @@ def _case():
         source_bindings={"ledger": {"sha256": "a" * 64, "size_bytes": 100}},
         correction_bindings=[],
     )
+
+
+def _unresolved_shared_flow_policy():
+    """Build a complete local #324 dependency state, not a status-only stand-in."""
+    contract = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text()
+    )
+    outcomes = deepcopy(contract["financial_outcomes"])
+    invested = next(row for row in outcomes if row["outcome_id"] == "INVESTED_CAPITAL")
+    policy = invested["calculation_contract"]
+    policy["shared_flow_contract"]["extension_status"] = "REQUIRED_NOT_READY"
+    policy["policy_status"] = "REQUIRED_NOT_READY"
+    invested["readiness"] = "REQUIRED_NOT_READY"
+    invested["blockers"] = [324]
+    financial._validate_outcomes(outcomes, allow_legacy_workbook=False)
+    return policy
 
 
 def _event(event_id, epoch_id, day, classification, amount, **extra):
@@ -517,17 +538,17 @@ def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path
     ]
 
 
-def test_cr2_d1_governed_result_preserves_blocked_policy_status_and_numeric_projection(
+def test_cr2_d1_governed_result_preserves_approved_current_policy_and_numeric_projection(
     tmp_path,
 ):
-    """A complete numeric result must not relabel a blocked policy as available."""
+    """The approved current policy releases the same governed numeric result."""
 
     input_path, contract_path = _governed_case(tmp_path)
 
     result = capital.build_governed_capital_result(input_path, contract_path)
 
-    assert result["policy_readiness_provenance"] == "REQUIRED_NOT_READY"
-    assert result["status"] == "REQUIRED_NOT_READY"
+    assert result["policy_readiness_provenance"] == "READY"
+    assert result["status"] == "AVAILABLE"
     assert result["current_aggregate_usd"] == "1100"
     assert result["missing_inputs"] == []
     assert (
@@ -550,11 +571,15 @@ def test_cr2_d1_unknown_or_missing_policy_readiness_fails(readiness):
         capital.calculate_invested_capital(**case)
 
 
-def test_cr2_d1_ready_policy_remains_available():
+def test_cr2_d1_natively_valid_unresolved_shared_flow_policy_preserves_numeric_projection():
     case = _case()
-    case["policy"]["policy_status"] = "READY"
+    case["policy"] = _unresolved_shared_flow_policy()
 
-    assert capital.calculate_invested_capital(**case)["status"] == "AVAILABLE"
+    result = capital.calculate_invested_capital(**case)
+
+    assert result["policy_readiness_provenance"] == "REQUIRED_NOT_READY"
+    assert result["status"] == "REQUIRED_NOT_READY"
+    assert result["current_aggregate_usd"] == "150"
 
 
 def test_required_epoch_accounts_are_bound_to_provenance_and_crosswalk():
@@ -1085,7 +1110,7 @@ def test_daily_capital_excludes_results_and_offsets_internal_transfers():
         _event("withdraw", "b-1", "2026-01-03", "EXTERNAL_WITHDRAWAL", "100"),
     ]
     result = capital.calculate_invested_capital(**case)
-    assert result["status"] == "REQUIRED_NOT_READY"
+    assert result["status"] == "AVAILABLE"
     # Day 1: 100+50. Day 2: only 20 of new owner cash. Day 3: 100 returned.
     assert [r["invested_capital_usd"] for r in result["daily_aggregate"]] == [
         "150",

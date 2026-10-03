@@ -2443,6 +2443,331 @@ def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocatio
     }
 
 
+def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
+    tmp_path: Path,
+):
+    """A conflicting included account cannot leave a partial v3 systematic total."""
+    derivation = load_derivation_module()
+    policy = {"selected_treatment": "raw", "calculation_effect": "raw"}
+    receipt = {
+        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "evidence_url": "https://example.test/a",
+        "comment_id": 1,
+        "digest_evidence_url": "https://example.test/b",
+        "digest_comment_id": 2,
+        "approved_on": "2026-10-02",
+        "payload_sha256": "",
+    }
+    import hashlib
+
+    receipt["payload_sha256"] = hashlib.sha256(
+        (
+            json.dumps({"decision": policy}, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    receipt_b = {
+        "schema_version": 1,
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "policy_id": "PORT-INVESTED-CAPITAL-1",
+        "approval_evidence_url": receipt["evidence_url"],
+        "approved_on": "2026-10-02",
+        "decision_payload_sha256": {
+            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
+        },
+    }
+    base_rows = [
+        {**included_row("volatis", "volatis-strategy"), "provider": "QUANTBASE"},
+        {**included_row("robuxio", "robuxio-crypto"), "provider": "MATRIXPORT"},
+        {**included_row("generic-2", "generic-strategy-2"), "provider": "IBKR"},
+        *[
+            {
+                **included_row(f"generic-{index}", f"generic-strategy-{index}"),
+                "provider": "IBKR",
+            }
+            for index in range(3, 7)
+        ],
+    ]
+    files = {
+        "provider-ledger.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [
+                    nav(f"generic-{index}", "2026-09-17", "100")
+                    for index in range(2, 7)
+                ],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        "account-strategy-current-epoch-crosswalk.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": base_rows,
+            }
+        ),
+        "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n09/17/2026,105\n",
+        "account_activity.csv": "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,,C,deposit-1,10000,provider-account-1\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
+        "nav_daily.csv": "day_timestamp_utc,nav,product_id\n2026-09-17T00:00:00Z,1,fund-m\n",
+        "wallet_deposits.csv": "transaction_id,state,currency,amount,created_at_utc\ndeposit-1,confirmed,USDC,10,2026-09-01T00:00:00Z\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
+        "wallet_currency_dispositions.csv": "wallet_label,disposition\nunknown,UNCLASSIFIED\n",
+        "subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc,subscription_share,confirm_nav,status,source_endpoint\n10,2026-09-17T00:00:00Z,order-1,fund-m,10,USDC,2026-09-16T00:00:00Z,10,1,300,/strategy/api/v2/order\n",
+        "coverage.csv": 'endpoint,status,terminal_reason,updated_at_utc,details_json\nGET https://mapi.matrixport.com/mapi/v1/wallet/deposits,complete_to_observed_boundary,structured_parameter_rejections_dispositioned,2026-09-18T00:00:00Z,"{""raw_rows"": 1}"\nGET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals,complete_to_observed_boundary,structured_parameter_rejections_dispositioned,2026-09-18T00:00:00Z,"{""raw_rows"": 0}"\n',
+        "request_manifest.jsonl": '{"request_id": "request-1", "request_sha256": "'
+        + "a" * 64
+        + '"}\n',
+        "matrixport-generation.json": "{}",
+        "matrixport-generation-catalog.json": json.dumps(
+            {
+                "catalog_schema_version": 2,
+                "provider_id": "matrixport",
+                "source_run_id": "synthetic-run",
+                "observed_boundary_date": "2026-09-18",
+            }
+        ),
+        "yfinance-history.json": json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDC-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDC-USD", "Date": "2026-09-16", "Close": "1"},
+                    {"Ticker": "USDC-USD", "Date": "2026-09-17", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-02", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-17", "Close": "1"},
+                ]
+            }
+        ),
+        "contract.json": json.dumps(
+            {
+                "financial_outcomes": [
+                    {
+                        "outcome_id": "INVESTED_CAPITAL",
+                        "calculation_contract": {
+                            "provider_custody_perimeter": policy,
+                            "owner_decision_receipts": {
+                                "PROVIDER_CUSTODY_PERIMETER": receipt
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+        "policy.json": json.dumps(policy),
+        "receipt-a.json": json.dumps(
+            {
+                "id": 1,
+                "body": "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal subtracts cash line below zero is an error",
+            }
+        ),
+        "receipt-b.json": json.dumps(receipt),
+        "receipt-b-response.json": json.dumps(
+            {
+                "id": 2,
+                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
+                + json.dumps(receipt_b)
+                + "\n```",
+            }
+        ),
+        "generation.json": json.dumps(
+            {
+                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "as_of_date": "2026-09-17",
+                "coverage": {
+                    "observed_end": "2026-09-17",
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+            }
+        ),
+        "rates.csv": "date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-01,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-02,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-16,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDT,USD,1,x,USDT-USD,Close,x\n",
+    }
+    paths = {name: tmp_path / name for name in files}
+    for name, contents in files.items():
+        paths[name].write_text(contents, encoding="utf-8")
+    generation = json.loads(paths["generation.json"].read_text(encoding="utf-8"))
+    generation["artifacts"] = [
+        {
+            "artifact_id": artifact_id,
+            "sha256": pinned_entry(paths[name])["sha256"],
+            "size_bytes": pinned_entry(paths[name])["bytes"],
+            "as_of_date": "2026-09-17",
+            "schema": "synthetic-native-artifact-v1",
+        }
+        for artifact_id, name in (
+            ("raw/yfinance-history.json", "yfinance-history.json"),
+            ("rates.csv", "rates.csv"),
+        )
+    ]
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    native_artifacts = [
+        ("csv/nav_daily.csv", "nav_daily.csv", "matrixport-canonical-csv", "1"),
+        (
+            "csv/wallet_deposits.csv",
+            "wallet_deposits.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        ("csv/wallet_bills.csv", "wallet_bills.csv", "matrixport-canonical-csv", "1"),
+        (
+            "csv/wallet_currency_dispositions.csv",
+            "wallet_currency_dispositions.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        (
+            "csv/subscription_details.csv",
+            "subscription_details.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        ("csv/coverage.csv", "coverage.csv", "matrixport-canonical-csv", "1"),
+        (
+            "reports/request_manifest.jsonl",
+            "request_manifest.jsonl",
+            "matrixport-acceptance-jsonl",
+            "1",
+        ),
+        (
+            "normalized/generation-catalog.json",
+            "matrixport-generation-catalog.json",
+            "matrixport-generation-catalog",
+            "2",
+        ),
+    ]
+    native_generation = {
+        "manifest_schema_version": 1,
+        "provider_id": "matrixport",
+        "generation_id": "synthetic-matrixport-generation",
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "sha256": pinned_entry(paths[name])["sha256"],
+                "size_bytes": pinned_entry(paths[name])["bytes"],
+                "schema": {"name": schema_name, "version": schema_version},
+            }
+            for artifact_id, name, schema_name, schema_version in native_artifacts
+        ],
+    }
+    paths["matrixport-generation.json"].write_text(
+        json.dumps(native_generation), encoding="utf-8"
+    )
+    entries = [pinned_entry(paths[name]) for name in list(files)[:8]]
+    entries.append(pinned_entry(paths["wallet_currency_dispositions.csv"]))
+    for family, name in {
+        "financial_source_contract": "contract.json",
+        "fx_generation_manifest": "generation.json",
+        "fx_usdc_usd_daily": "yfinance-history.json",
+        "fx_usdt_usd_daily": "yfinance-history.json",
+        "fx_daily_rates": "rates.csv",
+        "provider_capital_policy": "policy.json",
+        "provider_capital_owner_receipt_a": "receipt-a.json",
+        "provider_capital_owner_receipt_b": "receipt-b.json",
+        "provider_capital_owner_receipt_b_response": "receipt-b-response.json",
+        "matrixport_subscription_details": "subscription_details.csv",
+        "matrixport_generation_manifest": "matrixport-generation.json",
+        "matrixport_generation_catalog": "matrixport-generation-catalog.json",
+        "matrixport_owner_flow_coverage": "coverage.csv",
+        "matrixport_owner_flow_request_manifest": "request_manifest.jsonl",
+    }.items():
+        entry = pinned_entry(paths[name])
+        entry["family"] = family
+        entries.append(entry)
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": entries,
+        "generation_selection_evidence": {
+            "matrixport": {
+                "generation_id": "synthetic-matrixport-generation",
+                "source_run_id": "synthetic-run",
+                "generation_manifest_sha256": pinned_entry(
+                    paths["matrixport-generation.json"]
+                )["sha256"],
+                "catalog_sha256": pinned_entry(
+                    paths["matrixport-generation-catalog.json"]
+                )["sha256"],
+                "qualification": "STAGED_COMPLETE",
+                "finalized_through": "2026-09-17",
+                "finality_evidence_sha256_verified_V": "b" * 64,
+            }
+        },
+    }
+    positive = derivation.derive(tmp_path, manifest)
+    positive_metric_keys = {
+        (row["metric_id"], row["entity"]) for row in positive["metrics"]
+    }
+    base_active_strategies = {
+        "volatis-strategy",
+        "robuxio-crypto",
+        *{f"generic-strategy-{index}" for index in range(2, 7)},
+    }
+    assert ("capital.account.cutoff", "robuxio") in positive_metric_keys
+    assert (
+        "capital.portfolio.systematic.cutoff",
+        "portfolio",
+    ) in positive_metric_keys, [
+        row
+        for row in positive["not_derivable"]
+        if "capital" in row["metric_id"] or "weight" in row["metric_id"]
+    ]
+    assert {
+        entity
+        for metric_id, entity in positive_metric_keys
+        if metric_id == "weight.strategy.cutoff"
+    } == base_active_strategies
+
+    conflict_rows = [
+        *[row for row in base_rows if row["account_id"] != "generic-3"],
+        {**included_row("generic-3", "generic-strategy-2"), "provider": "IBKR"},
+        {**included_row("generic-2", "conflicted-strategy"), "provider": "IBKR"},
+    ]
+    paths["account-strategy-current-epoch-crosswalk.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": conflict_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["account-strategy-current-epoch-crosswalk.json"]):
+            entries[index] = pinned_entry(
+                paths["account-strategy-current-epoch-crosswalk.json"]
+            )
+            break
+    output = derivation.derive(
+        tmp_path,
+        manifest,
+    )
+    metric_keys = {(row["metric_id"], row["entity"]) for row in output["metrics"]}
+    not_derivable = {
+        (row["metric_id"], row["entity"]) for row in output["not_derivable"]
+    }
+    active_strategies = {
+        "volatis-strategy",
+        "robuxio-crypto",
+        "generic-strategy-2",
+        "conflicted-strategy",
+        *{f"generic-strategy-{index}" for index in range(4, 7)},
+    }
+    assert ("capital.strategy.cutoff", "volatis-strategy") in metric_keys
+    assert ("capital.strategy.cutoff", "generic-strategy-2") in not_derivable
+    assert ("capital.strategy.cutoff", "conflicted-strategy") in not_derivable
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in not_derivable
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") not in metric_keys
+    assert {
+        entity
+        for metric_id, entity in not_derivable
+        if metric_id == "weight.strategy.cutoff"
+    } == active_strategies
+
+
 def test_oracle_v3_b_raw_custody_capital_uses_each_matrixport_event_date_fx():
     """An unclassified non-native bill cannot reach the old FX allocation path."""
     derivation = load_derivation_module()
