@@ -53,7 +53,7 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "epoch": ("ledger", "baseline"),
     "hwm": ("epoch", "ledger", "baseline"),
     "capital": ("epoch", "ledger"),
-    "attribution": ("ledger", "plan-live-only"),
+    "attribution": ("ledger", "plan-live-only", "baseline"),
     "final-handoff": (
         "selected-history-normalization",
         "dependence",
@@ -103,6 +103,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "ledger_models": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/models.py",
     "ledger_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "performance": "contracts/portfolio-performance-policy-v1.json",
+    "attribution_baseline_reader": "tools/portfolio_attribution.py",
     "portfolio_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "provider_ledger": "tools/provider_ledger.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
@@ -147,6 +148,7 @@ _PREPARATION_STAGE_CODE = {
         "account_strategy_manifest",
         "portfolio_returns",
         "verify_account_manifest_generation",
+        "attribution_baseline_reader",
         "release_builder",
     ),
     "hwm": (
@@ -169,7 +171,12 @@ _PREPARATION_STAGE_CODE = {
         "hwm_inputs",
         "invested_capital",
     ),
-    "attribution": ("attended_preparation", "current_plan", "release_builder"),
+    "attribution": (
+        "attended_preparation",
+        "current_plan",
+        "release_builder",
+        "attribution_baseline_reader",
+    ),
     "final-handoff": ("attended_preparation",),
 }
 
@@ -1916,6 +1923,18 @@ def _prepare_attended_inputs(
                 "stage_result": root / "stage-results" / "baseline.json",
             },
         )
+
+    try:
+        release._validate_strategy_attribution_baseline_binding(
+            attribution_source.parents[1],
+            attribution_source.name,
+            root / "stages" / "baseline",
+            baseline_result["generation_id"],
+        )
+    except release.VerticalBuildError as exc:
+        raise AttendedPreparationError(
+            "attribution baseline identity differs from staged baseline"
+        ) from exc
 
     crosswalk = root / "preparation" / "current-epoch-crosswalk.json"
     epoch_membership_census = (

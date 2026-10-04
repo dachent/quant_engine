@@ -20,10 +20,12 @@ import pytest
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
+    CoverageStatus,
     GenerationManifest,
     SourceArtifact,
     VerificationStatus,
     run_storage,
+    stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -2418,6 +2420,112 @@ def _capture_hwm_compute(
     return captured
 
 
+def _stage_attended_baseline(root: Path) -> tuple[str, str]:
+    as_of = date.fromisoformat("2026-09-17")
+    catalog_bytes = canonical_json_bytes(
+        {
+            "as_of_date": "2026-09-17",
+            "baseline_schema_version": 1,
+            "fixture": "attended baseline",
+        }
+    )
+    catalog_sha = hashlib.sha256(catalog_bytes).hexdigest()
+    report_bytes = b'{"status":"PASS"}\n'
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-attended-baseline", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic attended baseline fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-baseline.json",
+                sha256=catalog_sha,
+                size_bytes=len(catalog_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-baseline-catalog",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "normalized/portfolio-baseline.json": catalog_bytes,
+            "verification/independent-verification.json": report_bytes,
+        },
+    )
+    generation = root / "generations" / manifest.generation_id
+    (generation / "portfolio-baseline.json").write_bytes(catalog_bytes)
+    return manifest.generation_id, catalog_sha
+
+
+def _stage_attended_attribution(root: Path, baseline: dict[str, str]) -> str:
+    as_of = date.fromisoformat("2026-09-17")
+    catalog_bytes = canonical_json_bytes(
+        {"baseline": baseline, "catalog_schema_version": 1}
+    )
+    catalog_sha = hashlib.sha256(catalog_bytes).hexdigest()
+    report_bytes = b'{"status":"PASS"}\n'
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-attended-attribution", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic attended attribution fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/strategy-attribution.json",
+                sha256=catalog_sha,
+                size_bytes=len(catalog_bytes),
+                as_of_date=as_of,
+                schema_name="strategy-attribution",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "normalized/strategy-attribution.json": catalog_bytes,
+            "verification/independent-verification.json": report_bytes,
+        },
+    )
+    generation = root / "generations" / manifest.generation_id
+    (generation / "strategy-attribution.json").write_bytes(catalog_bytes)
+    return manifest.generation_id
+
+
 def _preparation_function_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2426,6 +2534,7 @@ def _preparation_function_fixture(
     ledger_catalog: dict[str, object] | None = None,
     hwm_memberships: list[dict[str, object]] | None = None,
     hwm_component_periods: list[dict[str, object]] | None = None,
+    attribution_baseline_mismatch: str | None = None,
 ) -> tuple[Path, dict[str, int], dict[str, object]]:
     """Keep checkpoint control flow real while replacing only numerical producers.
 
@@ -2462,8 +2571,22 @@ def _preparation_function_fixture(
     history_root.mkdir()
     baseline_source = tmp_path / "baseline-source"
     baseline_source.mkdir()
-    attribution_source = tmp_path / "attribution-source" / "generations" / ("a" * 64)
-    attribution_source.mkdir(parents=True)
+    attribution_root = tmp_path / "attribution-source"
+    baseline_id, baseline_catalog_sha = _stage_attended_baseline(
+        tmp_path / "retained-baseline"
+    )
+    attributed_baseline = {
+        "generation_id": baseline_id,
+        "catalog_sha256": baseline_catalog_sha,
+    }
+    if attribution_baseline_mismatch == "generation_id":
+        attributed_baseline["generation_id"] = "c" * 64
+    elif attribution_baseline_mismatch == "catalog_sha256":
+        attributed_baseline["catalog_sha256"] = "c" * 64
+    elif attribution_baseline_mismatch is not None:
+        raise AssertionError("unsupported attribution baseline mismatch")
+    attribution_id = _stage_attended_attribution(attribution_root, attributed_baseline)
+    attribution_source = attribution_root / "generations" / attribution_id
     config: dict[str, object] = {
         "base_factor_file": str(tmp_path / "factors.csv"),
         "baseline_spec_template": str(tmp_path / "baseline-spec.json"),
@@ -2547,6 +2670,7 @@ def _preparation_function_fixture(
                 "ledger_models",
                 "ledger_returns",
                 "provider_ledger",
+                "attribution_baseline_reader",
                 "value_basis_bounds",
                 "layered_history_repository_dependencies",
             )
@@ -2575,6 +2699,7 @@ def _preparation_function_fixture(
         "source_selection": preparation._definition(source_selection),
     }
     calls = {
+        "attribution": 0,
         "baseline": 0,
         "capital": 0,
         "dependence": 0,
@@ -2671,7 +2796,8 @@ def _preparation_function_fixture(
 
     def build_baseline(_recipe: Path, _ledger: Path, output: Path) -> dict[str, str]:
         calls["baseline"] += 1
-        return staged_generation(output, "b")
+        generation_id, _catalog_sha = _stage_attended_baseline(output)
+        return {"generation_id": generation_id}
 
     monkeypatch.setattr(release, "build_ledger", build_ledger)
     monkeypatch.setattr(release, "build_baseline", build_baseline)
@@ -2767,12 +2893,43 @@ def _preparation_function_fixture(
     monkeypatch.setattr(outcomes, "verify_selected_capital_ledger", lambda *_args: None)
 
     def build_attribution(_recipe: Path, output: Path) -> dict[str, str]:
+        calls["attribution"] += 1
         output.mkdir(parents=True, exist_ok=True)
         (output / "bundle.json").write_text("{}", encoding="utf-8")
         return {"destination": str(output)}
 
     monkeypatch.setattr(release, "build_attribution", build_attribution)
     return tmp_path / "preparation-spec.json", calls, identity
+
+
+@pytest.mark.parametrize("mismatch", ["generation_id", "catalog_sha256"])
+def test_stale_retained_attribution_fails_before_epoch_on_fresh_and_resumed_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    """The selected attribution must bind each fresh or reused staged baseline."""
+    spec, calls, _identity = _preparation_function_fixture(
+        tmp_path,
+        monkeypatch,
+        attribution_baseline_mismatch=mismatch,
+    )
+    output = tmp_path / "prepared"
+    for resume in (False, True):
+        with pytest.raises(
+            preparation.AttendedPreparationError,
+            match="attribution baseline identity differs",
+        ):
+            preparation.prepare_attended_inputs(
+                preparation_spec_path=spec,
+                output_root=output,
+                requested_as_of="2026-09-17",
+                evaluated_on="2026-09-19",
+                release_commit="a" * 40,
+                resume=resume,
+            )
+        assert calls["baseline"] == 1
+        assert calls["rebind"] == 0
+        assert calls["hwm"] == 0
+        assert calls["capital"] == 0
 
 
 def test_final_handoff_binds_allocation_to_selected_retained_authority(
@@ -2804,9 +2961,7 @@ def test_final_handoff_binds_allocation_to_selected_retained_authority(
     assert isinstance(allocation, dict)
     assert allocation["path"] == selected["allocation_generation_root"]
     assert allocation["path"] == str((tmp_path / "baseline-source").resolve())
-    assert allocation["path"] != str(
-        (output / "stages" / "baseline" / "generations" / ("b" * 64)).resolve()
-    )
+    assert allocation["path"] != str((output / "stages" / "baseline").resolve())
 
 
 def test_preparation_resume_refuses_a_changed_evaluation_date(
@@ -3603,6 +3758,75 @@ def test_preparation_resume_reuses_all_valid_fixture_producers(
     )
 
     assert calls == initial_calls
+
+
+def test_attribution_reader_code_change_invalidates_epoch_attribution_and_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader code changes invalidate dependent checkpoints but reuse prior inputs."""
+    assert [
+        stage
+        for stage, names in preparation._PREPARATION_STAGE_CODE.items()
+        if "attribution_baseline_reader" in names
+    ] == ["epoch", "attribution"]
+    assert preparation._runtime_path("attribution_baseline_reader") == (
+        preparation.ROOT / "tools" / "portfolio_attribution.py"
+    )
+
+    spec, calls, identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    attribution_checkpoint_path = preparation._checkpoint_path(output, "attribution")
+    handoff_checkpoint_path = preparation._checkpoint_path(output, "final-handoff")
+    old_attribution = preparation._read(
+        attribution_checkpoint_path, "initial attribution checkpoint"
+    )
+    old_handoff = preparation._read(
+        handoff_checkpoint_path, "initial final-handoff checkpoint"
+    )
+    initial_calls = dict(calls)
+
+    code = identity["code"]
+    assert isinstance(code, dict)
+    code["attribution_baseline_reader"] = {"sha256": "changed"}
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    new_attribution = preparation._read(
+        attribution_checkpoint_path, "updated attribution checkpoint"
+    )
+    new_handoff = preparation._read(
+        handoff_checkpoint_path, "updated final-handoff checkpoint"
+    )
+    assert new_attribution["input_identity"] != old_attribution["input_identity"]
+    assert new_handoff["input_identity"] != old_handoff["input_identity"]
+    assert calls["baseline"] == initial_calls["baseline"]
+    assert calls["attribution"] == initial_calls["attribution"] + 1
+    assert calls["rebind"] == initial_calls["rebind"] + 1
+    assert calls["hwm"] == initial_calls["hwm"] + 1
+    assert calls["capital"] == initial_calls["capital"] + 1
+    reusable_upstream = {
+        "history",
+        "dependence",
+        "dependence_verify",
+        "plan",
+        "ledger",
+    }
+    assert {name: calls[name] for name in calls if name in reusable_upstream} == {
+        name: initial_calls[name] for name in initial_calls if name in reusable_upstream
+    }
 
 
 def test_history_native_dependency_mismatch_rebuilds_once_then_reuses_normalization(

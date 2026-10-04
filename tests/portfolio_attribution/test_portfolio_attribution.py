@@ -1193,6 +1193,58 @@ def test_stage_and_publish_are_content_addressed(tmp_path: Path) -> None:
     assert published["publication_state"] == "PUBLISHED"
 
 
+def test_staged_catalog_matches_verified_baseline_in_guard_and_report_reader(
+    tmp_path: Path,
+) -> None:
+    """The real producer output passes both consumers and rejects a stale baseline."""
+    import portfolio_release_builder as release
+    import portfolio_report as report
+
+    baseline_root = _baseline(tmp_path / "selected")
+    baseline_identity = attribution._baseline(baseline_root)[1]
+    spec, _returns = _inputs(tmp_path / "inputs")
+    attribution_root = tmp_path / "attribution"
+    staged = attribution.stage_catalog(baseline_root, spec, attribution_root)
+    generation_id = staged["generation_id"]
+
+    release._validate_strategy_attribution_baseline_binding(
+        attribution_root,
+        generation_id,
+        baseline_root,
+        baseline_identity["generation_id"],
+    )
+    catalog, identity, _catalog_path = report._attribution(
+        attribution_root,
+        baseline_identity,
+        attribution_generation_id=generation_id,
+    )
+    assert catalog["baseline"] == baseline_identity
+    assert identity["generation_id"] == generation_id
+
+    stale_baseline_root = _baseline(
+        tmp_path / "stale",
+        account_live_returns={date(2026, 1, 2): "0.02", date(2026, 1, 3): "-0.03"},
+    )
+    stale_baseline_identity = attribution._baseline(stale_baseline_root)[1]
+    assert stale_baseline_identity != baseline_identity
+    with pytest.raises(
+        release.VerticalBuildError,
+        match="baseline identity differs from staged baseline",
+    ):
+        release._validate_strategy_attribution_baseline_binding(
+            attribution_root,
+            generation_id,
+            stale_baseline_root,
+            stale_baseline_identity["generation_id"],
+        )
+    with pytest.raises(report.ReportValidationError, match="baseline identity differs"):
+        report._attribution(
+            attribution_root,
+            stale_baseline_identity,
+            attribution_generation_id=generation_id,
+        )
+
+
 def test_attribution_preserves_baseline_financial_cutoff_with_later_provenance(
     tmp_path: Path,
 ) -> None:

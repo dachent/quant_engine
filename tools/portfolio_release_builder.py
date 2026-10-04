@@ -864,6 +864,46 @@ def _validated_strategy_attribution_generation(
     return selected_generation_id
 
 
+def _validate_strategy_attribution_baseline_binding(
+    attribution_root: Path,
+    attribution_generation_id: object,
+    baseline_root: Path,
+    baseline_generation_id: object,
+) -> None:
+    """Require the retained attribution catalog to bind the verified baseline."""
+
+    selected_baseline_id = _generation_id(
+        baseline_generation_id, "staged baseline generation_id"
+    )
+    try:
+        import portfolio_attribution as attribution
+
+        _, expected_baseline, _, _ = attribution._baseline(  # noqa: SLF001
+            baseline_root, selected_baseline_id
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError("staged baseline generation is not accepted") from exc
+
+    selected_attribution_id = _validated_strategy_attribution_generation(
+        attribution_root, attribution_generation_id
+    )
+    attribution_catalog = _load(
+        attribution_root
+        / "generations"
+        / selected_attribution_id
+        / "strategy-attribution.json",
+        "selected strategy-attribution catalog",
+    )
+    attribution_baseline = attribution_catalog.get("baseline")
+    if (
+        not isinstance(attribution_baseline, dict)
+        or attribution_baseline != expected_baseline
+    ):
+        raise VerticalBuildError(
+            "strategy attribution baseline identity differs from staged baseline"
+        )
+
+
 def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     correlation_root = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
@@ -2177,6 +2217,28 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
             raise VerticalBuildError(
                 "attribution plan is not bound to the rebuilt provider ledger"
             )
+    attribution_definition = recipe.get("strategy_attribution_root")
+    if isinstance(attribution_definition, dict):
+        attribution_root = _path(
+            attribution_definition.get("path"), "strategy_attribution_root.path"
+        )
+        attribution_generation_id = attribution_definition.get("generation_id")
+        if attribution_generation_id is None:
+            try:
+                attribution_generation_id = read_current(attribution_root).generation_id
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise VerticalBuildError(
+                    "selected strategy-attribution generation is not accepted"
+                ) from exc
+        baseline_generation_id, _baseline_generation = _published_generation(
+            output_root.parent / "baseline"
+        )
+        _validate_strategy_attribution_baseline_binding(
+            attribution_root,
+            attribution_generation_id,
+            output_root.parent / "baseline",
+            baseline_generation_id,
+        )
     verification = {
         "artifact_count": len(rows),
         "bundle_id": source.name,
