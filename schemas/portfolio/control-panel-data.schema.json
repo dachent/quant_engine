@@ -605,9 +605,19 @@
       "type": "object",
       "required": ["analytics_schema_version", "as_of_date", "current_week", "default_evidence_mode", "display_groups", "generation_id", "hybrid_mode_reason", "hybrid_mode_status", "observation_meta_fields", "series", "source_sha256", "strategy_evidence_modes", "week_policy", "weeks"],
       "properties": {
-        "analytics_schema_version": { "const": 1 },
+        "analytics_schema_version": { "const": 2 },
         "as_of_date": { "type": "string", "format": "date" },
-        "current_week": { "type": "object" },
+        "current_week": {
+          "type": "object",
+          "required": ["data_through_date", "default_visible", "is_partial", "week_end", "week_start"],
+          "properties": {
+            "data_through_date": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+            "default_visible": { "const": true },
+            "is_partial": { "type": "boolean" },
+            "week_end": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+            "week_start": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] }
+          }
+        },
         "default_evidence_mode": { "const": "LIVE_ONLY" },
         "display_groups": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
@@ -635,9 +645,27 @@
             "properties": { "status": { "const": "UNAVAILABLE_NOT_CONFIGURED" } },
             "required": ["status"]
           },
-          "then": { "properties": { "series": { "maxItems": 0 } } },
+          "then": {
+            "properties": {
+              "current_week": {
+                "properties": {
+                  "data_through_date": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+                  "week_end": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+                  "week_start": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] }
+                }
+              },
+              "series": { "maxItems": 0 }
+            }
+          },
           "else": {
             "properties": {
+              "current_week": {
+                "properties": {
+                  "data_through_date": { "type": "string", "format": "date" },
+                  "week_end": { "type": "string", "format": "date" },
+                  "week_start": { "type": "string", "format": "date" }
+                }
+              },
               "series": {
                 "contains": {
                   "type": "object",

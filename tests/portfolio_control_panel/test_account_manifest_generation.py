@@ -28397,6 +28397,10 @@ def test_generation_available_mwr_reaches_bound_report_and_panel(
     available = next(
         row for row in report["twr_mwr"] if row["mwr_status"] == "AVAILABLE"
     )
+    mwr_methodology = next(
+        row["value"] for row in report["methodology"] if row["item"] == "MWR"
+    )
+    assert "the first baseline does not meet that gate" not in mwr_methodology
     blocked = next(
         row
         for row in report["twr_mwr"]

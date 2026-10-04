@@ -7319,7 +7319,7 @@ def build_report_data(
             },
             {
                 "item": "MWR",
-                "value": "UNAVAILABLE unless complete eligible flows, signs, and terminal NAV are proven; the first baseline does not meet that gate.",
+                "value": "Source-bound MWR is calculated only when complete eligible flows, signs, and terminal NAV are proven; otherwise it remains unavailable with the row's status and reason.",
             },
             {
                 "item": "Evidence layers",

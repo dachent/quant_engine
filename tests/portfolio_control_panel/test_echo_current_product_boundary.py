@@ -1217,8 +1217,15 @@ def test_weekly_current_surface_accepts_nine_plan_bound_strategy_series() -> Non
         for index in range(9)
     ]
     weekly = {
-        "analytics_schema_version": 1,
-        "current_week": {"default_visible": False},
+        "analytics_schema_version": 2,
+        "as_of_date": "2026-08-13",
+        "current_week": {
+            "data_through_date": "2026-08-13",
+            "default_visible": True,
+            "is_partial": True,
+            "week_end": "2026-08-16",
+            "week_start": "2026-08-10",
+        },
         "default_evidence_mode": "LIVE_ONLY",
         "display_groups": [
             "STRATEGY",
@@ -1270,6 +1277,7 @@ def test_weekly_current_surface_accepts_nine_plan_bound_strategy_series() -> Non
         strategy_names,
         plan_strategy_names,
     )
+    assert accepted["current_week"]["default_visible"] is True
     assert sum(row["primary_group"] == "STRATEGY" for row in accepted["series"]) == 7
     assert all(
         row.get("display_name") not in {"Strategy 7", "Strategy 8"}

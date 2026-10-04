@@ -47,6 +47,14 @@ if SPEC is None or SPEC.loader is None:
 panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
+MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_pipeline_materialize", REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py"
+)
+if MATERIALIZER_SPEC is None or MATERIALIZER_SPEC.loader is None:
+    raise RuntimeError("unable to load attended pipeline reader")
+materializer = importlib.util.module_from_spec(MATERIALIZER_SPEC)
+sys.modules[MATERIALIZER_SPEC.name] = materializer
+MATERIALIZER_SPEC.loader.exec_module(materializer)
 _CAPITAL_FIXTURE_SPEC = importlib.util.spec_from_file_location(
     "current_capital_fixture_panel_suite",
     REPOSITORY_ROOT / "tests" / "portfolio_report" / "current_capital_fixture.py",
@@ -346,8 +354,15 @@ def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
         for index in range(9)
     ]
     weekly = {
-        "analytics_schema_version": 1,
-        "current_week": {"default_visible": False},
+        "analytics_schema_version": 2,
+        "as_of_date": "2026-08-13",
+        "current_week": {
+            "data_through_date": "2026-08-13",
+            "default_visible": True,
+            "is_partial": True,
+            "week_end": "2026-08-16",
+            "week_start": "2026-08-10",
+        },
         "default_evidence_mode": "LIVE_ONLY",
         "display_groups": [
             "STRATEGY",
@@ -2163,6 +2178,53 @@ def _publish_analytics(
     publish_generation(root, manifest.generation_id)
 
 
+def test_attended_completed_analytics_accepts_weekly_schema_v2(tmp_path: Path) -> None:
+    stage_root = tmp_path / "analytics-stage"
+    correlation_root = stage_root / "correlation"
+    decomposition_root = stage_root / "decomposition"
+    lenses_root = stage_root / "lenses"
+    weekly_root = stage_root / "weekly"
+    for root, filename, schema, adapter in (
+        (correlation_root, "correlation.json", 1, "test-correlation"),
+        (decomposition_root, "decomposition.json", 1, "test-decomposition"),
+        (
+            lenses_root / "LIVE_ONLY" / "STATIC" / "source",
+            "decomposition.json",
+            1,
+            "test-lens",
+        ),
+        (weekly_root, "weekly-returns.json", 2, "test-weekly"),
+    ):
+        _publish_analytics(
+            root, filename, {"analytics_schema_version": schema}, adapter
+        )
+    receipt = {
+        "schema_version": 2,
+        "correlation_root": str(correlation_root),
+        "correlation_generation_id": read_current(correlation_root).generation_id,
+        "decomposition_root": str(decomposition_root),
+        "decomposition_generation_id": read_current(decomposition_root).generation_id,
+        "decomposition_lenses_root": str(lenses_root),
+        "weekly_root": str(weekly_root),
+        "weekly_generation_id": read_current(weekly_root).generation_id,
+        "lens_generation_bindings": [
+            {
+                "evidence_mode": "LIVE_ONLY",
+                "spec_id": "source:STATIC",
+                "source_key": "source",
+                "surface": "STATIC",
+                "plan_bundle_id": "bundle-live",
+                "generation_id": read_current(
+                    lenses_root / "LIVE_ONLY" / "STATIC" / "source"
+                ).generation_id,
+            }
+        ],
+        "plan_bundle_ids": {"LIVE_ONLY": "bundle-live"},
+    }
+
+    materializer._attended_completed_analytics(receipt, stage_root)
+
+
 def _publish_report(root: Path, source: Path, value: object) -> None:
     _write_json(source, value)
     manifest = GenerationManifest.build(
@@ -2616,9 +2678,15 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         weekly_root,
         "weekly-returns.json",
         {
-            "analytics_schema_version": 1,
+            "analytics_schema_version": 2,
             "as_of_date": "2026-07-30",
-            "current_week": {"default_visible": False},
+            "current_week": {
+                "data_through_date": "2026-07-30",
+                "default_visible": True,
+                "is_partial": True,
+                "week_end": "2026-08-02",
+                "week_start": "2026-07-27",
+            },
             "default_evidence_mode": "LIVE_ONLY",
             "display_groups": [
                 "STRATEGY",
@@ -4734,7 +4802,7 @@ def test_unresolved_versions_do_not_parse_invalid_hybrid_observations(
         inputs["weekly"],
         filename="weekly-returns.json",
         field_name="portfolio weekly returns",
-        expected_schema_version=1,
+        expected_schema_version=2,
     )
     for row in weekly["series"]:
         if row.get("primary_group") == "STRATEGY":
@@ -6182,6 +6250,9 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
         '"126", "130", "252", "260"]'
     ) in qa
     assert 'const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"]' in qa
+    assert '"Weekly returns show the source-bound current week by default"' in qa
+    assert "currentWeekIncluded === weeklyDefaultVisible" in qa
+    assert "PARTIAL" in qa and "data through ${weeklyDataThrough}" in qa
     for group in (
         "ALL",
         "STRATEGY",
@@ -6212,7 +6283,8 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa
     assert "Dependence live and hybrid evidence disclosures are exercised" in qa
-    assert "Weekly returns disclose live and hybrid strategy evidence" in qa
+    assert 'weeklyLiveDetail?.includes("Live only")' in qa
+    assert 'weeklyHybridDetail?.includes("Live plus backtest")' in qa
     assert "const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();" in qa
     assert (
         "Privacy-safe account context filters lifecycle, positions, and performance"

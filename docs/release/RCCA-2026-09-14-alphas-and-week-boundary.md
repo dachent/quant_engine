@@ -93,6 +93,12 @@ touch the validator at `portfolio_control_panel.py:5085` and the QA assertion
 | AI Factor live observations end 2026-06-30 | **refuted** — that is `factor_observed_end`, `limiting_input: COMMON_END_DATE`; the *factor source* ends 06-30, which is why ECONOMIC_FACTOR and RETURN_INDUSTRY carry `as_of 2026-06-30` while ETF_STYLE and RETURN_SECTOR reach 09-02 |
 | the hardcoded `LIVE_ONLY` at `app.js:410` is a live defect | **partially refuted** — real, but both modes are identical over the last 13 weeks, so it is latent; the proposed QA assertion would have been unsatisfiable |
 | "render the partial week labelled" is new work | **refuted** — the toggle and dashed styling already ship |
+
+> **Superseded current behavior (2026-10-04):** Owner authority recorded under
+> [issue #417](https://github.com/dachent/quant_engine/issues/417) now requires
+> the source-bound cutoff week to be visible by default and marked partial with
+> its data-through date. This RCCA preserves the earlier decision as historical
+> evidence; it no longer describes the active product contract.
 | removing `qa/downloads/portfolio-report.xlsx` closes #416 | **refuted** — the workbook is also embedded in `index.html` as 15 base64 chunks |
 
 ## Findings that survived

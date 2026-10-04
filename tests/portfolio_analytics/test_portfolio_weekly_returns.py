@@ -34,6 +34,15 @@ if SPEC is None or SPEC.loader is None:
 weekly = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = weekly
 SPEC.loader.exec_module(weekly)
+PANEL_SPEC = importlib.util.spec_from_file_location(
+    "weekly_test_portfolio_control_panel",
+    REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py",
+)
+if PANEL_SPEC is None or PANEL_SPEC.loader is None:
+    raise RuntimeError("unable to load weekly-generation consumer")
+panel = importlib.util.module_from_spec(PANEL_SPEC)
+sys.modules[PANEL_SPEC.name] = panel
+PANEL_SPEC.loader.exec_module(panel)
 
 STRATEGIES = tuple(f"Strategy {index}" for index in range(9))
 
@@ -324,7 +333,9 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
     assert strategy["values_by_mode"]["LIVE_ONLY"]["2026-07-27"] == "0.045"
     assert strategy["values_by_mode"]["LIVE_PLUS_BACKTEST"]["2026-07-20"] == "0.02"
     assert payload["week_policy"]["absent_value"] == "UNAVAILABLE_NOT_ZERO"
-    assert payload["current_week"]["default_visible"] is False
+    assert payload["current_week"]["default_visible"] is True
+    assert payload["current_week"]["is_partial"] is True
+    assert payload["current_week"]["data_through_date"] == payload["as_of_date"]
     assert payload["observation_meta_fields"] == [
         "daily_observation_count",
         "actual_observed_start",
@@ -347,6 +358,48 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
         output_root,
     )
     assert read_current(output_root).generation_id == published["generation_id"]
+    consumed, identity, _path = panel._current_analytics(
+        output_root,
+        filename="weekly-returns.json",
+        field_name="portfolio weekly returns",
+        expected_schema_version=2,
+    )
+    assert consumed["analytics_schema_version"] == 2
+    assert identity["generation_id"] == published["generation_id"]
+
+
+def test_current_partial_week_is_visible_by_default(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _current_plan_fixture(tmp_path)
+
+    payload, _inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    assert payload["current_week"]["default_visible"] is True
+    assert payload["current_week"]["is_partial"] is True
+    assert payload["current_week"]["data_through_date"] == payload["as_of_date"]
+    assert payload["default_evidence_mode"] == "LIVE_ONLY"
+
+
+def test_current_week_boundary_uses_cutoff_for_partial_and_complete_weeks() -> None:
+    partial = weekly._current_week(date(2026, 9, 17))
+    complete = weekly._current_week(date(2026, 9, 20))
+
+    assert partial == {
+        "data_through_date": "2026-09-17",
+        "default_visible": True,
+        "is_partial": True,
+        "week_end": "2026-09-20",
+        "week_start": "2026-09-14",
+    }
+    assert complete == {
+        "data_through_date": "2026-09-20",
+        "default_visible": True,
+        "is_partial": False,
+        "week_end": "2026-09-20",
+        "week_start": "2026-09-14",
+    }
 
 
 def test_weekly_generation_accepts_exact_current_plan_bundle(tmp_path: Path) -> None:
@@ -357,7 +410,7 @@ def test_weekly_generation_accepts_exact_current_plan_bundle(tmp_path: Path) -> 
         correlation_root, strategy_returns, plan_bundle
     )
 
-    assert payload["analytics_schema_version"] == 1
+    assert payload["analytics_schema_version"] == 2
     assert plan_bundle / "plan-manifest.json" in inputs
     assert len(payload["series"]) > len(STRATEGIES)
 

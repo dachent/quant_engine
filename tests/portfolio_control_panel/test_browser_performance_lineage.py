@@ -187,7 +187,8 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
     ]
     data["weekly_returns"]["weeks"] = weeks
     data["weekly_returns"]["current_week"] = {
-        "default_visible": False,
+        "default_visible": True,
+        "data_through_date": data["weekly_returns"]["as_of_date"],
         "is_partial": True,
         "week_end": "2026-08-09",
         "week_start": weeks[-1],

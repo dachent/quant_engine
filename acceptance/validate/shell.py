@@ -314,21 +314,23 @@ def payload_dereferences_before_guard(
         guards = [
             re.compile(template.format(name=escaped)) for template in _GUARD_TEMPLATES
         ]
-        eager_guards = [
-            match.start()
+        guard_matches = [
+            match
             for guard in guards
             for match in guard.finditer(masked)
             if not inside(match.start(), deferred)
+            and masked[match.end() : match.end() + 2] != "?."
         ]
+        eager_guards = [match.start() for match in guard_matches]
         for match in dereference.finditer(masked):
+            # The dot in ``data?.field`` is itself a safe optional access.
+            if masked[match.end() : match.end() + 1] == "?":
+                continue
             if inside(match.start(), deferred):
                 continue
             if any(guard < match.start() for guard in eager_guards):
                 break
-            first_guard = min(
-                (m.start() for guard in guards for m in guard.finditer(masked)),
-                default=None,
-            )
+            first_guard = min((guard.start() for guard in guard_matches), default=None)
             results.append(
                 EagerDereference(
                     binding=name,

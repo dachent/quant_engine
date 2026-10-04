@@ -5704,29 +5704,150 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
-    """C6: the current week is the cutoff's week, partial, visible and labelled."""
+    """C6: the current week is source-bound, partial as applicable, and visible."""
 
     weekly = node(ctx.panel, "weekly_returns")
+    source_artifact_id = "input/portfolio-weekly-returns.json"
+    artifacts = [
+        artifact
+        for artifact in rows(ctx.gen.manifest, "artifacts")
+        if artifact.get("artifact_id") == source_artifact_id
+    ]
+    has_source_identity = any(
+        weekly.get(name) is not None for name in ("generation_id", "source_sha256")
+    )
+    if weekly.get("status") == "UNAVAILABLE_NOT_CONFIGURED":
+        current = node(weekly, "current_week")
+        has_current_week_data = isinstance(current, Mapping) and any(
+            current.get(name) is not None
+            for name in ("week_start", "week_end", "data_through_date")
+        )
+        if artifacts or has_source_identity or has_current_week_data:
+            yield _finding(
+                "dates.weekly_current_week",
+                BLOCKER_AUTHORITY,
+                "weekly_returns.status",
+                {
+                    "source_artifact_count": len(artifacts),
+                    "current_week_data_present": has_current_week_data,
+                    "source_identity_present": has_source_identity,
+                },
+                "UNAVAILABLE only when no source artifact or source identity is bound",
+                PANEL,
+                "$.weekly_returns.status",
+                ("C6",),
+                "configured weekly-source evidence cannot be labelled unavailable",
+            )
+        return
+
+    if len(artifacts) != 1:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source",
+            len(artifacts),
+            "exactly one manifest-bound weekly source artifact",
+            GENERATION_MANIFEST,
+            "$.artifacts",
+            ("C6",),
+            "available weekly returns require one bound source snapshot",
+        )
+        return
+
+    artifact = artifacts[0]
+    manifest_as_of = to_date(artifact.get("as_of_date"))
+    source_hash = artifact.get("sha256")
+    artifact_valid = (
+        artifact.get("schema_name") == "portfolio-weekly-returns"
+        and artifact.get("schema_version") == "2"
+        and isinstance(source_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None
+        and isinstance(artifact.get("size_bytes"), int)
+        and not isinstance(artifact.get("size_bytes"), bool)
+        and artifact.get("size_bytes", 0) > 0
+    )
+    if not artifact_valid or manifest_as_of is None:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source",
+            {
+                "schema_name": artifact.get("schema_name"),
+                "schema_version": artifact.get("schema_version"),
+                "sha256_valid": isinstance(source_hash, str)
+                and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None,
+                "size_bytes": artifact.get("size_bytes"),
+            },
+            "valid portfolio-weekly-returns/2 manifest identity and source cutoff",
+            GENERATION_MANIFEST,
+            "$.artifacts",
+            ("C6",),
+            "weekly source artifact metadata is incomplete or invalid",
+        )
+        return
+    if weekly.get("source_sha256") != source_hash:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source_sha256",
+            weekly.get("source_sha256"),
+            source_hash,
+            PANEL,
+            "$.weekly_returns.source_sha256",
+            ("C6",),
+            "panel weekly source hash differs from the manifest-bound snapshot",
+        )
+        return
+    source_cutoff = manifest_as_of.isoformat()
+    if weekly.get("as_of_date") != source_cutoff:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.as_of_date",
+            weekly.get("as_of_date"),
+            source_cutoff,
+            PANEL,
+            "$.weekly_returns.as_of_date",
+            ("C6",),
+            "panel weekly cutoff differs from its manifest-bound source",
+        )
+        return
+
     current = node(weekly, "current_week")
     if not isinstance(current, Mapping):
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.current_week",
+            current,
+            "source-bound current-week object",
+            PANEL,
+            "$.weekly_returns.current_week",
+            ("C6",),
+            "available weekly source requires a current-week record",
+        )
         return
-    cutoff_week = iso_week_start(ctx.cutoff)
+
+    source_week_start = iso_week_start(manifest_as_of)
     week_start = to_date(current.get("week_start"))
-    if week_start != cutoff_week:
+    if week_start != source_week_start:
         yield _finding(
             "dates.weekly_current_week",
             BLOCKER_AUTHORITY,
             "weekly_returns.current_week",
             current.get("week_start"),
-            cutoff_week,
+            source_week_start.isoformat(),
             PANEL,
             "$.weekly_returns.current_week.week_start",
             ("C6",),
-            "current week is anchored to the evaluation date, not the declared cutoff",
+            "current week must be anchored to the verified weekly-source cutoff",
         )
-    cutoff_week_partial = ctx.cutoff.weekday() < 6
-    if cutoff_week_partial and (
-        current.get("is_partial") is not True
+    expected_week_end = source_week_start + timedelta(days=6)
+    expected_partial = manifest_as_of < expected_week_end
+    if (
+        current.get("week_end") != expected_week_end.isoformat()
+        or current.get("data_through_date") != source_cutoff
+        or current.get("is_partial") is not expected_partial
         or current.get("default_visible") is not True
     ):
         yield _finding(
@@ -5736,15 +5857,20 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             {
                 "is_partial": current.get("is_partial"),
                 "default_visible": current.get("default_visible"),
+                "week_end": current.get("week_end"),
+                "data_through_date": current.get("data_through_date"),
             },
-            {"is_partial": True, "default_visible": True},
+            {
+                "is_partial": expected_partial,
+                "default_visible": True,
+                "week_end": expected_week_end.isoformat(),
+                "data_through_date": source_cutoff,
+            },
             PANEL,
             "$.weekly_returns.current_week",
             ("C6",),
-            "the partial cutoff week must be shown by default and marked partial (#417)",
+            "the current week must match the verified source cutoff and visibility (#417)",
         )
-
-
 # ------------------------------------------------------------- completeness (E*)
 
 
