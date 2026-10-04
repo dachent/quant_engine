@@ -5894,6 +5894,224 @@ def test_current_attribution_binds_selected_history_not_legacy_template(
         assert not output.exists()
 
 
+def _stage_verified_baseline_for_attribution(
+    root: Path,
+) -> tuple[str, Path, str]:
+    as_of = builder.date.fromisoformat("2026-09-17")
+    catalog_bytes = canonical_json_bytes(
+        {"as_of_date": "2026-09-17", "baseline_schema_version": 1}
+    )
+    catalog_sha = hashlib.sha256(catalog_bytes).hexdigest()
+    report_bytes = b'{"status":"PASS"}\n'
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-baseline-binding", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic baseline binding fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-baseline.json",
+                sha256=catalog_sha,
+                size_bytes=len(catalog_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-baseline-catalog",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "normalized/portfolio-baseline.json": catalog_bytes,
+            "verification/independent-verification.json": report_bytes,
+        },
+    )
+    generation = root / "generations" / manifest.generation_id
+    (generation / "portfolio-baseline.json").write_bytes(catalog_bytes)
+    return (
+        manifest.generation_id,
+        generation,
+        catalog_sha,
+    )
+
+
+@pytest.mark.parametrize("mismatch", [None, "generation_id", "catalog_sha256"])
+def test_strategy_attribution_baseline_must_match_verified_staged_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    attribution_id = "a" * 64
+    attribution_root = tmp_path / "attribution"
+    attribution_generation = attribution_root / "generations" / attribution_id
+    attribution_generation.mkdir(parents=True)
+    baseline_root = tmp_path / "baseline"
+    baseline_id, _baseline_generation, catalog_sha = (
+        _stage_verified_baseline_for_attribution(baseline_root)
+    )
+    catalog = attribution_generation / "strategy-attribution.json"
+    catalog.write_bytes(
+        canonical_json_bytes(
+            {
+                "baseline": {
+                    "generation_id": (
+                        "c" * 64 if mismatch == "generation_id" else baseline_id
+                    ),
+                    "catalog_sha256": (
+                        "c" * 64 if mismatch == "catalog_sha256" else catalog_sha
+                    ),
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        builder,
+        "_validated_strategy_attribution_generation",
+        lambda _root, generation_id: generation_id,
+    )
+    if mismatch is None:
+        builder._validate_strategy_attribution_baseline_binding(
+            attribution_root,
+            attribution_id,
+            baseline_root,
+            baseline_id,
+        )
+        return
+    with pytest.raises(builder.VerticalBuildError, match="baseline identity differs"):
+        builder._validate_strategy_attribution_baseline_binding(
+            attribution_root,
+            attribution_id,
+            baseline_root,
+            baseline_id,
+        )
+
+
+def test_build_attribution_rejects_stale_baseline_binding_before_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "plan-id"
+    artifact = bundle / "artifact.json"
+    bundle.mkdir()
+    artifact.write_bytes(b"{}\n")
+    (bundle / "plan-manifest.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "bundle_id": bundle.name,
+                "inputs": [
+                    {
+                        "path": "artifact.json",
+                        "sha256": builder._sha(artifact)[0],
+                        "size_bytes": artifact.stat().st_size,
+                    }
+                ],
+                "outputs": [
+                    {
+                        "path": "artifact.json",
+                        "sha256": builder._sha(artifact)[0],
+                        "size_bytes": artifact.stat().st_size,
+                    }
+                ],
+            }
+        )
+    )
+    ledger = tmp_path / "ledger" / "generations" / ("d" * 64)
+    ledger.mkdir(parents=True)
+    (ledger / "generation.json").write_bytes(b"{}\n")
+    (ledger / "provider-ledger.json").write_bytes(b"{}\n")
+    history = bundle / "inputs" / "history" / "generation.json"
+    history.parent.mkdir(parents=True)
+    history.write_bytes(
+        canonical_json_bytes(
+            {
+                "inputs": [
+                    {
+                        "input_id": "provider-ledger-manifest",
+                        "generation_id": "d" * 64,
+                        "sha256": builder._sha(ledger / "generation.json")[0],
+                        "size_bytes": (ledger / "generation.json").stat().st_size,
+                    },
+                    {
+                        "input_id": "provider-ledger-catalog",
+                        "generation_id": "d" * 64,
+                        "sha256": builder._sha(ledger / "provider-ledger.json")[0],
+                        "size_bytes": (ledger / "provider-ledger.json").stat().st_size,
+                    },
+                ]
+            }
+        )
+    )
+    plan_manifest_path = bundle / "plan-manifest.json"
+    plan_manifest = json.loads(plan_manifest_path.read_bytes())
+    plan_manifest["builder"] = "portfolio-current-decomposition-plan"
+    plan_manifest["inputs"].append(
+        {
+            "path": "inputs/history/generation.json",
+            "sha256": builder._sha(history)[0],
+            "size_bytes": history.stat().st_size,
+        }
+    )
+    plan_manifest_path.write_bytes(canonical_json_bytes(plan_manifest))
+    baseline_root = tmp_path / "attribution-output" / "baseline"
+    baseline_id, baseline_generation, _catalog_sha = (
+        _stage_verified_baseline_for_attribution(baseline_root)
+    )
+    attribution_root = tmp_path / "retained-attribution"
+    attribution_generation = attribution_root / "generations" / ("a" * 64)
+    attribution_generation.mkdir(parents=True)
+    (attribution_generation / "strategy-attribution.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "baseline": {
+                    "generation_id": baseline_id,
+                    "catalog_sha256": "c" * 64,
+                }
+            }
+        )
+    )
+    output = tmp_path / "attribution-output" / "attribution"
+    recipe = {
+        "decomposition_plan_bundle": {"path": str(bundle)},
+        "strategy_attribution_root": {
+            "path": str(attribution_root),
+            "generation_id": "a" * 64,
+        },
+    }
+    monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
+    monkeypatch.setattr(
+        builder,
+        "_published_generation",
+        lambda root: (
+            ("d" * 64, ledger)
+            if root == output.parent / "ledger"
+            else (baseline_id, baseline_generation)
+        ),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_validated_strategy_attribution_generation",
+        lambda _root, generation_id: generation_id,
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="baseline identity differs"):
+        builder.build_attribution(tmp_path / "recipe.json", output)
+
+    assert not (output / "attribution-verification.json").exists()
+
+
 def test_publish_panel_forwards_dependence_inputs_to_every_consumer() -> None:
     """Every control-panel subcommand that accepts the selected inputs gets them.
 
