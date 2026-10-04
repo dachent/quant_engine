@@ -137,6 +137,7 @@ def _strategy(strategy: str, name: str, value: str, weight: str) -> dict[str, An
         "lifecycle_status": "ACTIVE",
         "current_value_usd": value,
         "systematic_weight": weight,
+        "weight_basis": "CURRENT_CUTOFF",
         "account_live_cumulative_return": "0.1",
         "account_live_observed_start": PATH_START,
         "account_live_observed_end": CUTOFF,
@@ -262,6 +263,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "400",
                 "systematic_weight": None,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
             {
                 "allocation_id": "a",
@@ -270,6 +272,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "1100",
                 "systematic_weight": W_ALPHA,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
             {
                 "allocation_id": "b",
@@ -278,6 +281,7 @@ def base_report() -> dict[str, Any]:
                 "as_of_date": CUTOFF,
                 "current_value_usd": "5500",
                 "systematic_weight": W_BETA,
+                "weight_basis": "HISTORICAL_SNAPSHOT_2026_09_17",
             },
         ],
         "portfolio_summary": [
@@ -314,7 +318,10 @@ def base_report() -> dict[str, Any]:
             "benchmark_comparisons": [
                 {
                     "strategy_id": strategy,
+                    "account_series_id": f"account:{strategy}",
+                    "reference_series_id": f"benchmark:{strategy}",
                     "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                    "version_compatibility_status": "PROVEN_COMPATIBLE",
                     "observed_start": PATH_START,
                     "observed_end": CUTOFF,
                     "metrics": _metrics(),
@@ -403,13 +410,28 @@ def base_report() -> dict[str, Any]:
             },
         },
         "dependence_analysis": {
+            "weight_basis": "POLICY_PORT_DEPENDENCE_1",
             "mode_summaries": {
                 "LIVE_ONLY": mode,
                 "LIVE_PLUS_BACKTEST": copy.deepcopy(mode),
-            }
+            },
         },
-        "implementation_reconciliation_contract": {"as_of_date": CUTOFF},
-        "implementation_return_attribution_contract": {"as_of_date": CUTOFF},
+        "implementation_reconciliation_contract": {
+            "as_of_date": CUTOFF,
+            "reconciliation_id": "a" * 64,
+            "schema_version": 1,
+            "sha256": "b" * 64,
+            "size_bytes": 123,
+            "strategy_count": 3,
+        },
+        "implementation_return_attribution_contract": {
+            "as_of_date": CUTOFF,
+            "attribution_id": "c" * 64,
+            "schema_version": 1,
+            "sha256": "d" * 64,
+            "size_bytes": 123,
+            "strategy_count": 3,
+        },
         "methodology": [
             {"item": "MWR", "value": "Available when complete dated flows exist."}
         ],
@@ -439,6 +461,7 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
         "panel_schema_version": 21,
         "meta": {
             "portfolio_as_of": CUTOFF,
+            "freshness_evaluated_on": CUTOFF,
             "report_generation_id": REPORT_GEN,
             "correlation_generation_id": "e" * 64,
             "decomposition_generation_id": "f" * 64,
@@ -580,14 +603,24 @@ def _crosswalk() -> dict[str, Any]:
 
 def _freshness() -> dict[str, Any]:
     return {
+        "as_of_date": "2026-09-17",
         "policies": [
             {
                 "policy_id": "daily-weekday-session",
                 "calendar": "WEEKDAY_SESSION",
                 "mode": "RECURRING",
+                "expected_interval_days": 1,
+                "grace_days": 2,
                 "stale_after_days": 5,
             },
-            {"policy_id": "finite-history", "mode": "FINITE", "stale_after_days": None},
+            {
+                "policy_id": "finite-history",
+                "calendar": "CALENDAR_DAY",
+                "mode": "FINITE",
+                "expected_interval_days": None,
+                "grace_days": 0,
+                "stale_after_days": None,
+            },
         ],
         "assessments": [
             {
@@ -597,6 +630,7 @@ def _freshness() -> dict[str, Any]:
                 "lane": "ACCOUNT",
                 "fact_type": "strategy-returns",
                 "last_accepted_date": CUTOFF,
+                "evaluated_on": CUTOFF,
                 "state": "FRESH",
                 "policy_id": "daily-weekday-session",
                 "required_for_current": True,
@@ -611,6 +645,306 @@ def _dump(value: Any) -> bytes:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_freshness_operational_late_at_financial_cutoff_is_not_b12(
+    tmp_path: Path,
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "state"), "LATE"),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+            ),
+        )
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("calendar", "last_accepted", "state"),
+    [
+        ("WEEKDAY_SESSION", "2026-09-18", "FRESH"),
+        ("CALENDAR_DAY", "2026-09-20", "FRESH"),
+    ],
+)
+def test_freshness_interval_plus_grace_remains_fresh(
+    tmp_path: Path, calendar: str, last_accepted: str, state: str
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "last_accepted_date"), last_accepted),
+                    _set(("assessments", 0, "state"), state),
+                    _set(("policies", 0, "calendar"), calendar),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+            ),
+        )
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "root-bool",
+        "root-trailing",
+        "row-clock-mismatch",
+        "observation-null",
+        "observation-bool",
+        "observation-trailing",
+        "observation-missing",
+        "unknown-mode",
+        "unknown-policy",
+        "bool-interval",
+        "bool-grace",
+        "negative-grace",
+        "contradictory-threshold",
+        "duplicate-policy",
+    ],
+)
+def test_freshness_rejects_malformed_clock_and_policy_metadata(
+    tmp_path: Path, case: str
+) -> None:
+    def mutate(health: dict[str, Any]) -> None:
+        row = health["assessments"][0]
+        policy = health["policies"][0]
+        if case == "root-bool":
+            health["as_of_date"] = True
+        elif case == "root-trailing":
+            health["as_of_date"] = "2026-09-17garbage"
+        elif case == "row-clock-mismatch":
+            row["evaluated_on"] = "2026-09-16"
+        elif case == "observation-null":
+            row["last_accepted_date"] = None
+        elif case == "observation-bool":
+            row["last_accepted_date"] = True
+        elif case == "observation-trailing":
+            row["last_accepted_date"] = "2026-09-17garbage"
+        elif case == "observation-missing":
+            row.pop("last_accepted_date")
+        elif case == "unknown-mode":
+            policy["mode"] = "UNKNOWN"
+        elif case == "unknown-policy":
+            row["policy_id"] = "unknown-policy"
+        elif case == "bool-interval":
+            policy["expected_interval_days"] = True
+        elif case == "bool-grace":
+            policy["grace_days"] = True
+        elif case == "negative-grace":
+            policy["grace_days"] = -1
+        elif case == "contradictory-threshold":
+            policy["stale_after_days"] = 1
+        else:
+            health["policies"].append(copy.deepcopy(policy))
+
+    findings = run(build(tmp_path, Spec(freshness=[mutate])))
+    freshness_findings = [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+    assert freshness_findings, case
+    assert any(
+        finding.klass == checks.BLOCKER_AUTHORITY for finding in freshness_findings
+    ), case
+
+
+def test_freshness_rejects_panel_operational_clock_contradiction(
+    tmp_path: Path,
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("as_of_date",), "2026-09-23"),
+                    _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+                    _set(("assessments", 0, "last_accepted_date"), "2026-09-17"),
+                    _set(("assessments", 0, "state"), "LATE"),
+                ],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-20")],
+            ),
+        )
+    )
+    assert any(
+        finding.check_id == "dates.freshness_vs_cutoff"
+        and finding.klass == checks.BLOCKER_AUTHORITY
+        for finding in findings
+    )
+
+
+def test_freshness_allows_explicit_unavailable_null_observation(tmp_path: Path) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "provider_id"), "alpaca"),
+                    _set(("assessments", 0, "policy_id"), "finite-history"),
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), False),
+                    _set(("assessments", 0, "blocks_current_consumers"), False),
+                    _set(("assessments", 0, "escalation_required"), False),
+                ]
+            ),
+        )
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+
+
+def test_freshness_allows_explicit_recurring_unavailable_null_observation(
+    tmp_path: Path,
+) -> None:
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), False),
+                    _set(("assessments", 0, "blocks_current_consumers"), False),
+                    _set(("assessments", 0, "escalation_required"), False),
+                ]
+            ),
+        )
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
+    ]
+
+
+def test_freshness_required_recurring_unavailable_retains_blocked_hwm_status(
+    tmp_path: Path,
+) -> None:
+    def report_mutation(report: dict[str, Any]) -> None:
+        report["strategy_summary"][0].update(
+            hwm_freshness_observed_end=None,
+            hwm_freshness_state="UNAVAILABLE",
+            hwm_freshness_status="BLOCKED",
+            hwm_freshness_boundary_matches_evidence=None,
+            nav_evidence_layer="ACCOUNT_LIVE",
+            nav_observed_end=None,
+        )
+
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[
+                    _set(("assessments", 0, "last_accepted_date"), None),
+                    _set(("assessments", 0, "state"), "UNAVAILABLE"),
+                    _set(("assessments", 0, "required_for_current"), True),
+                    _set(("assessments", 0, "blocks_current_consumers"), True),
+                    _set(("assessments", 0, "escalation_required"), True),
+                ],
+                report=[report_mutation],
+            ),
+        )
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id in {"dates.freshness_vs_cutoff", "validator.check_error"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "state", "last_accepted", "layer", "status"),
+    [
+        ("valid-late", "LATE", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
+        ("hwm-false-fresh", "FRESH", "2026-09-17", "ACCOUNT_LIVE", "ACCEPTED"),
+        (
+            "provider-does-not-bind-account",
+            "LATE",
+            "2026-09-17",
+            "PROVIDER_LIVE",
+            "ACCEPTED",
+        ),
+        ("stale-account-accepted", "STALE", "2026-09-03", "ACCOUNT_LIVE", "ACCEPTED"),
+    ],
+)
+def test_freshness_hwm_labels_bind_selected_lane_date_and_state(
+    tmp_path: Path,
+    case: str,
+    state: str,
+    last_accepted: str,
+    layer: str,
+    status: str,
+) -> None:
+    def health_mutation(health: dict[str, Any]) -> None:
+        health["as_of_date"] = "2026-09-23"
+        account = health["assessments"][0]
+        account.update(
+            evaluated_on="2026-09-23",
+            last_accepted_date=last_accepted,
+            state=state if state != "FRESH" else "LATE",
+        )
+        if case == "stale-account-accepted":
+            provider = copy.deepcopy(account)
+            provider.update(
+                lane="PROVIDER",
+                last_accepted_date="2026-09-17",
+                state="LATE",
+                required_for_current=False,
+            )
+            health["assessments"].append(provider)
+
+    def report_mutation(report: dict[str, Any]) -> None:
+        report["strategy_summary"][0].update(
+            hwm_freshness_observed_end=last_accepted,
+            hwm_freshness_state=state,
+            hwm_freshness_status=status,
+            hwm_freshness_boundary_matches_evidence=True,
+            nav_evidence_layer=layer,
+            nav_observed_end=last_accepted,
+        )
+
+    findings = run(
+        build(
+            tmp_path,
+            Spec(
+                freshness=[health_mutation],
+                panel=[_set(("meta", "freshness_evaluated_on"), "2026-09-23")],
+                report=[report_mutation],
+            ),
+        )
+    )
+    freshness_findings = [
+        finding
+        for finding in findings
+        if finding.check_id == "dates.freshness_vs_cutoff"
+    ]
+    if case == "valid-late":
+        assert not freshness_findings
+    else:
+        assert freshness_findings, case
 
 
 def build(root: Path, spec: Spec | None = None) -> Path:
@@ -713,15 +1047,48 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     return gen_dir
 
 
+def _policy_fixture(root: Path, alpha: str = "1", beta: str = "5") -> Path:
+    """Independent policy constants; never derived from the observed report."""
+    path = root / "contracts" / "portfolio-dependence-policy-v1.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        _dump(
+            {
+                "policy_id": "PORT-DEPENDENCE-1",
+                "allocation_authority": {"as_of_date": "2026-08-16"},
+                "series": [
+                    {
+                        "strategy_id": "alpha",
+                        "series_id": "Alpha",
+                        "allocation_weight": alpha,
+                    },
+                    {
+                        "strategy_id": "beta",
+                        "series_id": "Beta",
+                        "allocation_weight": beta,
+                    },
+                ],
+            }
+        )
+    )
+    return root
+
+
 def run(
-    gen_dir: Path, expected: list[dict[str, Any]] | None = None
+    gen_dir: Path,
+    expected: list[dict[str, Any]] | None = None,
+    *,
+    repo_root: Path | None = None,
 ) -> list[checks.Finding]:
+    if repo_root is None:
+        repo_root = _policy_fixture(gen_dir.parent / "test-authority")
     generation = load_generation(gen_dir)
     context = checks.Context(
         gen=generation,
         cutoff=checks.to_date(CUTOFF) or checks.date.today(),
         cutoff_source="test",
         expected=expected,
+        repo_root=repo_root,
     )
     return checks.run_checks(context)
 
@@ -811,6 +1178,159 @@ def test_good_generation_with_matching_expected_has_no_findings(tmp_path: Path) 
         },
     ]
     assert run(build(tmp_path), expected) == []
+
+
+def test_n50_w27_n51_current_checks_ignore_labeled_historical_snapshot_and_policy_weights(
+    tmp_path: Path,
+) -> None:
+    """N50 (RED): historical snapshot values never stand in for cutoff capital."""
+
+    def historical_only(report: dict[str, Any]) -> None:
+        report["allocation_history"][1]["current_value_usd"] = "900"
+        report["allocation_history"][1]["systematic_weight"] = "0.5"
+        for mode in report["dependence_analysis"]["mode_summaries"].values():
+            for block in ("correlation_one", "central_case"):
+                for component in mode[block]["components"]:
+                    component["allocation_weight"] = "0.5"
+
+    expected = [
+        {
+            "metric_id": "capital.strategy.cutoff",
+            "entity": "alpha",
+            "as_of": CUTOFF,
+            "expected": "1100",
+        }
+    ]
+    findings = run(
+        build(tmp_path, Spec(report=[historical_only])),
+        expected,
+        repo_root=_policy_fixture(tmp_path / "equal-policy", "1", "1"),
+    )
+    assert not [
+        finding
+        for finding in findings
+        if finding.check_id
+        in (
+            "capital.allocation_sum",
+            "expected.capital.strategy.cutoff",
+            "returns.allocation_weight_sets",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "basis", [None, "UNLABELED_POLICY", "HISTORICAL_SNAPSHOT_2026_09_16"]
+)
+def test_n50_w27_n51_rejects_missing_or_unknown_historical_weight_labels(
+    tmp_path: Path, basis: str | None
+) -> None:
+    """N50 (RED): a dated snapshot must carry its exact historical basis label."""
+
+    def unlabel(report: dict[str, Any]) -> None:
+        row = report["allocation_history"][1]
+        if basis is None:
+            row.pop("weight_basis")
+        else:
+            row["weight_basis"] = basis
+
+    findings = run(build(tmp_path, Spec(report=[unlabel])))
+    assert [
+        finding.check_id
+        for finding in findings
+        if finding.check_id == "returns.allocation_weight_sets"
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode,block",
+    [
+        ("LIVE_ONLY", "correlation_one"),
+        ("LIVE_ONLY", "central_case"),
+        ("LIVE_PLUS_BACKTEST", "correlation_one"),
+        ("LIVE_PLUS_BACKTEST", "central_case"),
+    ],
+)
+def test_n50_w27_n51_policy_weight_is_checked_against_independent_authority(
+    tmp_path, mode, block
+):
+    def change(report):
+        report["dependence_analysis"]["mode_summaries"][mode][block]["components"][0][
+            "allocation_weight"
+        ] = "0.5"
+
+    found = run(build(tmp_path, Spec(report=[change])))
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "negative", "nan", "zero", "duplicate", "wrong_id"]
+)
+def test_n50_w27_n51_unusable_policy_fails_closed(tmp_path, fault):
+    root = _policy_fixture(tmp_path / "policy")
+    path = root / "contracts" / "portfolio-dependence-policy-v1.json"
+    data = json.loads(path.read_text())
+    if fault == "missing":
+        path.unlink()
+    else:
+        if fault in {"negative", "nan", "zero"}:
+            for row in data["series"]:
+                row["allocation_weight"] = {
+                    "negative": "-1",
+                    "nan": "NaN",
+                    "zero": "0",
+                }[fault]
+        elif fault == "duplicate":
+            data["series"].append(data["series"][0].copy())
+        else:
+            data["policy_id"] = "WRONG"
+        path.write_bytes(_dump(data))
+    found = run(build(tmp_path / "generation"), repo_root=root)
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_basis",
+        "unknown_basis",
+        "wrong_date",
+        "wrong_policy",
+        "wrong_normalization",
+    ],
+)
+def test_n50_w27_n51_dependence_basis_and_present_authority_fail_closed(
+    tmp_path, fault
+):
+    def change(report):
+        block = report["dependence_analysis"]
+        if fault == "missing_basis":
+            block.pop("weight_basis")
+        elif fault == "unknown_basis":
+            block["weight_basis"] = "UNKNOWN"
+        else:
+            block["weight_authority"] = {
+                "as_of_date": "2026-08-16",
+                "policy_id": "PORT-DEPENDENCE-1",
+                "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
+            }
+            key, value = {
+                "wrong_date": ("as_of_date", CUTOFF),
+                "wrong_policy": ("policy_id", "WRONG"),
+                "wrong_normalization": ("normalization", "NONE"),
+            }[fault]
+            block["weight_authority"][key] = value
+
+    found = run(build(tmp_path, Spec(report=[change])))
+    assert any(
+        f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+        for f in found
+    )
 
 
 def test_absolute_locator_scan_ignores_url_schemes() -> None:
@@ -1213,7 +1733,9 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     ),
     "allocation_weights": (
         "returns.allocation_weight_sets",
-        checks.BLOCKER_INVARIANT,
+        # The POLICY component contradicts independent policy authority, rather
+        # than another displayed CURRENT weight set.
+        checks.BLOCKER_AUTHORITY,
         Spec(
             report=[
                 _set(
@@ -1333,7 +1855,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         Spec(
             report=[
                 _set(
-                    ("implementation_reconciliation_contract", "as_of_date"),
+                    ("decomposition_lenses", "modes", "LIVE_ONLY", 0, "as_of_date"),
                     "2026-08-03",
                 )
             ]
@@ -1574,15 +2096,32 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         Spec(
             report=[
                 _set(
-                    ("strategy_attribution", "benchmark_comparisons", 1, "status"),
-                    "UNAVAILABLE",
+                    (
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "available_count",
+                    ),
+                    0,
                 ),
                 _set(
                     (
-                        "strategy_attribution",
-                        "benchmark_comparisons",
-                        1,
-                        "observed_end",
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "unavailable_count",
+                    ),
+                    2,
+                ),
+                _set(
+                    (
+                        "decomposition_lenses",
+                        "modes",
+                        "LIVE_ONLY",
+                        0,
+                        "as_of_date",
                     ),
                     "2026-07-30",
                 ),
@@ -4443,7 +4982,10 @@ def test_without_crosswalk_fails_closed_instead_of_self_reference(
     gen_dir = build(tmp_path)
     generation = load_generation(gen_dir, discover=False)
     context = checks.Context(
-        gen=generation, cutoff=checks.date(2026, 9, 17), cutoff_source="test"
+        gen=generation,
+        cutoff=checks.date(2026, 9, 17),
+        cutoff_source="test",
+        repo_root=_policy_fixture(tmp_path / "policy"),
     )
     findings = checks.run_checks(context)
     assert {(f.check_id, f.klass) for f in findings} == {
@@ -4594,7 +5136,10 @@ def _cli(*args: str) -> int:
 
 
 def test_cli_good_exits_zero_and_writes_contract_document(tmp_path: Path) -> None:
-    gen_dir = build(tmp_path)
+    def use_current_cutoff_weights(report: dict[str, Any]) -> None:
+        report["dependence_analysis"]["weight_basis"] = "CURRENT_CUTOFF"
+
+    gen_dir = build(tmp_path, Spec(report=[use_current_cutoff_weights]))
     assert _cli(str(gen_dir)) == 0
     out = gen_dir.parent.parent / "validation" / GEN / "findings.json"
     raw = out.read_bytes()
@@ -4708,3 +5253,486 @@ def test_validator_imports_no_production_builder() -> None:
             assert (
                 f"import {forbidden}" not in text and f"from {forbidden}" not in text
             ), path
+
+
+@pytest.mark.parametrize("side", ["panel_one", "panel_all", "report_one", "report_all"])
+def test_n50_w27_n51_missing_epoch_counterpart_blocks(tmp_path, side):
+    def change_report(report):
+        if side == "report_one":
+            report["twr_mwr"].pop(0)
+        elif side == "report_all":
+            report["twr_mwr"] = []
+
+    def change_panel(panel):
+        if side == "panel_one":
+            panel["account_manifest"]["rows"].pop(0)
+        elif side == "panel_all":
+            panel["account_manifest"]["rows"] = []
+
+    found = run(build(tmp_path, Spec(report=[change_report], panel=[change_panel])))
+    missing = [
+        f
+        for f in found
+        if f.check_id == "capital.account_identity"
+        and "counterpart is missing" in f.message
+    ]
+    assert len(missing) == (3 if side.endswith("all") else 1)
+    assert all(f.klass == checks.BLOCKER_AUTHORITY for f in missing)
+
+
+def test_n50_w27_n51_legacy_manifest_rows_absence_preserves_contract(tmp_path):
+    def remove(panel):
+        panel["account_manifest"].pop("rows")
+
+    found = run(build(tmp_path, Spec(panel=[remove])))
+    assert not [f for f in found if f.check_id == "capital.account_identity"]
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_n50_w27_n51_hybrid_date_uses_its_own_published_mode(tmp_path, bounded):
+    def mutate(report):
+        lens = report["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"][0]
+        lens["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+        lens["as_of_date"] = "2026-09-03"
+        if bounded:
+            report["value_basis_bounds"] = {
+                "calculation_cutoff_date": CUTOFF,
+                "strategies": [
+                    {
+                        "strategy_id": "alpha",
+                        "effective_end": "2026-09-03",
+                        "account_ids": ["A1"],
+                    }
+                ],
+                "bounded_sections": [
+                    {
+                        "section": "decomposition_lenses",
+                        "entity": "ECONOMIC_FACTOR:LIVE_PLUS_BACKTEST",
+                        "date": "2026-09-03",
+                        "bounded_by": ["alpha"],
+                    }
+                ],
+            }
+
+    expected = (
+        [
+            {
+                "metric_id": "capital.strategy.cutoff",
+                "entity": "alpha",
+                "as_of": "2026-09-03",
+                "expected": "1100",
+            }
+        ]
+        if bounded
+        else None
+    )
+    found = run(build(tmp_path, Spec(report=[mutate])), expected)
+    dated = [
+        f
+        for f in found
+        if f.check_id == "dates.section_as_of_vs_cutoff"
+        and f.entity == "decomposition:ECONOMIC_FACTOR:LIVE_PLUS_BACKTEST"
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == (checks.NOT_READY if bounded else checks.BLOCKER_AUTHORITY)
+    assert ".modes.LIVE_PLUS_BACKTEST[0]." in dated[0].json_path
+
+
+@pytest.mark.parametrize("case", ["same_alias", "different_alias", "legacy_alias"])
+def test_n50_w27_n51_default_alias_date_dedup_preserves_divergence(tmp_path, case):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        section["lenses"][0]["as_of_date"] = "2026-09-03"
+        if case == "same_alias":
+            section["modes"]["LIVE_ONLY"][0]["as_of_date"] = "2026-09-03"
+        elif case == "legacy_alias":
+            section.pop("modes")
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    dated = [
+        f
+        for f in found
+        if f.check_id == "dates.section_as_of_vs_cutoff"
+        and f.entity == "decomposition:ECONOMIC_FACTOR:LIVE_ONLY"
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == checks.BLOCKER_AUTHORITY
+
+
+@pytest.mark.parametrize("surface", ["historical", "policy"])
+def test_n50_w27_n51_date_authority_requires_exact_iso(tmp_path, surface):
+    policy = _policy_fixture(tmp_path / "policy")
+
+    def mutate(report):
+        if surface == "historical":
+            report["allocation_history"][1]["as_of_date"] = CUTOFF + "garbage"
+
+    if surface == "policy":
+        path = policy / "contracts" / "portfolio-dependence-policy-v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["allocation_authority"]["as_of_date"] = "2026-08-16garbage"
+        path.write_bytes(_dump(payload))
+    found = run(build(tmp_path, Spec(report=[mutate])), repo_root=policy)
+    assert any(
+        f.check_id == "returns.allocation_weight_sets"
+        and f.klass == checks.BLOCKER_AUTHORITY
+        for f in found
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "value"),
+    [
+        ("missing", None),
+        ("null", None),
+        ("boolean", True),
+        ("malformed", "not-a-date"),
+        ("invalid_calendar", "2026-99-99"),
+        ("trailing_garbage", CUTOFF + "garbage"),
+    ],
+)
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_available_decomposition_date_fails_closed(
+    tmp_path, surface, case, value
+):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
+        )
+        if case == "missing":
+            row.pop("as_of_date", None)
+        else:
+            row["as_of_date"] = value
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    path_fragment = (
+        ".lenses[0].as_of_date"
+        if surface == "alias"
+        else f".modes.{surface}[0].as_of_date"
+    )
+    dated = [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and path_fragment in finding.json_path
+    ]
+    assert len(dated) == 1
+    assert dated[0].klass == checks.BLOCKER_AUTHORITY
+    assert dated[0].defect_ids == ("C3",)
+
+
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_available_decomposition_canonical_cutoff_is_valid(
+    tmp_path, surface
+):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
+        )
+        row["as_of_date"] = CUTOFF
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and finding.entity.startswith("decomposition:")
+    ]
+
+
+@pytest.mark.parametrize("surface", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "alias"])
+def test_n50_w27_n51_unavailable_decomposition_date_may_be_absent(tmp_path, surface):
+    def mutate(report):
+        section = report["decomposition_lenses"]
+        row = (
+            section["lenses"][0] if surface == "alias" else section["modes"][surface][0]
+        )
+        row["available_count"] = 0
+        row.pop("as_of_date", None)
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    path_fragment = (
+        ".lenses[0].as_of_date"
+        if surface == "alias"
+        else f".modes.{surface}[0].as_of_date"
+    )
+    assert not [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and path_fragment in finding.json_path
+    ]
+
+
+def test_n50_w27_n51_historical_reserve_is_not_current_oracle_view(tmp_path):
+    def mutate(report):
+        for row in report["allocation_history"]:
+            if row["scope"] == "RESERVE":
+                row["current_value_usd"] = "999"
+
+    found = run(
+        build(tmp_path, Spec(report=[mutate])),
+        [
+            {
+                "metric_id": "capital.reserve.cutoff",
+                "entity": "reserve",
+                "expected": "400",
+            }
+        ],
+    )
+    assert not [f for f in found if f.check_id == "expected.capital.reserve.cutoff"]
+
+
+def _c2_c4_date_findings(found):
+    return [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and (
+            "benchmark:" in finding.entity
+            or finding.entity.startswith("implementation_")
+        )
+    ]
+
+
+def _c2_c4_contract(key, as_of_date="2026-08-03"):
+    identity_key = (
+        "reconciliation_id"
+        if key == "implementation_reconciliation_contract"
+        else "attribution_id"
+    )
+    return {
+        "as_of_date": as_of_date,
+        identity_key: "a" * 64,
+        "schema_version": 1,
+        "sha256": "b" * 64,
+        "size_bytes": 123,
+        "strategy_count": 3,
+    }
+
+
+def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_path):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "strategy_id": "echotrade-growth-pivots",
+                "account_series_id": "account:echotrade-growth-pivots",
+                "reference_series_id": "benchmark:us-total-market-itot",
+                "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "observed_start": "2025-10-01",
+                "observed_end": "2025-11-24",
+            }
+        )
+        report["strategy_attribution"]["benchmark_assignments"] = []
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract", "2026-08-09"
+        )
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not _c2_c4_date_findings(found)
+
+
+def test_c2_c4_descriptive_absent_optional_contracts_remain_absent(tmp_path):
+    def mutate(report):
+        report.pop("implementation_reconciliation_contract")
+        report.pop("implementation_return_attribution_contract")
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not [
+        f for f in _c2_c4_date_findings(found) if f.entity.startswith("implementation_")
+    ]
+
+
+def test_c2_c4_descriptive_unavailable_null_comparisons_remain_valid(tmp_path):
+    def mutate(report):
+        comparisons = report["strategy_attribution"]["benchmark_comparisons"]
+        comparisons.extend(
+            {
+                "strategy_id": strategy,
+                "status": "UNAVAILABLE",
+                "version_compatibility_status": "UNRESOLVED",
+                "observed_start": None,
+                "observed_end": None,
+                "account_series_id": None,
+                "reference_series_id": None,
+            }
+            for strategy in ("composer-holy-grail", "robuxio-crypto")
+        )
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    assert not _c2_c4_date_findings(found)
+
+
+def test_c2_c4_descriptive_unavailable_missing_null_field_blocks(tmp_path):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "status": "UNAVAILABLE",
+                "observed_start": None,
+                "observed_end": None,
+                "account_series_id": None,
+                "reference_series_id": None,
+            }
+        )
+        row.pop("observed_start")
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+@pytest.mark.parametrize("row", [None, True, 7, "malformed", [], {}])
+def test_c2_c4_descriptive_non_object_comparison_blocks(tmp_path, row):
+    def mutate(report):
+        report["strategy_attribution"]["benchmark_comparisons"][0] = row
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    json_path = (
+        "$.strategy_attribution.benchmark_comparisons[0].observed_end"
+        if isinstance(row, dict)
+        else "$.strategy_attribution.benchmark_comparisons[0]"
+    )
+    assert any(
+        f.klass == checks.BLOCKER_AUTHORITY
+        and f.defect_ids == ("C2",)
+        and f.json_path == json_path
+        for f in dated
+    )
+
+
+@pytest.mark.parametrize("value", [None, {}, "malformed"])
+def test_c2_c4_descriptive_present_malformed_comparisons_container_blocks(
+    tmp_path, value
+):
+    def mutate(report):
+        report["strategy_attribution"]["benchmark_comparisons"] = value
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(
+        f.klass == checks.BLOCKER_AUTHORITY
+        and f.defect_ids == ("C2",)
+        and f.json_path == "$.strategy_attribution.benchmark_comparisons"
+        for f in dated
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", None),
+        ("status", "UNKNOWN"),
+        ("version_compatibility_status", None),
+        ("version_compatibility_status", "UNRESOLVED"),
+        ("strategy_id", None),
+        ("account_series_id", None),
+        ("reference_series_id", None),
+        ("observed_start", None),
+        ("observed_end", None),
+        ("observed_end", "2026-07-30garbage"),
+        ("observed_start", "2026-07-31"),
+        ("observed_end", "2026-09-18"),
+    ],
+)
+def test_c2_c4_descriptive_invalid_c2_metadata_blocks(tmp_path, field, value):
+    def mutate(report):
+        row = report["strategy_attribution"]["benchmark_comparisons"][0]
+        row.update(
+            {
+                "strategy_id": "alpha",
+                "account_series_id": "account:alpha",
+                "reference_series_id": "benchmark:alpha",
+                "status": "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "observed_start": "2026-07-01",
+                "observed_end": "2026-07-30",
+            }
+        )
+        if value is None:
+            row.pop(field, None)
+        else:
+            row[field] = value
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    blockers = [
+        finding for finding in dated if finding.klass == checks.BLOCKER_AUTHORITY
+    ]
+    assert blockers
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "value"),
+    [
+        ("implementation_reconciliation_contract", "sha256_missing", None),
+        ("implementation_reconciliation_contract", "as_of_date_missing", None),
+        ("implementation_reconciliation_contract", "null", None),
+        ("implementation_return_attribution_contract", "schema_version", True),
+        ("implementation_return_attribution_contract", "sha256", "not-a-hash"),
+        ("implementation_return_attribution_contract", "size_bytes", 0),
+        ("implementation_return_attribution_contract", "strategy_count", 2),
+        (
+            "implementation_return_attribution_contract",
+            "as_of_date",
+            "2026-08-09garbage",
+        ),
+        ("implementation_return_attribution_contract", "as_of_date", "2026-09-18"),
+    ],
+)
+def test_c2_c4_descriptive_invalid_c4_metadata_blocks(tmp_path, key, field, value):
+    def mutate(report):
+        metadata = _c2_c4_contract(key)
+        if field == "null":
+            report[key] = None
+        elif field == "sha256_missing":
+            metadata.pop("sha256")
+            report[key] = metadata
+        elif field == "as_of_date_missing":
+            metadata.pop("as_of_date")
+            report[key] = metadata
+        else:
+            metadata[field] = value
+            report[key] = metadata
+
+    dated = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    assert any(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+def test_c2_c4_descriptive_historical_role_does_not_exempt_current_lens(tmp_path):
+    def mutate(report):
+        report["implementation_reconciliation_contract"] = _c2_c4_contract(
+            "implementation_reconciliation_contract"
+        )
+        report["implementation_return_attribution_contract"] = _c2_c4_contract(
+            "implementation_return_attribution_contract"
+        )
+        report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["as_of_date"] = (
+            "2026-09-03"
+        )
+
+    found = run(build(tmp_path, Spec(report=[mutate])))
+    dated = [
+        finding
+        for finding in found
+        if finding.check_id == "dates.section_as_of_vs_cutoff"
+        and finding.entity.startswith("decomposition:")
+    ]
+    assert dated
+    assert all(f.klass == checks.BLOCKER_AUTHORITY for f in dated)

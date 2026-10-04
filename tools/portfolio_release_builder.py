@@ -2055,12 +2055,15 @@ def build_baseline(
         _path(recipe["baseline_spec"]["path"], "baseline spec"),
         "baseline specification",
     )
+    selected_financial = spec.get("provider_ledger", {}).get("financial_mvp")
     spec["provider_ledger"] = {
         "catalog_sha256": catalog_sha256,
         "generation_id": ledger_id,
         "manifest_sha256": manifest_sha256,
         "root_id": "provider-ledger",
     }
+    if selected_financial is not None:
+        spec["provider_ledger"]["financial_mvp"] = selected_financial
     roots = spec.get("roots")
     if not isinstance(roots, dict):
         raise VerticalBuildError("baseline roots are invalid")

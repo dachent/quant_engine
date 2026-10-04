@@ -4634,3 +4634,260 @@ def test_provider_ledger_path_publishes_an_authoritatively_admitted_reserve(
     assert accepted is True
     assert evidence["component_mismatches"] == []
     assert evidence["not_ready_components"] == ["retained_excluded", "total_liquid"]
+
+
+def _cr2_custody_financial_ref():
+    paths = {
+        "contract": REPOSITORY_ROOT
+        / "contracts/portfolio-financial-mvp-source-v1.json",
+        "registry": REPOSITORY_ROOT
+        / "docs/analytics/current-strategy-decomposition-plan.json",
+        "schema": REPOSITORY_ROOT
+        / "schemas/portfolio/financial-mvp-source-contract.schema.json",
+    }
+    return {
+        f"{name}_{kind}": (
+            str(path)
+            if kind == "path"
+            else hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+        for name, path in paths.items()
+        for kind in ("path", "sha256")
+    }
+
+
+def test_cr2_custody_held_ledger_cannot_adopt_unadmitted_new_contract(tmp_path):
+    root, ref = _provider_ledger_generation(tmp_path, catalog_schema_version=2)
+    ref["financial_mvp"] = _cr2_custody_financial_ref()
+    with pytest.raises(
+        baseline.BaselineValidationError, match="admission|file boundary"
+    ):
+        baseline._provider_ledger(ref, {"provider-ledger": root}, date(2026, 9, 17))
+
+
+def test_cr2_custody_declared_contract_tamper_fails_without_legacy_fallback(tmp_path):
+    root, ref = _provider_ledger_generation(tmp_path, catalog_schema_version=2)
+    financial = _cr2_custody_financial_ref()
+    changed = tmp_path / "contract.json"
+    changed.write_bytes(Path(financial["contract_path"]).read_bytes() + b" ")
+    financial["contract_path"] = str(changed)
+    ref["financial_mvp"] = financial
+    with pytest.raises(baseline.BaselineValidationError, match="hash"):
+        baseline._provider_ledger(ref, {"provider-ledger": root}, date(2026, 9, 17))
+
+
+def _cr2_custody_cash_case():
+    case = _cc_case()
+    case["strategies"] = [{"strategy_id": "alpha"}]
+    case["assignments"] = [_cc_assignment("acct-a1", "alpha", "2026-01-01")]
+    case["accounts"] = [
+        row for row in case["accounts"] if row["account_id"] == "acct-a1"
+    ]
+    case["nav"] = [_cc_nav("acct-a1", "2026-09-17", "105")]
+    case["policy_exclusions"] = {}
+
+    def row(record_id, value, **kw):
+        return {
+            "account_id": "acct-a1",
+            "provider_id": "synthetic",
+            "record_id": record_id,
+            "source_record_id": record_id,
+            "source_artifact_id": "native/capital.csv",
+            "generation_id": "a" * 64,
+            "event_date": "2026-09-16",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": value},
+            **kw,
+        }
+
+    case["provider_catalog"] = {
+        "catalog_schema_version": 2,
+        "flows": [
+            row(
+                "deposit",
+                "100",
+                provider_account_scope="ACCOUNT_ONLY",
+                capital_disposition="EXTERNAL_CAPITAL",
+                flow_type="DEPOSIT_OR_WITHDRAWAL",
+                mapping_status="UNMAPPED",
+                strategy_id=None,
+            )
+        ],
+        "capital_anchors": [
+            row(
+                "allocation",
+                "96",
+                mapping_status="MAPPED",
+                strategy_id="alpha",
+                capital_type="STRATEGY_CAPITAL_ALLOCATION",
+            )
+        ],
+        "admissions": [_cc_admission("acct-a1", "AUTHORITATIVE")],
+    }
+    for fact_type in ("flows", "capital_anchors"):
+        admission = _cc_admission("acct-a1", "AUTHORITATIVE")
+        admission["fact_type"] = fact_type
+        case["provider_catalog"]["admissions"].append(admission)
+    for admission in case["provider_catalog"]["admissions"]:
+        admission["account_reconciliation_sha256"] = hashlib.sha256(
+            b"SYNTHETIC_RECONCILIATION"
+        ).hexdigest()
+    case["custody_authority"] = {
+        **{
+            key: "a" * 64
+            for key in (
+                "ledger_generation_id",
+                "ledger_catalog_sha256",
+                "ledger_manifest_sha256",
+                "admission_receipt_sha256",
+                "contract_raw_sha256",
+                "contract_semantic_sha256",
+                "census_sha256",
+                "invested_capital_policy_sha256",
+            )
+        },
+        "census_id": "SYNTHETIC_CENSUS",
+    }
+    return case
+
+
+def test_cr2_custody_current_capital_adds_residual_cash_without_changing_members():
+    case = _cr2_custody_cash_case()
+    block = baseline._build_current_capital(**case)
+    row = block["strategies"][0]
+    assert row["current_value"]["value"] == "109"
+    assert row["members"][0]["value"]["value"] == "105"
+    assert row["derived_cash"][0]["current_value"]["value"] == "4"
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda raw: raw["flows"].append(copy.deepcopy(raw["flows"][0])), "duplicate"),
+        (
+            lambda raw: raw["capital_anchors"][0]["amount"].update(value="101"),
+            "negative",
+        ),
+        (
+            lambda raw: raw["capital_anchors"].append(
+                {
+                    **raw["capital_anchors"][0],
+                    "record_id": "other",
+                    "strategy_id": "bravo",
+                }
+            ),
+            "strategy",
+        ),
+    ],
+)
+def test_cr2_custody_cash_rejects_invalid_raw_facts(mutate, match):
+    case = _cr2_custody_cash_case()
+    mutate(case["provider_catalog"])
+    with pytest.raises(baseline.BaselineValidationError, match=match):
+        baseline._build_current_capital(**case)
+
+
+def test_cr2_custody_baseline_check_recomputes_raw_cash_and_rejects_emitted_tamper():
+    case = _cr2_custody_cash_case()
+    block = baseline._build_current_capital(**case)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+    assert all(
+        row["status"] != "FAIL"
+        for row in baseline._current_capital_checks(block, **arguments)
+    )
+    block["strategies"][0]["derived_cash"][0]["current_value"]["value"] = "5"
+    assert any(
+        row["status"] == "FAIL"
+        for row in baseline._current_capital_checks(block, **arguments)
+    )
+
+
+def test_cr2_custody_catalog_schema_accepts_strict_separate_cash():
+    block = baseline._build_current_capital(**_cr2_custody_cash_case())
+    _cc_schema_validator("current_capital").validate(block)
+
+
+def test_cr2_custody_same_day_is_order_invariant_and_date_negative_fails():
+    case = _cr2_custody_cash_case()
+    raw = case["provider_catalog"]
+    raw["capital_anchors"].append(
+        {
+            **raw["capital_anchors"][0],
+            "record_id": "allocation-2",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "2"},
+        }
+    )
+    original = baseline._build_current_capital(**case)
+    raw["capital_anchors"].reverse()
+    assert baseline._build_current_capital(**case) == original
+    raw["flows"][0]["event_date"] = "2026-09-17"
+    with pytest.raises(baseline.BaselineValidationError, match="negative dated"):
+        baseline._build_current_capital(**case)
+
+
+@pytest.mark.parametrize("rate,expected", [("0.99", "108"), ("1.01", "110")])
+def test_cr2_custody_native_event_fx_converts_once(rate, expected):
+    case = _cr2_custody_cash_case()
+    event = case["provider_catalog"]["flows"][0]
+    event["amount"]["currency"] = "USDC"
+    event["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDC",
+        "date": event["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "synthetic",
+        "rate": rate,
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
+    block = baseline._build_current_capital(**case)
+    assert block["strategies"][0]["current_value"]["value"] == expected
+    event["event_time_fx"]["date"] = "2026-09-15"
+    with pytest.raises(baseline.BaselineValidationError, match="FX"):
+        baseline._build_current_capital(**case)
+
+
+def test_cr2_custody_withdrawal_decreases_cash_and_q_a_no_preserves_members():
+    case = _cr2_custody_cash_case()
+    legacy = baseline._build_current_capital(
+        **{
+            key: value
+            for key, value in case.items()
+            if key not in {"custody_authority", "provider_catalog"}
+        }
+    )
+    raw = case["provider_catalog"]
+    raw["flows"].append(
+        {
+            **raw["flows"][0],
+            "record_id": "withdrawal",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-3"},
+        }
+    )
+    block = baseline._build_current_capital(**case)
+    assert block["strategies"][0]["current_value"]["value"] == "106"
+    assert canonical_json_bytes(
+        block["strategies"][0]["members"]
+    ) == canonical_json_bytes(legacy["strategies"][0]["members"])
+
+
+def test_cr2_custody_internal_movements_fail_without_sleeve_semantics():
+    case = _cr2_custody_cash_case()
+    raw = case["provider_catalog"]
+    raw["flows"].append(
+        {
+            **raw["flows"][0],
+            "record_id": "internal",
+            "flow_type": "TRANSFER:INTERNAL:CASH",
+            "mapping_status": "MAPPED",
+            "strategy_id": "alpha",
+        }
+    )
+    with pytest.raises(
+        baseline.BaselineValidationError, match="unsupported|ambiguous internal"
+    ):
+        baseline._build_current_capital(**case)

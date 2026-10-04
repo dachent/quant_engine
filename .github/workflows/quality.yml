@@ -35,6 +35,7 @@ jobs:
       UV_NO_PROGRESS: "1"
       UV_PYTHON: ${{ matrix.python-version }}
       UV_PYTHON_DOWNLOADS: never
+      PLAYWRIGHT_BROWSERS_PATH: "0"
     steps:
       - name: Check out the exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,6 +55,23 @@ jobs:
         run: uv lock --check
       - name: Install the frozen workspace
         run: uv sync --frozen --all-groups --all-packages --python "${{ matrix.python-version }}"
+      - name: Install pinned Node for browser tests
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+      - name: Install locked browser test runtime
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/quant-engine-npm-cache
+        run: npm ci --prefix apps/portfolio-control-panel --ignore-scripts --no-audit --no-fund
+      - name: Install matching project-local Chromium
+        run: node apps/portfolio-control-panel/node_modules/playwright/cli.js install chromium
+      - name: Prove browser runtime before the offline suite
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: |
+          node --input-type=module -e "import { chromium } from './apps/portfolio-control-panel/node_modules/playwright/index.mjs'; const browser = await chromium.launch({ headless: true }); try { const page = await browser.newPage(); await page.setContent('<p id=proof>browser-ready</p>'); if (await page.locator('#proof').textContent() !== 'browser-ready') throw new Error('browser runtime smoke failed'); } finally { await browser.close(); }"
       - name: Check formatting
         run: uv run --frozen --no-sync ruff format --check .
       - name: Check lint
@@ -73,7 +91,7 @@ jobs:
       - name: Verify pinned Gitleaks suppression provenance
         run: uv run --frozen --no-sync python tools/check_gitleaks_suppressions.py
       - name: Run bounded offline tests
-        run: uv run --frozen --no-sync pytest -q --disable-socket tests/alpaca tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/market_data tests/matrixport tests/portfolio123 tests/quantbase tests/portfolio_fx_rates tests/portfolio_ledger tests/provider_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/portfolio_analytics tests/portfolio_attribution tests/portfolio_operations tests/schwab tests/schwab_app tests/web_contracts tests/governance tests/acceptance
+        run: uv run --frozen --no-sync pytest -q --disable-socket --durations=20 tests/alpaca tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/market_data tests/matrixport tests/portfolio123 tests/quantbase tests/portfolio_fx_rates tests/portfolio_ledger tests/provider_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/portfolio_analytics tests/portfolio_attribution tests/portfolio_operations tests/schwab tests/schwab_app tests/web_contracts tests/governance tests/acceptance
       - name: Run Windows Schwab application continuity tests
         if: runner.os == 'Windows'
         run: uv run --frozen --no-sync pytest -q --disable-socket --allow-hosts=127.0.0.1,localhost apps/schwab-trading/tests

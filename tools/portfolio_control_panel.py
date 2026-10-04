@@ -88,8 +88,8 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
-PANEL_SCHEMA_VERSION: Final = 21
-BUILDER_VERSION: Final = "2.11.0"
+PANEL_SCHEMA_VERSION: Final = 22
+BUILDER_VERSION: Final = "2.12.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
         "grizzlybears-vtma",
@@ -1042,7 +1042,9 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         raise ControlPanelValidationError(
             "portfolio report data is not readable JSON"
         ) from exc
-    if report.get("report_schema_version") != 1:
+    if isinstance(report.get("report_schema_version"), bool) or report.get(
+        "report_schema_version"
+    ) not in {1, 2}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1122,7 +1124,9 @@ def _report_candidate(
     if candidate.name != sha256:
         raise ControlPanelValidationError("report candidate directory identity differs")
     report = _json_from_bytes(content, "report candidate data")
-    if report.get("report_schema_version") != 1:
+    if isinstance(report.get("report_schema_version"), bool) or report.get(
+        "report_schema_version"
+    ) not in {1, 2}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -3611,7 +3615,21 @@ def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
         raise ControlPanelValidationError(
             "accepted report portfolio dimensions must be non-empty"
         )
-    return {**_capital_summary(summary), "counts": counts}
+    result = {**_capital_summary(summary), "counts": counts}
+    custody = report.get("custody_current_capital")
+    if custody is not None:
+        from portfolio_report import _current_capital
+
+        try:
+            _current_capital({"current_capital": custody})
+        except (RuntimeError, ValueError) as exc:
+            raise ControlPanelValidationError(
+                f"custody current capital: {exc}"
+            ) from exc
+        if not isinstance(custody, dict) or not custody.get("custody_authority"):
+            raise ControlPanelValidationError("custody cash lacks admitted authority")
+        result["custody_current_capital"] = custody
+    return result
 
 
 def _fact_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -8334,7 +8352,15 @@ def _panel_data(
     )
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
-    _report_panel_expectations(report)
+    report_capital_expectations = _report_panel_expectations(report)
+    if report_capital_expectations.get("custody_current_capital") != (
+        baseline_catalog.get("current_capital")
+        if baseline_catalog.get("current_capital", {}).get("custody_authority")
+        else None
+    ):
+        raise ControlPanelValidationError(
+            "custody report differs from selected baseline"
+        )
     # The capital block the panel publishes is the governed baseline's current
     # capital as the report carried it; the report's rows are reconciled with the
     # baseline here and with the panel's own strategy rows below.
@@ -9147,7 +9173,7 @@ def _panel_data(
         {
             "artifact": "portfolio-report-generation",
             "as_of_date": report.get("as_of_date"),
-            "schema": "portfolio-report-data/1",
+            "schema": f"portfolio-report-data/{report['report_schema_version']}",
             "sha256": report_identity["sha256"],
         },
         *provenance,
@@ -9437,6 +9463,15 @@ def _panel_data(
         ),
         "account_manifest": (
             dict(account_manifest) if account_manifest is not None else None
+        ),
+        **(
+            {
+                "custody_current_capital": report_capital_expectations[
+                    "custody_current_capital"
+                ]
+            }
+            if "custody_current_capital" in report_capital_expectations
+            else {}
         ),
         "capital": capital_parts["capital"],
         "capital_as_of": capital_parts["capital_as_of"],
@@ -11371,6 +11406,10 @@ def verify_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    _rendered_bundle: list[
+        tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -11412,6 +11451,8 @@ def verify_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
+    if _rendered_bundle is not None:
+        _rendered_bundle.append((expected, data, _))
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
     checks.append(
@@ -11677,6 +11718,8 @@ def verify_candidate(
             data["capital"] == report_expectations["capital"]
             and data["capital_status"] == report_expectations["capital_status"]
             and data["capital_as_of"] == report_expectations["capital_as_of"]
+            and data.get("custody_current_capital")
+            == report_expectations.get("custody_current_capital")
             and not capital_problems,
             {
                 "actual": {
@@ -12774,6 +12817,9 @@ def publish_panel(
         raise ControlPanelValidationError(
             "publication requires financial mode or an exact verified account-manifest generation bundle"
         )
+    rendered_bundle: list[
+        tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
+    ] = []
     verification = verify_candidate(
         report_root,
         legacy_panel,
@@ -12813,6 +12859,7 @@ def publish_panel(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        _rendered_bundle=rendered_bundle,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -12822,45 +12869,9 @@ def publish_panel(
     _write_exact(
         qa_dir / "semantic-validation.json", canonical_json_bytes(verification)
     )
-    rendered_files, reproduced_data, input_paths = _rendered_files(
-        report_root,
-        legacy_panel,
-        template_root,
-        decomposition_root,
-        correlation_root,
-        strategy_evidence_path,
-        decomposition_lenses_root,
-        decomposition_plan_bundle,
-        weekly_returns_root,
-        freshness_health_path,
-        replication_root,
-        candidate_driver_map_path,
-        baseline_root,
-        hwm_portable_receipt,
-        hwm_portable_generation_bytes,
-        hwm_portable_calendar_bytes,
-        hwm_governed_result,
-        hwm_governed_generation_bytes,
-        hwm_governed_calendar_bytes,
-        hwm_governed_receipt_bytes,
-        dependence_selected_inputs_path=dependence_selected_inputs_path,
-        account_manifest_path=account_manifest_path,
-        financial_mode=financial_mode,
-        manifest_ledger_path=manifest_ledger_path,
-        manifest_ledger_identity_path=manifest_ledger_identity_path,
-        manifest_baseline_root=manifest_baseline_root,
-        manifest_classified_flows_path=manifest_classified_flows_path,
-        manifest_flow_coverage_path=manifest_flow_coverage_path,
-        manifest_classification_policy_path=manifest_classification_policy_path,
-        manifest_admission_policy_path=manifest_admission_policy_path,
-        account_manifest_generation_root=account_manifest_generation_root,
-        account_manifest_generation_id=account_manifest_generation_id,
-        manifest_membership_census_path=manifest_membership_census_path,
-        invested_capital_result=invested_capital_result,
-        invested_capital_input_generation_path=(invested_capital_input_generation_path),
-        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-        strategy_history_contract_path=strategy_history_contract_path,
-    )
+    if len(rendered_bundle) != 1:
+        raise ControlPanelValidationError("verified render bundle is unavailable")
+    rendered_files, reproduced_data, input_paths = rendered_bundle[0]
     reproduced_meta = _object(reproduced_data.get("meta"), "panel meta")
     authority_profile = reproduced_meta.get("account_manifest_authority_profile")
     manifest_verification = _object(
@@ -12955,6 +12966,22 @@ def publish_panel(
         )
     )
     publication_as_of = max(portfolio_as_of, freshness_as_of)
+    try:
+        retained_report = _object(
+            json.loads(input_snapshots["report"].decode("utf-8")),
+            "bound publication report snapshot",
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlPanelValidationError(
+            "bound publication report snapshot is invalid JSON"
+        ) from exc
+    retained_report_schema_version = retained_report.get("report_schema_version")
+    if isinstance(
+        retained_report_schema_version, bool
+    ) or retained_report_schema_version not in {1, 2}:
+        raise ControlPanelValidationError(
+            "bound publication report schema is unsupported"
+        )
 
     def snapshot_artifact(
         binding: str,
@@ -12998,7 +13025,7 @@ def publish_panel(
             artifact_id="input/portfolio-report-data.json",
             as_of_date=portfolio_as_of,
             schema_name="portfolio-report-data",
-            schema_version="1",
+            schema_version=str(retained_report_schema_version),
         ),
         snapshot_artifact(
             "legacy",

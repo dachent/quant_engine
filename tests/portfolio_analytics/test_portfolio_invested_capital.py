@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
 import portfolio_invested_capital as capital
+import portfolio_financial_mvp_contract as financial
 
 
 def _case():
@@ -62,6 +67,26 @@ def _case():
         source_bindings={"ledger": {"sha256": "a" * 64, "size_bytes": 100}},
         correction_bindings=[],
     )
+
+
+def _unresolved_shared_flow_policy():
+    """Build a complete local #324 dependency state, not a status-only stand-in."""
+    contract = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text()
+    )
+    outcomes = deepcopy(contract["financial_outcomes"])
+    invested = next(row for row in outcomes if row["outcome_id"] == "INVESTED_CAPITAL")
+    policy = invested["calculation_contract"]
+    policy["shared_flow_contract"]["extension_status"] = "REQUIRED_NOT_READY"
+    policy["policy_status"] = "REQUIRED_NOT_READY"
+    invested["readiness"] = "REQUIRED_NOT_READY"
+    invested["blockers"] = [324]
+    financial._validate_outcomes(outcomes, allow_legacy_workbook=False)
+    return policy
 
 
 def _event(event_id, epoch_id, day, classification, amount, **extra):
@@ -259,6 +284,302 @@ def test_governed_capital_replays_exact_thirteen_epoch_source_facts(tmp_path):
     result["current_aggregate_usd"] = "1101"
     with pytest.raises(capital.CapitalValidationError, match="recomputation"):
         capital.verify_governed_capital_result(result, input_path, contract_path)
+
+
+def test_t5c_custody_governed_builder_and_verifier_keep_generic_opening_flow(
+    tmp_path,
+):
+    input_path, contract_path = _governed_case(tmp_path)
+    arguments = json.loads(input_path.read_bytes())
+    ledger_path = tmp_path / "provider-ledger.json"
+    ledger = json.loads(ledger_path.read_bytes())
+    opening = next(
+        row
+        for row in ledger["capital_anchors"]
+        if row.get("capital_type") == "OPENING_CONTRIBUTED_BASIS"
+    )
+    ledger["capital_anchors"].remove(opening)
+    generic_opening = {
+        **opening,
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "provider_account_scope": "ACCOUNT_ONLY",
+    }
+    ledger["flows"].append(generic_opening)
+    ledger["capital_anchors"].append(
+        {
+            **opening,
+            "record_id": "synthetic-generic-opening-nav-anchor",
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+            "authority_profile": "SYNTHETIC",
+        }
+    )
+    digest = capital._digest(generic_opening)
+    for event in arguments["opening_basis"]:
+        if event["event_id"] == opening["record_id"]:
+            event["source_evidence_sha256"] = digest
+            event["fx_evidence_sha256"] = digest
+            break
+    else:
+        raise AssertionError("selected opening source has no admitted event")
+
+    ledger_path.write_bytes(capital._canonical(ledger))
+    arguments["source_bindings"]["provider_ledger"] = capital._file_binding(
+        ledger_path
+    )[0]
+    input_path.write_bytes(capital._canonical(arguments))
+
+    result = capital.build_governed_capital_result(input_path, contract_path)
+    assert result["current_aggregate_usd"] == "1100"
+    assert (
+        capital.verify_governed_capital_result(result, input_path, contract_path)
+        == result
+    )
+
+
+def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path):
+    """Native constructor preserves exact pre-epoch basis under caller contexts."""
+    from quant_engine.core import GenerationManifest
+    from quant_engine.core.contracts import canonical_json_bytes
+    from quant_engine.core.publication import (
+        read_generation_bundle,
+        stage_generation_bundle,
+    )
+
+    repo = Path(__file__).resolve().parents[2]
+    fixture_path = repo / "tests" / "portfolio_ledger" / "test_hwm_selected_inputs.py"
+    fixture_spec = importlib.util.spec_from_file_location(
+        "t5c_constructor_hwm_fixture", fixture_path
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    sys.modules[fixture_spec.name] = fixture
+    fixture_spec.loader.exec_module(fixture)
+
+    cli_path = repo / "ops" / "mvp2-release" / "scripts" / "build_capital_input.py"
+    cli_spec = importlib.util.spec_from_file_location("t5c_constructor_cli", cli_path)
+    assert cli_spec is not None and cli_spec.loader is not None
+    cli = importlib.util.module_from_spec(cli_spec)
+    sys.modules[cli_spec.name] = cli
+    cli_spec.loader.exec_module(cli)
+
+    paths = fixture._fixture(tmp_path / "native-world", bind_epoch_contract=False)
+    epoch_root = paths["generation"].parent
+    epoch_manifest = read_generation_bundle(epoch_root.parents[1], epoch_root.name)
+    epoch_document = json.loads(
+        epoch_manifest.payloads["outputs/account-strategy-manifest.json"]
+    )
+    epoch = next(
+        row
+        for row in epoch_document["rows"]
+        if sum(
+            candidate["account_id"] == row["account_id"]
+            for candidate in epoch_document["rows"]
+        )
+        == 1
+    )
+
+    provider_path = paths["provider_generation"]
+    provider_bundle = read_generation_bundle(
+        provider_path.parents[2], provider_path.parent.name
+    )
+    ledger = json.loads(provider_bundle.payloads["normalized/provider-ledger.json"])
+    deposit_date = (
+        date.fromisoformat(epoch["effective_start"]) - timedelta(days=1)
+    ).isoformat()
+    deposit = {
+        "record_id": "t5c-pre-epoch-precision-deposit",
+        "account_id": epoch["account_id"],
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": deposit_date,
+        "amount": {
+            "value": "100.00000000000000000000000000002",
+            "currency": "USD",
+            "status": "AVAILABLE",
+        },
+    }
+    ledger["flows"] = [deposit]
+    ledger["capital_anchors"] = [
+        {
+            "record_id": "t5c-epoch-opening-anchor",
+            "account_id": epoch["account_id"],
+            "strategy_id": epoch["strategy_id"],
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "event_date": epoch["effective_start"],
+            "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+        }
+    ]
+    ledger["admissions"] = [
+        {
+            "account_id": row["account_id"],
+            "fact_type": "flows",
+            "disposition": "AUTHORITATIVE",
+            "effective_start": (
+                date.fromisoformat(row["effective_start"]) - timedelta(days=1)
+            ).isoformat(),
+            "effective_end": epoch_document["calculation_cutoff_date"],
+        }
+        for row in epoch_document["rows"]
+    ]
+
+    provider_payloads = dict(provider_bundle.payloads)
+    ledger_bytes = canonical_json_bytes(ledger)
+    for artifact_id in provider_payloads:
+        if artifact_id.endswith("provider-ledger.json"):
+            provider_payloads[artifact_id] = ledger_bytes
+    provider_payloads["provider-ledger.json"] = ledger_bytes
+    artifacts = []
+    for artifact in provider_bundle.manifest.artifacts:
+        payload = provider_payloads[artifact.artifact_id]
+        artifacts.append(
+            replace(
+                artifact,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size_bytes=len(payload),
+            )
+        )
+    if not any(
+        artifact.artifact_id == "provider-ledger.json" for artifact in artifacts
+    ):
+        artifacts.append(
+            replace(
+                artifacts[0],
+                artifact_id="provider-ledger.json",
+                sha256=hashlib.sha256(ledger_bytes).hexdigest(),
+                size_bytes=len(ledger_bytes),
+            )
+        )
+    provider_manifest = GenerationManifest.build(
+        as_of_date=provider_bundle.manifest.as_of_date,
+        adapter=provider_bundle.manifest.adapter,
+        coverage=provider_bundle.manifest.coverage,
+        artifacts=tuple(artifacts),
+        verification=provider_bundle.manifest.verification,
+    )
+    selected_provider_root = stage_generation_bundle(
+        tmp_path / "selected-provider-ledger", provider_manifest, provider_payloads
+    )
+
+    baseline_path = paths["baseline_generation"]
+    baseline_bundle = read_generation_bundle(
+        baseline_path.parents[2], baseline_path.parent.name
+    )
+    baseline = json.loads(
+        baseline_bundle.payloads["normalized/portfolio-baseline.json"]
+    )
+    provenance_path = tmp_path / "provider-provenance.json"
+    provenance_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": baseline["as_of_date"],
+                "accounts": baseline["accounts"],
+                "assignments": [
+                    {**row, "mapping_status": "MAPPED"}
+                    for row in baseline["assignments"]
+                ],
+            }
+        )
+    )
+    spec_path = tmp_path / "provider-ledger-spec.json"
+    spec_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "provenance": {
+                    "catalog_path": str(provenance_path),
+                    "catalog_sha256": capital._file_binding(provenance_path)[0][
+                        "sha256"
+                    ],
+                    "generation_id": "a" * 64,
+                }
+            }
+        )
+    )
+    crosswalk_path = tmp_path / "account-crosswalk.json"
+    crosswalk_path.write_bytes(canonical_json_bytes({"bindings": []}))
+    kwargs = {
+        "provider_ledger_generation_root": selected_provider_root,
+        "epoch_manifest_generation_root": epoch_root,
+        "provider_ledger_spec_path": spec_path,
+        "financial_contract_path": paths["contract"],
+        "strategy_registry_path": repo
+        / "docs"
+        / "analytics"
+        / "current-strategy-decomposition-plan.json",
+        "account_crosswalk_path": crosswalk_path,
+        "requested_as_of": epoch_document["calculation_cutoff_date"],
+        "evaluated_on": epoch_document["calculation_cutoff_date"],
+    }
+
+    results = []
+    for precision in (28, 80):
+        with localcontext() as context:
+            context.prec = precision
+            generation, _locators = cli.build_input_generation(**kwargs)
+        opening = next(
+            row
+            for row in generation["opening_basis"]
+            if row["account_id"] == epoch["account_id"]
+        )
+        generation_bytes = canonical_json_bytes(generation)
+        results.append(
+            (
+                opening["amount"],
+                hashlib.sha256(generation_bytes).hexdigest(),
+            )
+        )
+
+    expected_amount = "100.00000000000000000000000000002"
+    assert results == [
+        (expected_amount, results[0][1]),
+        (expected_amount, results[0][1]),
+    ]
+
+
+def test_cr2_d1_governed_result_preserves_approved_current_policy_and_numeric_projection(
+    tmp_path,
+):
+    """The approved current policy releases the same governed numeric result."""
+
+    input_path, contract_path = _governed_case(tmp_path)
+
+    result = capital.build_governed_capital_result(input_path, contract_path)
+
+    assert result["policy_readiness_provenance"] == "READY"
+    assert result["status"] == "AVAILABLE"
+    assert result["current_aggregate_usd"] == "1100"
+    assert result["missing_inputs"] == []
+    assert (
+        capital.verify_governed_capital_result(result, input_path, contract_path)
+        == result
+    )
+
+
+@pytest.mark.parametrize("readiness", [None, "UNKNOWN"])
+def test_cr2_d1_unknown_or_missing_policy_readiness_fails(readiness):
+    """Readiness is an authority enum, never a truthy availability default."""
+
+    case = _case()
+    if readiness is None:
+        case["policy"].pop("policy_status", None)
+    else:
+        case["policy"]["policy_status"] = readiness
+
+    with pytest.raises(capital.CapitalValidationError, match="policy readiness"):
+        capital.calculate_invested_capital(**case)
+
+
+def test_cr2_d1_natively_valid_unresolved_shared_flow_policy_preserves_numeric_projection():
+    case = _case()
+    case["policy"] = _unresolved_shared_flow_policy()
+
+    result = capital.calculate_invested_capital(**case)
+
+    assert result["policy_readiness_provenance"] == "REQUIRED_NOT_READY"
+    assert result["status"] == "REQUIRED_NOT_READY"
+    assert result["current_aggregate_usd"] == "150"
 
 
 def test_required_epoch_accounts_are_bound_to_provenance_and_crosswalk():
@@ -1260,6 +1581,367 @@ def test_date_only_source_cannot_be_reported_as_exact_timestamp(tmp_path):
     input_path.write_bytes(capital._canonical(inputs))
     with pytest.raises(capital.CapitalValidationError, match="source timestamp"):
         capital.build_governed_capital_result(input_path, contract_path)
+
+
+def test_t5c_custody_requires_the_paired_selected_policy_decision():
+    case = _case()
+    case["required_epochs"] = [
+        {
+            "epoch_id": "custody-1",
+            "account_id": "custody-account",
+            "strategy_id": "A",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+    case["opening_basis"] = []
+    coverage = {
+        "account_id": "custody-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": "custody-1",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(coverage),
+        }
+    ]
+    deposit = {
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    anchor = {
+        "record_id": "custody-allocation",
+        "account_id": "custody-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "amount": {"value": "96", "currency": "USD", "status": "AVAILABLE"},
+    }
+    evidence = capital._digest(deposit)
+    case["events"] = [
+        _event(
+            "custody-deposit",
+            "custody-1",
+            "2026-01-01",
+            "EXTERNAL_CONTRIBUTION",
+            "100",
+            source_evidence_sha256=evidence,
+            fx_evidence_sha256=evidence,
+        )
+    ]
+    policy = deepcopy(case["policy"])
+    policy.pop("provider_custody_perimeter", None)
+    policy["owner_decision_receipts"].pop("PROVIDER_CUSTODY_PERIMETER", None)
+    with pytest.raises(
+        capital.CapitalValidationError, match="provider-custody perimeter undecided"
+    ):
+        capital._verify_selected_facts(
+            case,
+            {"provider_ledger": {"capital_anchors": [anchor], "flows": [deposit]}},
+            policy,
+        )
+
+
+def test_t5c_custody_deposit_is_capital_and_same_day_allocation_is_not():
+    case = _case()
+    case["required_epochs"] = [
+        {
+            "epoch_id": "custody-1",
+            "account_id": "custody-account",
+            "strategy_id": "A",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+    case["opening_basis"] = []
+    coverage = {
+        "account_id": "custody-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": "custody-1",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(coverage),
+        }
+    ]
+    deposit = {
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    anchor = {
+        "record_id": "custody-allocation",
+        "account_id": "custody-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "amount": {"value": "96", "currency": "USD", "status": "AVAILABLE"},
+    }
+    evidence = capital._digest(deposit)
+    case["events"] = [
+        _event(
+            "custody-deposit",
+            "custody-1",
+            "2026-01-01",
+            "EXTERNAL_CONTRIBUTION",
+            "100",
+            source_evidence_sha256=evidence,
+            fx_evidence_sha256=evidence,
+        )
+    ]
+    snapshots = {
+        "provider_ledger": {
+            "capital_anchors": [anchor],
+            "flows": [deposit],
+            "admissions": [coverage],
+        }
+    }
+    capital._verify_selected_facts(case, snapshots, case["policy"])
+    calculation_case = deepcopy(case)
+    calculation_case["opening_basis"] = [
+        _event(
+            "custody-open", "custody-1", "2026-01-01", "OPENING_CONTRIBUTED_BASIS", "0"
+        )
+    ]
+    assert (
+        capital.calculate_invested_capital(**calculation_case)["current_aggregate_usd"]
+        == "100"
+    )
+
+    before_deposit = deepcopy(anchor)
+    before_deposit["event_date"] = "2025-12-31"
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="custody allocation lacks qualifying deposit",
+    ):
+        capital._verify_selected_facts(
+            case,
+            {
+                "provider_ledger": {
+                    "capital_anchors": [before_deposit],
+                    "flows": [deposit],
+                    "admissions": [coverage],
+                }
+            },
+            case["policy"],
+        )
+
+    negative_cash = deepcopy(anchor)
+    negative_cash["amount"]["value"] = "101"
+    with pytest.raises(
+        capital.CapitalValidationError, match="provider-custody cash is negative"
+    ):
+        capital._verify_selected_facts(
+            case,
+            {
+                "provider_ledger": {
+                    "capital_anchors": [negative_cash],
+                    "flows": [deposit],
+                    "admissions": [coverage],
+                }
+            },
+            case["policy"],
+        )
+
+    tiny_negative_deposit = deepcopy(deposit)
+    tiny_negative_deposit["amount"]["value"] = "99.99999999999999999999999999999"
+    tiny_negative_anchor = deepcopy(anchor)
+    tiny_negative_anchor["amount"]["value"] = "100"
+    tiny_positive_deposit = deepcopy(deposit)
+    tiny_positive_deposit["amount"]["value"] = "100.00000000000000000000000000002"
+    tiny_positive_anchor = deepcopy(anchor)
+    tiny_positive_anchor["amount"]["value"] = "100.00000000000000000000000000001"
+    for precision in (28, 80):
+        with localcontext() as context:
+            context.prec = precision
+            with pytest.raises(
+                capital.CapitalValidationError,
+                match="provider-custody cash is negative",
+            ):
+                capital._verify_provider_custody_perimeter(
+                    {
+                        "capital_anchors": [tiny_negative_anchor],
+                        "flows": [tiny_negative_deposit],
+                    },
+                    case["required_epochs"],
+                    case["policy"],
+                )
+            capital._verify_provider_custody_perimeter(
+                {
+                    "capital_anchors": [tiny_positive_anchor],
+                    "flows": [tiny_positive_deposit],
+                },
+                case["required_epochs"],
+                case["policy"],
+            )
+
+
+def test_t5c_custody_perimeter_preserves_generic_opening_owner_capital():
+    case = _case()
+    epoch = case["required_epochs"][0]
+    epoch.update(account_id="generic-account", effective_start="2026-01-01")
+    case["required_epochs"] = [epoch]
+    case["opening_basis"] = []
+    case["events"] = []
+    generic_coverage = {
+        "account_id": "generic-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": epoch["epoch_id"],
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(generic_coverage),
+        }
+    ]
+    generic_opening = {
+        "record_id": "generic-opening-owner-capital",
+        "account_id": "generic-account",
+        "strategy_id": None,
+        "capital_type": "OPENING_CONTRIBUTED_BASIS",
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    generic_anchor = {
+        "record_id": "generic-opening-anchor",
+        "account_id": "generic-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+        "authority_profile": "SYNTHETIC",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    generic_ledger = {
+        "capital_anchors": [generic_anchor],
+        "flows": [generic_opening],
+        "admissions": [generic_coverage],
+    }
+
+    # The same native guard is called by the input producer and by the
+    # independent selected-facts verifier. Generic opening owner-capital rows
+    # are not provider-custody deposits and keep their established treatment.
+    assert (
+        capital._verify_provider_custody_perimeter(
+            generic_ledger, case["required_epochs"], case["policy"]
+        )
+        == set()
+    )
+    source_digest = capital._digest(generic_opening)
+    case["opening_basis"] = [
+        _event(
+            "generic-opening-owner-capital",
+            epoch["epoch_id"],
+            "2026-01-01",
+            "OPENING_CONTRIBUTED_BASIS",
+            "100",
+            source_evidence_sha256=source_digest,
+            fx_evidence_sha256=source_digest,
+        )
+    ]
+    capital._verify_selected_facts(
+        case, {"provider_ledger": generic_ledger}, case["policy"]
+    )
+
+    statement_anchor = {
+        **generic_anchor,
+        "record_id": "statement-opening-anchor",
+        "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+    }
+    statement_flow = {
+        **generic_opening,
+        "record_id": "statement-dividend",
+        "capital_type": None,
+        "flow_type": "DIVIDEND_INTEREST_REINVESTMENT",
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+    }
+    assert (
+        capital._verify_provider_custody_perimeter(
+            {"capital_anchors": [statement_anchor], "flows": [statement_flow]},
+            case["required_epochs"],
+            case["policy"],
+        )
+        == set()
+    )
+
+    custody_anchor = {
+        **generic_anchor,
+        "record_id": "custody-opening-anchor",
+        "account_id": "custody-account",
+    }
+    custody_epoch = {**epoch, "account_id": "custody-account"}
+    custody_deposit = {
+        **generic_opening,
+        "record_id": "custody-deposit",
+        "account_id": "custody-account",
+        "capital_type": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+    }
+    custody_ledger = {
+        "capital_anchors": [custody_anchor],
+        "flows": [custody_deposit],
+    }
+    assert capital._verify_provider_custody_perimeter(
+        custody_ledger, [custody_epoch], case["policy"]
+    ) == {"custody-account"}
+
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="custody allocation lacks qualifying deposit",
+    ):
+        capital._verify_provider_custody_perimeter(
+            {"capital_anchors": [custody_anchor], "flows": []},
+            [custody_epoch],
+            case["policy"],
+        )
+
+    unsupported_transfer = {
+        **custody_deposit,
+        "record_id": "custody-transfer",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "capital_disposition": None,
+    }
+    with pytest.raises(
+        capital.CapitalValidationError,
+        match="unsupported provider-custody cash fact",
+    ):
+        capital._verify_provider_custody_perimeter(
+            {
+                "capital_anchors": [custody_anchor],
+                "flows": [custody_deposit, unsupported_transfer],
+            },
+            [custody_epoch],
+            case["policy"],
+        )
 
 
 def _account_ledger_opening(epoch, sources):

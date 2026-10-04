@@ -5958,3 +5958,32 @@ def test_publish_panel_forwards_dependence_inputs_to_every_consumer() -> None:
         "publish_panel invokes control-panel subcommands that accept "
         f"--dependence-selected-inputs without forwarding them: {missing}"
     )
+
+
+def test_cr2_custody_template_reference_survives_build_baseline(tmp_path, monkeypatch):
+    """The real template assignment must retain the six selected authority pins."""
+    ref = {
+        f"{name}_{kind}": (str(tmp_path / name) if kind == "path" else "a" * 64)
+        for name in ("contract", "registry", "schema")
+        for kind in ("path", "sha256")
+    }
+    template = tmp_path / "template.json"
+    template.write_bytes(
+        canonical_json_bytes({"roots": {}, "provider_ledger": {"financial_mvp": ref}})
+    )
+    generation = tmp_path / ("b" * 64)
+    generation.mkdir()
+    for name in ("generation.json", "provider-ledger.json"):
+        (generation / name).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        builder, "_recipe", lambda _: {"baseline_spec": {"path": str(template)}}
+    )
+    monkeypatch.setattr(
+        builder, "_published_generation", lambda _: (generation.name, generation)
+    )
+    monkeypatch.setattr(builder, "_tool", lambda *args: {"generation_id": "c" * 64})
+    result = builder.build_baseline(
+        tmp_path / "recipe.json", tmp_path, tmp_path / "output"
+    )
+    emitted = json.loads(Path(result["spec"]).read_text(encoding="utf-8"))
+    assert emitted["provider_ledger"].get("financial_mvp") == ref

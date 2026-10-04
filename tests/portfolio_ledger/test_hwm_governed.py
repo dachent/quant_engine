@@ -17,6 +17,7 @@ from quant_engine.portfolio_ledger import (
     validate_as_held_hwm_policy,
     validate_governed_hwm_calendar_authority,
 )
+from quant_engine.portfolio_ledger.hwm import HwmCoverageError
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -402,3 +403,16 @@ def test_tampered_authority_hash_rejects() -> None:
 
     with pytest.raises(GovernedHwmAuthorityError, match="identity differs"):
         _validate(authority, accepted_hash=accepted_hash)
+
+
+def test_cr2_optional_custody_hwm_policy_accepts_paired_sixth_receipt() -> None:
+    policy = _policy()
+    policy["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"] = "f" * 64
+    validate_as_held_hwm_policy(policy)
+
+
+def test_cr2_optional_custody_hwm_policy_rejects_unknown_receipt() -> None:
+    policy = _policy()
+    policy["owner_decision_receipts"]["UNRELATED"] = "f" * 64
+    with pytest.raises(HwmCoverageError, match="keys differ"):
+        validate_as_held_hwm_policy(policy)

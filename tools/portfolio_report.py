@@ -89,9 +89,9 @@ from portfolio_invested_capital import (
 )
 
 
-REPORT_SCHEMA_VERSION: Final = 1
+REPORT_SCHEMA_VERSION: Final = 2
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -2509,6 +2509,15 @@ def _capital_strategy_rows(block: Mapping[str, Any]) -> dict[str, dict[str, Any]
                 }
             )
         row["members"] = members
+        cash = _objects(item.get("derived_cash", []), "current capital derived cash")
+        if cash and not block.get("custody_authority"):
+            raise ReportValidationError("custody cash lacks selected authority")
+        row["cash"] = [_capital_part(part, "custody derived cash") for part in cash]
+        if any(
+            part["status"] != CAPITAL_AVAILABLE or part["value"] < 0
+            for part in row["cash"]
+        ):
+            raise ReportValidationError("custody cash is not available or is negative")
         rows[strategy_id] = row
     return rows
 
@@ -2560,13 +2569,24 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
             )
         if (
             any(member["value"] is None for member in members)
-            or _exact_total([member["value"] for member in members]) != row["value"]
+            or _exact_total(
+                [
+                    *[member["value"] for member in members],
+                    *[part["value"] for part in row["cash"]],
+                ]
+            )
+            != row["value"]
         ):
             raise ReportValidationError(
                 "current capital strategy differs from its members: "
                 f"{row['strategy_id']}"
             )
-        if row["as_of_date"] != min(member["as_of_date"] for member in members):
+        if row["as_of_date"] != min(
+            [
+                *[member["as_of_date"] for member in members],
+                *[part["as_of_date"] for part in row["cash"]],
+            ]
+        ):
             raise ReportValidationError(
                 "current capital strategy is not dated at its oldest member: "
                 f"{row['strategy_id']}"
@@ -2630,6 +2650,85 @@ def _current_capital(catalog: Mapping[str, Any]) -> Mapping[str, Any]:
     if any(row["weight"] is not None for row in excluded):
         raise ReportValidationError("a retained excluded strategy carries a weight")
     return block
+
+
+def _verify_custody_current_capital(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    source_clock_authority: tuple[dict[str, Any], dict[str, Any]] | None,
+) -> None:
+    raw = catalog.get("current_capital")
+    if raw is None:
+        return
+    block = _object(raw, "current capital")
+    authority = block.get("custody_authority")
+    if authority is None:
+        if any(
+            row.get("derived_cash")
+            for row in _objects(block.get("strategies"), "strategies")
+        ):
+            raise ReportValidationError("custody cash lacks selected source authority")
+        return
+    if source_clock_authority is None:
+        raise ReportValidationError(
+            "custody current capital requires verified source authority"
+        )
+    phase = source_clock_authority[0]
+    identity = _object(authority, "custody authority")
+    fields = {
+        "contract_raw_sha256": "financial_input_contract",
+        "ledger_catalog_sha256": "provider_ledger_catalog",
+        "ledger_manifest_sha256": "provider_ledger_manifest",
+        "admission_receipt_sha256": "provider_ledger_receipt",
+    }
+    if phase.get("provider_ledger_generation_id") != identity.get(
+        "ledger_generation_id"
+    ) or any(
+        _object(phase.get(source), source).get("sha256") != identity.get(target)
+        for target, source in fields.items()
+    ):
+        raise ReportValidationError("custody selected source authority differs")
+    from provider_ledger import _financial_mvp_module
+    from portfolio_baseline import _derived_custody_cash
+
+    module = _financial_mvp_module()
+    contract = _load_json(
+        _source_clock_file_path(
+            phase["financial_input_contract"], "custody financial contract"
+        ),
+        "custody financial contract",
+    )
+    if (
+        module.contract_digest(contract) != identity.get("contract_semantic_sha256")
+        or module.census_digest(contract["current_census"])
+        != identity.get("census_sha256")
+        or contract["current_census"]["census_id"] != identity.get("census_id")
+        or module.invested_capital_policy_digest(contract)
+        != identity.get("invested_capital_policy_sha256")
+    ):
+        raise ReportValidationError("custody selected contract authority differs")
+    _, raw, generation_id, catalog_sha256 = _selected_provider_ledger_catalog(
+        catalog, baseline_root, provider_ledger_root
+    )
+    if generation_id != identity.get(
+        "ledger_generation_id"
+    ) or catalog_sha256 != identity.get("ledger_catalog_sha256"):
+        raise ReportValidationError("custody raw selected ledger differs")
+    try:
+        cash = _derived_custody_cash(
+            raw, _date(block["valuation_date"], "custody cutoff")
+        )
+    except (RuntimeError, ValueError, KeyError) as exc:
+        raise ReportValidationError(f"custody raw recompute failed: {exc}") from exc
+    rows = _objects(block["strategies"], "custody strategies")
+    if set(cash) - {str(row["strategy_id"]) for row in rows} or any(
+        row.get("derived_cash", []) != cash.get(str(row["strategy_id"]), [])
+        for row in rows
+    ):
+        raise ReportValidationError(
+            "custody cash differs from independent raw recompute"
+        )
 
 
 def _verify_current_capital_accounts(
@@ -6655,6 +6754,9 @@ def build_report_data(
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )
+    _verify_custody_current_capital(
+        catalog, baseline_root, provider_ledger_root, source_clock_authority
+    )
     strategy_product_controls, product_contract_provenance = _report_product_controls(
         catalog
     )
@@ -7010,7 +7112,15 @@ def build_report_data(
             baseline_root=baseline_root,
             provider_ledger_root=provider_ledger_root,
             calculation_cutoff_date=calculation_cutoff_date,
-            financial_input_contract_path=financial_input_contract_path,
+            financial_input_contract_path=(
+                _source_clock_file_path(
+                    source_clock_authority[0].get("financial_input_contract"),
+                    "financial input contract",
+                )
+                if invested_capital_input_generation_path is None
+                and _current_capital(catalog).get("custody_authority")
+                else financial_input_contract_path
+            ),
         )
     governed_hwm_proof = (
         _report_governed_hwm_proof(
@@ -7405,6 +7515,8 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    if verified_capital.get("custody_authority") is not None:
+        report["custody_current_capital"] = dict(verified_capital)
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
     if decomposition_lenses is not None:
@@ -8643,7 +8755,11 @@ def _workbook_parity_receipt(
         report = json.loads(report_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReportValidationError("workbook parity report JSON is invalid") from exc
-    if not isinstance(report, dict) or report.get("report_schema_version") != 1:
+    if (
+        not isinstance(report, dict)
+        or isinstance(report.get("report_schema_version"), bool)
+        or report.get("report_schema_version") not in {1, 2}
+    ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
         formula_workbook = load_workbook(
@@ -12454,7 +12570,7 @@ def publish_report(
             candidate_dir / REPORT_DATA_NAME,
             "normalized/portfolio-report-data.json",
             "portfolio-report-data",
-            "1",
+            str(report["report_schema_version"]),
         ),
     ]
     if "workbook" in evidence_snapshots:

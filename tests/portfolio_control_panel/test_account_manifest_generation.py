@@ -21909,6 +21909,21 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
         "status": "AVAILABLE",
         "value": "499",
     }
+    ledger["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
+    ledger["capital_anchors"][0]["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": ledger["capital_anchors"][0]["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
     payloads = perimeter_module.build_account_manifest_payloads(selected)
@@ -27333,17 +27348,36 @@ def test_mixed_independent_verifier_ignores_null_start_reserve_assignment(
     assert len(result["funded"]) == 1
 
 
-def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
+def test_t5b_event_fx_mixed_opening_anchor_converts_basis_not_performance_nav(
     perimeter_module: Any, verifier_module: Any
 ) -> None:
-    """Retained anchor amount funds the basis; opening_nav is the first ending NAV."""
+    """Event-date FX converts the basis; opening_nav remains the first ending NAV."""
 
     from tools import account_strategy_manifest
 
     base = _mixed_composer_selected_inputs(perimeter_module)
     ledger_payload = base.provider_ledger.json_object()
+    ledger_payload["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
     anchor = ledger_payload["capital_anchors"][0]
-    anchor["amount"]["value"] = "1000"
+    anchor["amount"] = {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    anchor["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": anchor["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1.0002319812774658",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
     anchor["opening_nav"]["value"] = "985.44"
     nav_values = ["985.44", "990", "1000"]
     for nav, value in zip(ledger_payload["nav_observations"], nav_values, strict=True):
@@ -27395,6 +27429,11 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
         opening_anchor=producer_anchors[0],
     )
     assert producer_row is not None
+    expected_opening = Decimal("49891.55") * Decimal("1.0002319812774658")
+    assert producer_row["opening_capital"].quantize(Decimal("1E-10")) == Decimal(
+        "49903.1239055037"
+    )
+    assert producer_row["performance_opening_value"] == Decimal("985.44")
 
     navs, flows, anchors = verifier_module._mixed_normalized_facts(verifier_inputs)
     events = [
@@ -27418,11 +27457,10 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
         },
     )
     verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
-    # R1 / A1 mechanism 3: the 1000 anchor amount is the contributed basis,
-    # never a return value.  Pre-change both engines linked 1000 -> 985.44
-    # (a -1.456 % pre-membership "return"); performance opens at 985.44.
+    # The anchor basis is converted from USDT exactly once at its event-date
+    # close. Performance still opens at the separately supplied USD opening NAV.
     expected = {
-        "opening_capital": Decimal("1000"),
+        "opening_capital": expected_opening,
         "first_base_nav": Decimal("985.44"),
         "first_ending_nav": Decimal("990"),
     }
@@ -27444,7 +27482,9 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
     output_row = next(
         row for row in output["rows"] if row["account_id"] == assignment["account_id"]
     )
-    assert output_row["opening_capital"] == "1000"
+    assert Decimal(output_row["opening_capital"]).quantize(Decimal("1E-10")) == Decimal(
+        "49903.1239055037"
+    )
     assert output_row["opening_capital_date"] == "2024-12-31"
     assert output_row["observation_trace"]["links"][0] == {
         "start_date": "2026-01-30",
@@ -27462,6 +27502,137 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
+
+    producer_only_mutant = dict(payloads)
+    mutant_output = json.loads(
+        producer_only_mutant["outputs/account-strategy-manifest.json"]
+    )
+    mutant_row = next(
+        row
+        for row in mutant_output["rows"]
+        if row["account_id"] == assignment["account_id"]
+    )
+    mutant_row["opening_capital"] = "49891.55"
+    producer_only_mutant["outputs/account-strategy-manifest.json"] = (
+        canonical_json_bytes(mutant_output)
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), producer_only_mutant
+        )
+
+    for mutation in (
+        "missing",
+        "event-date",
+        "source-currency",
+        "target-currency",
+        "boolean-rate",
+        "nonfinite-rate",
+        "source-identity",
+    ):
+        invalid_ledger = deepcopy(ledger_payload)
+        invalid_anchor = invalid_ledger["capital_anchors"][0]
+        if mutation == "missing":
+            del invalid_anchor["event_time_fx"]
+        elif mutation == "event-date":
+            invalid_anchor["event_time_fx"]["date"] = "2026-01-30"
+        elif mutation == "source-currency":
+            invalid_anchor["event_time_fx"]["currency"] = "EUR"
+        elif mutation == "target-currency":
+            invalid_anchor["event_time_fx"]["base_currency"] = "EUR"
+        elif mutation == "boolean-rate":
+            invalid_anchor["event_time_fx"]["rate"] = True
+        elif mutation == "nonfinite-rate":
+            invalid_anchor["event_time_fx"]["rate"] = "Infinity"
+        else:
+            invalid_anchor["event_time_fx"]["generation_id"] = "not-a-generation"
+        invalid_snapshot = InputSnapshot.from_bytes(
+            f"invalid event FX: {mutation}", canonical_json_bytes(invalid_ledger)
+        )
+        invalid_values = _selected_input_kwargs(selected)
+        invalid_values.update(
+            {
+                "provider_ledger": invalid_snapshot,
+                "provider_ledger_manifest": _generation_manifest_snapshot(
+                    catalog=invalid_snapshot,
+                    catalog_artifact_id="normalized/provider-ledger.json",
+                    catalog_schema_name="provider-ledger-catalog",
+                    catalog_schema_version="1",
+                    as_of_date="2026-02-01",
+                ),
+            }
+        )
+        invalid_selected = perimeter_module.AccountManifestSelectedInputs(
+            **invalid_values
+        )
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._mixed_normalized_facts(
+                _mixed_verifier_inputs(verifier_module, invalid_selected)
+            )
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "replacement"),
+    [
+        ("generation_id", "e" * 64),
+        ("provider", "alternate-provider"),
+        ("source_artifact_id", "alternate-rates.csv"),
+    ],
+)
+def test_t5b_event_fx_rejects_valid_alternate_identity_on_selected_route(
+    perimeter_module: Any,
+    verifier_module: Any,
+    identity_field: str,
+    replacement: str,
+) -> None:
+    """Selected FX identity changes cannot be re-signed into the candidate ledger."""
+    base = _mixed_composer_selected_inputs(perimeter_module)
+    ledger_payload = base.provider_ledger.json_object()
+    ledger_payload["portfolio_fx_generation"] = {
+        "generation_id": "f" * 64,
+        "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+    }
+    anchor = ledger_payload["capital_anchors"][0]
+    anchor["amount"] = {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    anchor["event_time_fx"] = {
+        "base_currency": "USD",
+        "currency": "USDT",
+        "date": anchor["event_date"],
+        "field": "Close",
+        "generation_id": "f" * 64,
+        "provider": "yahoo",
+        "rate": "1.0002319812774658",
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
+    selected = _mixed_selected_with_ledger(perimeter_module, base, ledger_payload)
+
+    altered_ledger = selected.provider_ledger.json_object()
+    altered_ledger["capital_anchors"][0]["event_time_fx"][identity_field] = replacement
+    altered_selected = _mixed_selected_with_ledger(
+        perimeter_module, selected, altered_ledger
+    )
+    # The existing selected ledger manifest is rebuilt around the altered
+    # candidate while receipt, policy, schema, and membership snapshots stay fixed.
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._mixed_normalized_facts(
+            _mixed_verifier_inputs(verifier_module, altered_selected)
+        )
+    try:
+        payloads = perimeter_module.build_account_manifest_payloads(altered_selected)
+    except (
+        perimeter_module.AccountAssignmentPerimeterError,
+        perimeter_module.ManifestError,
+    ):
+        return
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, altered_selected), payloads
+        )
 
 
 @pytest.mark.parametrize("lineage_edge", ["schema_relabel", "authority_removal"])

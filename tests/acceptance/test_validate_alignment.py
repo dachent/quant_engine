@@ -55,6 +55,7 @@ from test_validate_generation import (
     START,
     Spec,
     _manifest_row,
+    _policy_fixture,
     _twr_row,
     build,
 )
@@ -226,8 +227,9 @@ def _run(
         cutoff_source="test",
         expected=expected,
     )
-    if repo_root is not None:
-        context.repo_root = repo_root
+    context.repo_root = _policy_fixture(
+        repo_root if repo_root is not None else gen_dir.parent / "test-authority"
+    )
     return checks.run_checks(context)
 
 
@@ -2680,9 +2682,7 @@ BLOCKERS = [checks.BLOCKER_AUTHORITY]
 NOT_READY_ONLY = [checks.NOT_READY]
 CONSISTENT = _bounds_block([_bound_strategy("alpha")], [ACCOUNT_ENTRY, LENS_ENTRY])
 ACCOUNT_POINTER = "downloads/portfolio-report-data.json#$.account_summary[0].as_of_date"
-LENS_POINTER = (
-    "downloads/portfolio-report-data.json#$.decomposition_lenses.lenses[0].as_of_date"
-)
+LENS_POINTER = "downloads/portfolio-report-data.json#$.decomposition_lenses.modes.LIVE_ONLY[0].as_of_date"
 
 
 def test_without_a_block_the_early_dates_are_blockers_and_the_check_is_silent(
@@ -3222,7 +3222,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.problem is None, state.problem
     assert state.census is not None
     assert state.census.sha256 == (
-        "878f8585450c1d595388e97773b381417ca8579b1c6c8397b0c3eded6c6ad391"
+        "2fc2dcd11d53a67798abbcd2c5f47021eecbbaabf7785747094b4d94b908f616"
     )
     tuples = [
         (a.strategy_id, a.status, a.effective_start, a.effective_end)
@@ -3239,11 +3239,11 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
 
 
 def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None:
-    """Guard: Robuxio's value basis ends 2026-09-03 in the oracle, the rest at the cutoff."""
+    """Guard: current admitted NAV and FX reach September 17 in the oracle."""
 
     oracle = checks._oracle_cutoff_dates(_real_context())
     assert oracle is not None
-    assert oracle["robuxio-crypto"] == frozenset({date(2026, 9, 3)})
+    assert oracle["robuxio-crypto"] == frozenset({date(2026, 9, 17)})
     others = {name: days for name, days in oracle.items() if name != "robuxio-crypto"}
     assert len(others) == 6
     assert set(others.values()) == {frozenset({date(2026, 9, 17)})}

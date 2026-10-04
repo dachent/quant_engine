@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import json
 from pathlib import Path
 import shutil
 
 import pytest
+
+import portfolio_controller_graph as controller_graph
 
 from portfolio_controller_graph import (
     ControllerGraphError,
@@ -255,6 +258,103 @@ def test_validation_rejects_a_graph_after_a_bound_source_byte_changes(
         validate_controller_graph(root, graph)
 
 
+def test_build_parses_each_unchanged_source_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One graph build must not repeatedly parse identical source bytes."""
+
+    root = _isolated_projection_root(tmp_path)
+    parsed_filenames: list[str] = []
+    original_parse = controller_graph.ast.parse
+
+    def record_parse(*args: object, **kwargs: object) -> ast.Module:
+        filename = kwargs.get("filename")
+        if filename is None and len(args) > 1:
+            filename = args[1]
+        assert isinstance(filename, str)
+        parsed_filenames.append(filename)
+        return original_parse(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_graph.ast, "parse", record_parse)
+
+    build_controller_graph(root)
+
+    assert parsed_filenames
+    assert all(count == 1 for count in Counter(parsed_filenames).values())
+
+
+def test_current_graph_reader_reparses_changed_bytes_within_one_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader must not reuse an AST after the same source path changes bytes."""
+
+    root = _isolated_projection_root(tmp_path)
+    reader_type = getattr(controller_graph, "_CurrentGraphSourceReader")
+    reader = reader_type(root)
+    parsed_filenames: list[str] = []
+    original_parse = controller_graph.ast.parse
+
+    def record_parse(*args: object, **kwargs: object) -> ast.Module:
+        filename = kwargs.get("filename")
+        if filename is None and len(args) > 1:
+            filename = args[1]
+        assert isinstance(filename, str)
+        parsed_filenames.append(filename)
+        return original_parse(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_graph.ast, "parse", record_parse)
+    relative_path = "tools/portfolio_report.py"
+    first = reader.tree(relative_path)
+    path = root / relative_path
+    path.write_bytes(path.read_bytes() + b"\n# reader-byte-change\n")
+    second = reader.tree(relative_path)
+
+    assert first is not second
+    assert Counter(parsed_filenames) == Counter({relative_path: 2})
+
+
+def test_cached_graph_matches_stateless_reader_for_identical_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader reuse must preserve the source-bound graph on identical bytes."""
+
+    root = _isolated_projection_root(tmp_path)
+    reader_type = getattr(controller_graph, "_CurrentGraphSourceReader")
+    cached_graph = build_controller_graph(root)
+
+    class StatelessReader:
+        def __init__(self, repo_root: Path) -> None:
+            self.repo_root = repo_root
+
+        def tree(self, relative_path: str) -> ast.Module:
+            return controller_graph._tree(self.repo_root, relative_path)
+
+    monkeypatch.setattr(controller_graph, "_CurrentGraphSourceReader", StatelessReader)
+
+    assert cached_graph == build_controller_graph(root)
+    assert reader_type is not StatelessReader
+
+
+def test_second_graph_pass_rejects_semantic_route_mutation_after_first_build(
+    tmp_path: Path,
+) -> None:
+    """A later build or validation must parse a changed required CLI route."""
+
+    root = _isolated_projection_root(tmp_path)
+    graph = build_controller_graph(root)
+    _replace_function_literal(
+        root / "tools/portfolio_release_builder.py",
+        "build_panel_candidate",
+        '"portfolio_control_panel.py"',
+        '"removed_panel_consumer.py"',
+    )
+
+    with pytest.raises(ControllerGraphError, match="panel candidate build CLI target"):
+        build_controller_graph(root)
+    with pytest.raises(ControllerGraphError, match="panel candidate build CLI target"):
+        validate_controller_graph(root, graph)
+
+
 def test_build_rejects_mismatched_core_and_materializer_stage_declarations(
     tmp_path: Path,
 ) -> None:
@@ -463,6 +563,25 @@ def test_financial_source_schema_is_bound_and_has_full_impact() -> None:
     assert affected_stages(
         graph, ["schemas/portfolio/financial-mvp-source-contract.schema.json"]
     ) == ["ledger", "baseline", "attribution", "analytics", "report", "panel"]
+
+
+def test_baseline_spec_schema_is_a_declared_baseline_generation_contract() -> None:
+    """The baseline's manually validated specification reaches all downstream stages."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    baseline = next(
+        flow for flow in graph["artifact_flows"] if flow["id"] == "baseline-generation"
+    )
+
+    assert "schemas/portfolio/baseline-spec.schema.json" in baseline["source_paths"]
+    assert "schemas/portfolio/baseline-spec.schema.json" in baseline["contracts"]
+    assert affected_stages(graph, ["schemas/portfolio/baseline-spec.schema.json"]) == [
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ]
 
 
 def test_graph_records_integrated_preparation_declaration() -> None:

@@ -7,6 +7,7 @@ reads only the committed baseline file itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -14,21 +15,69 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = REPO_ROOT / "acceptance" / "expected-baseline.json"
+HISTORICAL_V2_PATH = (
+    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v2.json"
+)
+HISTORICAL_V2_SHA256 = (
+    "b87ab5bfd638d0ceb7d4415c05b5c43a7df7c48517519ddee0d815f4b9c6ce91"
+)
+CURRENT_09F6_HEAD = "09f6117513d57b8af7f18d3cdc655b3984ccfd44"
+CURRENT_AGREE_COUNT = 102
+CURRENT_NOT_DERIVABLE_COUNT = 14
+CURRENT_RAW_OUTPUT_SHA256 = {
+    "a": "76e06eccafb9a9467a26f47d2b6956e2c7678d7297441df229cbe6f969d48954",
+    "b": "8bf77ff37d8d1da1f39e7c310ba5923c2bd9bdc82bee270a80fadc619213ae26",
+}
+CURRENT_CONTRACT_POINTER = (
+    "contracts/portfolio-financial-mvp-source-v1.json",
+    "2fc2dcd11d53a67798abbcd2c5f47021eecbbaabf7785747094b4d94b908f616",
+)
+CURRENT_AUDIT_AUTHORITY_POINTERS = frozenset(
+    {
+        (
+            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/A-response.json",
+            "e5b5dc6acd5304b1bdc797c23168f2ad0c23cb38e75ae7cc7872e53db5d07683",
+        ),
+        (
+            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/B-response.json",
+            "84b84c3d22b33f7e03c92f3f8ff731d17f3a62c976f3560d196e1203a87edf7c",
+        ),
+        (
+            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/actual-sixth-receipt.json",
+            "773259022e297b06e6133c661a937e7cf7a331d58c6955a39ce22112fe93ddcb",
+        ),
+        (
+            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/approved-policy-decision.json",
+            "9b99fe3c7a60fdf2975b05981f64e06b099d6dc8cfa73141536d5c15a55313db",
+        ),
+    }
+)
 
 TOLERANCE_UNITS = {"USD", "ratio"}
 EXACT_UNITS = {"count", "date", "list", "status"}
 
 
-def _load() -> dict[str, Any]:
-    raw = BASELINE_PATH.read_bytes()
-    assert b"\r\n" not in raw, "expected-baseline.json must use LF line endings"
+def _load(path: Path = BASELINE_PATH) -> dict[str, Any]:
+    raw = path.read_bytes()
+    assert b"\r\n" not in raw, f"{path.name} must use LF line endings"
     value: dict[str, Any] = json.loads(raw.decode("utf-8"))
     return value
+
+
+def _rows(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*doc["metrics"], *doc["not_derivable"]]
 
 
 def test_file_is_utf8_lf_json() -> None:
     assert BASELINE_PATH.is_file(), f"missing {BASELINE_PATH}"
     _load()  # decodes cleanly as UTF-8 JSON with no CRLF
+
+
+def test_historical_v2_baseline_is_byte_exact() -> None:
+    assert HISTORICAL_V2_PATH.is_file(), f"missing {HISTORICAL_V2_PATH}"
+    raw = HISTORICAL_V2_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HISTORICAL_V2_SHA256
+    _load(HISTORICAL_V2_PATH)
 
 
 def test_header_schema() -> None:
@@ -86,14 +135,25 @@ ALLOWED_AUTHORITY_POINTER_ROOTS = (
     "evidence/",
     "schemas/",
 )
+ALLOWED_AUDIT_AUTHORITY_POINTERS = frozenset(
+    path for path, _sha256 in CURRENT_AUDIT_AUTHORITY_POINTERS
+)
 
 
 def _is_data_root_relative(path: str) -> bool:
-    # PureWindowsPath(...).anchor is non-empty for both "C:\..." and the
-    # driveless rooted "\Dev..." form; PurePosixPath covers "/...".
     if PureWindowsPath(path).anchor or PurePosixPath(path).anchor:
         return False
-    return path.startswith(ALLOWED_AUTHORITY_POINTER_ROOTS)
+    if chr(92) in path:
+        return False
+    parts = PurePosixPath(path).parts
+    if not parts or any(part in {".", ".."} for part in parts):
+        return False
+    if path != str(PurePosixPath(path)):
+        return False
+    return (
+        path.startswith(ALLOWED_AUTHORITY_POINTER_ROOTS)
+        or path in ALLOWED_AUDIT_AUTHORITY_POINTERS
+    )
 
 
 def test_no_machine_local_absolute_authority_pointer_paths() -> None:
@@ -133,6 +193,16 @@ def test_authority_pointer_gate_regression_rooted_and_relative() -> None:
         assert _is_data_root_relative(good), good
     # prefix must match at a component boundary, not as a loose substring
     assert not _is_data_root_relative("contracts-evil/payload.json")
+    for path in ALLOWED_AUDIT_AUTHORITY_POINTERS:
+        assert _is_data_root_relative(path), path
+    for bad in (
+        "contracts/../evidence/payload.json",
+        "contracts/./portfolio-financial-mvp-source-v1.json",
+        "contracts//portfolio-financial-mvp-source-v1.json",
+        r"contracts\portfolio-financial-mvp-source-v1.json",
+        "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/unadmitted.json",
+    ):
+        assert not _is_data_root_relative(bad), bad
 
 
 def test_tolerance_classes_match_spec() -> None:
@@ -205,6 +275,37 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
         assert "reason_a" in row and "reason_b" in row
 
 
+def test_current_successor_identity_and_authority_coverage() -> None:
+    doc = _load()
+    rows = _rows(doc)
+    assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
+    assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
+    assert len(rows) == 116
+    for side in ("a", "b"):
+        assert doc["derivations"][side]["code_commit"] == CURRENT_09F6_HEAD
+        assert (
+            doc["derivations"][side]["raw_output_sha256"]
+            == CURRENT_RAW_OUTPUT_SHA256[side]
+        )
+        assert {row[f"derivation_{side}"]["code_commit"] for row in doc["metrics"]} == {
+            CURRENT_09F6_HEAD
+        }
+    pointers = [pointer for row in rows for pointer in row.get("authority_pointer", [])]
+    for row in rows:
+        contract_pointers = [
+            (pointer["path"], pointer["sha256"])
+            for pointer in row.get("authority_pointer", [])
+            if pointer.get("path") == CURRENT_CONTRACT_POINTER[0]
+        ]
+        assert contract_pointers == [CURRENT_CONTRACT_POINTER], row
+    audit_pointers = {
+        (pointer["path"], pointer["sha256"])
+        for pointer in pointers
+        if str(pointer.get("path", "")).startswith("audit/")
+    }
+    assert audit_pointers == CURRENT_AUDIT_AUTHORITY_POINTERS
+
+
 # --- v2 row set (successor of PR #485's v1; inputs acceptance/v2/*) ---
 
 # Main commit (merge of PR #492) at which acceptance/derive_a and
@@ -235,7 +336,7 @@ def _find(
 
 
 def test_v2_row_set_and_derivation_identities() -> None:
-    doc = _load()
+    doc = _load(HISTORICAL_V2_PATH)
     assert len(doc["metrics"]) == V2_AGREE_COUNT
     assert len(doc["not_derivable"]) == V2_NOT_DERIVABLE_COUNT
     assert doc["derivations"]["a"]["code_commit"] == V2_COMMITS["a"]
@@ -248,7 +349,7 @@ def test_v2_row_set_and_derivation_identities() -> None:
 def test_v2_quantbase_rederived_on_finalized_capture() -> None:
     """Volatis (Quantbase) re-derived on the finalized 52b3758a capture:
     59,092.28 USD as of 2026-09-17, TWR 0.6765085987, MWR 0.1956573642."""
-    doc = _load()
+    doc = _load(HISTORICAL_V2_PATH)
     for metric_id, entity in (
         ("capital.account.cutoff", "account-58e75e8d952fa1b8"),
         ("capital.strategy.cutoff", "volatis-strategy"),
@@ -271,7 +372,7 @@ def test_v2_matrixport_rows_unchanged_with_raw_observation_date() -> None:
     """Matrixport rows keep their USD-converted values with true as_of
     2026-09-03; date.source_last_observation is the last raw observation
     date (2026-09-17) of the finalized f6e87f8c capture."""
-    doc = _load()
+    doc = _load(HISTORICAL_V2_PATH)
     row = _find(doc, "capital.strategy.cutoff", "robuxio-crypto")
     assert row["as_of"] == "2026-09-03", row
     assert Decimal(row["expected"]) == Decimal("52055.38"), row

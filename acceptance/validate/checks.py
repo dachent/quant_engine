@@ -24,10 +24,11 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+import json
 import math
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 
 from . import shell
 from .generation import (
@@ -2465,11 +2466,27 @@ def check_liquid_identity(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def _allocation_totals(ctx: Context) -> tuple[Decimal, Decimal | None, list[str]]:
+def _historical_snapshot(row: Mapping[str, Any]) -> bool:
+    raw_day = row.get("as_of_date")
+    day = to_date(raw_day)
+    return (
+        isinstance(raw_day, str)
+        and len(raw_day) == 10
+        and day is not None
+        and raw_day == day.isoformat()
+        and row.get("weight_basis") == f"HISTORICAL_SNAPSHOT_{day:%Y_%m_%d}"
+    )
+
+
+def _allocation_totals(
+    ctx: Context, *, current_only: bool = False
+) -> tuple[Decimal, Decimal | None, list[str]]:
     systematic = Decimal(0)
     reserve: Decimal | None = None
     dates: list[str] = []
     for row in rows(ctx.report, "allocation_history"):
+        if current_only and _historical_snapshot(row):
+            continue
         value = to_decimal(row.get("current_value_usd")) or Decimal(0)
         if row.get("scope") == "SYSTEMATIC":
             systematic += value
@@ -2482,7 +2499,13 @@ def _allocation_totals(ctx: Context) -> tuple[Decimal, Decimal | None, list[str]
 def check_allocation_sum(ctx: Context) -> Iterator[Finding]:
     if not rows(ctx.report, "allocation_history"):
         return
-    systematic, reserve, _ = _allocation_totals(ctx)
+    _allocation_systematic, reserve, _ = _allocation_totals(ctx, current_only=True)
+    systematic = sum(_current_capital_values(ctx).values(), Decimal(0))
+    for expected in ctx.expected or []:
+        if expected.get("metric_id") == "capital.portfolio.systematic.cutoff":
+            amount = to_decimal(expected.get("expected"))
+            if amount is not None:
+                systematic = amount
     for file, path, value in (
         (PANEL, "$.capital.systematic", node(ctx.panel, "capital", "systematic")),
         (
@@ -2502,7 +2525,7 @@ def check_allocation_sum(ctx: Context) -> Iterator[Finding]:
                 file,
                 path,
                 ("B6",),
-                "systematic total differs from the sum of its allocation rows",
+                "systematic total differs from current-cutoff capital authority",
             )
     panel_reserve = to_decimal(node(ctx.panel, "capital", "reserve"))
     if reserve is not None and panel_reserve is not None:
@@ -2967,6 +2990,7 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
         (position, row)
         for position, row in enumerate(rows(ctx.report, "allocation_history"))
         if (to_date(row.get("as_of_date")) or cutoff) < cutoff
+        and not _historical_snapshot(row)
     ]
     if stale_allocations:
         dates = sorted({str(row.get("as_of_date")) for _, row in stale_allocations})
@@ -3099,6 +3123,46 @@ def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
     and the panel, entity ``account|strategy|effective_start`` like its siblings. No
     defect id is attached: none describes it.
     """
+
+    # A missing list is the legacy contract. An explicit list, even empty,
+    # declares this cross-table universe and must account for each funded epoch.
+    if isinstance(node(ctx.panel, "account_manifest", "rows"), list):
+        blocked = blocked_epochs(ctx)
+        for entries, match, skip, file, path in (
+            (
+                twr_rows(ctx),
+                _manifest_epoch,
+                blocked.skips_report_row,
+                REPORT,
+                "$.twr_mwr",
+            ),
+            (
+                manifest_rows(ctx),
+                _report_epoch,
+                blocked.skips_manifest_row,
+                PANEL,
+                "$.account_manifest.rows",
+            ),
+        ):
+            for position, row in entries:
+                partner = match(ctx, row)
+                if (
+                    skip(row)
+                    or partner.row is not None
+                    or partner.disagreement is not None
+                ):
+                    continue
+                yield _finding(
+                    "capital.account_identity",
+                    BLOCKER_AUTHORITY,
+                    "|".join(epoch_key(row)),
+                    {"epoch": epoch_identity(row)},
+                    "same whole epoch identity and admission kind in the other table",
+                    file,
+                    f"{path}[{position}]",
+                    (),
+                    "account epoch counterpart is missing from the other declared table",
+                )
 
     for item in epoch_disagreements(ctx):
         position, row = item.report
@@ -4232,64 +4296,249 @@ def check_implied_flows(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
-    """B5: one current systematic weight per strategy across every view."""
+def _policy_weights(
+    ctx: Context,
+) -> tuple[dict[str, tuple[str, Decimal]], dict[str, str]]:
+    """Read independent policy authority once; never derive it from displayed weights."""
+    if "policy_weights" in ctx._cache:
+        return cast(
+            tuple[dict[str, tuple[str, Decimal]], dict[str, str]],
+            ctx._cache["policy_weights"],
+        )
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    payload = json.loads(
+        (root / "contracts" / "portfolio-dependence-policy-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if not isinstance(payload, dict) or payload.get("policy_id") != "PORT-DEPENDENCE-1":
+        raise ValueError("dependence policy identity differs")
+    day = node(payload, "allocation_authority", "as_of_date")
+    parsed_day = to_date(day)
+    if (
+        not isinstance(day, str)
+        or len(day) != 10
+        or parsed_day is None
+        or day != parsed_day.isoformat()
+    ):
+        raise ValueError("dependence policy allocation date is invalid")
+    source = payload.get("series")
+    if not isinstance(source, list) or not source:
+        raise ValueError("dependence policy series are absent")
+    declared: dict[str, tuple[str, Decimal]] = {}
+    strategies: set[str] = set()
+    for row in source:
+        if not isinstance(row, dict):
+            raise ValueError("dependence policy series is invalid")
+        series, strategy = row.get("series_id"), row.get("strategy_id")
+        weight = to_decimal(row.get("allocation_weight"))
+        if (
+            not isinstance(series, str)
+            or not series.strip()
+            or not isinstance(strategy, str)
+            or not strategy.strip()
+            or series in declared
+            or strategy in strategies
+            or weight is None
+            or weight < 0
+        ):
+            raise ValueError("dependence policy series identity or weight is invalid")
+        declared[series] = (strategy, weight)
+        strategies.add(strategy)
+    total = sum((weight for _, weight in declared.values()), Decimal(0))
+    if total <= 0:
+        raise ValueError("dependence policy weight total is not positive")
+    result = (
+        {
+            name: (strategy, weight / total)
+            for name, (strategy, weight) in declared.items()
+        },
+        {
+            "policy_id": "PORT-DEPENDENCE-1",
+            "as_of_date": str(day),
+            "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
+        },
+    )
+    ctx._cache["policy_weights"] = result
+    return result
 
+
+def _current_capital_values(ctx: Context) -> dict[str, Decimal]:
+    values = {
+        strategy: amount
+        for strategy, (amount, _) in cutoff_capital_by_strategy(ctx).items()
+    }
+    for row in ctx.expected or []:
+        if row.get("metric_id") == "capital.strategy.cutoff":
+            amount = to_decimal(row.get("expected"))
+            if amount is not None:
+                values[str(row.get("entity"))] = amount
+    return values
+
+
+def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
+    """B5: current shares and policy weights are distinct, independently checked sets."""
+    tolerance = Decimal("5e-8")
     names = strategy_names(ctx)
     by_name = {name: strategy for strategy, name in names.items()}
     sets: dict[str, dict[str, Decimal]] = {}
 
-    def put(view: str, strategy: str, value: Any) -> None:
-        amount = to_decimal(value)
-        if amount is not None:
-            sets.setdefault(strategy, {})[view] = amount
-
-    for row in rows(ctx.report, "allocation_history"):
-        if row.get("scope") == "SYSTEMATIC":
-            put(
-                "report.allocation_history.systematic_weight",
-                str(row.get("strategy_id")),
-                row.get("systematic_weight"),
-            )
-    for row in rows(ctx.report, "strategy_summary"):
-        put(
-            "report.strategy_summary.systematic_weight",
-            str(row.get("strategy_id")),
-            row.get("systematic_weight"),
+    def problem(
+        entity: str, shown: Any, expected: Any, path: str, message: str
+    ) -> Finding:
+        return _finding(
+            "returns.allocation_weight_sets",
+            BLOCKER_AUTHORITY,
+            entity,
+            shown,
+            expected,
+            REPORT,
+            path,
+            ("B5",),
+            message,
         )
-    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        for block in ("correlation_one", "central_case"):
-            components = node(
-                ctx.report,
-                "dependence_analysis",
-                "mode_summaries",
-                mode,
-                block,
-                "components",
-            )
-            for item in components if isinstance(components, list) else []:
-                if isinstance(item, dict):
-                    strategy = by_name.get(str(item.get("series_id")))
-                    if strategy is not None:
-                        put(
-                            f"report.dependence_analysis.{mode}.{block}.allocation_weight",
-                            strategy,
-                            item.get("allocation_weight"),
-                        )
-    totals = cutoff_capital_by_strategy(ctx)
-    grand = sum(amount for amount, _ in totals.values())
-    if grand:
-        for strategy, (amount, _) in totals.items():
+
+    for section in ("allocation_history", "strategy_summary"):
+        for position, row in enumerate(rows(ctx.report, section)):
+            if section == "allocation_history":
+                if row.get("scope") != "SYSTEMATIC" or _historical_snapshot(row):
+                    continue
+            strategy = str(row.get("strategy_id"))
+            basis = row.get("weight_basis")
+            path = f"$.{section}[{position}]"
+            if basis != "CURRENT_CUTOFF":
+                yield problem(
+                    strategy,
+                    basis,
+                    "CURRENT_CUTOFF or a correctly dated historical allocation",
+                    path + ".weight_basis",
+                    "current weight basis is missing or unrecognized",
+                )
+                continue
+            amount = to_decimal(row.get("systematic_weight"))
+            if amount is None:
+                if row.get("current_value_usd") is not None:
+                    yield problem(
+                        strategy,
+                        row.get("systematic_weight"),
+                        "finite current weight",
+                        path + ".systematic_weight",
+                        "available capital lacks a finite weight",
+                    )
+            else:
+                sets.setdefault(strategy, {})[f"report.{section}.systematic_weight"] = (
+                    amount
+                )
+    totals = _current_capital_values(ctx)
+    grand = sum(totals.values(), Decimal(0))
+    if grand > 0:
+        for strategy, amount in totals.items():
             sets.setdefault(strategy, {})["computed:cutoff_account_value_share"] = (
                 amount / grand
             )
+
+    dependence = node(ctx.report, "dependence_analysis")
+    modes = node(ctx.report, "dependence_analysis", "mode_summaries")
+    if isinstance(modes, dict) and modes:
+        basis = dependence.get("weight_basis") if isinstance(dependence, dict) else None
+        policy = None
+        if basis == "POLICY_PORT_DEPENDENCE_1":
+            try:
+                policy, authority = _policy_weights(ctx)
+            except (OSError, ValueError, TypeError, ArithmeticError) as exc:
+                yield problem(
+                    "policy",
+                    None,
+                    "usable independent PORT-DEPENDENCE-1 policy",
+                    "$.dependence_analysis.weight_basis",
+                    str(exc),
+                )
+            else:
+                shown_authority = dependence.get("weight_authority")
+                if "weight_authority" in dependence and shown_authority != authority:
+                    yield problem(
+                        "policy",
+                        shown_authority,
+                        authority,
+                        "$.dependence_analysis.weight_authority",
+                        "policy weight authority differs",
+                    )
+        elif basis != "CURRENT_CUTOFF":
+            yield problem(
+                "dependence",
+                basis,
+                "POLICY_PORT_DEPENDENCE_1 or CURRENT_CUTOFF",
+                "$.dependence_analysis.weight_basis",
+                "dependence weight basis is missing or unknown",
+            )
+        for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+            for block in ("correlation_one", "central_case"):
+                components = node(modes, mode, block, "components")
+                if not isinstance(components, list):
+                    continue
+                observed_names = []
+                for position, item in enumerate(components):
+                    if not isinstance(item, dict):
+                        yield problem(
+                            "dependence",
+                            item,
+                            "weight component object",
+                            "$.dependence_analysis",
+                            "weight component is invalid",
+                        )
+                        continue
+                    name = str(item.get("series_id"))
+                    observed_names.append(name)
+                    amount = to_decimal(item.get("allocation_weight"))
+                    path = f"$.dependence_analysis.mode_summaries.{mode}.{block}.components[{position}].allocation_weight"
+                    if basis == "POLICY_PORT_DEPENDENCE_1" and policy is not None:
+                        declared = policy.get(name)
+                        if (
+                            declared is None
+                            or by_name.get(name) != declared[0]
+                            or amount is None
+                            or abs(amount - declared[1]) > tolerance
+                        ):
+                            yield problem(
+                                name,
+                                item.get("allocation_weight"),
+                                declared[1] if declared else "declared policy series",
+                                path,
+                                "policy component differs from independent normalized policy weight",
+                            )
+                    elif basis == "CURRENT_CUTOFF":
+                        matched_strategy = by_name.get(name)
+                        if matched_strategy is None or amount is None:
+                            yield problem(
+                                name,
+                                item,
+                                "known current strategy with finite weight",
+                                path,
+                                "current component identity or weight is invalid",
+                            )
+                        else:
+                            sets.setdefault(matched_strategy, {})[
+                                f"report.dependence_analysis.{mode}.{block}.allocation_weight"
+                            ] = amount
+                if policy is not None and (
+                    set(observed_names) != set(policy)
+                    or len(observed_names) != len(set(observed_names))
+                ):
+                    yield problem(
+                        mode + ":" + block,
+                        observed_names,
+                        sorted(policy),
+                        f"$.dependence_analysis.mode_summaries.{mode}.{block}.components",
+                        "policy component perimeter differs",
+                    )
     for strategy in sorted(sets):
         views = sets[strategy]
-        if len(views) < 2 or spread(list(views.values())) <= Decimal("1e-8"):
+        if len(views) < 2 or spread(list(views.values())) <= tolerance:
             continue
-        defects = ["B5"]
-        if "computed:cutoff_account_value_share" in views:
-            defects.append("B4")
         yield _finding(
             "returns.allocation_weight_sets",
             BLOCKER_INVARIANT,
@@ -4298,7 +4547,7 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
             "one current systematic weight per strategy",
             REPORT,
             "$.strategy_summary[*].systematic_weight",
-            defects,
+            ("B5", "B4"),
             f"current weight differs across views by {spread(list(views.values()))}",
         )
 
@@ -4550,30 +4799,273 @@ def _age(policy: Mapping[str, Any], last: date, cutoff: date) -> int:
 
 
 def check_freshness(ctx: Context) -> Iterator[Finding]:
-    """B12/D7: freshness states must be judged against the declared cutoff."""
+    """B12/D7: validate operating freshness separately from financial coverage."""
 
     cutoff = ctx.cutoff
-    policies = _policies(ctx)
+
+    def canonical_day(value: Any) -> date | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.isoformat() == value else None
+
+    def authority(
+        entity: str,
+        observed: Any,
+        expected: Any,
+        path: str,
+        message: str,
+    ) -> Finding:
+        return _finding(
+            "dates.freshness_vs_cutoff",
+            BLOCKER_AUTHORITY,
+            entity,
+            observed,
+            expected,
+            FRESHNESS,
+            path,
+            ("B12",),
+            message,
+        )
+
+    raw_evaluated = node(ctx.gen.freshness, "as_of_date")
+    evaluated = canonical_day(raw_evaluated)
+    if evaluated is None:
+        yield authority(
+            "freshness-health",
+            raw_evaluated,
+            "canonical operational as_of_date",
+            "$.as_of_date",
+            "freshness operational clock is missing or invalid",
+        )
+        return
+
+    panel_meta = node(ctx.panel, "meta")
+    if isinstance(panel_meta, Mapping) and "freshness_evaluated_on" in panel_meta:
+        panel_clock_raw = panel_meta.get("freshness_evaluated_on")
+        panel_clock = canonical_day(panel_clock_raw)
+        if panel_clock is None or panel_clock != evaluated:
+            yield authority(
+                "panel-freshness-clock",
+                {"freshness_evaluated_on": panel_clock_raw},
+                {"freshness_evaluated_on": evaluated.isoformat()},
+                "$.meta.freshness_evaluated_on",
+                "panel and freshness health operational clocks differ or are invalid",
+            )
+
+    raw_policies = node(ctx.gen.freshness, "policies")
+    policy_map: dict[str, dict[str, Any]] = {}
+    duplicate_policies: set[str] = set()
+    policy_rows = raw_policies if isinstance(raw_policies, list) else []
+    if not isinstance(raw_policies, list):
+        yield authority(
+            "freshness-health",
+            raw_policies,
+            "policy list",
+            "$.policies",
+            "freshness policy metadata is missing or malformed",
+        )
+    for position, policy in enumerate(policy_rows):
+        path = f"$.policies[{position}]"
+        if not isinstance(policy, Mapping):
+            yield authority(
+                "freshness-health",
+                policy,
+                "policy object",
+                path,
+                "freshness policy metadata is malformed",
+            )
+            continue
+        policy_id = policy.get("policy_id")
+        if not isinstance(policy_id, str) or not policy_id:
+            yield authority(
+                "freshness-health",
+                {"policy_id": policy_id},
+                "non-empty policy_id",
+                f"{path}.policy_id",
+                "freshness policy identity is missing or invalid",
+            )
+            continue
+        if policy_id in policy_map:
+            duplicate_policies.add(policy_id)
+            yield authority(
+                f"policy:{policy_id}",
+                {"policy_id": policy_id},
+                "unique policy_id",
+                path,
+                "freshness policy identity is duplicated",
+            )
+            continue
+        policy_map[policy_id] = dict(policy)
+
+        mode = policy.get("mode")
+        calendar = policy.get("calendar")
+        grace = policy.get("grace_days")
+        interval = policy.get("expected_interval_days")
+        stale_after = policy.get("stale_after_days")
+        valid = (
+            isinstance(mode, str)
+            and mode in {"FINITE", "RECURRING"}
+            and isinstance(calendar, str)
+            and calendar in {"CALENDAR_DAY", "WEEKDAY_SESSION"}
+            and type(grace) is int
+            and grace >= 0
+        )
+        if mode == "RECURRING":
+            valid = valid and (
+                type(interval) is int
+                and interval > 0
+                and type(stale_after) is int
+                and stale_after >= interval + cast(int, grace)
+            )
+        elif mode == "FINITE":
+            valid = valid and interval is None and stale_after is None
+        if not valid:
+            yield authority(
+                f"policy:{policy_id}",
+                dict(policy),
+                "valid policy mode, calendar, and numeric thresholds",
+                path,
+                "freshness policy metadata is invalid or contradictory",
+            )
+
+    for policy_id in duplicate_policies:
+        policy_map.pop(policy_id, None)
+
+    raw_assessments = node(ctx.gen.freshness, "assessments")
+    if not isinstance(raw_assessments, list):
+        yield authority(
+            "freshness-health",
+            raw_assessments,
+            "assessment list",
+            "$.assessments",
+            "freshness assessment metadata is missing or malformed",
+        )
+        return
+    health_rows = [row if isinstance(row, Mapping) else None for row in raw_assessments]
+    for position, row in enumerate(health_rows):
+        if row is None:
+            yield authority(
+                "freshness-health",
+                raw_assessments[position],
+                "assessment object",
+                f"$.assessments[{position}]",
+                "freshness assessment metadata is malformed",
+            )
+
     reference = universe(ctx)
     active_strategies = reference.active_strategies if reference else None
-    for position, row in enumerate(rows(ctx.gen.freshness, "assessments")):
-        last = to_date(row.get("last_accepted_date"))
-        state = row.get("state")
-        policy = policies.get(str(row.get("policy_id")), {})
-        if last is None:
+    validated_health: list[tuple[Mapping[str, Any], date | None]] = []
+    for position, row in enumerate(health_rows):
+        if row is None:
             continue
+        path = f"$.assessments[{position}]"
+        state = row.get("state")
+        policy_id = row.get("policy_id")
         entity = (
             f"{row.get('provider_id')}:{row.get('subject_id')}:"
             f"{row.get('lane')}:{row.get('fact_type')}"
         )
+        if not isinstance(state, str) or state not in {
+            "FRESH",
+            "LATE",
+            "STALE",
+            "UNAVAILABLE",
+            "FINITE_COMPLETE",
+        }:
+            yield authority(
+                entity,
+                {"state": state},
+                "declared freshness state",
+                f"{path}.state",
+                "freshness assessment state is missing or invalid",
+            )
+            continue
+        row_evaluated_raw = row.get("evaluated_on")
+        row_evaluated = canonical_day(row_evaluated_raw)
+        if row_evaluated is None or row_evaluated != evaluated:
+            yield authority(
+                entity,
+                {"evaluated_on": row_evaluated_raw},
+                {"evaluated_on": evaluated.isoformat()},
+                f"{path}.evaluated_on",
+                "freshness row clock differs from its operational root",
+            )
+
+        policy = policy_map.get(policy_id) if isinstance(policy_id, str) else None
+        if policy is None:
+            yield authority(
+                entity,
+                {"policy_id": policy_id},
+                "a unique declared freshness policy",
+                f"{path}.policy_id",
+                "freshness assessment references an unknown or ambiguous policy",
+            )
+
+        required = row.get("required_for_current")
+        if type(required) is not bool:
+            yield authority(
+                entity,
+                {"required_for_current": required},
+                "boolean required_for_current",
+                f"{path}.required_for_current",
+                "freshness current-requirement metadata is invalid",
+            )
+
+        has_observation = "last_accepted_date" in row
+        raw_last = row.get("last_accepted_date")
+        last = canonical_day(raw_last)
+        observation_valid = False
+        if not has_observation:
+            yield authority(
+                entity,
+                {"last_accepted_date": "missing"},
+                "canonical date or explicit null with UNAVAILABLE state",
+                f"{path}.last_accepted_date",
+                "freshness observation date is missing",
+            )
+        elif raw_last is None:
+            observation_valid = state == "UNAVAILABLE"
+            if not observation_valid:
+                yield authority(
+                    entity,
+                    {"last_accepted_date": None, "state": state},
+                    "explicit null only with UNAVAILABLE state",
+                    f"{path}.last_accepted_date",
+                    "freshness observation date is null for a non-UNAVAILABLE state",
+                )
+        elif last is None:
+            yield authority(
+                entity,
+                {"last_accepted_date": raw_last},
+                "canonical ISO observation date",
+                f"{path}.last_accepted_date",
+                "freshness observation date is invalid",
+            )
+        else:
+            observation_valid = True
+            if last > evaluated:
+                yield authority(
+                    entity,
+                    {"last_accepted_date": raw_last},
+                    {"on_or_before_evaluated_on": evaluated.isoformat()},
+                    f"{path}.last_accepted_date",
+                    "freshness observation is later than its operational evaluation date",
+                )
+
+        if policy is None:
+            continue
+
         subject_is_retired = (
             row.get("subject_type") == "STRATEGY"
             and active_strategies is not None
             and str(row.get("subject_id")) not in active_strategies
         )
-        if row.get("required_for_current") is True and (
-            subject_is_retired or (policy.get("mode") == "FINITE" and last < cutoff)
-        ):
+        mode = policy.get("mode")
+        if required is True and (subject_is_retired or mode == "FINITE"):
             yield _finding(
                 "dates.freshness_vs_cutoff",
                 BLOCKER_AUTHORITY,
@@ -4590,65 +5082,263 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 ("D7",),
                 "a retired or finite, ended source is counted as required-current",
             )
-        if policy.get("mode") == "FINITE":
+
+        if not observation_valid:
+            if mode == "FINITE" and state != "UNAVAILABLE":
+                yield authority(
+                    entity,
+                    {"state": state, "last_accepted_date": raw_last},
+                    "UNAVAILABLE with explicit null observation for finite policy",
+                    path,
+                    "finite freshness state contradicts its missing observation",
+                )
             continue
-        if last >= cutoff and state in ("STALE", "LATE"):
-            yield _finding(
-                "dates.freshness_vs_cutoff",
-                BLOCKER_INVARIANT,
-                entity,
-                {"state": state, "last_accepted_date": row.get("last_accepted_date")},
-                {"state": "FRESH", "declared_cutoff": cutoff},
-                FRESHNESS,
-                f"$.assessments[{position}].state",
-                ("B12",),
-                f"{state} although data is accepted through the declared cutoff (state "
-                "is computed against the evaluation date, not the cutoff)",
+        if mode == "FINITE":
+            expected_finite_state = (
+                "FINITE_COMPLETE" if last is not None else "UNAVAILABLE"
             )
-        stale_after = policy.get("stale_after_days")
-        if (
-            isinstance(stale_after, int)
-            and state == "FRESH"
-            and _age(policy, last, cutoff) > stale_after
-        ):
+            if state != expected_finite_state:
+                yield authority(
+                    entity,
+                    {"state": state, "last_accepted_date": raw_last},
+                    f"{expected_finite_state} with the matching finite observation state",
+                    f"{path}.state",
+                    "finite freshness state contradicts its observed history",
+                )
+            validated_health.append((row, last))
+            continue
+
+        if mode != "RECURRING":
+            # The policy row already emitted an authority finding above.
+            continue
+        if last is None:
+            # An explicit null plus UNAVAILABLE is an honest absence. The owning
+            # producer carries its required/blocking semantics separately.
+            validated_health.append((row, None))
+            continue
+
+        interval = policy["expected_interval_days"]
+        grace = policy["grace_days"]
+        stale_after = policy["stale_after_days"]
+        age = _age(policy, last, evaluated)
+        expected_state = (
+            "STALE"
+            if age > stale_after
+            else "LATE"
+            if age > interval + grace
+            else "FRESH"
+        )
+        if state != expected_state:
             yield _finding(
                 "dates.freshness_vs_cutoff",
-                BLOCKER_AUTHORITY,
+                BLOCKER_AUTHORITY
+                if state == "FRESH" and expected_state == "STALE"
+                else BLOCKER_INVARIANT,
                 entity,
                 {"state": state, "last_accepted_date": row.get("last_accepted_date")},
-                {"state": "STALE", "stale_after_days": stale_after},
+                {"state": expected_state, "evaluated_on": evaluated},
                 FRESHNESS,
-                f"$.assessments[{position}].state",
+                f"{path}.state",
                 ("D7",),
-                "stale source counted as current",
+                "freshness state differs from the declared operating policy and clock",
             )
-    for position, row in enumerate(
-        rows(node(ctx.report, "hwm_summary"), "uncovered_details")
-    ):
-        last = to_date(row.get("last_accepted_date"))
+
+        validated_health.append((row, last))
+
+    # Mirror only the selected evidence identity needed to verify the report's
+    # copied HWM freshness. This is independent of the report builder and never
+    # substitutes PROVIDER evidence for an ACCOUNT_LIVE NAV path.
+    state_rank = {
+        "UNAVAILABLE": 5,
+        "STALE": 4,
+        "LATE": 3,
+        "FRESH": 2,
+        "FINITE_COMPLETE": 1,
+    }
+    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
+        # Some compact acceptance fixtures retain legacy HWM date labels but do
+        # not claim an evaluated HWM result. Require the complete operational
+        # status or a NAV endpoint before binding these copied labels.
         if (
-            last is not None
-            and last >= cutoff
-            and row.get("freshness_state") in ("STALE", "LATE")
+            row.get("hwm_freshness_status") is None
+            and row.get("nav_observed_end") is None
         ):
-            yield _finding(
-                "dates.freshness_vs_cutoff",
-                BLOCKER_INVARIANT,
-                f"hwm:{row.get('strategy_id')}",
+            continue
+        fields = (
+            "hwm_freshness_observed_end",
+            "hwm_freshness_state",
+            "hwm_freshness_status",
+            "nav_evidence_layer",
+        )
+        if not any(row.get(field) is not None for field in fields):
+            continue
+        entity = f"strategy:{row.get('strategy_id')}"
+        path = f"$.strategy_summary[{position}]"
+        layer = row.get("nav_evidence_layer")
+        eligible_lanes = (
+            {"PROVIDER"}
+            if layer == "PROVIDER_LIVE"
+            else {"ACCOUNT", "LEGACY"}
+            if layer == "ACCOUNT_LIVE"
+            else None
+        )
+        if eligible_lanes is None:
+            yield authority(
+                entity,
+                {"nav_evidence_layer": layer},
+                "ACCOUNT_LIVE or PROVIDER_LIVE evidence layer",
+                f"{path}.nav_evidence_layer",
+                "HWM freshness is not bound to a recognized NAV evidence lane",
+            )
+            continue
+        candidates = [
+            (assessment, last)
+            for assessment, last in validated_health
+            if assessment.get("subject_id") == row.get("strategy_id")
+            and assessment.get("subject_type") == "STRATEGY"
+            and assessment.get("lane") in eligible_lanes
+        ]
+        if not candidates:
+            if (
+                row.get("hwm_freshness_status") == "UNAVAILABLE"
+                and row.get("hwm_freshness_state") is None
+                and row.get("hwm_freshness_observed_end") is None
+                and row.get("nav_observed_end") is None
+            ):
+                continue
+            yield authority(
+                entity,
                 {
-                    "freshness_state": row.get("freshness_state"),
-                    "last_accepted_date": row.get("last_accepted_date"),
+                    "nav_evidence_layer": layer,
+                    "hwm_freshness_state": row.get("hwm_freshness_state"),
+                    "hwm_freshness_observed_end": row.get("hwm_freshness_observed_end"),
                 },
-                {"freshness_state": "FRESH", "declared_cutoff": cutoff},
-                REPORT,
-                f"$.hwm_summary.uncovered_details[{position}].freshness_state",
-                ("B12",),
-                "HWM sleeve excluded as stale although accepted through the cutoff",
+                "one matching health assessment in the selected evidence lane",
+                f"{path}.hwm_freshness_state",
+                "HWM freshness has no matching health evidence in its selected lane",
+            )
+            continue
+        selected_key = max(
+            (
+                state_rank.get(str(assessment.get("state")), 6),
+                str(assessment.get("lane")),
+            )
+            for assessment, _last in candidates
+        )
+        selected = [
+            (assessment, last)
+            for assessment, last in candidates
+            if (
+                state_rank.get(str(assessment.get("state")), 6),
+                str(assessment.get("lane")),
+            )
+            == selected_key
+        ]
+        selected_values = {
+            (assessment.get("state"), last) for assessment, last in selected
+        }
+        if len(selected_values) != 1:
+            yield authority(
+                entity,
+                [
+                    {
+                        "lane": assessment.get("lane"),
+                        "state": assessment.get("state"),
+                        "last_accepted_date": last.isoformat() if last else None,
+                    }
+                    for assessment, last in selected
+                ],
+                "one unambiguous selected-lane freshness state and date",
+                f"{path}.hwm_freshness_state",
+                "HWM freshness evidence is ambiguous in the selected lane",
+            )
+            continue
+        selected_state, selected_day = next(iter(selected_values))
+        raw_hwm_day = row.get("hwm_freshness_observed_end")
+        hwm_day = canonical_day(raw_hwm_day) if raw_hwm_day is not None else None
+        raw_nav_day = row.get("nav_observed_end")
+        nav_day = canonical_day(raw_nav_day) if raw_nav_day is not None else None
+        if (raw_hwm_day is not None and hwm_day is None) or (
+            raw_nav_day is not None and nav_day is None
+        ):
+            yield authority(
+                entity,
+                {
+                    "hwm_freshness_observed_end": raw_hwm_day,
+                    "nav_observed_end": raw_nav_day,
+                },
+                "canonical HWM and NAV observation dates",
+                f"{path}.hwm_freshness_observed_end",
+                "HWM evidence observation date is invalid",
+            )
+            continue
+        truncated_at_boundary = (
+            nav_day is not None
+            and selected_day is not None
+            and nav_day == cutoff
+            and selected_day > nav_day
+        )
+        boundary_mismatch = (
+            nav_day is not None
+            and selected_day is not None
+            and nav_day != selected_day
+            and not truncated_at_boundary
+        )
+        expected_boundary_match = (
+            None if nav_day is None or selected_day is None else not boundary_mismatch
+        )
+        blockers = any(
+            assessment.get("blocks_current_consumers") is True
+            or assessment.get("state") in {"STALE", "UNAVAILABLE"}
+            for assessment, _last in candidates
+        )
+        expected_status = (
+            "BOUNDARY_MISMATCH"
+            if boundary_mismatch
+            else "BLOCKED"
+            if blockers
+            else "ACCEPTED"
+        )
+        mismatch = (
+            row.get("hwm_freshness_state") != selected_state
+            or hwm_day != selected_day
+            or row.get("hwm_freshness_status") != expected_status
+            or row.get("hwm_freshness_boundary_matches_evidence")
+            != expected_boundary_match
+        )
+        if mismatch:
+            yield authority(
+                entity,
+                {
+                    "hwm_freshness_state": row.get("hwm_freshness_state"),
+                    "hwm_freshness_observed_end": raw_hwm_day,
+                    "hwm_freshness_status": row.get("hwm_freshness_status"),
+                    "nav_evidence_layer": layer,
+                },
+                {
+                    "hwm_freshness_state": selected_state,
+                    "hwm_freshness_observed_end": (
+                        selected_day.isoformat() if selected_day else None
+                    ),
+                    "hwm_freshness_status": expected_status,
+                    "hwm_freshness_boundary_matches_evidence": expected_boundary_match,
+                },
+                f"{path}.hwm_freshness_state",
+                "strategy HWM freshness does not match its selected health lane, date, and state",
             )
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         end = to_date(row.get("hwm_freshness_observed_end"))
         state = row.get("hwm_freshness_state")
         if end is not None and end >= cutoff and state in ("STALE", "LATE"):
+            matching_account = any(
+                assessment.get("subject_id") == row.get("strategy_id")
+                and assessment.get("lane") == "ACCOUNT"
+                and assessment.get("state") == state
+                and to_date(assessment.get("last_accepted_date")) == end
+                for assessment in rows(ctx.gen.freshness, "assessments")
+            )
+            if matching_account:
+                continue
             yield _finding(
                 "dates.freshness_vs_cutoff",
                 BLOCKER_INVARIANT,
@@ -4657,42 +5347,94 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                     "hwm_freshness_state": state,
                     "hwm_freshness_observed_end": row.get("hwm_freshness_observed_end"),
                 },
-                {"hwm_freshness_state": "FRESH", "declared_cutoff": cutoff},
+                {"hwm_freshness_state": state, "lane": "ACCOUNT"},
                 REPORT,
                 f"$.strategy_summary[{position}].hwm_freshness_state",
                 ("B12",),
-                f"strategy freshness shown {state} although observed through the cutoff",
+                "strategy HWM freshness does not match its ACCOUNT health evidence",
             )
 
 
 def _dated_sections(
     ctx: Context,
-) -> Iterator[tuple[str, str, str, Any, Any, tuple[str, ...]]]:
-    """(entity, file, path, date, status, defects) for current-claim section dates."""
+) -> Iterator[tuple[str, str, str, Any, Any, tuple[str, ...], tuple[str, Any] | None]]:
+    """(entity, file, path, date, status, defects, optional date role)."""
 
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
+    attribution = node(ctx.report, "strategy_attribution")
+    if (
+        isinstance(attribution, Mapping)
+        and "benchmark_comparisons" in attribution
+        and not isinstance(comparisons, list)
+    ):
+        yield (
+            "benchmark:comparisons-container",
+            REPORT,
+            "$.strategy_attribution.benchmark_comparisons",
+            None,
+            None,
+            ("C2",),
+            ("c2_malformed", comparisons),
+        )
     for position, row in enumerate(
         comparisons if isinstance(comparisons, list) else []
     ):
-        if isinstance(row, dict) and row.get("observed_end") is not None:
+        if not isinstance(row, dict):
             yield (
-                f"benchmark:{row.get('strategy_id')}",
+                f"benchmark:malformed:{position}",
                 REPORT,
-                f"$.strategy_attribution.benchmark_comparisons[{position}].observed_end",
-                row.get("observed_end"),
-                row.get("status"),
+                f"$.strategy_attribution.benchmark_comparisons[{position}]",
+                None,
+                None,
                 ("C2",),
+                ("c2_malformed", row),
             )
+            continue
+        yield (
+            f"benchmark:{row.get('strategy_id')}",
+            REPORT,
+            f"$.strategy_attribution.benchmark_comparisons[{position}].observed_end",
+            row.get("observed_end"),
+            row.get("status"),
+            ("C2",),
+            ("c2_descriptive", row),
+        )
+    # The alias is only one published view. Check every mode, retaining a
+    # divergent alias but avoiding duplicate findings for the same date claim.
+    lens_views: list[tuple[str, str, list[Any]]] = []
+    modes = node(ctx.report, "decomposition_lenses", "modes")
+    if isinstance(modes, Mapping):
+        for mode, mode_rows in modes.items():
+            if isinstance(mode_rows, list):
+                lens_views.append(
+                    (str(mode), f"$.decomposition_lenses.modes.{mode}", mode_rows)
+                )
     lenses = node(ctx.report, "decomposition_lenses", "lenses")
-    for position, row in enumerate(lenses if isinstance(lenses, list) else []):
-        if isinstance(row, dict):
+    if isinstance(lenses, list):
+        lens_views.append(("", "$.decomposition_lenses.lenses", lenses))
+    seen_dates: set[tuple[str, str, str]] = set()
+    for mode, prefix, view_rows in lens_views:
+        for position, row in enumerate(view_rows):
+            if not isinstance(row, dict):
+                continue
+            entity = (
+                f"decomposition:{row.get('lens_id')}:{mode or row.get('evidence_mode')}"
+            )
+            status = (
+                "AVAILABLE" if (row.get("available_count") or 0) > 0 else "UNAVAILABLE"
+            )
+            key = (entity, str(row.get("as_of_date")), status)
+            if key in seen_dates:
+                continue
+            seen_dates.add(key)
             yield (
-                f"decomposition:{row.get('lens_id')}:{row.get('evidence_mode')}",
+                entity,
                 REPORT,
-                f"$.decomposition_lenses.lenses[{position}].as_of_date",
+                f"{prefix}[{position}].as_of_date",
                 row.get("as_of_date"),
-                "AVAILABLE" if (row.get("available_count") or 0) > 0 else "UNAVAILABLE",
+                status,
                 ("C3",),
+                None,
             )
     factor = node(ctx.panel, "factor_analysis")
     if isinstance(factor, Mapping) and factor.get("as_of_date") is not None:
@@ -4703,14 +5445,26 @@ def _dated_sections(
             factor.get("as_of_date"),
             "AVAILABLE" if (factor.get("available_count") or 0) > 0 else "UNAVAILABLE",
             ("C3",),
+            None,
         )
-    for key in (
+    for metadata_key in (
         "implementation_reconciliation_contract",
         "implementation_return_attribution_contract",
     ):
-        value = node(ctx.report, key, "as_of_date")
-        if value is not None:
-            yield (key, REPORT, f"$.{key}.as_of_date", value, "AVAILABLE", ("C4",))
+        if metadata_key in ctx.report:
+            metadata = ctx.report[metadata_key]
+            value = (
+                metadata.get("as_of_date") if isinstance(metadata, Mapping) else None
+            )
+            yield (
+                metadata_key,
+                REPORT,
+                f"$.{metadata_key}.as_of_date",
+                value,
+                "AVAILABLE",
+                ("C4",),
+                ("c4_historical", (metadata_key, metadata)),
+            )
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
         if row.get("live_boundary_observed_end") is not None:
             yield (
@@ -4720,18 +5474,148 @@ def _dated_sections(
                 row.get("live_boundary_observed_end"),
                 row.get("live_boundary_status"),
                 ("C5",),
+                None,
             )
+
+
+def _canonical_iso_day(value: Any) -> date | None:
+    if not isinstance(value, str) or len(value) != 10:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if value == parsed.isoformat() else None
+
+
+def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
+    kind, detail = role
+    if kind == "c2_malformed":
+        return False
+    if kind == "c2_descriptive":
+        row = detail
+        if status == "UNAVAILABLE":
+            return (
+                isinstance(row.get("strategy_id"), str)
+                and bool(row["strategy_id"].strip())
+                and all(
+                    key in row and row[key] is None
+                    for key in (
+                        "observed_start",
+                        "observed_end",
+                        "account_series_id",
+                        "reference_series_id",
+                    )
+                )
+            )
+        start = _canonical_iso_day(row.get("observed_start"))
+        end = _canonical_iso_day(row.get("observed_end"))
+        return (
+            status == "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"
+            and row.get("version_compatibility_status") == "PROVEN_COMPATIBLE"
+            and all(
+                isinstance(row.get(key), str) and bool(row[key].strip())
+                for key in ("strategy_id", "account_series_id", "reference_series_id")
+            )
+            and start is not None
+            and end is not None
+            and start <= end
+            and value == row.get("observed_end")
+        )
+    if kind == "c4_historical":
+        key, metadata = detail
+        identity = (
+            "reconciliation_id"
+            if key == "implementation_reconciliation_contract"
+            else "attribution_id"
+        )
+        return (
+            isinstance(metadata, Mapping)
+            and _canonical_iso_day(value) is not None
+            and value == metadata.get("as_of_date")
+            and isinstance(metadata.get("schema_version"), int)
+            and not isinstance(metadata.get("schema_version"), bool)
+            and metadata.get("schema_version") == 1
+            and isinstance(metadata.get(identity), str)
+            and bool(metadata[identity].strip())
+            and isinstance(metadata.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"]) is not None
+            and isinstance(metadata.get("size_bytes"), int)
+            and not isinstance(metadata.get("size_bytes"), bool)
+            and metadata["size_bytes"] > 0
+            and isinstance(metadata.get("strategy_count"), int)
+            and not isinstance(metadata.get("strategy_count"), bool)
+            and metadata["strategy_count"] == 3
+        )
+    return False
 
 
 def check_section_dates(ctx: Context) -> Iterator[Finding]:
     """C2-C5: a section's as-of must be the cutoff, or be labelled as not current."""
 
     cutoff = ctx.cutoff
-    for entity, file, path, value, status, defects in _dated_sections(ctx):
-        day = to_date(value)
+    for entity, file, path, value, status, defects, role in _dated_sections(ctx):
+        if role is not None and not _date_role_is_valid(role, status, value):
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "section has malformed or unrecognized date-role metadata",
+            )
+            continue
+        if (
+            role is not None
+            and role[0] == "c2_descriptive"
+            and status == "UNAVAILABLE"
+            and value is None
+        ):
+            continue
+        day = _canonical_iso_day(value) if role is not None else to_date(value)
+        if role is not None and day is None:
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "section does not declare a canonical ISO date",
+            )
+            continue
+        if (
+            entity.startswith("decomposition:")
+            and is_available(status)
+            and (
+                not isinstance(value, str)
+                or len(value) != 10
+                or day is None
+                or value != day.isoformat()
+            )
+        ):
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "available decomposition section does not declare a canonical ISO date",
+            )
+            continue
         if day is None or day == cutoff:
             continue
         after = day > cutoff
+        if role is not None and not after:
+            continue
         bound = (
             verified_value_basis_bound(
                 ctx, "decomposition_lenses", entity.removeprefix("decomposition:"), day
@@ -5635,7 +6519,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         )
                     )
         for position, row in enumerate(rows(report, "allocation_history")):
-            if row.get("strategy_id") == entity:
+            if row.get("strategy_id") == entity and not _historical_snapshot(row):
                 out.append(
                     Observed(
                         "report:allocation_history.current_value_usd",
@@ -5673,7 +6557,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 )
             )
         for position, row in enumerate(rows(report, "allocation_history")):
-            if row.get("scope") == "RESERVE":
+            if row.get("scope") == "RESERVE" and not _historical_snapshot(row):
                 out.append(
                     Observed(
                         "report:allocation_history.RESERVE",

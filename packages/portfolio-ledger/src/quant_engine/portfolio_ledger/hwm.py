@@ -324,8 +324,11 @@ def validate_as_held_hwm_policy(policy: Mapping[str, Any]) -> None:
         "NEGATIVE_NET_CONTRIBUTIONS",
         "PREDECESSOR_TRANSITION",
     }
-    _strict_keys(decisions, decision_ids, "policy.owner_decision_receipts")
-    for decision_id in decision_ids:
+    allowed_ids = decision_ids | {"PROVIDER_CUSTODY_PERIMETER"}
+    actual_ids = set(decisions)
+    if not decision_ids <= actual_ids or not actual_ids <= allowed_ids:
+        raise HwmCoverageError("policy.owner_decision_receipts keys differ")
+    for decision_id in actual_ids:
         _sha256(
             decisions[decision_id],
             f"policy.owner_decision_receipts.{decision_id}",

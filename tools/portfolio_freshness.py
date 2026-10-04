@@ -207,9 +207,10 @@ def build_health(
                     _text(observed_text, f"{strategy_id}.{lane_name}.observed_end")
                 )
             )
+            policy = _provider_policy(provider_id, policies)
             assessments.append(
                 _assessment(
-                    policy=_provider_policy(provider_id, policies),
+                    policy=policy,
                     observed_end=observed_end,
                     as_of=as_of,
                     provider_id=provider_id,
@@ -218,7 +219,10 @@ def build_health(
                     fact_type="strategy-returns",
                     lane=lane_name.upper(),
                     coverage_status="AVAILABLE" if observed_end else "UNAVAILABLE",
-                    required_for_current=lane_name == "account",
+                    required_for_current=(
+                        lane_name == "account"
+                        and policy.mode is FreshnessMode.RECURRING
+                    ),
                 )
             )
 

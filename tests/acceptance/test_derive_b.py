@@ -760,6 +760,32 @@ def test_matrixport_raw_nav_uses_subscription_bill_units_and_embeds_opening_fund
     assert (flows, count) == ({}, 0)
 
 
+def test_matrixport_native_subscription_nav_uses_observation_date_fx():
+    """Native subscription NAV is converted with the selected raw-date FX close."""
+    derivation = load_derivation_module()
+    observations = derivation.matrixport_raw_observations(
+        [
+            {"day_timestamp_utc": "2026-09-02T00:00:00+00:00", "nav": "1"},
+            {"day_timestamp_utc": "2026-09-15T00:00:00+00:00", "nav": "1.5"},
+        ],
+        [],
+        [],
+        "account-m",
+        {date(2026, 9, 2): Decimal("1"), date(2026, 9, 15): Decimal("1.1")},
+        subscription_rows=[
+            {
+                "confirm_nav_time_utc": "2026-09-02T00:00:00+00:00",
+                "subscription_share": "10",
+            }
+        ],
+    )
+
+    assert observations == [
+        (date(2026, 9, 2), Decimal("10")),
+        (date(2026, 9, 15), Decimal("16.50")),
+    ]
+
+
 def test_derive_has_no_reporting_manifest_dependency(tmp_path: Path):
     """A missing reporting-generation manifest must not block the independent oracle."""
     derivation = load_derivation_module()
@@ -2069,7 +2095,7 @@ def test_manifest_future_schema_version_fails_closed(tmp_path: Path):
     manifest_path.write_text(
         json.dumps(
             {
-                "schema": "qe-cp-acceptance-inputs/3",
+                "schema": "qe-cp-acceptance-inputs/4",
                 "cutoff": "2026-09-17",
                 "inputs": [{"family": "test", "path": "x"}],
             }
@@ -2079,6 +2105,1369 @@ def test_manifest_future_schema_version_fails_closed(tmp_path: Path):
 
     with pytest.raises(derivation.ManifestError, match="unsupported schema"):
         derivation.load_inputs_manifest(manifest_path)
+
+
+def test_oracle_v3_b_schema3_rejects_an_unbound_manifest(tmp_path: Path):
+    """CR2 R6 v3 cannot select FX from an unbound schema-only manifest."""
+    derivation = load_derivation_module()
+    manifest_path = tmp_path / "acceptance-inputs-v3.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "qe-cp-acceptance-inputs/3",
+                "cutoff": "2026-09-17",
+                "inputs": [{"family": "test", "path": "x"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(derivation.ManifestError, match="authority.*families"):
+        derivation.load_inputs_manifest(manifest_path)
+
+
+def test_oracle_v3_b_schema3_requires_the_pinned_custody_authority_families(
+    tmp_path: Path,
+):
+    """A schema-3 label alone cannot authorize custody capital derivation."""
+    derivation = load_derivation_module()
+    manifest_path = tmp_path / "acceptance-inputs-v3.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "qe-cp-acceptance-inputs/3",
+                "cutoff": "2026-09-17",
+                "inputs": [{"family": "test", "path": "x"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(derivation.ManifestError, match="authority.*families"):
+        derivation.load_inputs_manifest(manifest_path)
+
+
+def test_oracle_v3_b_matrixport_fx_converts_the_cutoff_date():
+    """R6 v3 removes the v2 September-3 conversion boundary for selected inputs."""
+    derivation = load_derivation_module()
+    observations = derivation.matrixport_raw_observations(
+        [{"day_timestamp_utc": "2026-09-17T00:00:00+00:00", "nav": "2"}],
+        [],
+        [
+            {
+                "currency": "USDT",
+                "direction": "2",
+                "amount": "10",
+                "timestamp_utc": "2026-09-16T12:00:00+00:00",
+            }
+        ],
+        "custody",
+        {date(2026, 9, 17): Decimal("0.99")},
+        fx_last_admitted_date=date(2026, 9, 17),
+    )
+
+    assert observations == [(date(2026, 9, 17), Decimal("9.90"))]
+
+
+def test_oracle_v3_b_matrixport_subscription_flow_drives_public_fund_mwr():
+    """Opening NAV allocation is excluded; later confirmed subscription is a positive fund flow."""
+    derivation = load_derivation_module()
+    observations = [
+        (date(2026, 1, 1), Decimal("100")),
+        (date(2027, 1, 1), Decimal("150")),
+        (date(2028, 1, 1), Decimal("176")),
+    ]
+    subscriptions = [
+        {
+            "subscription_time_utc": "2025-12-01T12:00:00+00:00",
+            "confirm_nav_time_utc": "2026-01-01T00:00:00+00:00",
+            "subscription_currency": "USDT",
+            "subscription_amount": "100",
+            "subscription_share": "100",
+        },
+        {
+            "subscription_time_utc": "2026-12-15T12:00:00+00:00",
+            "confirm_nav_time_utc": "2027-01-01T00:00:00+00:00",
+            "subscription_currency": "USDT",
+            "subscription_amount": "50",
+            "subscription_share": "50",
+        },
+    ]
+
+    flows, count = derivation.matrixport_raw_flows(
+        [],
+        observations,
+        fx_rates={date(2027, 1, 1): Decimal("1")},
+        opening_date=observations[0][0],
+        subscription_rows=subscriptions,
+        fx_rates_by_currency={
+            "USDT": {
+                date(2026, 1, 1): Decimal("1"),
+                date(2027, 1, 1): Decimal("1"),
+            }
+        },
+    )
+    mwr = derivation.xirr(
+        [(observations[0][0], -observations[0][1])]
+        + [(occurred_on, -amount) for occurred_on, amount in flows.items()]
+        + [(observations[-1][0], observations[-1][1])]
+    )
+
+    assert flows == {date(2027, 1, 1): Decimal("50")}
+    assert count == 1
+    assert mwr is not None
+    assert abs(mwr - Decimal("0.10")) < Decimal("0.00000000000000000001")
+
+
+@pytest.mark.parametrize(
+    ("effective_start", "nav_rows", "subscription_rows", "expected_flows"),
+    [
+        (
+            "2026-01-01",
+            [
+                ("2026-02-01", "1"),
+                ("2026-06-01", "1"),
+                ("2026-09-01", "2"),
+            ],
+            [("2026-02-01", "100"), ("2026-06-01", "50")],
+            [(date(2026, 6, 1), Decimal("50"))],
+        ),
+        (
+            "2026-01-02",
+            [
+                ("2026-01-31", "1"),
+                ("2026-02-01", "1"),
+                ("2026-06-01", "2"),
+            ],
+            [("2026-01-31", "100"), ("2026-02-01", "50")],
+            [(date(2026, 2, 1), Decimal("50"))],
+        ),
+    ],
+)
+def test_oracle_v3_b_public_derive_uses_accepted_window_opening_for_matrixport_mwr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effective_start: str,
+    nav_rows: list[tuple[str, str]],
+    subscription_rows: list[tuple[str, str]],
+    expected_flows: list[tuple[date, Decimal]],
+):
+    """Public account MWR uses the same accepted opening as its NAV window."""
+    derivation = load_derivation_module()
+    role_paths = write_manifest_role_fixtures(tmp_path)
+    role_paths["provider-ledger.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    role_paths["account-strategy-current-epoch-crosswalk.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [
+                    {
+                        **included_row("account-m", "strategy-m"),
+                        "provider": "MATRIXPORT",
+                        "effective_start": effective_start,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    role_paths["nav_daily.csv"].write_text(
+        "day_timestamp_utc,nav,product_id\n"
+        + "".join(f"{day}T00:00:00+00:00,{nav},fund-m\n" for day, nav in nav_rows),
+        encoding="utf-8",
+    )
+    role_paths["wallet_deposits.csv"].write_text(
+        "transaction_id,state,currency,amount,created_at_utc\n"
+        + "".join(
+            f"deposit-{index},confirmed,USDT,{amount},{day}T01:00:00+00:00\n"
+            for index, (day, amount) in enumerate(subscription_rows)
+        ),
+        encoding="utf-8",
+    )
+    role_paths["wallet_bills.csv"].write_text(
+        "currency,direction,amount,timestamp_utc\n", encoding="utf-8"
+    )
+    role_paths["yfinance-history.json"].write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDT-USD", "Date": day, "Close": 1}
+                    for day, _ in nav_rows
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    native_paths = {
+        "matrixport_subscription_details": tmp_path / "subscription_details.csv",
+        "matrixport_generation_manifest": tmp_path / "generation.json",
+        "matrixport_generation_catalog": tmp_path / "catalog.json",
+        "matrixport_owner_flow_coverage": tmp_path / "coverage.csv",
+        "matrixport_owner_flow_request_manifest": tmp_path / "requests.jsonl",
+    }
+    native_paths["matrixport_subscription_details"].write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc,"
+        "subscription_share,confirm_nav,status,source_endpoint\n"
+        + "".join(
+            f"{amount},{day}T00:00:00+00:00,order-{index},fund-m,{amount},USDT,"
+            f"{date.fromisoformat(day) - date.resolution}T00:00:00+00:00,"
+            f"{amount},1,300,/strategy/api/v2/order\n"
+            for index, (day, amount) in enumerate(subscription_rows)
+        ),
+        encoding="utf-8",
+    )
+    for path, contents in (
+        (native_paths["matrixport_generation_manifest"], "{}"),
+        (native_paths["matrixport_generation_catalog"], "{}"),
+        (native_paths["matrixport_owner_flow_coverage"], ""),
+        (native_paths["matrixport_owner_flow_request_manifest"], ""),
+    ):
+        path.write_text(contents, encoding="utf-8")
+    rates_path = tmp_path / "rates.csv"
+    rates_path.write_text(
+        "date,currency,base_currency,rate,provider,ticker,field,timing\n"
+        + "".join(
+            f"{day},USDT,USD,1,synthetic,USDT-USD,Close,EOD\n"
+            for day in sorted(
+                {
+                    candidate
+                    for subscription_day, _ in subscription_rows
+                    for candidate in (
+                        subscription_day,
+                        (
+                            date.fromisoformat(subscription_day) - date.resolution
+                        ).isoformat(),
+                    )
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        derivation,
+        "native_matrixport_input_paths",
+        lambda manifest, qe_root: native_paths,
+    )
+    monkeypatch.setattr(
+        derivation,
+        "v3_authority_paths",
+        lambda manifest, qe_root: {"fx_daily_rates": rates_path},
+    )
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": [
+            *[unpinned_entry(path) for path in role_paths.values()],
+            *[unpinned_entry(path) for path in native_paths.values()],
+        ],
+    }
+
+    output = derivation.derive(tmp_path, manifest)
+    assert any(
+        row["metric_id"] == "mwr.account" and row["entity"] == "account-m"
+        for row in output["metrics"]
+    ), output["not_derivable"]
+    account_mwr = next(
+        row
+        for row in output["metrics"]
+        if row["metric_id"] == "mwr.account" and row["entity"] == "account-m"
+    )
+    opening_date = date.fromisoformat(nav_rows[0][0])
+    opening_value = Decimal(subscription_rows[0][1])
+    ending_date = date.fromisoformat(nav_rows[-1][0])
+    ending_value = Decimal(nav_rows[-1][1]) * sum(
+        Decimal(amount) for _, amount in subscription_rows
+    )
+    expected_mwr = derivation.xirr(
+        [(opening_date, -opening_value)]
+        + [(occurred_on, -amount) for occurred_on, amount in expected_flows]
+        + [(ending_date, ending_value)]
+    )
+    assert expected_mwr is not None
+    assert Decimal(account_mwr["value"]) == Decimal(derivation.ratio(expected_mwr))
+
+
+def test_oracle_v3_b_raw_custody_capital_uses_owner_deposit_and_sleeve_allocation():
+    """R8 keeps a provider account's owner funding distinct from its fund buy."""
+    derivation = load_derivation_module()
+
+    result = derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-1",
+                "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-01T13:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "SELL",
+                "fund": "107",
+                "amount": "-7",
+                "created_to_cover_fees": "True",
+                "time": "2026-09-02T13:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {date(2026, 9, 1): Decimal("1")}, "USDT": {}},
+    )
+
+    assert result["volatis-strategy"] == {
+        "invested": Decimal("100"),
+        "cash": Decimal("4"),
+        "allocation": Decimal("96"),
+    }
+
+
+def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
+    tmp_path: Path,
+):
+    """A conflicting included account cannot leave a partial v3 systematic total."""
+    derivation = load_derivation_module()
+    policy = {"selected_treatment": "raw", "calculation_effect": "raw"}
+    receipt = {
+        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "evidence_url": "https://example.test/a",
+        "comment_id": 1,
+        "digest_evidence_url": "https://example.test/b",
+        "digest_comment_id": 2,
+        "approved_on": "2026-10-02",
+        "payload_sha256": "",
+    }
+    import hashlib
+
+    receipt["payload_sha256"] = hashlib.sha256(
+        (
+            json.dumps({"decision": policy}, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    receipt_b = {
+        "schema_version": 1,
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "policy_id": "PORT-INVESTED-CAPITAL-1",
+        "approval_evidence_url": receipt["evidence_url"],
+        "approved_on": "2026-10-02",
+        "decision_payload_sha256": {
+            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
+        },
+    }
+    base_rows = [
+        {**included_row("volatis", "volatis-strategy"), "provider": "QUANTBASE"},
+        {**included_row("robuxio", "robuxio-crypto"), "provider": "MATRIXPORT"},
+        {**included_row("generic-2", "generic-strategy-2"), "provider": "IBKR"},
+        *[
+            {
+                **included_row(f"generic-{index}", f"generic-strategy-{index}"),
+                "provider": "IBKR",
+            }
+            for index in range(3, 7)
+        ],
+    ]
+    files = {
+        "provider-ledger.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [
+                    nav(f"generic-{index}", "2026-09-17", "100")
+                    for index in range(2, 7)
+                ],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        "account-strategy-current-epoch-crosswalk.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": base_rows,
+            }
+        ),
+        "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n09/17/2026,105\n",
+        "account_activity.csv": "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,,C,deposit-1,10000,provider-account-1\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
+        "nav_daily.csv": "day_timestamp_utc,nav,product_id\n2026-09-17T00:00:00Z,1,fund-m\n",
+        "wallet_deposits.csv": "transaction_id,state,currency,amount,created_at_utc\ndeposit-1,confirmed,USDC,10,2026-09-01T00:00:00Z\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
+        "wallet_currency_dispositions.csv": "wallet_label,disposition\nunknown,UNCLASSIFIED\n",
+        "subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc,subscription_share,confirm_nav,status,source_endpoint\n10,2026-09-17T00:00:00Z,order-1,fund-m,10,USDC,2026-09-16T00:00:00Z,10,1,300,/strategy/api/v2/order\n",
+        "coverage.csv": 'endpoint,status,terminal_reason,updated_at_utc,details_json\nGET https://mapi.matrixport.com/mapi/v1/wallet/deposits,complete_to_observed_boundary,structured_parameter_rejections_dispositioned,2026-09-18T00:00:00Z,"{""raw_rows"": 1}"\nGET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals,complete_to_observed_boundary,structured_parameter_rejections_dispositioned,2026-09-18T00:00:00Z,"{""raw_rows"": 0}"\n',
+        "request_manifest.jsonl": '{"request_id": "request-1", "request_sha256": "'
+        + "a" * 64
+        + '"}\n',
+        "matrixport-generation.json": "{}",
+        "matrixport-generation-catalog.json": json.dumps(
+            {
+                "catalog_schema_version": 2,
+                "provider_id": "matrixport",
+                "source_run_id": "synthetic-run",
+                "observed_boundary_date": "2026-09-18",
+            }
+        ),
+        "yfinance-history.json": json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDC-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDC-USD", "Date": "2026-09-16", "Close": "1"},
+                    {"Ticker": "USDC-USD", "Date": "2026-09-17", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-02", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-17", "Close": "1"},
+                ]
+            }
+        ),
+        "contract.json": json.dumps(
+            {
+                "financial_outcomes": [
+                    {
+                        "outcome_id": "INVESTED_CAPITAL",
+                        "calculation_contract": {
+                            "provider_custody_perimeter": policy,
+                            "owner_decision_receipts": {
+                                "PROVIDER_CUSTODY_PERIMETER": receipt
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+        "policy.json": json.dumps(policy),
+        "receipt-a.json": json.dumps(
+            {
+                "id": 1,
+                "body": "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal subtracts cash line below zero is an error",
+            }
+        ),
+        "receipt-b.json": json.dumps(receipt),
+        "receipt-b-response.json": json.dumps(
+            {
+                "id": 2,
+                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
+                + json.dumps(receipt_b)
+                + "\n```",
+            }
+        ),
+        "generation.json": json.dumps(
+            {
+                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "as_of_date": "2026-09-17",
+                "coverage": {
+                    "observed_end": "2026-09-17",
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+            }
+        ),
+        "rates.csv": "date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-01,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-02,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-16,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDT,USD,1,x,USDT-USD,Close,x\n",
+    }
+    paths = {name: tmp_path / name for name in files}
+    for name, contents in files.items():
+        paths[name].write_text(contents, encoding="utf-8")
+    generation = json.loads(paths["generation.json"].read_text(encoding="utf-8"))
+    generation["artifacts"] = [
+        {
+            "artifact_id": artifact_id,
+            "sha256": pinned_entry(paths[name])["sha256"],
+            "size_bytes": pinned_entry(paths[name])["bytes"],
+            "as_of_date": "2026-09-17",
+            "schema": "synthetic-native-artifact-v1",
+        }
+        for artifact_id, name in (
+            ("raw/yfinance-history.json", "yfinance-history.json"),
+            ("rates.csv", "rates.csv"),
+        )
+    ]
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    native_artifacts = [
+        ("csv/nav_daily.csv", "nav_daily.csv", "matrixport-canonical-csv", "1"),
+        (
+            "csv/wallet_deposits.csv",
+            "wallet_deposits.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        ("csv/wallet_bills.csv", "wallet_bills.csv", "matrixport-canonical-csv", "1"),
+        (
+            "csv/wallet_currency_dispositions.csv",
+            "wallet_currency_dispositions.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        (
+            "csv/subscription_details.csv",
+            "subscription_details.csv",
+            "matrixport-canonical-csv",
+            "1",
+        ),
+        ("csv/coverage.csv", "coverage.csv", "matrixport-canonical-csv", "1"),
+        (
+            "reports/request_manifest.jsonl",
+            "request_manifest.jsonl",
+            "matrixport-acceptance-jsonl",
+            "1",
+        ),
+        (
+            "normalized/generation-catalog.json",
+            "matrixport-generation-catalog.json",
+            "matrixport-generation-catalog",
+            "2",
+        ),
+    ]
+    native_generation = {
+        "manifest_schema_version": 1,
+        "provider_id": "matrixport",
+        "generation_id": "synthetic-matrixport-generation",
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "sha256": pinned_entry(paths[name])["sha256"],
+                "size_bytes": pinned_entry(paths[name])["bytes"],
+                "schema": {"name": schema_name, "version": schema_version},
+            }
+            for artifact_id, name, schema_name, schema_version in native_artifacts
+        ],
+    }
+    paths["matrixport-generation.json"].write_text(
+        json.dumps(native_generation), encoding="utf-8"
+    )
+    entries = [pinned_entry(paths[name]) for name in list(files)[:8]]
+    entries.append(pinned_entry(paths["wallet_currency_dispositions.csv"]))
+    for family, name in {
+        "financial_source_contract": "contract.json",
+        "fx_generation_manifest": "generation.json",
+        "fx_usdc_usd_daily": "yfinance-history.json",
+        "fx_usdt_usd_daily": "yfinance-history.json",
+        "fx_daily_rates": "rates.csv",
+        "provider_capital_policy": "policy.json",
+        "provider_capital_owner_receipt_a": "receipt-a.json",
+        "provider_capital_owner_receipt_b": "receipt-b.json",
+        "provider_capital_owner_receipt_b_response": "receipt-b-response.json",
+        "matrixport_subscription_details": "subscription_details.csv",
+        "matrixport_generation_manifest": "matrixport-generation.json",
+        "matrixport_generation_catalog": "matrixport-generation-catalog.json",
+        "matrixport_owner_flow_coverage": "coverage.csv",
+        "matrixport_owner_flow_request_manifest": "request_manifest.jsonl",
+    }.items():
+        entry = pinned_entry(paths[name])
+        entry["family"] = family
+        entries.append(entry)
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": entries,
+        "generation_selection_evidence": {
+            "matrixport": {
+                "generation_id": "synthetic-matrixport-generation",
+                "source_run_id": "synthetic-run",
+                "generation_manifest_sha256": pinned_entry(
+                    paths["matrixport-generation.json"]
+                )["sha256"],
+                "catalog_sha256": pinned_entry(
+                    paths["matrixport-generation-catalog.json"]
+                )["sha256"],
+                "qualification": "STAGED_COMPLETE",
+                "finalized_through": "2026-09-17",
+                "finality_evidence_sha256_verified_V": "b" * 64,
+            }
+        },
+    }
+    positive = derivation.derive(tmp_path, manifest)
+    positive_metric_keys = {
+        (row["metric_id"], row["entity"]) for row in positive["metrics"]
+    }
+    base_active_strategies = {
+        "volatis-strategy",
+        "robuxio-crypto",
+        *{f"generic-strategy-{index}" for index in range(2, 7)},
+    }
+    assert ("capital.account.cutoff", "robuxio") in positive_metric_keys
+    assert (
+        "capital.portfolio.systematic.cutoff",
+        "portfolio",
+    ) in positive_metric_keys, [
+        row
+        for row in positive["not_derivable"]
+        if "capital" in row["metric_id"] or "weight" in row["metric_id"]
+    ]
+    assert {
+        entity
+        for metric_id, entity in positive_metric_keys
+        if metric_id == "weight.strategy.cutoff"
+    } == base_active_strategies
+
+    conflict_rows = [
+        *[row for row in base_rows if row["account_id"] != "generic-3"],
+        {**included_row("generic-3", "generic-strategy-2"), "provider": "IBKR"},
+        {**included_row("generic-2", "conflicted-strategy"), "provider": "IBKR"},
+    ]
+    paths["account-strategy-current-epoch-crosswalk.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": conflict_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["account-strategy-current-epoch-crosswalk.json"]):
+            entries[index] = pinned_entry(
+                paths["account-strategy-current-epoch-crosswalk.json"]
+            )
+            break
+    output = derivation.derive(
+        tmp_path,
+        manifest,
+    )
+    metric_keys = {(row["metric_id"], row["entity"]) for row in output["metrics"]}
+    not_derivable = {
+        (row["metric_id"], row["entity"]) for row in output["not_derivable"]
+    }
+    active_strategies = {
+        "volatis-strategy",
+        "robuxio-crypto",
+        "generic-strategy-2",
+        "conflicted-strategy",
+        *{f"generic-strategy-{index}" for index in range(4, 7)},
+    }
+    assert ("capital.strategy.cutoff", "volatis-strategy") in metric_keys
+    assert ("capital.strategy.cutoff", "generic-strategy-2") in not_derivable
+    assert ("capital.strategy.cutoff", "conflicted-strategy") in not_derivable
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in not_derivable
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") not in metric_keys
+    assert {
+        entity
+        for metric_id, entity in not_derivable
+        if metric_id == "weight.strategy.cutoff"
+    } == active_strategies
+
+
+def test_oracle_v3_b_raw_custody_capital_uses_each_matrixport_event_date_fx():
+    """An unclassified non-native bill cannot reach the old FX allocation path."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [
+                {
+                    "state": "confirmed",
+                    "currency": "USDC",
+                    "amount": "100",
+                    "created_at_utc": "2026-09-01T12:00:00+00:00",
+                }
+            ],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
+            {
+                "USDC": {date(2026, 9, 1): Decimal("1")},
+                "USDT": {date(2026, 9, 2): Decimal("1.01")},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("amount", "timestamp"),
+    [("", "2026-09-01T12:00:00+00:00"), ("10", "")],
+)
+def test_oracle_v3_b_confirmed_matrixport_deposit_requires_amount_and_timestamp(
+    amount: str, timestamp: str
+):
+    """A confirmed owner deposit with incomplete facts cannot disappear silently."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(
+        ValueError, match="confirmed Matrixport deposit lacks timestamp or amount"
+    ):
+        derivation.raw_custody_capital(
+            [],
+            [
+                {
+                    "state": "confirmed",
+                    "currency": "USDC",
+                    "amount": amount,
+                    "created_at_utc": timestamp,
+                }
+            ],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_quantbase_unsupported_transfer_with_funding_still_fails():
+    """A valid funded sleeve cannot make an unsupported owner transfer admissible."""
+    derivation = load_derivation_module()
+
+    with pytest.raises(ValueError, match="unsupported Quantbase owner transfer type"):
+        derivation.raw_custody_capital(
+            [
+                {
+                    "activity_type": "transfer",
+                    "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-1",
+                    "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                },
+                {
+                    "activity_type": "filled_txn",
+                    "type": "BUY",
+                    "fund": "107",
+                    "amount": "96",
+                    "time": "2026-09-01T13:00:00+00:00",
+                },
+                {
+                    "activity_type": "transfer",
+                    "type": "INTERNAL_TRANSFER",
+                    "status": "C",
+                    "id": "transfer-1",
+                    "amount": "4",
+                    "amount_cents": "400",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-02T12:00:00+00:00",
+                },
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_quantbase_completed_transfer_requires_admitted_identity_and_cents():
+    derivation = load_derivation_module()
+    base = {
+        "activity_type": "transfer",
+        "type": "DEPOSIT",
+        "status": "C",
+        "id": "deposit-1",
+        "amount": "100",
+        "amount_cents": "10000",
+        "destination_account_id": "provider-account-1",
+        "created_at": "2026-09-01T12:00:00+00:00",
+    }
+    for invalid in (
+        {**base, "amount_cents": "9999"},
+        {**base, "destination_account_id": ""},
+    ):
+        with pytest.raises(ValueError):
+            derivation.raw_custody_capital([invalid], [], [], {"USDC": {}, "USDT": {}})
+    with pytest.raises(ValueError, match="linked accounts"):
+        derivation.raw_custody_capital(
+            [
+                base,
+                {
+                    **base,
+                    "id": "deposit-2",
+                    "destination_account_id": "provider-account-2",
+                },
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_quantbase_conflicting_transfer_id_fails_and_noncompleted_is_zero():
+    derivation = load_derivation_module()
+    row = {
+        "activity_type": "transfer",
+        "type": "DEPOSIT",
+        "status": "C",
+        "id": "deposit-1",
+        "amount": "100",
+        "amount_cents": "10000",
+        "destination_account_id": "provider-account-1",
+        "created_at": "2026-09-01T12:00:00+00:00",
+    }
+    with pytest.raises(ValueError, match="conflicting"):
+        derivation.raw_custody_capital(
+            [row, {**row, "amount": "101", "amount_cents": "10100"}],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+    result = derivation.raw_custody_capital(
+        [{**row, "status": "P"}], [], [], {"USDC": {}, "USDT": {}}
+    )
+    assert result == {}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"activity_type": "journal", "status": "C", "type": "UNKNOWN"},
+        {
+            "activity_type": "filled_txn",
+            "status": "C",
+            "type": "SELL",
+            "fund": "107",
+            "amount": "-7",
+            "time": "2026-09-02T13:00:00+00:00",
+        },
+    ],
+)
+def test_oracle_v3_b_unknown_journal_and_generic_sell_fail_custody(row):
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError):
+        derivation.raw_custody_capital(
+            [
+                {
+                    "activity_type": "transfer",
+                    "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-1",
+                    "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-01T12:00:00+00:00",
+                },
+                {
+                    "activity_type": "filled_txn",
+                    "type": "BUY",
+                    "fund": "107",
+                    "amount": "96",
+                    "time": "2026-09-01T13:00:00+00:00",
+                },
+                row,
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+def test_oracle_v3_b_non_native_relevant_bill_is_not_an_allocation():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "tx_type": "UNKNOWN",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
+            {"USDC": {}, "USDT": {date(2026, 9, 2): Decimal("1")}},
+        )
+
+
+def test_oracle_v3_b_completed_transfer_rejects_naive_timestamp_before_local_timezone():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="timezone"):
+        derivation.raw_custody_capital(
+            [
+                {
+                    "activity_type": "transfer",
+                    "type": "DEPOSIT",
+                    "status": "C",
+                    "id": "deposit-naive-time",
+                    "amount": "100",
+                    "amount_cents": "10000",
+                    "destination_account_id": "provider-account-1",
+                    "created_at": "2026-09-01T12:00:00",
+                }
+            ],
+            [],
+            [],
+            {"USDC": {}, "USDT": {}},
+        )
+
+
+@pytest.mark.parametrize("fee_type", ["PARTNER_SUB_FEE", "AUM_FEE"])
+def test_oracle_v3_b_native_fee_journal_is_outside_custody_formula(fee_type):
+    derivation = load_derivation_module()
+    result = derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-fee-journal",
+                "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "journal",
+                "status": "COMPLETE",
+                "source_type": fee_type,
+                "amount": "2",
+                "created_at": "2026-09-01T13:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-01T14:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "SELL",
+                "fund": "107",
+                "amount": "-1",
+                "created_to_cover_fees": " true ",
+                "time": "2026-09-01T15:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {}, "USDT": {}},
+    )
+    assert result["volatis-strategy"] == {
+        "invested": Decimal("100"),
+        "cash": Decimal("4"),
+        "allocation": Decimal("96"),
+    }
+
+
+def test_oracle_v3_b_non_native_bill_without_tx_type_fails_closed():
+    derivation = load_derivation_module()
+    with pytest.raises(ValueError, match="Matrixport"):
+        derivation.raw_custody_capital(
+            [],
+            [],
+            [
+                {
+                    "currency": "USDT",
+                    "direction": "2",
+                    "tx_type": " ",
+                    "amount": "96",
+                    "timestamp_utc": "2026-09-02T12:00:00+00:00",
+                }
+            ],
+            {"USDC": {}, "USDT": {date(2026, 9, 2): Decimal("1")}},
+        )
+
+
+def test_oracle_v3_b_native_success_wallet_deposit_is_admitted_for_custody():
+    derivation = load_derivation_module()
+    result = derivation.raw_custody_capital(
+        [],
+        [
+            {
+                "state": "success",
+                "currency": "USDT",
+                "amount": "100",
+                "created_at_utc": "2026-09-01T12:00:00+00:00",
+            }
+        ],
+        [],
+        {
+            "USDC": {},
+            "USDT": {
+                date(2026, 9, 1): Decimal("1.01"),
+                date(2026, 9, 2): Decimal("1"),
+            },
+        },
+        [
+            {
+                "subscription_time_utc": "2026-09-02T12:00:00+00:00",
+                "subscription_amount": "100",
+            }
+        ],
+    )
+    assert result["robuxio-crypto"]["invested"] == Decimal("101")
+
+
+def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
+    """A schema-3 public derive keeps a 100 owner deposit distinct from a 96 buy."""
+    derivation = load_derivation_module()
+    policy = {"selected_treatment": "raw", "calculation_effect": "raw"}
+    receipt = {
+        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "evidence_url": "https://example.test/a",
+        "comment_id": 1,
+        "digest_evidence_url": "https://example.test/b",
+        "digest_comment_id": 2,
+        "approved_on": "2026-10-02",
+        "payload_sha256": "",
+    }
+    import hashlib
+
+    receipt["payload_sha256"] = hashlib.sha256(
+        (
+            json.dumps(
+                {"decision": policy},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+    receipt_b_machine = {
+        "schema_version": 1,
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "policy_id": "PORT-INVESTED-CAPITAL-1",
+        "approval_evidence_url": receipt["evidence_url"],
+        "approved_on": "2026-10-02",
+        "decision_payload_sha256": {
+            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
+        },
+    }
+    files = {
+        "provider-ledger.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [
+                    nav(f"generic-{index}", "2026-09-17", "100")
+                    for index in range(2, 7)
+                ],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        "account-strategy-current-epoch-crosswalk.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [
+                    {
+                        **included_row("volatis", "volatis-strategy"),
+                        "provider": "QUANTBASE",
+                    },
+                    {
+                        **included_row("robuxio", "robuxio-crypto"),
+                        "provider": "MATRIXPORT",
+                    },
+                    *[
+                        {
+                            **included_row(
+                                f"generic-{index}", f"generic-strategy-{index}"
+                            ),
+                            "provider": "IBKR",
+                        }
+                        for index in range(2, 7)
+                    ],
+                ],
+            }
+        ),
+        "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n09/17/2026,105\n",
+        "account_activity.csv": "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,,C,deposit-1,10000,provider-account-1\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
+        "nav_daily.csv": "day_timestamp_utc,nav\n2026-09-02T00:00:00Z,1\n",
+        "wallet_deposits.csv": "state,currency,amount,created_at_utc\nconfirmed,USDC,10,2026-09-01T00:00:00Z\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
+        "yfinance-history.json": json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDC-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-02", "Close": "1"},
+                ]
+            }
+        ),
+        "contract.json": json.dumps(
+            {
+                "financial_outcomes": [
+                    {
+                        "outcome_id": "INVESTED_CAPITAL",
+                        "calculation_contract": {
+                            "provider_custody_perimeter": policy,
+                            "owner_decision_receipts": {
+                                "PROVIDER_CUSTODY_PERIMETER": receipt
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+        "policy.json": json.dumps(policy),
+        "receipt-a.json": json.dumps(
+            {
+                "id": 1,
+                "body": "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal subtracts cash line below zero is an error",
+            }
+        ),
+        "receipt-b.json": json.dumps(receipt),
+        "receipt-b-response.json": json.dumps(
+            {
+                "id": 2,
+                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
+                + json.dumps(receipt_b_machine)
+                + "\n```",
+            }
+        ),
+        "generation.json": json.dumps(
+            {
+                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "as_of_date": "2026-09-17",
+                "coverage": {
+                    "observed_end": "2026-09-17",
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+            }
+        ),
+        "rates.csv": "date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-01,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-02,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-17,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDT,USD,1,x,USDT-USD,Close,x\n",
+    }
+    paths = {}
+    for name, contents in files.items():
+        path = tmp_path / name
+        path.write_text(contents, encoding="utf-8")
+        paths[name] = path
+    generation = json.loads(paths["generation.json"].read_text(encoding="utf-8"))
+    generation["artifacts"] = [
+        {
+            "artifact_id": artifact_id,
+            "sha256": pinned_entry(paths[name])["sha256"],
+            "size_bytes": pinned_entry(paths[name])["bytes"],
+            "as_of_date": "2026-09-17",
+            "schema": "synthetic-native-artifact-v1",
+        }
+        for artifact_id, name in (
+            ("raw/yfinance-history.json", "yfinance-history.json"),
+            ("rates.csv", "rates.csv"),
+        )
+    ]
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    entries = [pinned_entry(paths[name]) for name in list(files)[:8]]
+    family_paths = {
+        "financial_source_contract": "contract.json",
+        "fx_generation_manifest": "generation.json",
+        "fx_usdc_usd_daily": "yfinance-history.json",
+        "fx_usdt_usd_daily": "yfinance-history.json",
+        "fx_daily_rates": "rates.csv",
+        "provider_capital_policy": "policy.json",
+        "provider_capital_owner_receipt_a": "receipt-a.json",
+        "provider_capital_owner_receipt_b": "receipt-b.json",
+        "provider_capital_owner_receipt_b_response": "receipt-b-response.json",
+    }
+    for family, name in family_paths.items():
+        entry = pinned_entry(paths[name])
+        entry["family"] = family
+        entries.append(entry)
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": entries,
+    }
+    output = derivation.derive(tmp_path, manifest)
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+    assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
+    assert values[("capital.strategy_cash.cutoff", "volatis-strategy")] == "4.00"
+    assert values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
+
+    rates_path = paths["rates.csv"]
+    admitted_rates = rates_path.read_text(encoding="utf-8")
+    rates_path.write_text(
+        admitted_rates.replace("2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n", ""),
+        encoding="utf-8",
+    )
+    generation["artifacts"][1].update(
+        sha256=pinned_entry(rates_path)["sha256"],
+        size_bytes=pinned_entry(rates_path)["bytes"],
+    )
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["generation.json"]):
+            updated = pinned_entry(paths["generation.json"])
+            updated["family"] = "fx_generation_manifest"
+            entries[index] = updated
+        elif entry["path"] == str(rates_path):
+            updated = pinned_entry(rates_path)
+            updated["family"] = "fx_daily_rates"
+            entries[index] = updated
+    missing_fx = derivation.derive(tmp_path, manifest)
+    missing_fx_ids = {
+        (row["metric_id"], row["entity"]) for row in missing_fx["not_derivable"]
+    }
+    assert ("capital.strategy_cash.cutoff", "robuxio-crypto") in missing_fx_ids
+    rates_path.write_text(admitted_rates, encoding="utf-8")
+    generation["artifacts"][1].update(
+        sha256=pinned_entry(rates_path)["sha256"],
+        size_bytes=pinned_entry(rates_path)["bytes"],
+    )
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["generation.json"]):
+            updated = pinned_entry(paths["generation.json"])
+            updated["family"] = "fx_generation_manifest"
+            entries[index] = updated
+        elif entry["path"] == str(rates_path):
+            updated = pinned_entry(rates_path)
+            updated["family"] = "fx_daily_rates"
+            entries[index] = updated
+
+    generation["artifacts"][0]["sha256"] = "0" * 64
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["generation.json"]):
+            updated = pinned_entry(paths["generation.json"])
+            updated["family"] = "fx_generation_manifest"
+            entries[index] = updated
+    with pytest.raises(derivation.ManifestError, match="generation artifact"):
+        derivation.derive(tmp_path, manifest)
+    generation["artifacts"][0]["sha256"] = pinned_entry(paths["yfinance-history.json"])[
+        "sha256"
+    ]
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(paths["generation.json"]):
+            updated = pinned_entry(paths["generation.json"])
+            updated["family"] = "fx_generation_manifest"
+            entries[index] = updated
+
+    ledger_path = paths["provider-ledger.json"]
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["capital_anchors"] = [{"account_id": "volatis", "amount": "999999"}]
+    ledger["nav_observations"].extend(
+        [
+            nav("volatis", "2026-09-17", "1"),
+            nav("volatis", "2026-09-17", "999"),
+        ]
+    )
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(ledger_path):
+            entries[index] = pinned_entry(ledger_path)
+    same = derivation.derive(tmp_path, manifest)
+    same_values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in same["metrics"]
+    }
+    assert same_values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
+
+    activity_path = paths["account_activity.csv"]
+    activity_path.write_text(
+        "activity_type,type,fund,amount,created_at,time\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(activity_path):
+            entries[index] = pinned_entry(activity_path)
+    unavailable = derivation.derive(tmp_path, manifest)
+    unavailable_ids = {
+        (row["metric_id"], row["entity"]) for row in unavailable["not_derivable"]
+    }
+    assert {
+        ("invested_capital.strategy.cutoff", "volatis-strategy"),
+        ("capital.strategy_cash.cutoff", "volatis-strategy"),
+        ("capital.strategy.cutoff", "volatis-strategy"),
+        ("capital.portfolio.systematic.cutoff", "portfolio"),
+        ("weight.strategy.cutoff", "volatis-strategy"),
+    }.issubset(unavailable_ids)
+    assert {
+        ("weight.strategy.cutoff", strategy_id)
+        for strategy_id in (
+            "volatis-strategy",
+            "robuxio-crypto",
+            *(f"generic-strategy-{index}" for index in range(2, 7)),
+        )
+    }.issubset(unavailable_ids)
+
+    activity_path.write_text(
+        "activity_type,type,fund,amount,created_at,time\n"
+        "transfer,DEPOSIT,,50,2026-09-01T12:00:00+00:00,\n"
+        "transfer,DEPOSIT,,100,2026-09-02T12:00:00+00:00,\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(activity_path):
+            entries[index] = pinned_entry(activity_path)
+    negative = derivation.derive(tmp_path, manifest)
+    negative_ids = {
+        (row["metric_id"], row["entity"]) for row in negative["not_derivable"]
+    }
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") in negative_ids
+
+    activity_path.write_text(
+        "activity_type,type,fund,amount,created_at,time\n"
+        "transfer,UNSUPPORTED,,100,2026-09-01T12:00:00+00:00,\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(activity_path):
+            entries[index] = pinned_entry(activity_path)
+    unsupported = derivation.derive(tmp_path, manifest)
+    unsupported_ids = {
+        (row["metric_id"], row["entity"]) for row in unsupported["not_derivable"]
+    }
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") in unsupported_ids
+
+    activity_path.write_text(
+        "activity_type,type,fund,amount,created_at,time\n"
+        "transfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(activity_path):
+            entries[index] = pinned_entry(activity_path)
+    deposits_path = paths["wallet_deposits.csv"]
+    deposits_path.write_text(
+        "state,currency,amount,created_at_utc\n"
+        "confirmed,USDC,10,2026-09-01T00:00:00Z\n"
+        "confirmed,USDT,5,\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(deposits_path):
+            entries[index] = pinned_entry(deposits_path)
+    malformed_matrixport = derivation.derive(tmp_path, manifest)
+    malformed_ids = {
+        (row["metric_id"], row["entity"])
+        for row in malformed_matrixport["not_derivable"]
+    }
+    assert {
+        ("invested_capital.strategy.cutoff", "robuxio-crypto"),
+        ("capital.strategy_cash.cutoff", "robuxio-crypto"),
+        ("capital.strategy.cutoff", "robuxio-crypto"),
+        ("capital.portfolio.systematic.cutoff", "portfolio"),
+    }.issubset(malformed_ids)
+    assert {
+        ("weight.strategy.cutoff", strategy_id)
+        for strategy_id in (
+            "volatis-strategy",
+            "robuxio-crypto",
+            *(f"generic-strategy-{index}" for index in range(2, 7)),
+        )
+    }.issubset(malformed_ids)
 
 
 def test_derive_never_dates_a_flow_after_the_last_valuation_at_that_valuation(
@@ -2223,4 +3612,127 @@ def test_derive_keeps_raw_last_date_when_all_nav_rows_are_fx_unconverted(
     assert all("FX-converted" in reason for reason in reasons)
     assert derivation.MATRIXPORT_NAV_PATH.as_posix() in {
         item["path"] for item in output["inputs"]
+    }
+
+
+def test_quantbase_fee_created_sells_are_not_sleeve_external_flows():
+    """Native fee-funded SELL rows do not become external sleeve flows."""
+    derivation = load_derivation_module()
+
+    flow_data = derivation.quantbase_sleeve_flows(
+        [
+            {
+                "activity_type": "filled_txn",
+                "id": "ordinary-buy",
+                "fund": "107",
+                "type": "BUY",
+                "amount": "50",
+                "time": "2026-01-01T10:00:00Z",
+                "created_to_cover_fees": "False",
+                "is_rebalance": "False",
+            },
+            {
+                "activity_type": "filled_txn",
+                "id": "fee-sell-lowercase",
+                "fund": "107",
+                "type": "SELL",
+                "amount": "-2",
+                "time": "2026-01-01T11:00:00Z",
+                "created_to_cover_fees": "true",
+                "is_rebalance": "False",
+            },
+            {
+                "activity_type": "filled_txn",
+                "id": "fee-sell-spaced",
+                "fund": "107",
+                "type": "SELL",
+                "amount": "-3",
+                "time": "2026-01-01T12:00:00Z",
+                "created_to_cover_fees": " true ",
+                "is_rebalance": "False",
+            },
+        ],
+        [
+            (date(2026, 1, 1), Decimal("100")),
+            (date(2026, 1, 2), Decimal("150")),
+            (date(2026, 1, 3), Decimal("165")),
+        ],
+    )
+
+    assert flow_data.cash_flows == {date(2026, 1, 1): Decimal("50")}
+    assert flow_data.twr_beginning_flows == {date(2026, 1, 1): Decimal("50")}
+    assert flow_data.count == 1
+
+
+def test_selected_fx_guard_requires_rate_for_successful_usdc_custody_date(
+    tmp_path: Path,
+):
+    """A successful admitted deposit needs its own normalized event-date FX row."""
+    derivation = load_derivation_module()
+    rates_path = tmp_path / "rates.csv"
+    rates_path.write_text(
+        "date,currency,ticker\n2026-09-01,USDC,USDC-USD\n",
+        encoding="utf-8",
+    )
+    deposits = [
+        {
+            "state": "success",
+            "currency": "USDC",
+            "amount": "10",
+            "created_at_utc": "2026-09-01T00:00:00Z",
+        }
+    ]
+
+    # The admitted date is a positive control; removing only its normalized row
+    # must fail closed even though raw FX may still contain that date.
+    derivation.selected_fx_covers_custody_event_dates(rates_path, deposits, [], [])
+    rates_path.write_text("date,currency,ticker\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="selected FX rates lack a raw custody event date"
+    ):
+        derivation.selected_fx_covers_custody_event_dates(rates_path, deposits, [], [])
+
+
+@pytest.mark.parametrize("fee_type", ["PARTNER_SUB_FEE", "AUM_FEE"])
+def test_oracle_v3_b_native_complete_fee_journal_uses_provider_type_field(fee_type):
+    """Known COMPLETE fee journals use the provider's native `type` field."""
+    derivation = load_derivation_module()
+
+    result = derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "type": "DEPOSIT",
+                "status": "C",
+                "id": "deposit-native-fee-journal",
+                "amount": "100",
+                "amount_cents": "10000",
+                "destination_account_id": "provider-account-1",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "journal",
+                "status": "COMPLETE",
+                "type": fee_type,
+                "amount": "2",
+                "created_at": "2026-09-01T13:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-01T14:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {}, "USDT": {}},
+    )
+
+    assert result["volatis-strategy"] == {
+        "invested": Decimal("100"),
+        "cash": Decimal("4"),
+        "allocation": Decimal("96"),
     }

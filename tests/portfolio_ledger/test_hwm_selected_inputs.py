@@ -1815,6 +1815,58 @@ def test_reconciles_declared_gap_spanning_hwm_link_from_admitted_inputs() -> Non
     )
 
 
+def test_hwm_gap_compound_is_032_for_two_verified_intervals() -> None:
+    """The HWM compound is (1.1 * 1.2) - 1, not an additive 0.3."""
+    hwm_rows, _ledger_rows = _robuxio_gap_parity_rows()
+    ledger_rows = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.1",
+        },
+        {
+            "strategy_id": "robuxio-crypto",
+            "date": "2026-01-04",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.2",
+        },
+    ]
+
+    selected_hwm._validate_hwm_return_parity(hwm_rows, ledger_rows)
+    with localcontext() as context:
+        context.prec = 40
+        assert (Decimal("1.1") * Decimal("1.2")) - Decimal(1) == Decimal("0.32")
+
+
+def test_hwm_declared_gap_must_be_strictly_inside_interval_at_lower_bound() -> None:
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="unexplained HWM interval"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 2)})
+            },
+            recompute_gap_interval=lambda *_args: Decimal("0.2"),
+        )
+
+
+def test_hwm_declared_gap_must_be_strictly_inside_interval_at_upper_bound() -> None:
+    hwm_rows, ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="unexplained HWM interval"):
+        selected_hwm._validate_hwm_return_parity(
+            hwm_rows,
+            ledger_rows,
+            declared_nav_gap_dates_by_strategy={
+                "robuxio-crypto": frozenset({date(2026, 1, 4)})
+            },
+            recompute_gap_interval=lambda *_args: Decimal("0.2"),
+        )
+
+
 def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
     """The MVP-2 ledger declares the same Matrixport NAV outage as the producer."""
     module_path = REPO / "tests/core/mvp2_financial_fixture.py"
@@ -1994,6 +2046,52 @@ def test_parity_gate_is_called_when_account_live_ledger_rows_are_present(
         _build(_fixture(tmp_path, mutate_ledger=mutate))
 
 
+def test_real_builder_rejects_empty_strategy_returns(tmp_path: Path) -> None:
+    def mutate(ledger: dict[str, Any]) -> None:
+        for nav in ledger["nav_observations"]:
+            nav["provider_id"] = "synthetic"
+        ledger["provider_coverage"] = [
+            {"provider_id": "synthetic", "coverage": {"declared_exclusions": []}}
+        ]
+        ledger["strategy_returns"] = []
+
+    with pytest.raises(SelectedHwmInputError, match="ACCOUNT_LIVE"):
+        _build(_fixture(tmp_path, mutate_ledger=mutate))
+
+
+def test_real_builder_rejects_non_live_only_strategy_returns(tmp_path: Path) -> None:
+    def mutate(ledger: dict[str, Any]) -> None:
+        for nav in ledger["nav_observations"]:
+            nav["provider_id"] = "synthetic"
+        ledger["provider_coverage"] = [
+            {"provider_id": "synthetic", "coverage": {"declared_exclusions": []}}
+        ]
+        ledger["strategy_returns"] = [
+            {
+                "strategy_id": "grizzlybears-vtma",
+                "date": DAY.isoformat(),
+                "evidence_layer": "BACKTEST",
+                "return": "0.1",
+            }
+        ]
+
+    with pytest.raises(SelectedHwmInputError, match="ACCOUNT_LIVE"):
+        _build(_fixture(tmp_path, mutate_ledger=mutate))
+
+
+def test_direct_parity_rejects_empty_strategy_returns() -> None:
+    hwm_rows, _ledger_rows = _robuxio_gap_parity_rows()
+
+    with pytest.raises(SelectedHwmInputError, match="ACCOUNT_LIVE"):
+        selected_hwm._validate_hwm_return_parity(hwm_rows, [])
+
+
+def test_real_builder_accepts_legacy_ledger_without_strategy_returns(
+    tmp_path: Path,
+) -> None:
+    assert _build(_fixture(tmp_path))["schema_version"] == 1
+
+
 def test_rejects_daily_strategy_interval_with_missing_member_nav_boundary() -> None:
     crosswalk, calculation, output = _zero_nav_strategy_rows()
     zero_key = next(key for key in calculation if key[0] == "account-zero-sleeve")
@@ -2140,7 +2238,21 @@ def test_reads_ordinary_source_producer_layouts(tmp_path: Path, field: str) -> N
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows path limit")
 def test_reads_ordinary_source_child_past_windows_path_limit(tmp_path: Path) -> None:
-    parent = tmp_path / ("long-source-" + "x" * 80)
+    parent = tmp_path
+    segment = "long-source-" + "x" * 80
+    while (
+        len(
+            str(
+                parent
+                / "provider-ledger"
+                / "generations"
+                / ("0" * 64)
+                / "generation.json"
+            )
+        )
+        <= 260
+    ):
+        parent /= segment
     extended_parent = Path("\\\\?\\" + str(parent.absolute()))
     path, manifest, payloads = _ordinary_source(extended_parent, "provider-ledger")
     ordinary_path = Path(str(path)[4:])

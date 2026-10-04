@@ -79,7 +79,7 @@
       "required": ["schwab"],
       "properties": {"schwab": {"$ref": "#/$defs/provider_generation"}}
     },
-    "provider_ledger": {"$ref": "#/$defs/provider_generation"},
+    "provider_ledger": {"$ref": "#/$defs/provider_ledger"},
     "replay": {"$ref": "#/$defs/replay"}
   },
   "allOf": [
@@ -97,6 +97,68 @@
     }
   ],
   "$defs": {
+    "provider_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_id",
+        "generation_id",
+        "catalog_sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "root_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "generation_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "financial_mvp": {
+          "$ref": "#/$defs/financial_mvp_reference"
+        }
+      }
+    },
+    "financial_mvp_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_path",
+        "contract_sha256",
+        "registry_path",
+        "registry_sha256",
+        "schema_path",
+        "schema_sha256"
+      ],
+      "properties": {
+        "contract_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "registry_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registry_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
     "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "relative_path": {

@@ -1269,6 +1269,7 @@
             "missing_history": {"$ref": "#/$defs/nonempty_string"},
             "missing_infrastructure": {"$ref": "#/$defs/nonempty_string"},
             "negative_net_contributions": {"$ref": "#/$defs/policy_decision"},
+            "provider_custody_perimeter": {"$ref": "#/$defs/policy_decision"},
             "owner_decision_receipts": {
               "type": "object",
               "additionalProperties": false,
@@ -1284,7 +1285,8 @@
                 "FX_BASE_CURRENCY": {"$ref": "#/$defs/owner_decision_receipt"},
                 "MARGIN_AND_LEVERAGE": {"$ref": "#/$defs/owner_decision_receipt"},
                 "NEGATIVE_NET_CONTRIBUTIONS": {"$ref": "#/$defs/owner_decision_receipt"},
-                "PREDECESSOR_TRANSITION": {"$ref": "#/$defs/owner_decision_receipt"}
+                "PREDECESSOR_TRANSITION": {"$ref": "#/$defs/owner_decision_receipt"},
+                "PROVIDER_CUSTODY_PERIMETER": {"$ref": "#/$defs/owner_decision_receipt"}
               }
             },
             "policy_id": {"$ref": "#/$defs/nonempty_string"},

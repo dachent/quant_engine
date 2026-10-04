@@ -24,7 +24,7 @@ import hashlib
 import json
 import sys
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 
 _MAGNITUDE = {
@@ -178,6 +178,15 @@ def build_input_generation(
     print("epochs", len(epochs))
 
     required_account_ids = {row["account_id"] for row in epochs}
+    custody_accounts = capital._verify_provider_custody_perimeter(
+        ledger,
+        epochs,
+        next(
+            row["calculation_contract"]
+            for row in contract["financial_outcomes"]
+            if row["outcome_id"] == "INVESTED_CAPITAL"
+        ),
+    )
 
     # --- opening basis ------------------------------------------------------
     # One opening per ACCOUNT, not per epoch. An account's later epoch opens on
@@ -200,6 +209,10 @@ def build_input_generation(
             for digest, row in source_rows.items()
             if row.get("account_id") == account_id
             and capital._is_owner_capital_source(row, rules)
+            and (
+                account_id not in custody_accounts
+                or capital._is_provider_custody_external_flow(row)
+            )
             and date.fromisoformat(row["event_date"]) < end_exclusive
         }
         components = sorted(eligible)
@@ -218,14 +231,20 @@ def build_input_generation(
             "source_component_sha256s": components,
         }
         evidence = capital._digest(descriptor)
-        effect = sum(
-            (capital._source_effect_usd(source_rows[item]) for item in components),
-            Decimal(0),
-        )
+        with localcontext() as context:
+            context.prec = capital._capital_precision(
+                [source_rows[item] for item in components]
+            )
+            context.rounding = ROUND_HALF_EVEN
+            effect = sum(
+                (capital._source_effect_usd(source_rows[item]) for item in components),
+                Decimal(0),
+            )
+            exact_amount = capital._number(effect)
         opening_basis.append(
             {
                 "account_id": account_id,
-                "amount": capital._number(effect),
+                "amount": exact_amount,
                 "basis_scope": capital._ACCOUNT_LEDGER_BASIS_SCOPE,
                 "classification": "OPENING_CONTRIBUTED_BASIS",
                 "currency": "USD",
@@ -276,6 +295,11 @@ def build_input_generation(
             continue
         account_id = row.get("account_id")
         if account_id not in epoch_by_account:
+            continue
+        if (
+            account_id in custody_accounts
+            and not capital._is_provider_custody_external_flow(row)
+        ):
             continue
         effective = row["event_date"]
         if effective > complete_through:

@@ -33,6 +33,7 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
+from browser_runtime import require_browser_runtime, resolve_browser_runtime
 from tools.account_strategy_manifest import (
     build_manifest_candidate,
     validate_manifest_schema,
@@ -2180,7 +2181,7 @@ def _publish_report(root: Path, source: Path, value: object) -> None:
                 artifact_id="normalized/portfolio-report-data.json",
                 as_of_date=date(2026, 7, 30),
                 schema_name="synthetic-portfolio-report",
-                schema_version="1",
+                schema_version=str(value["report_schema_version"]),
             ),
         ),
         verification=VerificationStatus.VERIFIED,
@@ -4318,9 +4319,28 @@ def test_current_analytics_walks_a_long_finalized_generation(
         physical_root, "decomposition.json", _decomposition(), "long-lens"
     )
     pointer = read_current(physical_root)
-    long_component = physical_root / ("long-root-" + "x" * 100)
-    long_component.mkdir()
-    root = long_component / ".."
+    long_component = physical_root
+    segment = "long-root-" + "x" * 100
+    parent_count = 0
+    while True:
+        long_component /= segment
+        parent_count += 1
+        candidate_root = long_component.joinpath(*([".."] * parent_count))
+        candidate_artifact = (
+            candidate_root
+            / "generations"
+            / pointer.generation_id
+            / "decomposition.json"
+        )
+        if len(str(candidate_artifact.absolute())) > 270:
+            break
+    storage_component = (
+        Path(f"\\\\?\\{long_component.absolute()}")
+        if sys.platform == "win32"
+        else long_component
+    )
+    storage_component.mkdir(parents=True)
+    root = long_component.joinpath(*([".."] * parent_count))
     artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
     assert len(str(artifact_path.absolute())) > 270
 
@@ -5866,7 +5886,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 21" in renderer
+    assert "![21, 22].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -10274,27 +10294,10 @@ def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
 def _run_rendered_epoch_manifest_probe(html: Path) -> dict[str, object]:
     """Exercise the shipped static page in Chromium and return its DOM evidence."""
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    if not playwright_module.exists():
-        pytest.skip("Playwright module is not available for rendered browser proof")
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not Path(executable).exists():
-        pytest.skip("Chromium executable is not available for rendered browser proof")
+    node, playwright_module, executable = runtime
     probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
@@ -10373,25 +10376,10 @@ def _run_interaction_qa(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     """Run the shipped Chromium acceptance harness against one candidate."""
 
-    node = shutil.which("node")
-    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
-    if not node or not runtime_node:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
-    playwright_module = (
-        Path(runtime_node).resolve().parent
-        / "node_modules"
-        / "playwright"
-        / "index.mjs"
-    )
-    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
-        Path(os.environ.get("LOCALAPPDATA", ""))
-        / "ms-playwright"
-        / "chromium-1237"
-        / "chrome-win64"
-        / "chrome.exe"
-    )
-    if not playwright_module.exists() or not executable:
-        pytest.skip("Playwright module or Chromium executable is not available")
+    node, playwright_module, executable = runtime
     output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
@@ -11727,6 +11715,60 @@ def test_account_manifest_producer_to_publish_blocked_seam(
     assert rebuilt["panel_id"] != built["panel_id"]
 
 
+def test_g2_render_reuse_publish_renders_once_while_public_verify_renders(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish may reuse its verified render, but standalone verification may not."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    original_rendered_files = panel._rendered_files
+    calls = 0
+
+    def count_rendered_files(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original_rendered_files(*args, **kwargs)
+
+    monkeypatch.setattr(panel, "_rendered_files", count_rendered_files)
+    verified = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    assert verified["all_passed"] is True
+    assert calls == 1
+
+    calls = 0
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
+    )
+    assert published["publication_state"] == "PUBLISHED"
+    assert calls == 1
+
+
 def test_financial_publish_rejects_manifest_change_after_verification(
     inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11752,7 +11794,7 @@ def test_financial_publish_rejects_manifest_change_after_verification(
     monkeypatch.setattr(panel, "verify_candidate", verify_then_change)
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="candidate changed after verification or source snapshot drifted",
+        match="publication input changed after final render: account_manifest",
     ):
         panel.publish_panel(
             inputs["report"],
@@ -11803,9 +11845,7 @@ def test_financial_publish_rejects_input_change_after_final_render(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    original_rendered_files = panel._rendered_files
     original_read_bytes = Path.read_bytes
-    calls = 0
     mutate_active = False
 
     baseline_generation_id = read_current(
@@ -11844,12 +11884,12 @@ def test_financial_publish_rejects_input_change_after_final_render(
     )
     mutation_path = mutation_paths[mutated_input].resolve()
 
-    def render_then_change(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls, mutate_active
-        result = original_rendered_files(*args, **kwargs)
-        calls += 1
-        if calls == 2:
-            mutate_active = True
+    original_validate_qa = panel.validate_qa
+
+    def validate_then_change(*args: Any, **kwargs: Any) -> Any:
+        nonlocal mutate_active
+        result = original_validate_qa(*args, **kwargs)
+        mutate_active = True
         return result
 
     def changed_read_bytes(path: Path) -> bytes:
@@ -11858,7 +11898,7 @@ def test_financial_publish_rejects_input_change_after_final_render(
             return b" " + content
         return content
 
-    monkeypatch.setattr(panel, "_rendered_files", render_then_change)
+    monkeypatch.setattr(panel, "validate_qa", validate_then_change)
     monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
     with pytest.raises(
         panel.ControlPanelValidationError,
@@ -11895,18 +11935,14 @@ def test_financial_publish_revalidates_private_qa_snapshot_after_final_render(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    original_rendered_files = panel._rendered_files
-    calls = 0
+    original_validate_qa = panel.validate_qa
 
-    def render_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        result = original_rendered_files(*args, **kwargs)
-        calls += 1
-        if calls == 2:
-            (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
+    def validate_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
+        result = original_validate_qa(*args, **kwargs)
+        (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
         return result
 
-    monkeypatch.setattr(panel, "_rendered_files", render_then_corrupt_qa)
+    monkeypatch.setattr(panel, "validate_qa", validate_then_corrupt_qa)
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="interaction.checks must be an array",
@@ -12360,3 +12396,655 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
         report,
         "report capital differs from the governed baseline current capital",
     )
+
+
+def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
+    for version in (1, 2):
+        value = _report()
+        value["report_schema_version"] = version
+        root = tmp_path / f"published-{version}"
+        source = tmp_path / f"report-{version}.json"
+        _publish_report(root, source, value)
+        accepted, identity, returned = panel._current_report(root)
+        assert accepted["report_schema_version"] == version
+        assert returned.read_bytes() == source.read_bytes()
+        candidate = tmp_path / f"candidate-{version}" / identity["sha256"]
+        candidate.mkdir(parents=True)
+        payload = candidate / "portfolio-report-data.json"
+        payload.write_bytes(source.read_bytes())
+        candidate_value, candidate_identity, candidate_path = panel._report_candidate(
+            candidate
+        )
+        assert candidate_value["report_schema_version"] == version
+        assert candidate_identity["sha256"] == identity["sha256"]
+        assert candidate_path == payload
+    for version in (3, True, "2"):
+        value = _report()
+        value["report_schema_version"] = version
+        root = tmp_path / f"rejected-{version!s}"
+        _publish_report(root, tmp_path / f"rejected-{version!s}.json", value)
+        with pytest.raises(
+            panel.ControlPanelValidationError, match="schema is unsupported"
+        ):
+            panel._current_report(root)
+
+
+def test_schema22_weight_labels_preserve_schema21(
+    inputs: dict[str, Path],
+) -> None:
+    from copy import deepcopy
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = json.loads(
+        (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
+    )
+    assert data["panel_schema_version"] == 22
+    assert panel.BUILDER_VERSION == "2.12.0"
+    panel._validate_panel_data_schema(data)
+    data["dependence_modes"]["LIVE_PLUS_BACKTEST"] = deepcopy(
+        data["dependence_modes"]["LIVE_ONLY"]
+    )
+    panel._validate_panel_data_schema(data)
+    targets = [
+        data["dependence_analysis"],
+        data["dependence_modes"]["LIVE_ONLY"],
+        data["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+    ]
+    for target_index in range(len(targets)):
+        for field in ("weight_basis", "weight_authority"):
+            broken = deepcopy(data)
+            broken_targets = [
+                broken["dependence_analysis"],
+                broken["dependence_modes"]["LIVE_ONLY"],
+                broken["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+            ]
+            del broken_targets[target_index][field]
+            with pytest.raises(panel.ControlPanelValidationError):
+                panel._validate_panel_data_schema(broken)
+    if data["hwm_summary"]["hwm_numerical_status"] == "AVAILABLE":
+        broken = deepcopy(data)
+        del broken["hwm_summary"]["weight_basis"]
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel._validate_panel_data_schema(broken)
+    legacy = deepcopy(data)
+    legacy["panel_schema_version"] = 21
+    for target in (
+        legacy["dependence_analysis"],
+        legacy["dependence_modes"]["LIVE_ONLY"],
+        legacy["dependence_modes"]["LIVE_PLUS_BACKTEST"],
+    ):
+        target.pop("weight_basis", None)
+        target.pop("weight_authority", None)
+    legacy["hwm_summary"].pop("weight_basis", None)
+    panel._validate_panel_data_schema(legacy)
+
+
+def test_panel_schema22_publication_records_input_report_version(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    for report_version in (1, 2):
+        report = _report_with_baseline(inputs)
+        report["report_schema_version"] = report_version
+        report = _with_hwm_summary(
+            report, inputs["freshness"], _panel_baseline_catalog()
+        )
+        report_root = tmp_path / f"report-v{report_version}"
+        report_source = tmp_path / f"report-v{report_version}.json"
+        _publish_report(report_root, report_source, report)
+
+        version_inputs = dict(inputs)
+        version_inputs["report"] = report_root
+        version_inputs["output"] = tmp_path / f"panel-v{report_version}"
+        financial = _financial_manifest_kwargs(
+            tmp_path / f"manifest-v{report_version}", inputs["baseline"]
+        )
+        built = panel.build_candidate(
+            version_inputs["report"],
+            version_inputs["legacy"],
+            version_inputs["output"],
+            freshness_health_path=version_inputs["freshness"],
+            baseline_root=version_inputs["baseline"],
+            **financial,
+        )
+        candidate = Path(built["candidate_dir"])
+        qa = _qa(candidate, tmp_path / f"qa-v{report_version}")
+        release_root = tmp_path / f"release-v{report_version}"
+        release_root.mkdir()
+        receipt = _frozen_financial_receipt(
+            release_root,
+            version_inputs,
+            candidate,
+            qa,
+            financial,
+        )
+        published = panel.publish_panel(
+            version_inputs["report"],
+            version_inputs["legacy"],
+            candidate,
+            qa,
+            version_inputs["output"],
+            private_stage_root=version_inputs["output"],
+            portfolio_root=tmp_path / f"production-v{report_version}",
+            freshness_health_path=version_inputs["freshness"],
+            baseline_root=version_inputs["baseline"],
+            coordinated_release_receipt=receipt,
+            **financial,
+        )
+        generation = (
+            version_inputs["output"] / "generations" / published["generation_id"]
+        )
+        manifest = json.loads((generation / "generation.json").read_bytes())
+        dashboard = json.loads(
+            (generation / "data" / "dashboard_data.json").read_bytes()
+        )
+        artifact = next(
+            artifact
+            for artifact in manifest["artifacts"]
+            if artifact["artifact_id"] == "input/portfolio-report-data.json"
+        )
+        selected_sha = hashlib.sha256(report_source.read_bytes()).hexdigest()
+        provenance = next(
+            item
+            for item in dashboard["provenance"]
+            if item.get("artifact") == "portfolio-report-generation"
+        )
+        assert manifest["adapter"]["version"] == "2.12.0"
+        assert dashboard["panel_schema_version"] == 22
+        assert artifact["schema"]["version"] == str(report_version)
+        assert artifact["sha256"] == selected_sha
+        assert provenance["schema"] == f"portfolio-report-data/{report_version}"
+        assert provenance["sha256"] == selected_sha
+
+
+def test_renderer_accepts_panel_schema21_and22(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    import textwrap
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    candidate_renderer = (candidate / "app.js").read_text(encoding="utf-8")
+    assert candidate_renderer.replace("\r\n", "\n") == renderer.replace("\r\n", "\n")
+
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+
+    pages: dict[int, Path] = {}
+    for version in (21, 22, 23):
+        page_root = tmp_path / f"renderer-v{version}"
+        shutil.copytree(candidate, page_root)
+        data_path = page_root / "data" / "dashboard_data.json"
+        data = json.loads(data_path.read_bytes())
+        data["panel_schema_version"] = version
+        if version == 21:
+            for target in (
+                data["dependence_analysis"],
+                *data["dependence_modes"].values(),
+                data["hwm_summary"],
+            ):
+                target.pop("weight_basis", None)
+                target.pop("weight_authority", None)
+        serialized = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        data_path.write_text(serialized + "\n", encoding="utf-8")
+        (page_root / "data" / "dashboard_data.js").write_text(
+            "window.PORTFOLIO_DATA = " + serialized + ";\n", encoding="utf-8"
+        )
+        pages[version] = page_root / "index.html"
+
+    probe = textwrap.dedent(
+        r"""
+        import { pathToFileURL } from "node:url";
+        const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+        const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+        const results = [];
+        try {
+          for (const version of [21, 22, 23]) {
+            const page = await browser.newPage();
+            const errors = [];
+            page.on("pageerror", error => errors.push(String(error)));
+            page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+            await page.goto(process.env[`PANEL_HTML_${version}`], { waitUntil: "load", timeout: 15000 });
+            await page.waitForFunction(
+              () => ["ready", "error"].includes(document.querySelector("#app")?.dataset.appState),
+              null,
+              { timeout: 8000 }
+            );
+            const state = await page.evaluate(() => ({
+              state: document.querySelector("#app")?.dataset.appState,
+              errorVisible: !document.querySelector("#error-state").hidden,
+              kpis: document.querySelector("#command-kpis")?.textContent?.trim() || "",
+              errorText: document.querySelector("#error-state")?.innerText || ""
+            }));
+            results.push({ version, ...state, errors });
+            await page.close();
+          }
+        } finally { await browser.close(); }
+        console.log(JSON.stringify(results));
+        """
+    )
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    for version, html in pages.items():
+        env[f"PANEL_HTML_{version}"] = html.resolve().as_uri()
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        env=env,
+    )
+    evidence = json.loads(result.stdout.strip().splitlines()[-1])
+    assert [item["version"] for item in evidence] == [21, 22, 23]
+    for item in evidence[:2]:
+        assert item["state"] == "ready" and not item["errorVisible"]
+        assert item["kpis"]
+        assert not item["errors"]
+    unsupported = evidence[2]
+    assert unsupported["state"] == "error" and unsupported["errorVisible"]
+    assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
+    assert any("missing or unsupported" in error for error in unsupported["errors"])
+
+
+def _run_f2_f7_browser_probe(html: Path) -> dict[str, object]:
+    """Run the real current panel bundle in Chromium and capture boot/render state."""
+
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
+        pytest.skip("Chromium runtime is not available for F2/F7 browser proof")
+    node, playwright_module, executable = runtime
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+process.stderr.write("stage:launch:start\n");
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, timeout: 12000 });
+process.stderr.write("stage:launch:complete\n");
+try {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const pageErrors = [];
+  const consoleErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  process.stderr.write("stage:goto:start\n");
+  await page.goto(pathToFileURL(process.env.F2_F7_HTML).href + "#capital", { waitUntil: "domcontentloaded", timeout: 12000 });
+  process.stderr.write("stage:goto:domcontentloaded\n");
+  await page.waitForFunction(() => ["ready", "error"].includes(document.querySelector("#app")?.dataset.appState), null, { timeout: 12000 });
+  process.stderr.write("stage:state:complete\n");
+  const evidence = await page.evaluate(() => ({
+    state: document.querySelector("#app")?.dataset.appState ?? null,
+    loadingHidden: document.querySelector("#loading-state")?.hidden ?? null,
+    errorHidden: document.querySelector("#error-state")?.hidden ?? null,
+    errorText: document.querySelector("#error-state")?.textContent?.trim() ?? "",
+    portfolioAsOf: document.querySelector("#portfolio-as-of")?.textContent?.trim() ?? "",
+    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[7]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[7]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
+    positionDateTexts: Array.from(document.querySelectorAll("#position-table tbody tr"), row => row.cells[5]?.firstChild?.textContent?.trim() ?? ""),
+    injectedPositionNodes: document.querySelectorAll("#position-table [data-f2-f7-position-probe]").length,
+    injectedDateScripts: document.querySelectorAll("#allocation-table script[data-f2-f7-probe]").length,
+    probeValue: window.__date_probe ?? null,
+    positionSearchPresent: Boolean(document.querySelector("#position-search")),
+  }));
+  evidence.pageErrors = pageErrors;
+  evidence.consoleErrors = consoleErrors;
+  console.log(JSON.stringify(evidence));
+  process.stderr.write("stage:probe:complete\n");
+} finally { process.stderr.write("stage:close:start\n"); await browser.close(); process.stderr.write("stage:close:complete\n"); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["F2_F7_HTML"] = str(html.resolve())
+    renderer_path = html.parent / "app.js"
+    template_renderer = panel.DEFAULT_TEMPLATE_ROOT / "app.js"
+    assert renderer_path.read_text(encoding="utf-8") == template_renderer.read_text(
+        encoding="utf-8"
+    ), "candidate is not bound to the assigned app.js"
+    try:
+        result = subprocess.run(
+            [node, "--input-type=module", "-e", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(
+            f"F2/F7 Node probe timed out; stdout={error.stdout!r}; stderr={error.stderr!r}"
+        ) from error
+    return json.loads(result.stdout)
+
+
+def _run_g2_lazy_view_probe(html: Path, download_path: Path) -> dict[str, object]:
+    """Exercise every routed view in Chromium with temporary renderer instrumentation."""
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    probe = r"""
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const htmlUrl = pathToFileURL(process.env.G2_PANEL_HTML).href;
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+try {
+  const results = [];
+  for (const view of views) {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.goto(`${htmlUrl}#${view}`, { waitUntil: "load" });
+    await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready", null, { timeout: 12000 });
+    results.push(await page.evaluate((requested) => ({
+      active: document.querySelector(`[data-view="${requested}"]`)?.classList.contains("is-active") ?? false,
+      calls: window.__g2_render_calls ?? {},
+      state: document.querySelector("#app")?.dataset.appState ?? null,
+      view: requested,
+    }), view));
+    await page.close();
+  }
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.goto(`${htmlUrl}#weekly`, { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready", null, { timeout: 12000 });
+  const option = await page.locator('#context-account option:not([value="ALL"])').first();
+  const accountValue = await option.getAttribute("value");
+  const accountLabel = (await option.textContent())?.trim();
+  await page.locator("#context-account").selectOption(String(accountValue));
+  await page.locator('[data-nav="capital"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-view="capital"]')?.classList.contains("is-active"));
+  const contextSummary = (await page.locator("#context-summary").textContent())?.trim();
+  await page.locator('[data-nav="data"]').click();
+  const candidate = JSON.parse(await readFile(new URL("candidate.json", htmlUrl), "utf8"));
+  const pending = page.waitForEvent("download");
+  await page.locator('a[download][href="downloads/portfolio-report-data.json"]').click();
+  const download = await pending;
+  await download.saveAs(process.env.G2_DOWNLOAD_PATH);
+  const actualDownloadSha256 = createHash("sha256").update(await readFile(process.env.G2_DOWNLOAD_PATH)).digest("hex");
+  results.push({
+    accountLabel,
+    actualDownloadSha256,
+    contextSummary,
+    expectedDownloadSha256: candidate.artifact_sha256["downloads/portfolio-report-data.json"],
+  });
+  await page.close();
+  console.log(JSON.stringify(results));
+} finally { await browser.close(); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["G2_DOWNLOAD_PATH"] = str(download_path)
+    env["G2_PANEL_HTML"] = str(html.resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=90,
+    )
+    return {"results": json.loads(result.stdout)}
+
+
+def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A direct route renders once; hidden views wait until their route is opened."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    app_path = candidate / "app.js"
+    renderer = app_path.read_text(encoding="utf-8")
+    renderers = (
+        "renderCommand",
+        "renderCapital",
+        "renderRisk",
+        "renderSignals",
+        "renderAttribution",
+        "renderDependence",
+        "renderWeekly",
+        "renderCandidates",
+        "renderData",
+    )
+    for name in renderers:
+        marker = f"function {name}() {{"
+        assert renderer.count(marker) == 1
+        renderer = renderer.replace(
+            marker,
+            "function "
+            + name
+            + "() { window.__g2_render_calls = window.__g2_render_calls || {}; "
+            + f"window.__g2_render_calls.{name} = (window.__g2_render_calls.{name} || 0) + 1;",
+        )
+    app_path.write_text(renderer, encoding="utf-8")
+
+    evidence = _run_g2_lazy_view_probe(
+        candidate / "index.html", tmp_path / "download.json"
+    )
+    routed = evidence["results"][:-1]
+    assert isinstance(routed, list)
+    for row in routed:
+        assert row["state"] == "ready"
+        assert row["active"] is True
+        assert row["calls"] == {"render" + row["view"].title(): 1}
+    download = evidence["results"][-1]
+    assert download["actualDownloadSha256"] == download["expectedDownloadSha256"]
+    assert download["accountLabel"] in download["contextSummary"]
+
+
+def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The shipped QA reads source-clock declarations before opening the Data view."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    cutoff = data["meta"]["portfolio_as_of"]
+    clock = {
+        "selected_financial_cutoff": cutoff,
+        "latest_common_eod": cutoff,
+        "limiting_inputs": ["synthetic"],
+        "source_data_as_of": [
+            {
+                "source_id": "synthetic",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": cutoff,
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "timezone": "UTC",
+                "precision": "DATE",
+            }
+        ],
+    }
+    data["meta"]["source_clock"] = clock
+    data["limitations"].extend(panel._source_clock_display_lines(clock))
+    _write_dashboard_data_script(candidate, data)
+    common_eod = clock["latest_common_eod"]
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    output = tmp_path / "native-browser-qa"
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = playwright_module
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    result = subprocess.run(
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "browser_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(output),
+            "--expected-calculation-cutoff",
+            cutoff,
+            "--expected-common-eod",
+            common_eod,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=150,
+    )
+    assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
+    manifests = list(output.glob("*/manifest.json"))
+    assert len(manifests) == 28
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
+        for path in manifests
+    )
+
+
+def test_g2_lazy_view_navigation_error_uses_visible_app_error_state(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A malformed lazy Weekly payload must leave READY and show the controlled error."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data_path = candidate / "data" / "dashboard_data.json"
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    data["weekly_returns"] = None
+    _write_dashboard_data_script(candidate, data)
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+try {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.goto(pathToFileURL(process.env.G2_PANEL_HTML).href, { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+  await page.locator('[data-nav="weekly"]').click();
+  await page.waitForTimeout(200);
+  console.log(JSON.stringify(await page.evaluate(() => ({
+    appState: document.querySelector("#app")?.dataset.appState,
+    loadingHidden: document.querySelector("#loading-state")?.hidden,
+    errorHidden: document.querySelector("#error-state")?.hidden,
+    weeklyText: document.querySelector('[data-view="weekly"]')?.textContent?.trim(),
+  }))));
+  console.log(JSON.stringify({ pageErrors }));
+} finally { await browser.close(); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["G2_PANEL_HTML"] = str((candidate / "index.html").resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stderr
+    app = json.loads(result.stdout.splitlines()[0])
+    errors = json.loads(result.stdout.splitlines()[1])
+    assert app["appState"] == "error", app
+    assert app["loadingHidden"] is True and app["errorHidden"] is False, app
+    assert errors["pageErrors"] == []
+
+
+@pytest.mark.parametrize("payload_script", ["", "window.PORTFOLIO_DATA = null;\n"])
+def test_f2_f7_missing_or_null_payload_reaches_visible_guard(
+    inputs: dict[str, Path], tmp_path: Path, payload_script: str
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    (candidate / "data" / "dashboard_data.js").write_text(
+        payload_script, encoding="utf-8"
+    )
+
+    evidence = _run_f2_f7_browser_probe(candidate / "index.html")
+
+    assert evidence["state"] == "error", evidence
+    assert evidence["loadingHidden"] is True, evidence
+    assert evidence["errorHidden"] is False, evidence
+    assert "could not be loaded" in evidence["errorText"], evidence
+    assert any(
+        "missing or unsupported" in message for message in evidence["consoleErrors"]
+    ), evidence
+    assert evidence["pageErrors"] == [], evidence
+
+
+def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data_path = candidate / "data" / "dashboard_data.json"
+    payload = json.loads(data_path.read_text(encoding="utf-8"))
+    assert payload["panel_schema_version"] == 22
+    assert len(payload["allocations"]) >= 2
+    payload["allocations"][0]["as_of_date"] = "2026-08-16"
+    payload["allocations"][0]["weight_basis"] = "CURRENT_CUTOFF"
+    hostile_date = "</td><script data-f2-f7-probe>window.__date_probe=1</script><td>"
+    payload["allocations"][1]["as_of_date"] = hostile_date
+    position_attack = "</td><span data-f2-f7-position-probe>injected</span><td>"
+    assert payload["positions"]
+    payload["positions"][0]["as_of_date"] = position_attack
+    _write_dashboard_data_script(candidate, payload)
+
+    evidence = _run_f2_f7_browser_probe(candidate / "index.html")
+
+    assert evidence["state"] == "ready", evidence
+    assert evidence["portfolioAsOf"], evidence
+    assert evidence["positionSearchPresent"] is True, evidence
+    assert evidence["injectedDateScripts"] == 0, evidence
+    assert evidence["injectedPositionNodes"] == 0, evidence
+    assert evidence["probeValue"] is None, evidence
+    assert evidence["allocationRows"][0]["dateText"] == "Aug 16, 2026", evidence
+    assert evidence["allocationRows"][0]["weightBasis"] == "Current cutoff weights", (
+        evidence
+    )
+    assert evidence["allocationRows"][1]["dateText"] == hostile_date, evidence
+    assert evidence["positionDateTexts"][0] == position_attack, evidence
+    assert evidence["pageErrors"] == [], evidence

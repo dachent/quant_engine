@@ -310,6 +310,7 @@ def test_ci_lock_contains_only_full_action_shas_and_checksummed_tools() -> None:
     assert set(ci_lock["actions"]) == {
         "actions/checkout",
         "actions/setup-python",
+        "actions/setup-node",
         "astral-sh/setup-uv",
     }
     for record in ci_lock["actions"].values():

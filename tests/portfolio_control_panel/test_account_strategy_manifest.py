@@ -6603,6 +6603,145 @@ def test_provider_opening_anchor_sets_capital_basis_but_never_a_return_value(
     assert len(stats["observation_trace"]["links"]) == 2
 
 
+def _t5b_usdt_opening_anchor() -> dict[str, Any]:
+    return {
+        "account_id": "account-synthetic",
+        "amount": {"currency": "USDT", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "event_time_fx": {
+            "base_currency": "USD",
+            "currency": "USDT",
+            "date": "2025-12-05",
+            "field": "Close",
+            "generation_id": "f" * 64,
+            "provider": "yahoo",
+            "rate": "1.0002319812774658",
+            "source_artifact_id": "rates.csv",
+            "timing": "UTC_DAILY_CLOSE",
+        },
+        "evidence_layer": "ACCOUNT_LIVE",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "opening_nav": {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": "49908.46479303836713372",
+        },
+        "record_id": "synthetic-opening-anchor",
+        "source_record_id": "synthetic-subscription",
+        "strategy_id": "synthetic-strategy",
+    }
+
+
+def test_t5b_event_fx_converts_foreign_opening_amount_and_preserves_nav(
+    manifest_module: Any,
+) -> None:
+    """Convert the anchor basis at event FX; keep opening_nav as the return start."""
+    fx = Decimal("1.0002319812774658")
+    anchors = manifest_module.parse_capital_anchors(
+        {
+            "accounting_currency": "USD",
+            "portfolio_fx_generation": {
+                "generation_id": "f" * 64,
+                "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+            },
+            "capital_anchors": [_t5b_usdt_opening_anchor()],
+        }
+    )
+    stats = manifest_module.analyze_epoch(
+        {
+            "2025-12-06": Decimal("49908.46479303836713372"),
+            "2025-12-07": Decimal("50000"),
+            "2025-12-08": Decimal("50100"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2025-12-05",
+        None,
+        opening_anchor=anchors[0],
+    )
+
+    assert stats is not None
+    assert anchors[0]["amount"] == Decimal("49891.55") * fx
+    assert stats["opening_capital"].quantize(Decimal("1E-10")) == Decimal(
+        "49903.1239055037"
+    )
+    assert stats["performance_opening_value"] == Decimal("49908.46479303836713372")
+    assert stats["performance_opening_date"] == "2025-12-06"
+
+    usd_anchor = _t5b_usdt_opening_anchor()
+    usd_anchor["amount"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    usd_anchor.pop("event_time_fx")
+    unchanged = manifest_module.parse_capital_anchors(
+        {"accounting_currency": "USD", "capital_anchors": [usd_anchor]}
+    )
+    assert unchanged[0]["amount"] == Decimal("49891.55")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "event-date",
+        "source-currency",
+        "target-currency",
+        "boolean-rate",
+        "nonfinite-rate",
+        "source-identity",
+        "alternate-generation",
+        "alternate-provider",
+        "alternate-artifact",
+    ],
+)
+def test_t5b_event_fx_rejects_missing_or_mismatched_evidence(
+    manifest_module: Any, mutation: str
+) -> None:
+    from copy import deepcopy
+
+    anchor = _t5b_usdt_opening_anchor()
+    if mutation == "missing":
+        del anchor["event_time_fx"]
+    elif mutation == "event-date":
+        anchor["event_time_fx"]["date"] = "2025-12-06"
+    elif mutation == "source-currency":
+        anchor["event_time_fx"]["currency"] = "EUR"
+    elif mutation == "target-currency":
+        anchor["event_time_fx"]["base_currency"] = "EUR"
+    elif mutation == "boolean-rate":
+        anchor["event_time_fx"]["rate"] = True
+    elif mutation == "nonfinite-rate":
+        anchor["event_time_fx"]["rate"] = "Infinity"
+    elif mutation == "alternate-generation":
+        anchor["event_time_fx"]["generation_id"] = "e" * 64
+    elif mutation == "alternate-provider":
+        anchor["event_time_fx"]["provider"] = "alternate-provider"
+    elif mutation == "alternate-artifact":
+        anchor["event_time_fx"]["source_artifact_id"] = "alternate-rates.csv"
+    else:
+        anchor["event_time_fx"]["generation_id"] = "not-a-generation"
+    raw = deepcopy(anchor)
+
+    with pytest.raises(manifest_module.ManifestError):
+        manifest_module.parse_capital_anchors(
+            {
+                "accounting_currency": "USD",
+                "portfolio_fx_generation": {
+                    "generation_id": "f" * 64,
+                    "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+                },
+                "capital_anchors": [raw],
+            }
+        )
+
+
 def test_provider_opening_anchor_nav_must_confirm_the_performance_opening(
     manifest_module: Any,
 ) -> None:

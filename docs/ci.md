@@ -14,12 +14,12 @@ lock only through their governing issues.
 The packaging range and the CI contract are deliberately not the same thing. The
 workspace stays source-compatible across `>=3.11,<3.14` and publishes nothing, so the range is
 kept; what Quality gates is the single combination the product is delivered on, windows-2025 with
-CPython 3.11. Installability across the rest of the declared range is still proved on every pull
-request, because the required `validate` and `workflow-policy` contexts each run
-`uv sync --frozen --all-groups --all-packages` on ubuntu-24.04 with Python 3.13. That is an
-install gate, not a test gate, and the distinction is the point: a behavioural difference on an
-interpreter nothing ships on would be found by neither a six-cell matrix nobody reads nor by
-these, so the honest contract is to gate the runtime that ships and say so.
+CPython 3.11. The required `validate` context keeps the full-workspace frozen install
+on ubuntu-24.04 with Python 3.13 and runs `tests/governance/test_issue_guard.py`.
+The required `workflow-policy` context installs only `quant-engine-ci-controls`
+without development dependencies, then validates the complete workflow policy.
+Both contexts check the lock before installing. Quality retains the complete
+Windows governance suite, including PATH, extended-path and Job Object checks.
 
 `uv.lock` is authoritative for development and CI dependencies. Every quality
 job runs `uv lock --check` before a frozen sync; later commands use `--no-sync`

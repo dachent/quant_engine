@@ -5073,6 +5073,68 @@ def _mixed_normalized_facts(
             ):
                 _fail()
             normalized["opening_nav"] = dict(opening_nav)
+            accounting_currency = _fact_currency(opening_nav.get("currency"))
+            source_currency = amount["currency"]
+            event_fx = raw.get("event_time_fx")
+            if source_currency == accounting_currency:
+                if "event_time_fx" in raw:
+                    _fail()
+            else:
+                expected_fx_fields = {
+                    "base_currency",
+                    "currency",
+                    "date",
+                    "field",
+                    "generation_id",
+                    "provider",
+                    "rate",
+                    "source_artifact_id",
+                    "timing",
+                }
+                if (
+                    accounting_currency != "USD"
+                    or not isinstance(event_fx, dict)
+                    or set(event_fx) != expected_fx_fields
+                    or event_fx.get("base_currency") != accounting_currency
+                    or event_fx.get("currency") != source_currency
+                    or _date_value(event_fx.get("date"))
+                    != _date_value(normalized["event_date"])
+                    or event_fx.get("field") != "Close"
+                    or event_fx.get("timing") != "UTC_DAILY_CLOSE"
+                ):
+                    _fail()
+                fx_generation = event_fx.get("generation_id")
+                if (
+                    type(fx_generation) is not str
+                    or _SHA256.fullmatch(fx_generation) is None
+                ):
+                    _fail()
+                selected_fx = ledger.get("portfolio_fx_generation")
+                if (
+                    not isinstance(selected_fx, dict)
+                    or set(selected_fx) != {"generation_id", "selection"}
+                    or selected_fx.get("selection")
+                    != "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT"
+                ):
+                    _fail()
+                selected_fx_generation = selected_fx.get("generation_id")
+                if (
+                    type(selected_fx_generation) is not str
+                    or _SHA256.fullmatch(selected_fx_generation) is None
+                    or fx_generation != selected_fx_generation
+                    or _fact_text(event_fx.get("provider")) != "yahoo"
+                    or _fact_text(event_fx.get("source_artifact_id")) != "rates.csv"
+                ):
+                    _fail()
+                rate_value = event_fx.get("rate")
+                if type(rate_value) is not str:
+                    _fail()
+                try:
+                    rate = Decimal(rate_value)
+                except (InvalidOperation, ValueError):
+                    _fail()
+                if not rate.is_finite() or rate <= 0:
+                    _fail()
             normalized["nav_source_artifact_id"] = _fact_text(
                 raw.get("nav_source_artifact_id")
             )
@@ -5377,6 +5439,11 @@ def _verify_mixed_calculation_bridge(
         "flows": projected_flows,
         "capital_anchors": projected_anchors,
     }
+    selected_ledger = _strict_object(selected.provider_ledger.contents)
+    if "portfolio_fx_generation" in selected_ledger:
+        calculation_ledger["portfolio_fx_generation"] = selected_ledger[
+            "portfolio_fx_generation"
+        ]
     ledger_bytes = canonical_json_bytes(calculation_ledger)
     ledger_artifact = _subject_artifact(
         ledger_bytes,
@@ -5985,15 +6052,30 @@ def _mixed_numeric_facts(
         # The opening anchor dates no MWR leg, but its own fill field is
         # validated like every other anchor's.
         _independent_anchor_fill_date(raw_opening, opening_event, opening_recognition)
+        opening_amount = _parse_retained_source_decimal(
+            raw_opening.get("amount", {}).get("value")
+            if isinstance(raw_opening.get("amount"), dict)
+            else None
+        )
+        if raw_opening["amount"]["currency"] != currency:
+            event_fx = raw_opening.get("event_time_fx")
+            if not isinstance(event_fx, dict):
+                _fail()
+            rate_value = event_fx.get("rate")
+            if type(rate_value) is not str:
+                _fail()
+            try:
+                rate = Decimal(rate_value)
+            except (InvalidOperation, ValueError):
+                _fail()
+            if not rate.is_finite() or rate <= 0:
+                _fail()
+            opening_amount *= rate
         opening_anchor = _IndependentCapitalAnchorFact(
             opening_event,
             opening_recognition,
             currency,
-            _parse_retained_source_decimal(
-                raw_opening.get("amount", {}).get("value")
-                if isinstance(raw_opening.get("amount"), dict)
-                else None
-            ),
+            opening_amount,
             _parse_retained_source_decimal(opening_nav.get("value")),
         )
     allocation_facts: list[_IndependentFlowFact] = []

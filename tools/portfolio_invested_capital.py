@@ -101,8 +101,16 @@ def _capital_precision(events: Sequence[Mapping[str, Any]]) -> int:
     """Enough places for every exact amount-times-FX product and their sum."""
     widths = []
     for event in events:
-        amount = _decimal(event.get("amount"), "event amount").as_tuple()
-        rate = _decimal(event.get("fx_rate"), "event FX").as_tuple()
+        raw_amount = event.get("amount")
+        if isinstance(raw_amount, Mapping):
+            currency = raw_amount.get("currency")
+            raw_amount = raw_amount.get("value")
+            raw_fx = event.get("event_time_fx", {}) if currency != "USD" else {}
+            rate_value = raw_fx.get("rate", "1") if isinstance(raw_fx, Mapping) else "1"
+        else:
+            rate_value = event.get("fx_rate")
+        amount = _decimal(raw_amount, "event amount").as_tuple()
+        rate = _decimal(rate_value, "event FX").as_tuple()
         exponent = int(amount.exponent) + int(rate.exponent)
         widths.append((exponent, exponent + len(amount.digits) + len(rate.digits)))
     if not widths:
@@ -339,6 +347,9 @@ def calculate_invested_capital(
             or policy.get("gains_treatment") != "EXCLUDED"
         ):
             raise CapitalValidationError("invested-capital definition differs")
+        readiness = policy.get("policy_status")
+        if readiness not in {"READY", "REQUIRED_NOT_READY"}:
+            raise CapitalValidationError("policy readiness is unsupported")
         try:
             _validate_owner_decision_receipts(policy)
         except FinancialMvpContractError as exc:
@@ -619,7 +630,7 @@ def calculate_invested_capital(
         result = {
             "schema_version": 1,
             "outcome_id": "INVESTED_CAPITAL",
-            "status": "AVAILABLE",
+            "status": ("AVAILABLE" if readiness == "READY" else "REQUIRED_NOT_READY"),
             "evaluation_date": evaluation_date,
             "complete_through": complete_through,
             "period_start": start.isoformat(),
@@ -627,7 +638,7 @@ def calculate_invested_capital(
             "age_days": (evaluation - end).days,
             "policy_id": policy["policy_id"],
             "policy_sha256": _digest(policy),
-            "policy_readiness_provenance": policy.get("policy_status"),
+            "policy_readiness_provenance": readiness,
             "required_epochs": [
                 row for key, row in epochs.items() if key in required_ids
             ],
@@ -792,6 +803,146 @@ def _source_effect_usd(source: Mapping[str, Any]) -> Decimal:
     return native * rate
 
 
+def _is_provider_custody_external_flow(source: Mapping[str, Any]) -> bool:
+    """Identify the owner-approved account-only external cash facts."""
+    return (
+        source.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and source.get("capital_disposition") == "EXTERNAL_CAPITAL"
+        and source.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"
+    )
+
+
+def _is_generic_opening_owner_capital(source: Mapping[str, Any]) -> bool:
+    """Keep the legacy opening-purchase rows outside custody cash accounting."""
+    return (
+        source.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and source.get("capital_type") == "OPENING_CONTRIBUTED_BASIS"
+        and source.get("flow_type") == "EXTERNAL_CONTRIBUTION"
+        and source.get("capital_disposition") is None
+    )
+
+
+def _verify_provider_custody_perimeter(
+    ledger: Mapping[str, Any],
+    epochs: Sequence[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> set[str]:
+    """Prove the selected account-only custody cash perimeter, if present."""
+    anchors = [
+        row
+        for row in ledger.get("capital_anchors", [])
+        if row.get("capital_type")
+        in {"OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"}
+    ]
+    if not anchors:
+        return set()
+    strategies_by_account: dict[str, set[str]] = {}
+    for epoch in epochs:
+        account_id = epoch.get("account_id")
+        strategy_id = epoch.get("strategy_id")
+        if isinstance(account_id, str) and isinstance(strategy_id, str):
+            strategies_by_account.setdefault(account_id, set()).add(strategy_id)
+    anchors_by_account: dict[str, list[Mapping[str, Any]]] = {}
+    for anchor in anchors:
+        account_id = _text(anchor.get("account_id"), "custody anchor account")
+        if account_id not in strategies_by_account:
+            continue
+        account_flows = [
+            row
+            for row in ledger.get("flows", [])
+            if row.get("account_id") == account_id
+        ]
+        has_custody_marker = any(
+            row.get("provider_account_scope") == "ACCOUNT_ONLY"
+            and row.get("capital_disposition") == "EXTERNAL_CAPITAL"
+            for row in account_flows
+        )
+        generic_statement_anchor = (
+            anchor.get("provider_account_scope") == "STATEMENT_ACCOUNT"
+            or anchor.get("mapping_basis")
+            == "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE"
+        )
+        generic_account_flows = bool(account_flows) and all(
+            row.get("provider_account_scope") == "STATEMENT_ACCOUNT"
+            or _is_generic_opening_owner_capital(row)
+            for row in account_flows
+        )
+        if not has_custody_marker and (
+            generic_statement_anchor or generic_account_flows
+        ):
+            continue
+        anchors_by_account.setdefault(account_id, []).append(anchor)
+    if not anchors_by_account:
+        return set()
+    decision = policy.get("provider_custody_perimeter")
+    receipt = policy.get("owner_decision_receipts", {}).get(
+        "PROVIDER_CUSTODY_PERIMETER"
+    )
+    if (
+        not isinstance(decision, Mapping)
+        or decision.get("decision_status") != "APPROVED"
+        or decision.get("decision_authority") != "OWNER_318"
+        or not isinstance(receipt, Mapping)
+    ):
+        raise CapitalValidationError("provider-custody perimeter undecided")
+    try:
+        _validate_owner_decision_receipts(policy)
+    except FinancialMvpContractError as exc:
+        raise CapitalValidationError(
+            "provider-custody perimeter receipt differs"
+        ) from exc
+    for account_id, account_anchors in anchors_by_account.items():
+        anchor_strategies = {
+            _text(row.get("strategy_id"), "custody anchor strategy")
+            for row in account_anchors
+        }
+        if (
+            len(anchor_strategies) != 1
+            or anchor_strategies != strategies_by_account[account_id]
+        ):
+            raise CapitalValidationError("custody account strategy mapping differs")
+        flows = [
+            row
+            for row in ledger.get("flows", [])
+            if row.get("account_id") == account_id
+        ]
+        if any(not _is_provider_custody_external_flow(row) for row in flows):
+            raise CapitalValidationError("unsupported provider-custody cash fact")
+        qualifying = [row for row in flows if _is_provider_custody_external_flow(row)]
+        with localcontext() as context:
+            context.prec = _capital_precision([*qualifying, *account_anchors])
+            context.rounding = ROUND_HALF_EVEN
+            first_anchor = min(
+                _day(row.get("event_date"), "custody allocation date")
+                for row in account_anchors
+            )
+            if not any(
+                _source_effect_usd(row) > 0
+                and _day(row.get("event_date"), "custody deposit date") <= first_anchor
+                for row in qualifying
+            ):
+                raise CapitalValidationError(
+                    "custody allocation lacks qualifying deposit"
+                )
+            dated_cash: dict[date, Decimal] = {}
+            for row in qualifying:
+                day = _day(row.get("event_date"), "custody cash date")
+                dated_cash[day] = dated_cash.get(day, Decimal(0)) + _source_effect_usd(
+                    row
+                )
+            for row in account_anchors:
+                day = _day(row.get("event_date"), "custody allocation date")
+                dated_cash[day] = dated_cash.get(day, Decimal(0)) - _source_effect_usd(
+                    row
+                )
+            balance = Decimal(0)
+            for day in sorted(dated_cash):
+                balance += dated_cash[day]
+                if balance < 0:
+                    raise CapitalValidationError("provider-custody cash is negative")
+    return set(anchors_by_account)
+
+
 def _verify_account_ledger_opening(
     event: Mapping[str, Any],
     epoch: Mapping[str, Any],
@@ -878,7 +1029,9 @@ def _verify_account_ledger_opening(
 
 
 def _verify_selected_facts(
-    arguments: Mapping[str, Any], snapshots: Mapping[str, Any]
+    arguments: Mapping[str, Any],
+    snapshots: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
 ) -> None:
     """Tie every admitted amount, classification, FX and coverage to selected rows.
 
@@ -886,6 +1039,8 @@ def _verify_selected_facts(
     manifest cannot turn an arbitrary file or a NAV observation into funding.
     """
     ledger = snapshots["provider_ledger"]
+    if policy is not None:
+        _verify_provider_custody_perimeter(ledger, arguments["required_epochs"], policy)
     source_rows = {
         _digest(row): row
         for name in ("capital_anchors", "flows")
@@ -1838,7 +1993,7 @@ def build_governed_capital_result(
             census_sha256=census_digest(contract["current_census"]),
         )
         _verify_required_epoch_accounts(arguments, snapshots)
-    _verify_selected_facts(arguments, snapshots)
+    _verify_selected_facts(arguments, snapshots, policy)
     result = calculate_invested_capital(
         policy=policy,
         identity_remaps=_same_account_remaps(arguments, snapshots, contract),

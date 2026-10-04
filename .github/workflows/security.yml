@@ -94,5 +94,5 @@ jobs:
       - name: Prove workflow policy from the frozen environment
         run: |
           uv lock --check
-          uv sync --frozen --all-groups --all-packages
+          uv sync --frozen --package quant-engine-ci-controls --no-dev
           uv run --frozen --no-sync quant-engine-workflow-policy --root .

@@ -3324,6 +3324,13 @@ def _build_mixed_account_manifest_payloads(
         "flows": projected_flows,
         "capital_anchors": projected_anchors,
     }
+    selected_ledger = selected_inputs.provider_ledger.json_object(
+        "selected provider ledger"
+    )
+    if "portfolio_fx_generation" in selected_ledger:
+        calculation_ledger["portfolio_fx_generation"] = selected_ledger[
+            "portfolio_fx_generation"
+        ]
     calculation_ledger_snapshot = InputSnapshot.from_bytes(
         "calculation ledger", canonical_json_bytes(calculation_ledger)
     )

@@ -165,7 +165,10 @@ def test_generation_bundle_round_trip_supports_windows_extended_paths(
     tmp_path: Path,
 ) -> None:
     manifest, payloads = _envelope_manifest_and_payloads()
-    root = tmp_path.joinpath(*(["extended-path-segment-0123456789x"] * 3))
+    root = tmp_path
+    segment = "extended-path-segment-0123456789x"
+    while len(str(root / "generations" / manifest.generation_id)) <= 260:
+        root /= segment
 
     final = publication.stage_generation_bundle(root, manifest, payloads)
     bundle = publication.read_generation_bundle(root, manifest.generation_id)

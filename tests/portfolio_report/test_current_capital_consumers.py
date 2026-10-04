@@ -1020,6 +1020,70 @@ def _real_builder_block(catalog: dict[str, Any]) -> dict[str, Any]:
     return produced
 
 
+def _baseline_test_fixture() -> Any:
+    """Load the baseline test's compact public-builder synthetic world."""
+
+    return _load(
+        "portfolio_baseline_public_catalog_fixture",
+        REPOSITORY_ROOT / "tests" / "portfolio_baseline" / "test_portfolio_baseline.py",
+    )
+
+
+def _t1_strategy_product_controls() -> dict[str, dict[str, str]]:
+    """T1's required perimeter: strategies 1--3; 4--9 are retained exclusions."""
+
+    return {
+        f"strategy-{index}": {
+            "product_requirement": "REQUIRED" if index <= 3 else "EXCLUDED"
+        }
+        for index in range(1, 10)
+    }
+
+
+def test_the_public_baseline_catalog_is_what_the_report_consumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer-to-consumer seam: public baseline catalog through report consumers."""
+
+    baseline_test = _baseline_test_fixture()
+    spec_path, _spec_data = baseline_test._spec(tmp_path)
+    monkeypatch.setattr(
+        baseline_test.baseline,
+        "_hwm_policy_exclusions",
+        lambda: {
+            f"strategy-{index}": baseline_test.date(2026, 1, 1)
+            for index in range(4, 10)
+        },
+    )
+    catalog, _manifest, _bytes = baseline_test.baseline.build_catalog(spec_path)
+
+    current_capital = reporter._current_capital(catalog)
+    accounts = reporter._accounts(catalog)
+    reporter._verify_current_capital_accounts(current_capital, accounts)
+    controls = _t1_strategy_product_controls()
+    rows = {
+        str(row["strategy_id"]): row
+        for row in reporter._strategies(
+            catalog,
+            [],
+            strategy_product_controls=controls,
+            strategy_provider_evidence=[],
+        )
+    }
+    assert {
+        key: rows[key]["current_value_usd"]
+        for key in ("strategy-1", "strategy-2", "strategy-3")
+    } == {
+        "strategy-1": "11",
+        "strategy-2": "20",
+        "strategy-3": "30",
+    }
+    summary = reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+    assert _summary(summary, "Systematic capital")["value"] == "61"
+    assert _summary(summary, "Reserve")["status"] == "NOT_READY_AT_CUTOFF"
+    assert _summary(summary, "Total liquid")["status"] == "NOT_READY_AT_CUTOFF"
+
+
 def test_the_real_baseline_builder_output_is_what_the_report_consumes() -> None:
     """Producer to consumer seam: the baseline's own block through the report."""
 
@@ -1089,3 +1153,474 @@ def test_the_hwm_exception_coverage_row_says_it_shows_current_cutoff_weights(
     assert exception["uncovered_details"][0]["systematic_weight"] == "0.12"
     assert exception["weight_basis"] == "CURRENT_CUTOFF"
     assert fx.unlabeled_weight_paths(rows) == []
+
+
+def test_cr2_custody_report_preserves_member_equality_with_separate_cash():
+    owner = _baseline_test_fixture()
+    case = owner._cr2_custody_cash_case()
+    block = owner.baseline._build_current_capital(**case)
+    assert reporter._current_capital({"current_capital": block}) == block
+    reporter._verify_current_capital_accounts(
+        block,
+        [
+            {
+                "account_id": "acct-a1",
+                "latest_value_usd": "105",
+                "as_of_date": "2026-09-17",
+            }
+        ],
+    )
+
+
+def test_cr2_custody_report_requires_source_authority_for_cash(tmp_path, full):
+    catalog = fx.with_current_capital(full._baseline_catalog())
+    catalog["current_capital"]["custody_authority"] = {"ledger_generation_id": "a" * 64}
+    root = full._published_baseline(tmp_path / "baseline", catalog)
+    with pytest.raises(full.reporter.ReportValidationError, match="custody.*source"):
+        full.reporter.build_report_data(root)
+
+
+@pytest.fixture(scope="module")
+def cr2_custody_native_world(tmp_path_factory):
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_release_builder as builder
+    from portfolio_attended_preparation import _source_clock
+
+    root = tmp_path_factory.mktemp("native")
+    admitted = fx.cr2_custody_native_source(root / "source", same_day_fill=True)
+    recipe, template = fx.cr2_custody_native_recipe(
+        root / "inputs", admitted, epoch_perimeter=True
+    )
+    output = root / "baseline"
+    result = builder.build_baseline(recipe, admitted["ledger_root"], output)
+    catalog = json.loads(
+        (
+            output / "generations" / result["generation_id"] / "portfolio-baseline.json"
+        ).read_bytes()
+    )
+    clock_path = root / "source-clock.json"
+    clock_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "source_phase": admitted["source_phase"],
+                "data_clock": _source_clock(admitted["source_phase"], "2026-09-17"),
+            }
+        )
+    )
+    return root, admitted, recipe, template, output, catalog, clock_path
+
+
+def test_cr2_custody_native_template_independent_report_and_panel(
+    cr2_custody_native_world,
+):
+    """Native producer and independent custody consumers; full epoch route stays required."""
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_baseline as baseline
+    import portfolio_control_panel as panel
+    import hashlib
+
+    root, admitted, _recipe, template, output, catalog, clock_path = (
+        cr2_custody_native_world
+    )
+    authority = reporter._source_clock_authority(clock_path)
+    reporter._verify_custody_current_capital(
+        catalog, output, admitted["ledger_root"], authority
+    )
+    rows = {r["strategy_id"]: r for r in catalog["current_capital"]["strategies"]}
+    assert rows["robuxio-crypto"]["derived_cash"][0]["current_value"]["value"] == "8.9"
+    assert rows["volatis-strategy"]["derived_cash"][0]["current_value"]["value"] == "7"
+    assert rows["robuxio-crypto"]["current_value"]["value"] == "119.9"
+    assert rows["volatis-strategy"]["current_value"]["value"] == "127"
+    assert reporter._current_capital(catalog) == catalog["current_capital"]
+    reporter._verify_current_capital_accounts(
+        catalog["current_capital"], reporter._accounts(catalog)
+    )
+    emitted = json.loads((output / "config/portfolio-baseline-spec.json").read_bytes())
+    assert emitted["provider_ledger"]["financial_mvp"] == admitted["financial_mvp"]
+
+    legacy_spec = deepcopy(emitted)
+    legacy_spec["provider_ledger"].pop("financial_mvp")
+    legacy_path = root / "legacy-spec.json"
+    legacy_path.write_bytes(canonical_json_bytes(legacy_spec))
+    legacy, _manifest, _raw = baseline.build_catalog(legacy_path)
+    preserved = {}
+    for field in (
+        "allocations",
+        "nav_observations",
+        "flows",
+        "transactions",
+        "strategy_returns",
+        "provider_strategy_returns",
+        "audit_snapshot",
+        "replay",
+    ):
+        left, right = (
+            canonical_json_bytes(catalog[field]),
+            canonical_json_bytes(legacy[field]),
+        )
+        assert left == right, field
+        preserved[field] = hashlib.sha256(left).hexdigest()
+    for strategy_id in rows:
+        other = next(
+            r
+            for r in legacy["current_capital"]["strategies"]
+            if r["strategy_id"] == strategy_id
+        )
+        assert canonical_json_bytes(
+            rows[strategy_id]["members"]
+        ) == canonical_json_bytes(other["members"])
+    (root / "qa-no-canonical-sha256.json").write_bytes(canonical_json_bytes(preserved))
+    expectations = panel._report_panel_expectations(
+        {
+            "portfolio_summary": reporter._portfolio_summary(
+                catalog,
+                strategy_product_controls=reporter._report_product_controls(catalog)[0],
+            ),
+            "strategy_summary": [{"strategy_id": "robuxio-crypto"}],
+            "account_summary": reporter._accounts(catalog),
+            "allocation_history": catalog["allocations"],
+            "custody_current_capital": catalog["current_capital"],
+        }
+    )
+    assert expectations["custody_current_capital"] == catalog["current_capital"]
+
+
+def test_cr2_custody_native_report_tamper_missing_authority_and_full_epoch_gate(
+    cr2_custody_native_world,
+):
+    _root, admitted, _recipe, _template, output, catalog, clock_path = (
+        cr2_custody_native_world
+    )
+    with pytest.raises(reporter.ReportValidationError, match="custody.*source"):
+        reporter._verify_custody_current_capital(
+            catalog, output, admitted["ledger_root"], None
+        )
+    altered = deepcopy(catalog)
+    row = next(
+        r
+        for r in altered["current_capital"]["strategies"]
+        if r["strategy_id"] == "robuxio-crypto"
+    )
+    row["derived_cash"][0]["current_value"]["value"] = "9.9"
+    with pytest.raises(reporter.ReportValidationError, match="custody"):
+        reporter._verify_custody_current_capital(
+            altered,
+            output,
+            admitted["ledger_root"],
+            reporter._source_clock_authority(clock_path),
+        )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="requires manifest, source receipt, and current epoch crosswalk",
+    ):
+        reporter.build_report_data(
+            output,
+            provider_ledger_root=admitted["ledger_root"],
+            source_clock_path=clock_path,
+        )
+
+
+def test_cr2_custody_native_selected_authority_relocation_and_mismatch(
+    cr2_custody_native_world,
+):
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_baseline as baseline
+
+    _root, admitted, _recipe, _template, output, catalog, _clock_path = (
+        cr2_custody_native_world
+    )
+    spec = json.loads((output / "config/portfolio-baseline-spec.json").read_bytes())
+    relocated = _root / "relocated"
+    relocated.mkdir()
+    for key in ("contract", "registry", "schema"):
+        old = Path(spec["provider_ledger"]["financial_mvp"][key + "_path"])
+        new = relocated / (key + ".json")
+        new.write_bytes(old.read_bytes())
+        spec["provider_ledger"]["financial_mvp"][key + "_path"] = str(new)
+    path = relocated / "spec.json"
+    path.write_bytes(canonical_json_bytes(spec))
+    shifted, _manifest, _raw = baseline.build_catalog(path)
+    assert canonical_json_bytes(shifted) == canonical_json_bytes(catalog)
+    spec["provider_ledger"]["financial_mvp"]["contract_sha256"] = "0" * 64
+    path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(
+        baseline.BaselineValidationError, match="selected custody authority"
+    ):
+        baseline.build_catalog(path)
+
+
+def test_cr2_custody_native_missing_required_class_keeps_readiness_gate(tmp_path):
+    import portfolio_pipeline_materialize as materializer
+
+    with pytest.raises(
+        materializer.MaterializationError, match="not READY_FOR_COMPOSITION"
+    ):
+        fx.cr2_custody_native_source(tmp_path, missing_required_class=True)
+
+
+def test_cr2_custody_native_epoch_full_report_current_perimeter_gate(
+    cr2_custody_native_world,
+):
+    """The native full route requires genuinely bound fifteen mapped assignments."""
+    _root, _admitted, _recipe, _template, _output, catalog, _clock = (
+        cr2_custody_native_world
+    )
+    mapped = [a for a in catalog["assignments"] if a["mapping_status"] == "MAPPED"]
+    assert len(mapped) == 15, (
+        "native epoch crosswalk requires exactly fifteen mapped assignments"
+    )
+
+    epoch = fx.cr2_custody_native_epoch(
+        _root / "epoch",
+        _admitted,
+        _output,
+        json.loads(
+            next((_output / "generations").glob("*/generation.json")).read_bytes()
+        )["generation_id"],
+    )
+    # A genuine verified epoch bundle permits the full report caller to reach
+    # its current-capital gate. Missing current facts remain fail-closed.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="required strategy has no current capital: grizzlybears-vtma",
+    ):
+        reporter.build_report_data(
+            _output,
+            provider_ledger_root=_admitted["ledger_root"],
+            source_clock_path=_clock,
+            **epoch,
+        )
+
+
+def test_cr2_custody_original_cross_day_anchor_keeps_native_epoch_gate(tmp_path):
+    import portfolio_release_builder as builder
+    from tools.account_strategy_manifest import ManifestError
+
+    admitted = fx.cr2_custody_native_source(tmp_path / "source")
+    recipe, _template = fx.cr2_custody_native_recipe(
+        tmp_path / "inputs", admitted, epoch_perimeter=True
+    )
+    output = tmp_path / "baseline"
+    result = builder.build_baseline(recipe, admitted["ledger_root"], output)
+    with pytest.raises(ManifestError, match="economic fill date 2026-09-16 is outside"):
+        fx.cr2_custody_native_epoch(
+            tmp_path / "epoch", admitted, output, result["generation_id"]
+        )
+
+
+@pytest.fixture(scope="module")
+def cr2_custody_structural_complete_world(tmp_path_factory):
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_release_builder as builder
+    from portfolio_attended_preparation import _source_clock
+
+    root = tmp_path_factory.mktemp("complete")
+    admitted = fx.cr2_custody_native_source(root / "source", same_day_fill=True)
+    recipe, template = fx.cr2_custody_native_recipe(
+        root / "inputs", admitted, epoch_perimeter=True, complete_perimeter=True
+    )
+    output = root / "baseline"
+    result = builder.build_baseline(recipe, admitted["ledger_root"], output)
+    catalog = json.loads(
+        (
+            output / "generations" / result["generation_id"] / "portfolio-baseline.json"
+        ).read_bytes()
+    )
+    clock = root / "source-clock.json"
+    clock.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "source_phase": admitted["source_phase"],
+                "data_clock": _source_clock(admitted["source_phase"], "2026-09-17"),
+            }
+        )
+    )
+    epoch = fx.cr2_custody_native_epoch(
+        root / "epoch", admitted, output, result["generation_id"]
+    )
+    return root, admitted, recipe, template, output, catalog, clock, epoch
+
+
+def test_cr2_custody_structural_complete_current_required(
+    cr2_custody_structural_complete_world,
+):
+    root, admitted, recipe, template, output, catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    required = [
+        r
+        for r in catalog["current_capital"]["strategies"]
+        if r["scope"] == "SYSTEMATIC"
+    ]
+    assert len(required) == 7
+    assert all(r["status"] == "AVAILABLE" for r in required)
+    report, raw, path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    assert report["custody_current_capital"] == catalog["current_capital"]
+
+
+def test_cr2_custody_report_schema_accepts_native_handoff(
+    cr2_custody_structural_complete_world,
+):
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
+
+
+def test_cr2_custody_report_schema_rejects_invalid_authority_hash(
+    cr2_custody_structural_complete_world,
+):
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    report["custody_current_capital"]["custody_authority"]["contract_raw_sha256"] = (
+        "not-a-sha256"
+    )
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = list(
+        Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(report)
+    )
+    assert any(
+        list(error.absolute_path)
+        == ["custody_current_capital", "custody_authority", "contract_raw_sha256"]
+        for error in errors
+    )
+
+
+def test_cr2_custody_structural_complete_raw_facts_unchanged(
+    cr2_custody_structural_complete_world,
+):
+    """Selected cash changes no captured same-scenario NAV, flows or returns."""
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_baseline as baseline
+    import hashlib
+
+    root, _admitted, _recipe, _template, output, catalog, _clock, _epoch = (
+        cr2_custody_structural_complete_world
+    )
+    spec = json.loads((output / "config/portfolio-baseline-spec.json").read_bytes())
+    spec["provider_ledger"].pop("financial_mvp")
+    legacy_path = root / "complete-legacy-spec.json"
+    legacy_path.write_bytes(canonical_json_bytes(spec))
+    legacy, _manifest, _raw = baseline.build_catalog(legacy_path)
+    preserved = {}
+    for field in (
+        "allocations",
+        "nav_observations",
+        "flows",
+        "transactions",
+        "strategy_returns",
+        "provider_strategy_returns",
+        "audit_snapshot",
+        "replay",
+    ):
+        current_bytes = canonical_json_bytes(catalog[field])
+        assert current_bytes == canonical_json_bytes(legacy[field]), field
+        preserved[field] = hashlib.sha256(current_bytes).hexdigest()
+    by_id = {row["strategy_id"]: row for row in legacy["current_capital"]["strategies"]}
+    for row in catalog["current_capital"]["strategies"]:
+        current_bytes = canonical_json_bytes(row["members"])
+        assert current_bytes == canonical_json_bytes(
+            by_id[row["strategy_id"]]["members"]
+        )
+        preserved["members/" + row["strategy_id"]] = hashlib.sha256(
+            current_bytes
+        ).hexdigest()
+    (root / "complete-qa-no-canonical-sha256.json").write_bytes(
+        canonical_json_bytes(preserved)
+    )
+
+
+def test_cr2_custody_structural_complete_candidate_retains_native_history_gate(
+    cr2_custody_structural_complete_world,
+):
+    """An actual report candidate cannot substitute for its absent native history."""
+    from quant_engine.core.contracts import canonical_json_bytes
+    import portfolio_control_panel as panel
+
+    root, admitted, _recipe, _template, output, catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    staged = reporter.build_candidate(
+        output,
+        root / "report-candidate",
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    candidate = Path(staged["candidate_dir"])
+    actual = json.loads((candidate / "portfolio-report-data.json").read_bytes())
+    assert actual["custody_current_capital"] == catalog["current_capital"]
+    # This scenario has not authored a legacy/analytics/history release. The
+    # candidate must stop at its first named native prerequisite, before these
+    # absent downstream authorities can be consumed or represented as admitted.
+    legacy = root / "unavailable-legacy"
+    legacy.mkdir()
+    call = {
+        "report_root": None,
+        "legacy_panel": str(legacy),
+        "output_root": str(root / "panel-candidate"),
+        "report_candidate": str(candidate),
+        "baseline_root": str(output),
+        "template_root": str(panel.DEFAULT_TEMPLATE_ROOT),
+        "financial_mode": True,
+        "account_manifest_path": str(epoch["epoch_manifest_path"]),
+        "account_manifest_generation_root": str(
+            epoch["epoch_manifest_generation_root"]
+        ),
+        "manifest_membership_census_path": str(root / "epoch/membership-census.json"),
+        "strategy_history_contract_path": None,
+        "outcome": "PANEL_NOT_PROVEN_NATIVE_HISTORY_REQUIRED",
+    }
+    (root / "complete-panel-literal-call.json").write_bytes(canonical_json_bytes(call))
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="report candidate requires a strategy history contract",
+    ):
+        panel.build_candidate(
+            None,
+            legacy,
+            root / "panel-candidate",
+            report_candidate=candidate,
+            baseline_root=output,
+            financial_mode=True,
+            account_manifest_path=epoch["epoch_manifest_path"],
+            account_manifest_generation_root=epoch["epoch_manifest_generation_root"],
+            manifest_membership_census_path=root / "epoch/membership-census.json",
+        )
+    print(
+        "ACTUAL_PANEL_NATIVE_GATE: report candidate requires a strategy history contract"
+    )
+    print("ACTUAL_REPORT_CANDIDATE:", candidate)
