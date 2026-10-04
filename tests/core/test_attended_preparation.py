@@ -415,7 +415,16 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
                 "source_selection": pin(selection_path.name),
                 "provider_ledger_generation_root": str(tmp_path / "ledger"),
                 "retained_verified_generations": {
-                    "history": {"root": str(tmp_path / "history")}
+                    "history": {"root": str(tmp_path / "history")},
+                    "attribution": {
+                        "root": str(
+                            tmp_path / "attribution" / "generations" / ("a" * 64)
+                        )
+                    },
+                },
+                "expected_staged_baseline": {
+                    "generation_id": "b" * 64,
+                    "catalog_sha256": "c" * 64,
                 },
                 "plans": modes,
             }
@@ -445,6 +454,7 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     plan_calls: list[dict[str, object]] = []
     import portfolio_current_decomposition_plan as plans
     import portfolio_target_series as history
+    import portfolio_release_builder as release
     import provider_ledger
 
     monkeypatch.setattr(
@@ -459,6 +469,14 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     # its own actual-reader rejection regression above.
     monkeypatch.setattr(
         preparation, "_validate_hwm_authority_inputs", lambda _config: None
+    )
+    attribution_preflight_calls: list[tuple[Path, object, object]] = []
+    monkeypatch.setattr(
+        release,
+        "_validate_strategy_attribution_expected_baseline_binding",
+        lambda root, generation_id, expected: attribution_preflight_calls.append(
+            (root, generation_id, expected)
+        ),
     )
     monkeypatch.setattr(
         materializer, "validate_source_phase", lambda **_kwargs: source_phase
@@ -476,6 +494,14 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
 
     preparation._validated_inputs(config_path, "2026-09-17", "2026-09-19")
 
+    assert attribution_preflight_calls == [
+        (
+            tmp_path / "attribution",
+            "a" * 64,
+            {"generation_id": "b" * 64, "catalog_sha256": "c" * 64},
+        )
+    ]
+
     expected = {name: tmp_path / f"{name}.json" for name in authority_names}
     assert [
         {name: call[name] for name in authority_names} for call in history_calls
@@ -491,6 +517,19 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         expected_captures["LIVE_ONLY"],
         expected_captures["LIVE_PLUS_BACKTEST"],
     ]
+
+    config = json.loads(config_path.read_bytes())
+    config.pop("expected_staged_baseline")
+    config_path.write_bytes(preparation.canonical_json_bytes(config))
+    prior_history_calls = len(history_calls)
+    prior_plan_calls = len(plan_calls)
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="expected staged baseline identity is required",
+    ):
+        preparation._validated_inputs(config_path, "2026-09-17", "2026-09-19")
+    assert len(history_calls) == prior_history_calls
+    assert len(plan_calls) == prior_plan_calls
 
 
 def test_selected_dependence_handoff_replaces_every_stale_authority(
@@ -2625,6 +2664,7 @@ def _preparation_function_fixture(
             "baseline": {"root": str(baseline_source)},
             "history": {"root": str(history_root)},
         },
+        "expected_staged_baseline": attributed_baseline,
         "source_selection": str(source_selection),
     }
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
