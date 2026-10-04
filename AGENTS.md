@@ -101,6 +101,20 @@ Before mutating repository or external state:
 If any of these cannot be established, perform only safe read-only discovery
 and hand off the blocker.
 
+### Attended generation procedure
+
+Before planning or executing an attended generation, follow
+[`docs/attended-generation-runbook.md`](docs/attended-generation-runbook.md)
+and the storage contract in `docs/attended-run-storage.md`. Resolve the current
+issue-bound runbook and exact selected input/admission receipt; historical state
+runbooks are evidence, not current launch authority. Use the supported runner,
+configured interpreter, short local roots, declaration-only plan, explicit
+financial/evaluation clocks, and explicit generation identities. Require the
+selected strategy attribution to match its separately pinned expected staged
+portfolio baseline both before preparation work and after the baseline stage.
+Keep the allocation authority used by dependence distinct from that staged
+portfolio baseline. Report skips and unresolved acceptance gaps explicitly.
+
 ## Execution rules
 
 <!-- RCCA_SCOPE_POLICY BEGIN -->

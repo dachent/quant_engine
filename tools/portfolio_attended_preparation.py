@@ -856,6 +856,30 @@ def _validated_inputs(
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
     _pins(config, "preparation specification")
+    retained_generations = config.get("retained_verified_generations")
+    if isinstance(retained_generations, Mapping) and isinstance(
+        retained_generations.get("attribution"), Mapping
+    ):
+        attribution_source = Path(
+            str(retained_generations["attribution"].get("root"))
+        ).resolve()
+        expected_baseline = config.get("expected_staged_baseline")
+        if not isinstance(expected_baseline, Mapping):
+            raise AttendedPreparationError(
+                "expected staged baseline identity is required for retained attribution"
+            )
+        import portfolio_release_builder as release
+
+        try:
+            release._validate_strategy_attribution_expected_baseline_binding(
+                attribution_source.parents[1],
+                attribution_source.name,
+                expected_baseline,
+            )
+        except release.VerticalBuildError as exc:
+            raise AttendedPreparationError(
+                "retained attribution differs from expected staged baseline"
+            ) from exc
     _validate_product_contract_currency(config)
     _validate_hwm_authority_inputs(config)
     # Capital consumes this replay specification transitively. Verify the exact

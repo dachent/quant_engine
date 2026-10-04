@@ -884,6 +884,42 @@ def _validate_strategy_attribution_baseline_binding(
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise VerticalBuildError("staged baseline generation is not accepted") from exc
 
+    _validate_strategy_attribution_expected_baseline_binding(
+        attribution_root,
+        attribution_generation_id,
+        expected_baseline,
+    )
+
+
+def _validate_strategy_attribution_expected_baseline_binding(
+    attribution_root: Path,
+    attribution_generation_id: object,
+    expected_baseline: object,
+) -> None:
+    """Compare retained attribution to a pinned staged-baseline identity."""
+
+    if not isinstance(expected_baseline, Mapping) or set(expected_baseline) != {
+        "generation_id",
+        "catalog_sha256",
+    }:
+        raise VerticalBuildError("expected staged baseline identity differs")
+    expected = {
+        "generation_id": _generation_id(
+            expected_baseline.get("generation_id"),
+            "expected staged baseline generation_id",
+        ),
+        "catalog_sha256": _text(
+            expected_baseline.get("catalog_sha256"),
+            "expected staged baseline catalog_sha256",
+        ),
+    }
+    if len(expected["catalog_sha256"]) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in expected["catalog_sha256"]
+    ):
+        raise VerticalBuildError(
+            "expected staged baseline catalog_sha256 is not canonical"
+        )
     selected_attribution_id = _validated_strategy_attribution_generation(
         attribution_root, attribution_generation_id
     )
@@ -895,12 +931,9 @@ def _validate_strategy_attribution_baseline_binding(
         "selected strategy-attribution catalog",
     )
     attribution_baseline = attribution_catalog.get("baseline")
-    if (
-        not isinstance(attribution_baseline, dict)
-        or attribution_baseline != expected_baseline
-    ):
+    if not isinstance(attribution_baseline, dict) or attribution_baseline != expected:
         raise VerticalBuildError(
-            "strategy attribution baseline identity differs from staged baseline"
+            "strategy attribution baseline identity differs from expected staged baseline"
         )
 
 
