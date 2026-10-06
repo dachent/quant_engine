@@ -58,6 +58,9 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION: Final = 3
 SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2, 3})
 CATALOG_SCHEMA_VERSION: Final = 1
+# A catalog that carries custody-derived cash publishes version 2: each cash line is dated
+# by the coverage that proves it and names its last event and its coverage end.
+CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
 BUILDER_VERSION: Final = "1.3.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 # The provenance registry binds nine strategy identities (including the retained
@@ -2522,8 +2525,18 @@ def _strategy_members(
 def _derived_custody_cash(
     provider_catalog: Mapping[str, Any],
     valuation_date: date,
+    *,
+    legacy: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Derive separate cash components from the selected raw admitted events."""
+    """Derive separate cash components from the selected raw admitted events.
+
+    A cash line is true through the earlier of the cutoff and the end of every
+    AUTHORITATIVE account-live admission it is derived from: the flows it adds and the
+    sleeve allocations it subtracts.  Its ``as_of_date`` is that proven-through date, not
+    the date of its last event; ``last_event_date`` and the unclamped ``coverage_end`` are
+    carried beside it.  ``legacy`` reproduces the version-1 label (the last event date)
+    for a catalog sealed before the proof was recorded.
+    """
     from portfolio_invested_capital import _source_effect_usd
 
     flows = _objects(provider_catalog.get("flows"), "custody flows")
@@ -2653,17 +2666,44 @@ def _derived_custody_cash(
                 raise BaselineValidationError(
                     f"custody negative dated closing cash: {account_id} {day}"
                 )
+        last_event = max(movements)
+        coverage_fields: dict[str, str] = {}
+        proven_through = last_event
+        if not legacy:
+            window_ends = []
+            for fact_type in ("flows", "capital_anchors"):
+                ends = [
+                    item.effective_end
+                    for item in admissions
+                    if item.provider_id == provider_id
+                    and item.account_id == account_id
+                    and item.fact_type == fact_type
+                    and item.disposition is AdmissionDisposition.AUTHORITATIVE
+                    and item.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
+                ]
+                if not ends:
+                    raise BaselineValidationError(
+                        "custody cash lacks an authoritative admission window"
+                    )
+                window_ends.append(max(ends))
+            coverage_end = min(window_ends)
+            proven_through = min(valuation_date, coverage_end)
+            coverage_fields = {
+                "coverage_end": coverage_end.isoformat(),
+                "last_event_date": last_event.isoformat(),
+            }
         components[strategy_id].append(
             {
                 "account_id": account_id,
                 "provider_id": provider_id,
-                "as_of_date": max(movements).isoformat(),
+                "as_of_date": proven_through.isoformat(),
                 "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
                 "status": _CAPITAL_AVAILABLE,
                 "current_value": _capital_amount(balance),
                 "events": sorted(
                     events, key=lambda row: (row["event_date"], row["record_id"])
                 ),
+                **coverage_fields,
             }
         )
     return dict(components)
@@ -3225,7 +3265,14 @@ def _reconcile_current_capital(
             raise BaselineValidationError(
                 "custody reconciliation lacks raw provider catalog"
             )
-        cash = _derived_custody_cash(provider_catalog, valuation_date)
+        legacy_cash = any(
+            "coverage_end" not in line
+            for row in rows
+            for line in _objects(row.get("derived_cash", []), "derived cash")
+        )
+        cash = _derived_custody_cash(
+            provider_catalog, valuation_date, legacy=legacy_cash
+        )
         for row in rows:
             strategy_id = str(row["strategy_id"])
             expected = cash.get(strategy_id, [])
@@ -5219,7 +5266,11 @@ def build_catalog(
         ),
         "assumptions": provenance.get("assumptions", []),
         "audit_snapshot": audit_snapshot,
-        "baseline_schema_version": CATALOG_SCHEMA_VERSION,
+        "baseline_schema_version": (
+            CUSTODY_CASH_CATALOG_SCHEMA_VERSION
+            if custody_authority
+            else CATALOG_SCHEMA_VERSION
+        ),
         "calendar_coverage": calendar,
         "capital_pools": provenance.get("capital_pools")
         or [
@@ -5312,7 +5363,7 @@ def build_catalog(
         size_bytes=len(catalog_bytes),
         as_of_date=as_of,
         schema_name="portfolio-baseline-catalog",
-        schema_version=str(CATALOG_SCHEMA_VERSION),
+        schema_version=str(catalog["baseline_schema_version"]),
     )
     # Physical root bindings are runtime locators, not financial evidence.  The
     # same hash-identified inputs must therefore produce the same generation

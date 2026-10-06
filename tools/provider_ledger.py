@@ -8039,9 +8039,18 @@ def _admissions(
         mapping_status,
     ), rows in by_provider_fact_account.items():
         start, end = _observed_bounds(rows)
+        # The Quantbase account-activity capture is one complete API response from which
+        # both the flows and the sleeve allocations (capital anchors) are read, so the
+        # allocations carry the same capture coverage.  Without that claim an anchor
+        # admission ends at the last anchor, and cash that subtracts allocations could not
+        # be proven past it.  Matrixport allocations come from subscription_details, whose
+        # capture records no observed boundary (coverage.csv carries a completion row
+        # "all_discovered_subscription_ids" with empty observed bounds), so they keep
+        # their own window.
         coverage_claim = (
             provider_flow_coverage.get(provider_id, {}).get(account_id)
             if fact_type == "flows"
+            or (fact_type == "capital_anchors" and provider_id == "quantbase")
             else None
         )
         if coverage_claim is not None:
@@ -8078,7 +8087,7 @@ def _admissions(
                 }
                 raise ProviderLedgerError(messages[provider_id])
             start, end = coverage_start, coverage_end
-            if mapping_status == "MAPPED":
+            if mapping_status == "MAPPED" and fact_type == "flows":
                 covered_flow_accounts.add((provider_id, account_id))
         coverage_key = (
             "terminal_history_coverage"

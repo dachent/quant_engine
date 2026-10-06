@@ -4891,3 +4891,130 @@ def test_cr2_custody_internal_movements_fail_without_sleeve_semantics():
         baseline.BaselineValidationError, match="unsupported|ambiguous internal"
     ):
         baseline._build_current_capital(**case)
+
+
+def _cash_line(block: dict[str, Any]) -> dict[str, Any]:
+    line: dict[str, Any] = block["strategies"][0]["derived_cash"][0]
+    return line
+
+
+def _admission_ends(case: dict[str, Any], *, flows: str, anchors: str) -> None:
+    """Set the end of the AUTHORITATIVE flows and capital-anchor admission windows."""
+
+    for admission in case["provider_catalog"]["admissions"]:
+        if admission["fact_type"] == "flows":
+            admission["effective_end"] = flows
+        elif admission["fact_type"] == "capital_anchors":
+            admission["effective_end"] = anchors
+
+
+def test_n56_cash_line_covered_by_both_admissions_is_dated_the_cutoff() -> None:
+    """N56: a cash line is proven true through min(cutoff, every admission window end).
+
+    The deposit and the sleeve allocation are both on 2026-09-16 and both captures are
+    admitted through 2026-09-18, so the balance is proven through the 2026-09-17 cutoff;
+    the date of the last event is kept beside it, not used as the label.
+    """
+
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-18")
+
+    block = baseline._build_current_capital(**case)
+
+    line = _cash_line(block)
+    assert line["as_of_date"] == "2026-09-17"
+    assert line["last_event_date"] == "2026-09-16"
+    assert line["coverage_end"] == "2026-09-18"
+    # The member is dated 2026-09-17, so the row and Systematic are too.
+    assert block["strategies"][0]["as_of_date"] == "2026-09-17"
+    assert block["systematic"]["as_of_date"] == "2026-09-17"
+
+
+def test_n56_cash_line_dated_the_cutoff_when_coverage_ends_exactly_there() -> None:
+    case = _cr2_custody_cash_case()
+
+    line = _cash_line(baseline._build_current_capital(**case))
+
+    assert line["as_of_date"] == "2026-09-17"
+    assert line["coverage_end"] == "2026-09-17"
+    assert line["last_event_date"] == "2026-09-16"
+
+
+def test_n56_an_early_ending_anchor_window_keeps_the_line_the_row_and_systematic() -> (
+    None
+):
+    """Cash subtracts sleeve allocations, so an unadmitted later allocation would
+    overstate it: the anchor window end, not the flows' later end, bounds the proof."""
+
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-16")
+
+    block = baseline._build_current_capital(**case)
+
+    line = _cash_line(block)
+    assert line["as_of_date"] == "2026-09-16"
+    assert line["coverage_end"] == "2026-09-16"
+    assert line["last_event_date"] == "2026-09-16"
+    assert block["strategies"][0]["as_of_date"] == "2026-09-16"
+    assert block["systematic"]["as_of_date"] == "2026-09-16"
+    # Values are unchanged: only the label moves.
+    assert block["strategies"][0]["current_value"]["value"] == "109"
+
+
+def test_n56_an_early_ending_flows_window_bounds_the_line_too() -> None:
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-16", anchors="2026-09-18")
+
+    assert _cash_line(baseline._build_current_capital(**case))["as_of_date"] == (
+        "2026-09-16"
+    )
+
+
+def test_n56_baseline_check_recomputes_the_cash_label_and_rejects_a_forged_one() -> (
+    None
+):
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-16")
+    block = baseline._build_current_capital(**case)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+    assert all(
+        row["status"] != "FAIL"
+        for row in baseline._current_capital_checks(block, **arguments)
+    )
+
+    block["strategies"][0]["derived_cash"][0]["as_of_date"] = "2026-09-17"
+
+    assert any(
+        row["status"] == "FAIL"
+        for row in baseline._current_capital_checks(block, **arguments)
+    )
+
+
+def test_n56_custody_catalog_schema_requires_the_new_cash_fields_from_version_two() -> (
+    None
+):
+    case = _cr2_custody_cash_case()
+    block = baseline._build_current_capital(**case)
+
+    _cc_schema_validator("current_capital").validate(block)
+    _cc_schema_validator("current_capital_v2").validate(block)
+    for field in ("last_event_date", "coverage_end"):
+        stripped = copy.deepcopy(block)
+        del stripped["strategies"][0]["derived_cash"][0][field]
+        _cc_schema_validator("current_capital").validate(stripped)
+        with pytest.raises(ValidationError):
+            _cc_schema_validator("current_capital_v2").validate(stripped)
+
+
+def test_n56_catalog_version_two_only_when_custody_cash_is_present() -> None:
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert schema["properties"]["baseline_schema_version"] == {"enum": [1, 2]}
+    assert baseline.CUSTODY_CASH_CATALOG_SCHEMA_VERSION == 2
+    assert baseline.CATALOG_SCHEMA_VERSION == 1
