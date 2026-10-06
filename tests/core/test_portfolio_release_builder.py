@@ -6035,7 +6035,6 @@ def test_strategy_attribution_matches_explicit_expected_staged_baseline(
             builder._validate_strategy_attribution_expected_baseline_binding(
                 attribution_root, attribution_id, expected
             )
-        return
 
 
 def test_build_attribution_rejects_stale_baseline_binding_before_receipt(

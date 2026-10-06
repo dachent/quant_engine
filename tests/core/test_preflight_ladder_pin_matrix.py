@@ -19,6 +19,8 @@ from preflight_ladder_fixture import (
     make_ledger,
 )
 
+pytestmark = pytest.mark.real_attended_path_budget
+
 # ---------------------------------------------------------------- (a) pin matrix
 
 

@@ -15,6 +15,8 @@ import pytest
 
 import portfolio_pipeline_materialize as materializer
 
+pytestmark = pytest.mark.real_attended_path_budget
+
 LIMIT = 260
 GEN = "0" * 64
 

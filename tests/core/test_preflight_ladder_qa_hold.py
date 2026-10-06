@@ -13,6 +13,8 @@ from preflight_ladder_fixture import (
     ROOT,
 )
 
+pytestmark = pytest.mark.real_attended_path_budget
+
 # ---------------------------------------------------------------- (c) QA hold
 
 

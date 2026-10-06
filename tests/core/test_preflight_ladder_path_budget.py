@@ -15,6 +15,8 @@ from preflight_ladder_fixture import (
     REFUSAL_SECONDS,
 )
 
+pytestmark = pytest.mark.real_attended_path_budget
+
 # ---------------------------------------------------------------- (b) path budget
 
 

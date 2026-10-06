@@ -19,6 +19,8 @@ from preflight_ladder_fixture import (
     _json,
 )
 
+pytestmark = pytest.mark.real_attended_path_budget
+
 LIMIT = 260
 GEN = "0" * 64
 
