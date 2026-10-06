@@ -7,9 +7,7 @@ V12       No contract defines a field named ``leverage_ratio``.  The contract
           (portfolio-financial-mvp-source-v1.json, leverage_accounting) requires gross
           exposure and financing cost to be disclosed, so the check reads LEVERAGE_EXPOSURE
           and FINANCING_COST disclosure rows, not a key.
-V7        The oracle's not_derivable rows for per-account performance of an owner-excluded
-          account (flows, MWR, TWR) are expected exclusions, not NOT_READY; capital for the
-          same account is required and stays NOT_READY, as do rows of active accounts.
+V7        (moved to test_r2_exclusions.py: owner-excluded performance rows are no finding.)
 Census    A baseline that does not pin the census contract yields the NOT_READY census
           finding saying so precisely; the same baseline with the pin skips the confirmed
           blocked epoch (the oracle assembler side lives outside this repository).
@@ -18,7 +16,6 @@ Census    A baseline that does not pin the census contract yields the NOT_READY 
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +32,6 @@ from test_validate_alignment import (
 )
 from test_validate_generation import (
     CUTOFF,
-    REPORT_GEN,
     Spec,
     _append,
     _policy_fixture,
@@ -199,118 +195,6 @@ def test_v12_financing_cost_that_is_only_observed_stays_not_ready(
     findings = _leverage_findings(_generation_findings(gen_dir))
     assert [(f.entity, f.klass) for f in findings] == [
         ("leverage_disclosures.financing_cost", checks.NOT_READY)
-    ]
-
-
-# ------------------------------------------------------------------------------- V7
-
-EXCLUDED = "X1"
-
-
-def _not_derivable(metric: str, entity: str) -> dict[str, Any]:
-    return {
-        "metric_id": metric,
-        "entity": entity,
-        "window": "ITD",
-        "reason": "account has no FUNDED_MEMBERSHIP interval",
-    }
-
-
-def _not_derivable_findings(findings: list[checks.Finding]):
-    return sorted(
-        (f.entity, f.klass) for f in findings if f.check_id == "expected.not_derivable"
-    )
-
-
-def test_v7_performance_of_an_owner_excluded_account_is_expected_excluded(
-    tmp_path: Path,
-) -> None:
-    gen_dir = build(tmp_path)
-    rows = [
-        _not_derivable(metric, EXCLUDED)
-        for metric in (
-            "twr.account",
-            "mwr.account",
-            "flows.account.net",
-            "flows.account.count",
-        )
-    ]
-    findings = _generation_findings(gen_dir, [], rows)
-    assert _not_derivable_findings(findings) == sorted(
-        (f"{row['metric_id']}:{EXCLUDED}", checks.EXPECTED_EXCLUDED) for row in rows
-    )
-    assert checks.EXPECTED_EXCLUDED not in checks.BLOCKERS
-    assert checks.EXPECTED_EXCLUDED in checks.CLASSES
-
-
-def test_v7_capital_of_an_excluded_account_stays_not_ready(tmp_path: Path) -> None:
-    gen_dir = build(tmp_path)
-    rows = [
-        _not_derivable("capital.account.cutoff", EXCLUDED),
-        _not_derivable("date.source_last_observation", EXCLUDED),
-    ]
-    findings = _generation_findings(gen_dir, [], rows)
-    assert _not_derivable_findings(findings) == [
-        (f"capital.account.cutoff:{EXCLUDED}", checks.NOT_READY),
-        (f"date.source_last_observation:{EXCLUDED}", checks.NOT_READY),
-    ]
-
-
-def test_v7_performance_of_an_active_or_unknown_account_stays_not_ready(
-    tmp_path: Path,
-) -> None:
-    gen_dir = build(tmp_path)
-    rows = [_not_derivable("twr.account", "A1"), _not_derivable("twr.account", "Q7")]
-    findings = _generation_findings(gen_dir, [], rows)
-    assert _not_derivable_findings(findings) == [
-        ("twr.account:A1", checks.NOT_READY),
-        ("twr.account:Q7", checks.NOT_READY),
-    ]
-
-
-def _end_the_product_epoch(gen_dir: Path) -> None:
-    path = (
-        gen_dir.parents[2]
-        / "reporting"
-        / "generations"
-        / REPORT_GEN
-        / "input"
-        / "account-strategy-current-epoch-crosswalk.json"
-    )
-    document = json.loads(path.read_bytes())
-    document["rows"].append(
-        {
-            "account_id": "E5",
-            "strategy_id": "delta",
-            "effective_start": "2025-01-01",
-            "effective_end": "2025-11-24",
-            "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
-        }
-    )
-    path.write_bytes((json.dumps(document) + "\n").encode())
-
-
-def test_v7_an_account_whose_product_epoch_merely_ended_is_not_owner_excluded(
-    tmp_path: Path,
-) -> None:
-    gen_dir = build(tmp_path, Spec(post_write=[_end_the_product_epoch]))
-    findings = _generation_findings(gen_dir, [], [_not_derivable("twr.account", "E5")])
-    assert _not_derivable_findings(findings) == [("twr.account:E5", checks.NOT_READY)]
-
-
-def test_v7_without_a_crosswalk_nothing_is_presumed_excluded(tmp_path: Path) -> None:
-    gen_dir = build(tmp_path)
-    context = checks.Context(
-        gen=load_generation(gen_dir, discover=False),
-        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
-        cutoff_source="test",
-        expected=[],
-        expected_not_derivable=[_not_derivable("twr.account", EXCLUDED)],
-        repo_root=_policy_fixture(tmp_path / "policy"),
-    )
-    findings = checks.run_checks(context)
-    assert _not_derivable_findings(findings) == [
-        (f"twr.account:{EXCLUDED}", checks.NOT_READY)
     ]
 
 

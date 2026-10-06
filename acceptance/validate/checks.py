@@ -54,17 +54,7 @@ BLOCKER_AUTHORITY = "BLOCKER_AUTHORITY"
 BLOCKER_REGRESSION = "BLOCKER_REGRESSION"
 NOT_READY = "NOT_READY"
 WARNING = "WARNING"
-# An oracle row about something the owner excluded from the product: recorded, never a
-# blocker and never a not-ready (the oracle states it is not derivable by design).
-EXPECTED_EXCLUDED = "EXPECTED_EXCLUDED"
-CLASSES = (
-    BLOCKER_INVARIANT,
-    BLOCKER_AUTHORITY,
-    BLOCKER_REGRESSION,
-    NOT_READY,
-    WARNING,
-    EXPECTED_EXCLUDED,
-)
+CLASSES = (BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION, NOT_READY, WARNING)
 BLOCKERS = frozenset({BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION})
 
 USD_TOLERANCE = Decimal("0.01")
@@ -7733,8 +7723,15 @@ _PERFORMANCE_METRICS = frozenset(
 )
 
 
+# The only EXCLUDED_ dispositions the crosswalk contract defines. An out-of-vocabulary
+# value (a corrupted or new label) is not an owner exclusion and excludes nothing.
+OWNER_EXCLUSION_DISPOSITIONS = frozenset(
+    {"EXCLUDED_DEPRECATED_HISTORY_ONLY", "EXCLUDED_IMMATERIAL"}
+)
+
+
 def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
-    """Accounts the crosswalk excludes by owner disposition (``EXCLUDED_*``), by account."""
+    """Accounts the crosswalk excludes by an owner disposition, by account."""
 
     reference = universe(ctx)
     if reference is None:
@@ -7742,8 +7739,37 @@ def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
     return {
         account: disposition
         for account, disposition in reference.excluded_accounts.items()
-        if disposition.startswith("EXCLUDED_")
+        if disposition in OWNER_EXCLUSION_DISPOSITIONS
     }
+
+
+def _is_owner_exclusion(
+    row: Mapping[str, Any], owner_excluded: Mapping[str, str]
+) -> bool:
+    return (
+        row.get("metric_id") in _PERFORMANCE_METRICS
+        and str(row.get("entity")) in owner_excluded
+    )
+
+
+def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
+    """Oracle not-derivable performance rows of owner-excluded accounts.
+
+    They are not findings (the findings contract has five classes and the oracle states
+    them not derivable by design): the validator writes them to its details file.
+    """
+
+    owner_excluded = _owner_excluded_accounts(ctx)
+    return [
+        {
+            "metric_id": row.get("metric_id"),
+            "entity": row.get("entity"),
+            "disposition": owner_excluded[str(row.get("entity"))],
+            "reason": row.get("reason"),
+        }
+        for row in ctx.expected_not_derivable
+        if _is_owner_exclusion(row, owner_excluded)
+    ]
 
 
 def check_expected(ctx: Context) -> Iterator[Finding]:
@@ -7762,23 +7788,18 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         return
     owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
-        excluded = (
-            row.get("metric_id") in _PERFORMANCE_METRICS
-            and str(row.get("entity")) in owner_excluded
-        )
+        if _is_owner_exclusion(row, owner_excluded):
+            continue
         yield _finding(
             "expected.not_derivable",
-            EXPECTED_EXCLUDED if excluded else NOT_READY,
+            NOT_READY,
             f"{row.get('metric_id')}:{row.get('entity')}",
             None,
             row.get("reason"),
             "(expected baseline)",
             "$.not_derivable",
             _METRIC_DEFECTS.get(str(row.get("metric_id")), ()),
-            "per-account performance is not required for an owner-excluded account "
-            f"({owner_excluded[str(row.get('entity'))]})"
-            if excluded
-            else "metric not derivable from upstream authority",
+            "metric not derivable from upstream authority",
         )
     for position, row in enumerate(ctx.expected):
         metric_id = str(row.get("metric_id"))
