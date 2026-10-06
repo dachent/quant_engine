@@ -1081,7 +1081,9 @@ def build_catalog(
             artifact_id="input/portfolio-baseline.json",
             as_of_date=as_of,
             schema_name="portfolio-baseline-catalog",
-            schema_version="1",
+            # The reader accepts baseline schema 1 and 2 and verified that the
+            # generation declares this very version; carry it, never relabel it.
+            schema_version=str(baseline["baseline_schema_version"]),
         ),
         baseline_generation_artifact,
         SourceArtifact(
