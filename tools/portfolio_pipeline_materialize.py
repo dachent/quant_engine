@@ -6080,6 +6080,86 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+ORACLE_LEDGER_BASENAME: Final = "provider-ledger.json"
+
+
+def _attended_oracle_ledger_identity(document: Path) -> dict[str, str]:
+    """The ledger identity an A/B oracle inputs manifest (or a receipt embedding it) names.
+
+    The oracle derivations (``acceptance/derive_a`` and ``derive_b``) select their ledger
+    as the one ``provider-ledger.json`` entry of the inputs manifest, whose parent
+    directory is the provider-ledger generation id, and pin its sha256.
+    """
+
+    loaded = _load(document, "oracle inputs manifest")
+    manifest = loaded
+    if not isinstance(loaded.get("inputs"), list):
+        embedded = loaded.get("manifest")
+        manifest = embedded if isinstance(embedded, dict) else {}
+    entries = manifest.get("inputs")
+    ledgers: dict[str, str] = {}
+    if isinstance(entries, list):
+        for entry in entries:
+            raw = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(raw, str):
+                continue
+            parts = raw.replace("\\", "/").split("/")
+            if parts[-1] != ORACLE_LEDGER_BASENAME or len(parts) < 2:
+                continue
+            sha256 = entry.get("sha256")
+            if not isinstance(sha256, str) or len(sha256) != 64:
+                raise MaterializationError("oracle ledger input is not sha256-pinned")
+            ledgers[raw] = sha256
+            generation = parts[-2]
+    if not ledgers:
+        raise MaterializationError(
+            f"oracle document {document} names no ledger input "
+            f"({ORACLE_LEDGER_BASENAME}); it is neither an acceptance inputs "
+            "manifest nor a receipt embedding one"
+        )
+    if len(ledgers) != 1:
+        raise MaterializationError("oracle document names more than one ledger input")
+    return {"generation_id": generation, "sha256": next(iter(ledgers.values()))}
+
+
+def _attended_oracle_ledger_join(
+    source_phase: Mapping[str, Any],
+    oracle_document: Path | None,
+    *,
+    declares_acceptance: bool,
+) -> dict[str, Any] | None:
+    """Join the oracle's ledger identity to the ledger the run (and so report and panel) consumes.
+
+    Report and panel read the provider ledger the source phase admitted, so the source
+    phase's catalog identity is the ledger they consume. Without an oracle document a run
+    that declares acceptance is reported NOT_CHECKED, loudly: it is not a pass.
+    """
+
+    if oracle_document is None:
+        if not declares_acceptance:
+            return None
+        print(
+            "attended oracle-to-run ledger join: NOT_CHECKED (no --oracle-manifest "
+            "supplied for a run that declares acceptance)",
+            file=sys.stderr,
+        )
+        return {"status": "NOT_CHECKED", "reason": "no --oracle-manifest supplied"}
+    oracle = _attended_oracle_ledger_identity(Path(oracle_document).resolve())
+    catalog = source_phase.get("provider_ledger_catalog")
+    run = {
+        "generation_id": source_phase.get("provider_ledger_generation_id"),
+        "sha256": catalog.get("sha256") if isinstance(catalog, dict) else None,
+    }
+    if oracle != run:
+        raise MaterializationError(
+            "oracle ledger identity differs from the ledger the run consumed: "
+            f"oracle generation {oracle['generation_id']} (catalog sha256 "
+            f"{oracle['sha256']}) but run generation {run['generation_id']} "
+            f"(catalog sha256 {run['sha256']})"
+        )
+    return {"status": "MATCH", **oracle}
+
+
 def _attended_pin_matrix(
     run_ledger_root: Path,
     *,
@@ -7080,6 +7160,31 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--invested-capital-result", type=Path)
     attended_cmd.add_argument("--invested-capital-input-generation", type=Path)
     attended_cmd.add_argument("--qa-dir", type=Path)
+    attended_cmd.add_argument(
+        "--oracle-manifest",
+        type=Path,
+        help=(
+            "the A/B oracle inputs manifest, or parent-execution-receipt.json "
+            "embedding it; the run refuses when its ledger identity differs from "
+            "the ledger the run consumes"
+        ),
+    )
+    attended_cmd.add_argument(
+        "--declares-acceptance",
+        action="store_true",
+        help=(
+            "this run feeds an acceptance receipt: without --oracle-manifest the "
+            "oracle-to-run ledger join is reported NOT_CHECKED"
+        ),
+    )
+    attended_cmd.add_argument(
+        "--qa-hold",
+        action="store_true",
+        help=(
+            "declare that --execute runs without QA evidence and will stop at the "
+            "panel stage until browser QA exists (then --resume --qa-dir)"
+        ),
+    )
     attended_cmd.add_argument("--resume", action="store_true")
     attended_cmd.add_argument("--execute", action="store_true")
     attended_cmd.add_argument(
@@ -7317,6 +7422,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
+            oracle_join = _attended_oracle_ledger_join(
+                preflight.get("source_phase") or {},
+                args.oracle_manifest,
+                declares_acceptance=args.declares_acceptance,
+            )
             if args.execute:
                 storage = storage or _attended_storage(args)
                 if args.preparation_spec is None:
@@ -7334,6 +7444,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     preflight["request_identity"],
                     qa_dir=preflight["qa_dir"],
                 )
+            if oracle_join is not None:
+                result["oracle_ledger_join"] = oracle_join
         elif args.command == "acquire":
             result = acquire(args.recipe, args.output_dir)
         elif args.command == "authority":

@@ -39,7 +39,12 @@ instructions, or deletion/recovery commands into a current run.
    allocation, baseline, attribution or dependence selection that binds another
    provider ledger than the run (`check_retained_authority_pins.py --ledger-root L
    --retained ROLE=PATH` runs the same matrix by hand), and an output or cache root
-   under which a generated path would reach 260 characters.
+   under which a generated path would reach 260 characters. For a run that declares
+   acceptance (`--declares-acceptance`), pass the A/B oracle inputs manifest or
+   `parent-execution-receipt.json` as `--oracle-manifest`: the run refuses when the
+   oracle's `provider-ledger.json` identity (generation id and sha256) differs from
+   the ledger the run consumed, and without the flag the join is reported
+   `NOT_CHECKED` on stderr and in the result, which is not a pass.
 6. Settle the QA hold before `--execute`. The `panel` stage needs browser QA
    evidence that only exists after `panel-candidate`. The plan prints a `qa` block
    with the stage and the required `--qa-dir`; `--execute` refuses unless the
