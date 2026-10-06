@@ -8659,83 +8659,264 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
 CAPITAL_SCOPES = frozenset({"SYSTEMATIC", "RETAINED_EXCLUDED"})
 
 
-def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
-    """N56: the custody capital labels carry the date they are valued at.
+def _capital_available(entry: Mapping[str, Any]) -> bool:
+    """Whether a custody capital object is an AVAILABLE value (not explicitly unavailable)."""
 
-    The systematic total and each systematic strategy are valued at the cutoff; an
-    as_of older than that (the last event date or the minimum over members) labels a
-    current value with a past date. An AVAILABLE value must carry a canonical ISO
-    ``as_of_date``: a missing, null or malformed one is a finding, not a pass. Retained
-    and excluded rows (``RETAINED_EXCLUDED``) are not systematic; a scope outside the
-    producer's vocabulary is itself a finding (it would switch this check off).
+    status = entry.get("status") if "status" in entry else None
+    if status is not None and not is_available(status):
+        return False
+    value = node(entry, "current_value")
+    return not (isinstance(value, Mapping) and not is_available(value.get("status")))
+
+
+def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
+    """N56: the custody capital labels are recomputed, not trusted.
+
+    ``as_of_date`` on a custody capital object is the last date through which its value is
+    proven true: a NAV member's observation date; a derived cash line's
+    ``min(cutoff, coverage_end)`` (its ``last_event_date`` is the latest event, not the
+    proof); a strategy row's the oldest of its members and cash lines; the Systematic
+    total's the oldest of its rows. Rules, in order:
+
+    1. every AVAILABLE member, cash line, row and total needs a canonical ``as_of_date``
+       (missing: BLOCKER_AUTHORITY);
+    2. a cash line that states ``last_event_date`` / ``coverage_end`` (schema versions
+       baseline 2, report 3, panel 23) must have ``last_event_date`` equal to its latest
+       event date and ``as_of_date`` equal to ``min(cutoff, coverage_end)``
+       (BLOCKER_INVARIANT); lines of older versions are judged by rule 4 only;
+    3. a row's date equals the oldest of its AVAILABLE members and cash lines, the
+       Systematic date the oldest of its rows (BLOCKER_INVARIANT: a stale member hidden
+       behind a cutoff label);
+    4. anything dated before the cutoff is NOT_READY only when its labels are honest
+       (rules 2 and 3 hold for it and everything under it) and
+       ``verified_value_basis_bound`` discloses it (section ``current_capital``);
+       otherwise BLOCKER_AUTHORITY, so it never passes;
+    5. a date after the cutoff is BLOCKER_AUTHORITY.
+
+    A custody scope outside the producer's vocabulary is a finding, and
+    ``RETAINED_EXCLUDED`` rows are not systematic (echotrade is N59).
     """
 
     custody = node(ctx.report, "custody_current_capital")
-    candidates: list[tuple[str, str, Mapping[str, Any]]] = []
-    systematic = node(custody, "systematic")
-    if isinstance(systematic, Mapping):
-        candidates.append(
-            (
-                "current_capital:systematic",
-                "$.custody_current_capital.systematic",
-                systematic,
+    base = "$.custody_current_capital"
+    findings: list[Finding] = []
+
+    def emit(
+        klass: str,
+        entity: str,
+        observed: Any,
+        expected: Any,
+        pointer: str,
+        message: str,
+    ) -> None:
+        findings.append(
+            _finding(
+                "capital.as_of_cutoff",
+                klass,
+                entity,
+                observed,
+                expected,
+                REPORT,
+                pointer,
+                ("N56",),
+                message,
             )
         )
-    for position, row in enumerate(rows(custody, "strategies")):
-        pointer = f"$.custody_current_capital.strategies[{position}]"
-        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
-            yield _finding(
-                "capital.as_of_cutoff",
-                BLOCKER_AUTHORITY,
-                f"current_capital:{row.get('strategy_id')}:scope",
-                row.get("scope"),
-                sorted(CAPITAL_SCOPES),
-                REPORT,
-                f"{pointer}.scope",
-                ("N56",),
-                "the custody scope is outside the producer's vocabulary, so the "
-                "capital date check cannot classify the row",
-            )
-            continue
-        if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":
-            candidates.append(
-                (f"current_capital:{row.get('strategy_id')}", pointer, row)
-            )
-    for entity, pointer, entry in candidates:
-        value = node(entry, "current_value")
-        available = entry.get("status") if "status" in entry else None
-        if available is not None and not is_available(available):
-            continue
-        if isinstance(value, Mapping) and not is_available(value.get("status")):
-            continue
+
+    def judge_date(
+        entity: str,
+        pointer: str,
+        entry: Mapping[str, Any],
+        honest: bool,
+        section_entity: str,
+    ) -> date | None:
+        """Rules 1, 4 and 5 for one object; returns its canonical date (or None)."""
+
         day = _canonical_iso_day(entry.get("as_of_date"))
         if day is None:
-            yield _finding(
-                "capital.as_of_cutoff",
+            emit(
                 BLOCKER_AUTHORITY,
                 entity,
                 entry.get("as_of_date"),
                 "a canonical ISO as_of_date",
-                REPORT,
                 f"{pointer}.as_of_date",
-                ("N56",),
                 "an available current-capital value carries no canonical as_of_date",
             )
+            return None
+        if day > ctx.cutoff:
+            emit(
+                BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                ctx.cutoff,
+                f"{pointer}.as_of_date",
+                "current capital is valued at the cutoff but labelled with an as_of "
+                "after it",
+            )
+        elif day < ctx.cutoff:
+            bound = (
+                verified_value_basis_bound(ctx, "current_capital", section_entity, day)
+                if honest
+                else None
+            )
+            emit(
+                NOT_READY if bound is not None else BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                ctx.cutoff,
+                f"{pointer}.as_of_date",
+                _bound_message(bound, "current capital")
+                if bound is not None
+                else "current capital is valued at the cutoff but labelled with an "
+                "as_of before it"
+                + ("" if honest else " (its labels do not recompute)"),
+            )
+        return day
+
+    rows_honest: list[tuple[date, bool]] = []
+    for position, row in enumerate(rows(custody, "strategies")):
+        pointer = f"{base}.strategies[{position}]"
+        strategy = str(row.get("strategy_id"))
+        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
+            emit(
+                BLOCKER_AUTHORITY,
+                f"current_capital:{strategy}:scope",
+                row.get("scope"),
+                sorted(CAPITAL_SCOPES),
+                f"{pointer}.scope",
+                "the custody scope is outside the producer's vocabulary, so the "
+                "capital date check cannot classify the row",
+            )
             continue
-        if day == ctx.cutoff:
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC" or not _capital_available(
+            row
+        ):
             continue
-        yield _finding(
-            "capital.as_of_cutoff",
-            BLOCKER_AUTHORITY,
-            entity,
-            entry.get("as_of_date"),
-            ctx.cutoff,
-            REPORT,
-            f"{pointer}.as_of_date",
-            ("N56",),
-            "current capital is valued at the cutoff but labelled with an as_of "
-            f"{'after' if day > ctx.cutoff else 'before'} it",
+        component_days: list[date] = []
+        components_honest = True
+        components_complete = True
+        for member_position, member in enumerate(rows(row, "members")):
+            if not _capital_available(member):
+                continue
+            day = judge_date(
+                f"current_capital:{strategy}:member:{member.get('account_id')}",
+                f"{pointer}.members[{member_position}]",
+                member,
+                True,
+                f"{strategy}:{member.get('account_id')}",
+            )
+            if day is None:
+                components_complete = False
+            else:
+                component_days.append(day)
+        for line_position, line in enumerate(rows(row, "derived_cash")):
+            if not _capital_available(line):
+                continue
+            line_pointer = f"{pointer}.derived_cash[{line_position}]"
+            entity = f"current_capital:{strategy}:cash:{line.get('account_id')}"
+            honest = True
+            stated = "last_event_date" in line or "coverage_end" in line
+            if stated:
+                last = _canonical_iso_day(line.get("last_event_date"))
+                coverage_end = _canonical_iso_day(line.get("coverage_end"))
+                events = [
+                    _canonical_iso_day(event.get("event_date"))
+                    for event in rows(line, "events")
+                ]
+                latest = max((day for day in events if day is not None), default=None)
+                if last is None or coverage_end is None:
+                    honest = False
+                    emit(
+                        BLOCKER_INVARIANT,
+                        entity,
+                        {
+                            "last_event_date": line.get("last_event_date"),
+                            "coverage_end": line.get("coverage_end"),
+                        },
+                        "canonical last_event_date and coverage_end",
+                        line_pointer,
+                        "the cash line states last_event_date or coverage_end but not "
+                        "both as canonical dates",
+                    )
+                else:
+                    if last != latest:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("last_event_date"),
+                            latest.isoformat() if latest else None,
+                            f"{line_pointer}.last_event_date",
+                            "last_event_date is not the latest event date of the line",
+                        )
+                    proven = min(ctx.cutoff, coverage_end)
+                    if _canonical_iso_day(line.get("as_of_date")) != proven:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("as_of_date"),
+                            proven.isoformat(),
+                            f"{line_pointer}.as_of_date",
+                            "the cash line's as_of_date is not min(cutoff, coverage_end)",
+                        )
+            day = judge_date(
+                entity,
+                line_pointer,
+                line,
+                honest,
+                f"{strategy}:{line.get('account_id')}",
+            )
+            components_honest = components_honest and honest
+            if day is None:
+                components_complete = False
+            else:
+                component_days.append(day)
+        row_day_raw = row.get("as_of_date")
+        row_honest = components_honest
+        if components_complete and component_days:
+            oldest = min(component_days)
+            if _canonical_iso_day(row_day_raw) not in (None, oldest):
+                row_honest = False
+                emit(
+                    BLOCKER_INVARIANT,
+                    f"current_capital:{strategy}",
+                    row_day_raw,
+                    oldest.isoformat(),
+                    f"{pointer}.as_of_date",
+                    "the strategy's as_of_date is not the oldest of its members and "
+                    "cash lines",
+                )
+        row_day = judge_date(
+            f"current_capital:{strategy}", pointer, row, row_honest, strategy
         )
+        if row_day is not None:
+            rows_honest.append((row_day, row_honest))
+    systematic = node(custody, "systematic")
+    if isinstance(systematic, Mapping) and _capital_available(systematic):
+        honest = all(flag for _, flag in rows_honest)
+        raw = systematic.get("as_of_date")
+        if rows_honest and _canonical_iso_day(raw) not in (
+            None,
+            min(day for day, _ in rows_honest),
+        ):
+            honest = False
+            emit(
+                BLOCKER_INVARIANT,
+                "current_capital:systematic",
+                raw,
+                min(day for day, _ in rows_honest).isoformat(),
+                f"{base}.systematic.as_of_date",
+                "the Systematic as_of_date is not the oldest of its rows",
+            )
+        judge_date(
+            "current_capital:systematic",
+            f"{base}.systematic",
+            systematic,
+            honest,
+            "systematic",
+        )
+    yield from findings
 
 
 def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
