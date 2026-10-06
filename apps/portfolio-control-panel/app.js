@@ -472,6 +472,20 @@
   // source's own reason token, and nothing is aggregated across data classes.
   const LEVERAGE_MAX_ROWS = 250;
 
+  // D6: the report labels each account row with its role.  A product account is the
+  // unmarked case; a reserve account or one with no current assignment is named
+  // beside the account so a history-only account cannot read as a current one.
+  const ACCOUNT_ROLE_NOTES = {
+    RESERVE: "Reserve account",
+    HISTORY_ONLY_NO_CURRENT_ASSIGNMENT: "History only · no current assignment",
+  };
+  function accountRoleNote(row) {
+    const role = row && row.account_role;
+    if (!role || role === "PRODUCT") return "";
+    const label = ACCOUNT_ROLE_NOTES[role] || humanStatus(role);
+    return `<span class="cell-secondary" data-account-role="${safe(role)}">${safe(label)}</span>`;
+  }
+
   function renderLeverageDisclosures() {
     const rows = Array.isArray(data.leverage_disclosures) ? data.leverage_disclosures : [];
     const status = $("#leverage-status");
@@ -517,7 +531,7 @@
         ? currencyExact(amount.value)
         : statusText(amount ? amount.status : "UNAVAILABLE");
       const account = [row.provider_id, row.account_id].filter(Boolean).join(" · ");
-      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}${accountRoleNote(row)}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
     });
     $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], detailRows);
     truncation.textContent = rows.length > shown.length
@@ -1508,7 +1522,7 @@
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
       return row.missing_interval_reason || "No missing interval declared";
     };
-    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span></th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
+    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span>${accountRoleNote(row)}</th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
     const matrixTable = $("#fact-coverage-matrix-table");
     matrixTable.dataset.totalRows = String(factMatrix.length);
     matrixTable.dataset.noPathRows = String(noPathRows.length);
