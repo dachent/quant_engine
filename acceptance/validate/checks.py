@@ -1951,6 +1951,12 @@ def _readiness(ctx: Context) -> dict[str, Any]:
     return values
 
 
+# The panel's root in a coordinated release (packages/core pipeline: ``portfolio-panel``).
+PANEL_ROOT_ID = "portfolio-panel"
+_RELEASE_ROOT_ID = re.compile(r"[a-z][a-z0-9-]*")
+_RELEASE_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
 def _release_evidence_problem(ctx: Context) -> tuple[str, str] | None:
     """Why a committed release pointer's evidence cannot be used, if it cannot.
 
@@ -1974,16 +1980,29 @@ def _release_evidence_problem(ctx: Context) -> tuple[str, str] | None:
             "not hydrated or not a JSON object",
         )
     targets = manifest.get("targets")
-    if not isinstance(targets, list):
-        return "malformed", "the release manifest has no list of targets"
+    if not isinstance(targets, list) or not targets:
+        return "malformed", "the release manifest has no non-empty list of targets"
     for position, target in enumerate(targets):
-        if not isinstance(target, dict) or not isinstance(
-            target.get("proposed_generation_id"), str
+        if not isinstance(target, dict):
+            return "malformed", f"release target {position} is not an object"
+        root_id = target.get("root_id")
+        generation_id = target.get("proposed_generation_id")
+        if not isinstance(root_id, str) or not _RELEASE_ROOT_ID.fullmatch(root_id):
+            return (
+                "malformed",
+                f"release target {position} has no valid root_id "
+                "(schemas/core/release-manifest.schema.json)",
+            )
+        # A target that names this very generation is bound to its id by the
+        # generation-id check; every other target must carry a real digest.
+        if not isinstance(generation_id, str) or not (
+            _RELEASE_DIGEST.fullmatch(generation_id)
+            or generation_id == ctx.gen.generation_id
         ):
             return (
                 "malformed",
-                f"release target {position} is not an object naming a "
-                "proposed_generation_id",
+                f"release target {position} has no valid proposed_generation_id "
+                "(64 lowercase hex characters)",
             )
     return None
 
@@ -2008,32 +2027,54 @@ def _release_evidence_finding(
     )
 
 
-def _release_target(ctx: Context) -> tuple[dict[str, Any], str] | None:
-    """The committed release's target that names this generation, with where it is.
+def _release_targets(ctx: Context) -> list[tuple[dict[str, Any], str]]:
+    """Every committed release target that pins this generation under the panel root.
 
     Publication is the committed release (``CURRENT_RELEASE`` and its ``release.json``
-    target), not a stage ``CURRENT.json``: a stage pointer can only ever say PUBLISHED.
+    targets), not a stage ``CURRENT.json``: a stage pointer can only ever say PUBLISHED.
+    A target counts only when it names the panel root (``portfolio-panel``) and this
+    generation id; one that names the generation under another root does not.
     """
 
     external = ctx.gen.external
     manifest = external.release_manifest
     targets = manifest.get("targets") if isinstance(manifest, dict) else None
     if not isinstance(targets, list):
-        return None
-    for position, target in enumerate(targets):
-        if (
-            isinstance(target, dict)
-            and target.get("proposed_generation_id") == ctx.gen.generation_id
-        ):
-            return target, f"{external.release_manifest_path}#$.targets[{position}]"
-    return None
+        return []
+    return [
+        (target, f"{external.release_manifest_path}#$.targets[{position}]")
+        for position, target in enumerate(targets)
+        if isinstance(target, dict)
+        and target.get("root_id") == PANEL_ROOT_ID
+        and target.get("proposed_generation_id") == ctx.gen.generation_id
+    ]
+
+
+def _release_misrooted(ctx: Context) -> list[tuple[str, str]]:
+    """Targets that name this generation under a root other than the panel's."""
+
+    external = ctx.gen.external
+    manifest = external.release_manifest
+    targets = manifest.get("targets") if isinstance(manifest, dict) else None
+    if not isinstance(targets, list):
+        return []
+    return [
+        (
+            str(target.get("root_id")),
+            f"{external.release_manifest_path}#$.targets[{position}]",
+        )
+        for position, target in enumerate(targets)
+        if isinstance(target, dict)
+        and target.get("root_id") != PANEL_ROOT_ID
+        and target.get("proposed_generation_id") == ctx.gen.generation_id
+    ]
 
 
 def _is_published(ctx: Context) -> tuple[bool, str | None]:
-    found = _release_target(ctx)
-    if found is None:
+    found = _release_targets(ctx)
+    if not found:
         return False, None
-    return True, found[1]
+    return True, found[0][1]
 
 
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
@@ -2144,29 +2185,42 @@ def check_release_pinned(ctx: Context) -> Iterator[Finding]:
     if evidence is not None:
         yield evidence
         return
-    found = _release_target(ctx)
-    if found is None:
+    found = _release_targets(ctx)
+    if not found:
+        for root_id, where in _release_misrooted(ctx):
+            yield _finding(
+                "identity.release_pinned",
+                BLOCKER_AUTHORITY,
+                pointer["release_id"],
+                {"root_id": root_id},
+                {"root_id": PANEL_ROOT_ID},
+                "(release manifest)",
+                where,
+                ("F8",),
+                "the committed release names this generation under a root other than "
+                "the panel's, so it does not pin the panel",
+            )
         return
-    target, where = found
     manifest_path = ctx.gen.gen_dir / GENERATION_MANIFEST
     actual = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    bound = target.get("proposed_manifest_sha256")
-    if bound != actual:
-        yield _finding(
-            "identity.release_pinned",
-            BLOCKER_AUTHORITY,
-            pointer["release_id"],
-            {"proposed_manifest_sha256": bound},
-            {
-                "proposed_generation_id": ctx.gen.generation_id,
-                "proposed_manifest_sha256": actual,
-            },
-            "(release manifest)",
-            where,
-            ("F8",),
-            "the committed release target that names this generation does not carry "
-            "the sha256 of its generation.json",
-        )
+    for target, where in found:
+        bound = target.get("proposed_manifest_sha256")
+        if bound != actual:
+            yield _finding(
+                "identity.release_pinned",
+                BLOCKER_AUTHORITY,
+                pointer["release_id"],
+                {"proposed_manifest_sha256": bound},
+                {
+                    "proposed_generation_id": ctx.gen.generation_id,
+                    "proposed_manifest_sha256": actual,
+                },
+                "(release manifest)",
+                where,
+                ("F8",),
+                "a committed release target that names this generation does not carry "
+                "the sha256 of its generation.json",
+            )
 
 
 def check_absolute_paths(ctx: Context) -> Iterator[Finding]:
@@ -8552,8 +8606,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
-    ("dates.account_live_window", check_account_live_window),
-    ("capital.current_capital_as_of", check_current_capital_as_of),
+    ("dates.section_as_of_vs_cutoff", check_account_live_window),
+    ("capital.as_of_cutoff", check_current_capital_as_of),
     (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
     ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
