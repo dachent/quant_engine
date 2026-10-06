@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, Callable, Final, Mapping, Sequence, cast
@@ -6085,12 +6086,16 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
 ORACLE_LEDGER_BASENAME: Final = "provider-ledger.json"
 
 
-def _attended_oracle_ledger_identity(document: Path) -> dict[str, str]:
-    """The ledger identity an A/B oracle inputs manifest (or a receipt embedding it) names.
+def _attended_oracle_ledger_identity(document: Path) -> dict[str, Any]:
+    """The ledger identity an acceptance inputs MANIFEST (or a receipt embedding it) names.
 
-    The oracle derivations (``acceptance/derive_a`` and ``derive_b``) select their ledger
-    as the one ``provider-ledger.json`` entry of the inputs manifest, whose parent
-    directory is the provider-ledger generation id, and pin its sha256.
+    The identity is the sha256 of the ledger file's content: the oracle derivations
+    (``acceptance/derive_a`` and ``derive_b``) select the one ``provider-ledger.json``
+    entry of the manifest and pin its sha256, and a preserved copy under any folder
+    name holds the same bytes. The parent folder counts as a generation id only when it
+    is 64 hex characters; only then is it compared. A receipt such as
+    ``parent-execution-receipt.json`` carries just ``manifest_sha256`` and is accepted
+    only if it embeds the manifest under ``manifest``.
     """
 
     loaded = _load(document, "oracle inputs manifest")
@@ -6112,16 +6117,24 @@ def _attended_oracle_ledger_identity(document: Path) -> dict[str, str]:
             if not isinstance(sha256, str) or len(sha256) != 64:
                 raise MaterializationError("oracle ledger input is not sha256-pinned")
             ledgers[raw] = sha256
-            generation = parts[-2]
     if not ledgers:
         raise MaterializationError(
             f"oracle document {document} names no ledger input "
-            f"({ORACLE_LEDGER_BASENAME}); it is neither an acceptance inputs "
-            "manifest nor a receipt embedding one"
+            f"({ORACLE_LEDGER_BASENAME}); --oracle-manifest takes the acceptance "
+            "inputs MANIFEST file (a receipt is accepted only if it embeds that "
+            "manifest; parent-execution-receipt.json holds only manifest_sha256 "
+            "and is refused)"
         )
     if len(ledgers) != 1:
         raise MaterializationError("oracle document names more than one ledger input")
-    return {"generation_id": generation, "sha256": next(iter(ledgers.values()))}
+    raw, sha256 = next(iter(ledgers.items()))
+    folder = raw.replace("\\", "/").split("/")[-2]
+    is_generation = re.fullmatch(r"[0-9a-f]{64}", folder) is not None
+    return {
+        "generation_id": folder if is_generation else None,
+        "generation_id_checked": is_generation,
+        "sha256": sha256,
+    }
 
 
 def _attended_oracle_ledger_join(
@@ -6148,16 +6161,16 @@ def _attended_oracle_ledger_join(
         return {"status": "NOT_CHECKED", "reason": "no --oracle-manifest supplied"}
     oracle = _attended_oracle_ledger_identity(Path(oracle_document).resolve())
     catalog = source_phase.get("provider_ledger_catalog")
-    run = {
-        "generation_id": source_phase.get("provider_ledger_generation_id"),
-        "sha256": catalog.get("sha256") if isinstance(catalog, dict) else None,
-    }
-    if oracle != run:
+    run_sha = catalog.get("sha256") if isinstance(catalog, dict) else None
+    run_generation = source_phase.get("provider_ledger_generation_id")
+    if oracle["sha256"] != run_sha or (
+        oracle["generation_id_checked"] and oracle["generation_id"] != run_generation
+    ):
         raise MaterializationError(
             "oracle ledger identity differs from the ledger the run consumed: "
-            f"oracle generation {oracle['generation_id']} (catalog sha256 "
-            f"{oracle['sha256']}) but run generation {run['generation_id']} "
-            f"(catalog sha256 {run['sha256']})"
+            f"oracle generation {oracle['generation_id'] or '(not a generation folder)'} "
+            f"(catalog sha256 {oracle['sha256']}) but run generation "
+            f"{run_generation} (catalog sha256 {run_sha})"
         )
     return {"status": "MATCH", **oracle}
 
@@ -7166,9 +7179,11 @@ def _parser() -> argparse.ArgumentParser:
         "--oracle-manifest",
         type=Path,
         help=(
-            "the A/B oracle inputs manifest, or parent-execution-receipt.json "
-            "embedding it; the run refuses when its ledger identity differs from "
-            "the ledger the run consumes"
+            "the acceptance inputs MANIFEST file (a receipt such as "
+            "parent-execution-receipt.json is accepted only if it embeds that "
+            "manifest); the run refuses when the manifest's ledger sha256 differs "
+            "from the ledger the run consumes, and when its ledger folder is a "
+            "64-hex generation id that differs from the run's generation"
         ),
     )
     attended_cmd.add_argument(

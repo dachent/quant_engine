@@ -98,3 +98,11 @@ def test_basic_preflight_refuses_a_deep_root_and_admits_a_short_one(
         assert basic["output_root"] == (short / "out").resolve()
     finally:
         shutil.rmtree(short, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "output_root",
+    ["C:\Dev\q\out", "C:\Dev\q\mvp-final-20261004-r2\out"],
+)
+def test_real_supported_roots_pass_the_budget(output_root):
+    materializer._attended_path_budget(Path(output_root), Path("C:\Dev\q\cache"))

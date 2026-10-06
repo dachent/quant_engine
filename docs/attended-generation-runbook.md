@@ -40,11 +40,15 @@ instructions, or deletion/recovery commands into a current run.
    provider ledger than the run (`check_retained_authority_pins.py --ledger-root L
    --retained ROLE=PATH` runs the same matrix by hand), and an output or cache root
    under which a generated path would reach 260 characters. For a run that declares
-   acceptance (`--declares-acceptance`), pass the A/B oracle inputs manifest or
-   `parent-execution-receipt.json` as `--oracle-manifest`: the run refuses when the
-   oracle's `provider-ledger.json` identity (generation id and sha256) differs from
-   the ledger the run consumed, and without the flag the join is reported
-   `NOT_CHECKED` on stderr and in the result, which is not a pass.
+   acceptance (`--declares-acceptance`), pass the acceptance inputs MANIFEST file as
+   `--oracle-manifest` (a receipt is accepted only if it embeds that manifest;
+   `parent-execution-receipt.json` holds just `manifest_sha256` and is refused). The
+   join identity is the ledger file's sha256: the run refuses when it differs from the
+   ledger the run consumed, and also when the manifest's ledger folder is a 64-hex
+   generation id that differs from the run's generation. A preserved copy under any
+   other folder name is accepted on sha alone (`generation_id_checked=false`).
+   Without the flag the join is reported `NOT_CHECKED` on stderr and in the result,
+   which is not a pass.
 6. Settle the QA hold before `--execute`. The `panel` stage needs browser QA
    evidence that only exists after `panel-candidate`. The plan prints a `qa` block
    with the stage and the required `--qa-dir`; `--execute` refuses unless the

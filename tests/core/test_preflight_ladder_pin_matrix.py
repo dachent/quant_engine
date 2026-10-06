@@ -135,3 +135,19 @@ def test_attended_preflight_helper_raises_materialization_error(good, tmp_path):
             dependence_ledger_root=good["dependence"],
         )
     assert time.monotonic() - started < REFUSAL_SECONDS
+
+
+def test_legacy_catalog_without_ledger_rows_names_the_file_and_the_rebuild(
+    good, tmp_path
+):
+    legacy = tmp_path / "legacy" / ("c" * 64)
+    legacy.mkdir(parents=True)
+    catalog = legacy / "portfolio-baseline.json"
+    catalog.write_bytes(
+        _json({"source_artifacts": [{"schema_name": "x", "sha256": "1" * 64}]})
+    )
+    with pytest.raises(Exception) as caught:
+        _matrix(good, allocation=legacy)
+    message = str(caught.value)
+    assert str(catalog) in message
+    assert "rebuild" in message and "provider-ledger-generation" in message

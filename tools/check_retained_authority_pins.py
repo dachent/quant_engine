@@ -344,11 +344,19 @@ def _describe(identity: dict[str, str]) -> str:
     return ", ".join(parts) or "none"
 
 
-def _compare_ledger(role: str, bound: dict[str, str], run: dict[str, str]) -> None:
+def _compare_ledger(
+    role: str,
+    bound: dict[str, str],
+    run: dict[str, str],
+    source: Path | None = None,
+) -> None:
     if not bound:
+        where = f" in {source}" if source is not None else ""
         raise LedgerPinMismatch(
-            f"retained {role} carries no provider ledger identity; "
-            f"the run selects ledger {_describe(run)}"
+            f"retained {role} carries no provider ledger identity{where} (no "
+            f"{LEDGER_SOURCE_KEY} source_artifacts rows; a legacy catalog); rebuild "
+            f"the {role} generation from the run's ledger [{_describe(run)}] rather "
+            "than relaxing this check"
         )
     if any(bound.get(key) != run[key] for key in LEDGER_SCHEMAS):
         raise LedgerPinMismatch(
@@ -377,10 +385,11 @@ def check_ledger_pin_matrix(
     rows: list[dict[str, str]] = []
     for role in ("allocation", "baseline"):
         if role in retained:
-            catalog = _json_file(
-                retained[role] / "portfolio-baseline.json", f"retained {role} catalog"
+            catalog_path = retained[role] / "portfolio-baseline.json"
+            catalog = _json_file(catalog_path, f"retained {role} catalog")
+            _compare_ledger(
+                role, ledger_identity_of_catalog(catalog), run, catalog_path
             )
-            _compare_ledger(role, ledger_identity_of_catalog(catalog), run)
             rows.append({"role": role, "status": "MATCH"})
     if "dependence" in retained:
         _compare_ledger(
