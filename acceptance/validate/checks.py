@@ -8849,6 +8849,40 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                             f"{line_pointer}.last_event_date",
                             "last_event_date is not the latest event date of the line",
                         )
+                    label = _canonical_iso_day(line.get("as_of_date"))
+                    if label is not None and latest is not None and latest > label:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            latest.isoformat(),
+                            f"an event on or before {label.isoformat()}",
+                            f"{line_pointer}.events",
+                            "the line counts an event dated after its as_of_date, so it "
+                            "states a balance it did not have on that date",
+                        )
+                    amount = to_decimal(node(line, "current_value", "value"))
+                    signed = [
+                        to_decimal(event.get("signed_usd"))
+                        for event in rows(line, "events")
+                    ]
+                    if (
+                        amount is not None
+                        and signed
+                        and None not in signed
+                        and sum((s for s in signed if s is not None), Decimal(0))
+                        != amount
+                    ):
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("current_value"),
+                            "the sum of its events' signed_usd",
+                            f"{line_pointer}.current_value",
+                            "the line's value is not the sum of its events' signed "
+                            "amounts",
+                        )
                     proven = min(ctx.cutoff, coverage_end)
                     if _canonical_iso_day(line.get("as_of_date")) != proven:
                         honest = False

@@ -137,6 +137,56 @@ def test_rule_2_one_stated_field_without_the_other_blocks(tmp_path: Path) -> Non
     assert [f.klass for f in findings] == [checks.BLOCKER_INVARIANT]
 
 
+def _early_world(cash: dict[str, Any]):
+    return _custody(cash=cash, row=EARLY, systematic=EARLY)
+
+
+def _cash_findings(findings: list[checks.Finding]) -> list[checks.Finding]:
+    return [f for f in findings if ":cash:" in f.entity]
+
+
+def test_rule_2_an_event_dated_after_the_label_blocks(tmp_path: Path) -> None:
+    """Astra rg-9fb7125 item 2 mutation control: the value counts a 12-07 event but the
+    line is labelled 12-05, so it states a balance it did not have on its own date."""
+
+    cash = _cash(as_of=EARLY, coverage_end=EARLY, last_event="2025-12-07")
+    cash["events"].append({"event_date": "2025-12-07", "signed_usd": "20"})
+    cash["current_value"]["value"] = "113.97"
+
+    findings = _cash_findings(_findings(tmp_path, _early_world(cash)))
+
+    assert (
+        "current_capital:beta:cash:CASH1",
+        checks.BLOCKER_INVARIANT,
+    ) in _view(findings)
+    assert any("after its as_of_date" in f.message for f in findings)
+
+
+def test_rule_2_a_value_that_is_not_the_sum_of_its_events_blocks(
+    tmp_path: Path,
+) -> None:
+    cash = _cash(as_of=EARLY, coverage_end=EARLY)
+    cash["current_value"]["value"] = "94"
+
+    findings = _cash_findings(_findings(tmp_path, _early_world(cash)))
+
+    assert (
+        "current_capital:beta:cash:CASH1",
+        checks.BLOCKER_INVARIANT,
+    ) in _view(findings)
+    assert any("sum of its events" in f.message for f in findings)
+
+
+def test_rule_2_a_value_equal_to_its_events_through_the_label_does_not_block(
+    tmp_path: Path,
+) -> None:
+    cash = _cash(as_of=EARLY, coverage_end=EARLY)
+
+    findings = _cash_findings(_findings(tmp_path, _early_world(cash)))
+
+    assert checks.BLOCKER_INVARIANT not in {f.klass for f in findings}
+
+
 def test_rule_3_a_stale_member_behind_a_cutoff_labelled_strategy_blocks(
     tmp_path: Path,
 ) -> None:
