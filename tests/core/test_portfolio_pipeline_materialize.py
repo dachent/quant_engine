@@ -5324,6 +5324,10 @@ def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
     cache.mkdir()
     qa_dir = tmp_path / "qa"
     qa_dir.mkdir()
+    capital_result = tmp_path / "capital-result.json"
+    capital_generation = tmp_path / "capital-generation.json"
+    capital_result.write_text("{}", encoding="utf-8")
+    capital_generation.write_text("{}", encoding="utf-8")
     return {
         "repo_root": repo,
         "python": runtime,
@@ -5335,7 +5339,10 @@ def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
         "runtime": {"descriptor": descriptor, "identity": {"runtime": "test"}},
         "recipe": recipe,
         "financial_inputs": {},
-        "financial_stage_inputs": {},
+        "financial_stage_inputs": {
+            "--invested-capital-result": capital_result,
+            "--invested-capital-input-generation": capital_generation,
+        },
         "qa_dir": qa_dir,
         "request_identity": {"fixture": "attended-child-boundary"},
         "required_stages": materializer.ATTENDED_STAGES,
@@ -6330,6 +6337,76 @@ def test_attended_forwards_complete_governed_financial_families_and_qa(
     assert panel[panel.index("--qa-dir") + 1] == str(qa_dir)
 
 
+class _NoopRelease:
+    """A release builder whose own family checks accept anything."""
+
+    @staticmethod
+    def _governed_hwm_arguments(**_kwargs: object) -> None:
+        return None
+
+    @staticmethod
+    def _invested_capital_arguments(**_kwargs: object) -> None:
+        return None
+
+
+def _financial_args(tmp_path: Path, supplied: dict[str, str]) -> argparse.Namespace:
+    values: dict[str, object] = {
+        attribute: None
+        for attribute in (
+            *materializer.ATTENDED_HWM_INPUTS.values(),
+            *materializer.ATTENDED_CAPITAL_INPUTS.values(),
+        )
+    }
+    for attribute in supplied:
+        path = tmp_path / f"{attribute}.json"
+        path.write_text("{}", encoding="utf-8")
+        values[attribute] = path
+    return argparse.Namespace(**values)
+
+
+def test_attended_preflight_refuses_a_run_without_the_invested_capital_family(
+    tmp_path: Path,
+) -> None:
+    """N36/B7: the contract marks INVESTED_CAPITAL REQUIRED, so none is not optional."""
+
+    for supplied in (
+        {},
+        {"invested_capital_result": ""},
+        {"invested_capital_input_generation": ""},
+    ):
+        with pytest.raises(
+            materializer.MaterializationError,
+            match="requires the governed invested-capital",
+        ):
+            materializer._attended_stage_financial_inputs(  # noqa: SLF001
+                _financial_args(tmp_path, supplied), _NoopRelease()
+            )
+
+
+def test_attended_preflight_accepts_the_capital_family_without_hwm(
+    tmp_path: Path,
+) -> None:
+    accepted = materializer._attended_stage_financial_inputs(  # noqa: SLF001
+        _financial_args(
+            tmp_path,
+            {"invested_capital_result": "", "invested_capital_input_generation": ""},
+        ),
+        _NoopRelease(),
+    )
+
+    assert set(accepted) == set(materializer.ATTENDED_CAPITAL_INPUTS)
+
+
+def test_attended_stage_command_requires_the_capital_family(tmp_path: Path) -> None:
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["financial_stage_inputs"] = {}
+
+    with pytest.raises(
+        materializer.MaterializationError, match="financial input family"
+    ):
+        materializer._attended_stage_command(preflight, tmp_path / "output", "ledger")
+
+
 def test_attended_rejects_partial_governed_financial_family_before_child(
     tmp_path: Path,
 ) -> None:
@@ -6419,7 +6496,10 @@ def test_attended_rejects_missing_run_receipt_after_execution_started(
         canonical_json_bytes(
             {
                 "data_clock": clock,
-                "financial_stage_inputs": {},
+                "financial_stage_inputs": {
+                    flag: materializer._file_definition(path)
+                    for flag, path in preflight["financial_stage_inputs"].items()  # type: ignore[attr-defined]
+                },
                 "schema_version": 1,
                 "source_phase": preflight["source_phase"],
                 "source_run": materializer._file_definition(source_run),

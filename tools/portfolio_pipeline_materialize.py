@@ -5928,6 +5928,15 @@ def _attended_stage_financial_inputs(
             **ATTENDED_CAPITAL_INPUTS,
         }.items()
     }
+    # The contract marks INVESTED_CAPITAL REQUIRED for every current strategy, so
+    # an attended run without the governed capital family can only end in a
+    # blocked validator.  HWM stays all-or-none and is not gated here.
+    if any(supplied[flag] is None for flag in ATTENDED_CAPITAL_INPUTS):
+        raise MaterializationError(
+            "attended run requires the governed invested-capital result and input "
+            "generation (--invested-capital-result and "
+            "--invested-capital-input-generation); start it with --preparation-spec"
+        )
     try:
         release._governed_hwm_arguments(  # noqa: SLF001
             result=supplied["--hwm-governed-result"],
@@ -7205,9 +7214,7 @@ def _attended_stage_command(
     capital = [financial_stage_inputs.get(flag) for flag in ATTENDED_CAPITAL_INPUTS]
     if any(path is not None for path in hwm) and any(path is None for path in hwm):
         raise MaterializationError("attended financial input family differs")
-    if any(path is not None for path in capital) and any(
-        path is None for path in capital
-    ):
+    if any(path is None for path in capital):
         raise MaterializationError("attended financial input family differs")
     for flag in (*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS):
         if (path := financial_stage_inputs.get(flag)) is not None:

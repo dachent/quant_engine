@@ -228,7 +228,10 @@ def _storage_preflight(tmp_path: Path, cache: Path) -> dict[str, object]:
     source_run.write_text("{}", encoding="utf-8")
     return {
         "financial_inputs": {},
-        "financial_stage_inputs": {},
+        "financial_stage_inputs": {
+            "--invested-capital-result": Path("capital-result.json"),
+            "--invested-capital-input-generation": Path("capital-generation.json"),
+        },
         "portfolio_root": tmp_path / "workspace" / "dataPortfolio",
         "python": Path(sys.executable),
         "qa_dir": None,

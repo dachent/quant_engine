@@ -82,7 +82,10 @@ def _stubs(monkeypatch, tmp_path, *, planned: str, final: str):
         "prepare_attended_inputs",
         lambda **_k: {
             "source_run": tmp_path / "prepared-source-run.json",
-            "financial_stage_inputs": {},
+            "financial_stage_inputs": {
+                "--invested-capital-result": Path("capital-result.json"),
+                "--invested-capital-input-generation": Path("capital-generation.json"),
+            },
         },
     )
     monkeypatch.setattr(
