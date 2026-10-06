@@ -184,6 +184,8 @@ def nav(account_id: str, observed_on: str, value: str) -> dict[str, object]:
         "account_id": account_id,
         "as_of_date": observed_on,
         "nav": {"status": "AVAILABLE", "currency": "USD", "value": value},
+        # V15: a ledger row states its mapping; one that does not is not admitted.
+        "mapping_status": "MAPPED",
     }
 
 

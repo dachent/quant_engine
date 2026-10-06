@@ -571,23 +571,34 @@ def current_membership_starts(rows: list[dict[str, object]]) -> dict[str, date]:
 
 
 UNMAPPED_NAV_REASON = (
-    "every provider-ledger NAV observation for this account is UNMAPPED (no admitted "
-    "strategy mapping), so no admitted source date exists"
+    "no provider-ledger NAV observation of this account on or before the cutoff carries "
+    "an admitted (MAPPED) strategy mapping, so no admitted source date exists"
 )
 
 
 def accounts_without_admitted_mapping(ledger: dict[str, object]) -> set[str]:
-    """Accounts whose provider-ledger NAV rows are all explicitly UNMAPPED.
+    """Accounts with ledger NAV observations in the cutoff window and none MAPPED.
 
-    V15: an account that carries ledger NAV observations and not one admitted (MAPPED)
-    row has no admitted source; its source-last-observation date is not derivable from
-    the unmapped rows. A row that states no mapping_status is not evidence of either.
+    V15: only observations dated on or before the cutoff count (a later MAPPED row cannot
+    admit an account whose valued window is unmapped); a row that states no
+    mapping_status is not admitted either. An account with no observation in the window
+    is not judged here.
     """
 
-    statuses: dict[str, set[str]] = defaultdict(set)
+    statuses: dict[str, list[str]] = defaultdict(list)
     for row in cast(list[dict[str, object]], ledger["nav_observations"]):
-        statuses[str(row["account_id"])].add(str(row.get("mapping_status")))
-    return {account for account, found in statuses.items() if found == {"UNMAPPED"}}
+        observed_on = row.get("as_of_date")
+        try:
+            day = parse_date(str(observed_on))
+        except ValueError:
+            continue
+        if day > CUTOFF:
+            continue
+        status = row.get("mapping_status")
+        statuses[str(row["account_id"])].append(
+            status if isinstance(status, str) and status else "MISSING"
+        )
+    return {account for account, found in statuses.items() if "MAPPED" not in found}
 
 
 def latest_observations(

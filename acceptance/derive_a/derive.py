@@ -3839,9 +3839,26 @@ def _last_value(
 
 
 UNMAPPED_NAV_REASON = (
-    "every provider-ledger NAV observation for this account is UNMAPPED (no admitted "
-    "strategy mapping), so no admitted source date exists"
+    "no provider-ledger NAV observation of this account on or before the cutoff carries "
+    "an admitted (MAPPED) strategy mapping, so no admitted source date exists"
 )
+
+
+def _mapping_withheld(ledger: Ledger, account_id: str, cutoff: dt.date) -> bool:
+    """V15: the account has ledger NAV observations in the cutoff window and none MAPPED.
+
+    Only observations dated on or before the cutoff count (a later MAPPED row cannot admit
+    an account whose valued window is unmapped); a row that states no mapping_status is
+    MISSING, which is not admitted either. An account with no observations in the window
+    (raw-source accounts) is not judged here.
+    """
+
+    window = [
+        status
+        for day, status in ledger.nav_mapping.get(account_id, ())
+        if day is not None and day <= cutoff
+    ]
+    return bool(window) and "MAPPED" not in window
 
 
 def _derive_accounts(
@@ -3892,8 +3909,7 @@ def _derive_accounts(
             )
             # V15: an account whose ledger NAV rows are all UNMAPPED has no admitted
             # source; its date is not derived from the unmapped rows.
-            found = ledger.nav_mapping.get(account_id)
-            if found == frozenset({"UNMAPPED"}):
+            if _mapping_withheld(ledger, account_id, cutoff):
                 output.missing(
                     "date.source_last_observation",
                     account_id,
