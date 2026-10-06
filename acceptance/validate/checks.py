@@ -3084,14 +3084,38 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
                 )
 
 
+def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
+    """The unallocated cash line each strategy's custody row publishes (OWNER_318).
+
+    A strategy's capital is its sleeve account NAV plus this derived cash line; only an
+    AVAILABLE line with a numeric USD value counts.
+    """
+
+    cash: dict[str, Decimal] = {}
+    for strategy in rows(node(ctx.report, "custody_current_capital"), "strategies"):
+        lines = strategy.get("derived_cash")
+        if not isinstance(lines, list):
+            continue
+        for line in lines:
+            value = node(line, "current_value")
+            if not isinstance(value, Mapping) or not is_available(value.get("status")):
+                continue
+            amount = to_decimal(value.get("value"))
+            if amount is not None:
+                key = str(strategy.get("strategy_id"))
+                cash[key] = cash.get(key, Decimal(0)) + amount
+    return cash
+
+
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
     values = {
         str(row.get("account_id")): to_decimal(row.get("latest_value_usd"))
         for row in rows(ctx.report, "account_summary")
     }
+    cash = derived_cash_by_strategy(ctx)
     totals: dict[str, tuple[Decimal, list[str]]] = {}
     for strategy, accounts in current_accounts_by_strategy(ctx).items():
-        amount = Decimal(0)
+        amount = cash.get(strategy, Decimal(0))
         for account in accounts:
             amount += values.get(account) or Decimal(0)
         totals[strategy] = (amount, sorted(accounts))
@@ -6675,7 +6699,7 @@ def metric_unit(metric_id: str, declared: Any) -> str:
         return declared
     if metric_id.startswith("capital.") or metric_id == "flows.account.net":
         return "USD"
-    if metric_id.startswith(("twr.", "mwr.")):
+    if metric_id.startswith(("twr.", "mwr.", "weight.")):
         return "ratio"
     if metric_id.endswith("_ids"):
         return "list"
@@ -6729,6 +6753,30 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"$.account_summary[{position}].latest_value_usd",
                         )
                     )
+        # The custody block carries every account the capital identity names, including
+        # a retained or excluded account that has no account_summary row.
+        for position, row in enumerate(
+            rows(node(report, "custody_current_capital"), "strategies")
+        ):
+            for member_position, member in enumerate(rows(row, "members")):
+                value = member.get("value")
+                if (
+                    member.get("account_id") == entity
+                    and isinstance(value, Mapping)
+                    and is_available(value.get("status"))
+                ):
+                    out.append(
+                        Observed(
+                            "report:custody_current_capital.strategies.members.value",
+                            value.get("value"),
+                            None,
+                            None,
+                            member.get("as_of_date"),
+                            REPORT,
+                            f"$.custody_current_capital.strategies[{position}]"
+                            f".members[{member_position}].value.value",
+                        )
+                    )
         for position, row in manifest_rows(ctx):
             if (
                 str(row.get("account_id")) == entity
@@ -6743,6 +6791,54 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         row.get("end"),
                         PANEL,
                         f"$.account_manifest.rows[{position}].current_value",
+                    )
+                )
+    elif metric_id == "weight.strategy.cutoff":
+        for file, key in ((REPORT, "strategy_summary"), (PANEL, "strategies")):
+            for position, row in enumerate(
+                rows(report if file == REPORT else panel, key)
+            ):
+                if row.get("strategy_id") == entity and "systematic_weight" in row:
+                    out.append(
+                        Observed(
+                            f"{file}:{key}.systematic_weight",
+                            row.get("systematic_weight"),
+                            None,
+                            None,
+                            None,
+                            file,
+                            f"$.{key}[{position}].systematic_weight",
+                        )
+                    )
+    elif metric_id == "capital.strategy_cash.cutoff":
+        for position, row in enumerate(
+            rows(node(report, "custody_current_capital"), "strategies")
+        ):
+            lines = row.get("derived_cash")
+            if row.get("strategy_id") != entity or not isinstance(lines, list):
+                continue
+            total = Decimal(0)
+            counted = 0
+            for line in lines:
+                value = node(line, "current_value")
+                amount = (
+                    to_decimal(value.get("value"))
+                    if isinstance(value, Mapping) and is_available(value.get("status"))
+                    else None
+                )
+                if amount is not None:
+                    total += amount
+                    counted += 1
+            if counted:
+                out.append(
+                    Observed(
+                        "report:custody_current_capital.strategies.derived_cash",
+                        total,
+                        None,
+                        None,
+                        row.get("as_of_date"),
+                        REPORT,
+                        f"$.custody_current_capital.strategies[{position}].derived_cash",
                     )
                 )
     elif metric_id == "capital.strategy.cutoff":
