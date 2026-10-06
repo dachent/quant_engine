@@ -4684,6 +4684,10 @@ def _implementation_return_attribution_contract(
     }
 
 
+_ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
+_ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
+
+
 def _strategies(
     catalog: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
@@ -4928,6 +4932,16 @@ def _strategies(
             "compatibility_reason",
             "Compatibility is unavailable without an effective-dated registry row.",
         )
+        registry_version_ref = version.get("version_ref", strategy.get("version_ref"))
+        registry_disposition = version.get(
+            "disposition", strategy.get("version_disposition", "UNRESOLVED")
+        )
+        registry_disposition_reason = version.get(
+            "disposition_reason",
+            "Legacy provenance has no effective-dated strategy version row.",
+        )
+        backtest_slot_status = backtest.get("status", "UNAVAILABLE")
+        backtest_slot_version_ref = backtest.get("version_ref")
         history = (
             dict(history_contract.get(str(strategy.get("name")), {}))
             if history_contract is not None
@@ -4996,6 +5010,37 @@ def _strategies(
                 if compatibility_status == "PROVEN_COMPATIBLE"
                 else f"{compatibility_status}: {compatibility_reason}"
             )
+        if history_accepted:
+            # The authenticated history contract admitted exact-version
+            # prehistory for this strategy, so the declared backtest slot and the
+            # version registry follow that admission instead of the stale
+            # effective-dated catalog default (UNAVAILABLE and UNRESOLVED). The
+            # catalog's live_boundary identity window is hash-pinned and is not
+            # touched here.
+            admitted_version_ref = history.get("strategy_version")
+            if backtest_slot_status in _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST:
+                backtest_slot_status = _ADMITTED_PREHISTORY_BACKTEST_STATUS
+                if backtest_slot_version_ref is None and isinstance(
+                    admitted_version_ref, str
+                ):
+                    backtest_slot_version_ref = admitted_version_ref
+            if (
+                isinstance(admitted_version_ref, str)
+                and admitted_version_ref not in {"", "UNRESOLVED"}
+                and registry_version_ref in {None, admitted_version_ref}
+                and compatibility_status == "UNRESOLVED"
+            ):
+                registry_version_ref = admitted_version_ref
+                registry_disposition = "EVIDENCED"
+                registry_disposition_reason = (
+                    "Bound to the hash-bound exact version named by the "
+                    f"authenticated history contract: {history_compatibility_reason}"
+                )
+                compatibility_status = "PROVEN_COMPATIBLE"
+                compatibility_reason = (
+                    "Authenticated history contract accepts this exact version: "
+                    f"{history_compatibility_reason}"
+                )
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -5116,14 +5161,9 @@ def _strategies(
                 ),
                 "cost_status": cost_row.get("cost_status", "UNAVAILABLE"),
                 "implementation_gap_status": gap_row.get("status", "UNAVAILABLE"),
-                "version_ref": version.get("version_ref", strategy.get("version_ref")),
-                "version_disposition": version.get(
-                    "disposition", strategy.get("version_disposition", "UNRESOLVED")
-                ),
-                "version_disposition_reason": version.get(
-                    "disposition_reason",
-                    "Legacy provenance has no effective-dated strategy version row.",
-                ),
+                "version_ref": registry_version_ref,
+                "version_disposition": registry_disposition,
+                "version_disposition_reason": registry_disposition_reason,
                 "version_effective_start": version.get("effective_start"),
                 "version_effective_end": version.get("effective_end"),
                 "version_compatibility_status": compatibility_status,
@@ -5157,8 +5197,8 @@ def _strategies(
                 "design_version_ref": design.get("version_ref"),
                 "configuration_status": configuration.get("status", "UNAVAILABLE"),
                 "configuration_version_ref": configuration.get("version_ref"),
-                "backtest_status": backtest.get("status", "UNAVAILABLE"),
-                "backtest_version_ref": backtest.get("version_ref"),
+                "backtest_status": backtest_slot_status,
+                "backtest_version_ref": backtest_slot_version_ref,
                 "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
                 "live_boundary_observed_start": live_boundary.get("observed_start"),
                 "live_boundary_observed_end": live_boundary.get("observed_end"),

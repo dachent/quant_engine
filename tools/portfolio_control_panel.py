@@ -5937,16 +5937,36 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
     for row in strategies:
         history_status = row.get("history_compatibility_status")
         if history_status is not None:
+            # The gate reports the report's own version registry status; it never
+            # relabels accepted history as PROVEN_COMPATIBLE. History accepted
+            # beside an unbound registry stays blocked and shows that status.
+            registry_status = str(
+                row.get("version_compatibility_status") or "UNRESOLVED"
+            )
             accepted = (
                 history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
                 and row.get("live_plus_backtest_status") == "ELIGIBLE_ACCEPTED_HISTORY"
+                and registry_status == "PROVEN_COMPATIBLE"
             )
-            compatibility = "PROVEN_COMPATIBLE" if accepted else str(history_status)
+            compatibility = (
+                registry_status
+                if history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                else str(history_status)
+            )
             reason = str(
                 row.get("live_plus_backtest_reason")
                 or row.get("history_compatibility_reason")
                 or "No accepted strategy history is recorded."
             )
+            if (
+                history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                and registry_status != "PROVEN_COMPATIBLE"
+            ):
+                reason = (
+                    "Accepted history is not bound to a compatible version "
+                    f"registry row ({registry_status}): "
+                    f"{row.get('version_compatibility_reason') or 'no reason recorded'}"
+                )
             version_ref = row.get("history_version_ref")
         else:
             compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")

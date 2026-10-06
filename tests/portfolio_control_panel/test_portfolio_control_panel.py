@@ -4731,6 +4731,9 @@ def test_partial_hybrid_coverage_still_publishes_the_hybrid_mode() -> None:
             ),
             "strategy_id": strategy_id,
             "strategy_name": name,
+            "version_compatibility_status": (
+                "PROVEN_COMPATIBLE" if accepted else "UNRESOLVED"
+            ),
         }
 
     gate = panel._hybrid_mode_gate(
@@ -4756,6 +4759,47 @@ def test_partial_hybrid_coverage_still_publishes_the_hybrid_mode() -> None:
         "ELIGIBLE_PROVEN_COMPATIBLE",
         "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
     }
+
+
+def test_hybrid_gate_reports_registry_status_instead_of_relabeling_history() -> None:
+    """D4: accepted history never turns an unbound registry into PROVEN_COMPATIBLE."""
+
+    def row(strategy_id: str, registry: dict[str, str]) -> dict[str, Any]:
+        return {
+            "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+            "history_version_ref": f"{strategy_id}:backtest",
+            "live_plus_backtest_reason": "History is accepted.",
+            "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_id.upper(),
+            **registry,
+        }
+
+    gate = panel._hybrid_mode_gate(
+        [
+            row("bound", {"version_compatibility_status": "PROVEN_COMPATIBLE"}),
+            row(
+                "unbound",
+                {
+                    "version_compatibility_reason": "No effective-dated row.",
+                    "version_compatibility_status": "UNRESOLVED",
+                },
+            ),
+            row("missing", {}),
+        ]
+    )
+
+    assert [item["strategy_id"] for item in gate["eligible_strategies"]] == ["bound"]
+    assert gate["eligible_strategies"][0]["compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert [
+        (item["strategy_id"], item["compatibility_status"])
+        for item in gate["blocked_strategies"]
+    ] == [("unbound", "UNRESOLVED"), ("missing", "UNRESOLVED")]
+    assert (
+        "not bound to a compatible version registry row"
+        in (gate["blocked_strategies"][0]["reason"])
+    )
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
 
 
 def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:

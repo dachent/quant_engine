@@ -2839,9 +2839,13 @@ def test_missing_strategy_evidence_is_unavailable_not_inferred(tmp_path: Path) -
     assert strategy["nav_status"] == "UNAVAILABLE"
 
 
-def test_effective_dated_strategy_version_registry_projects_into_report(
-    tmp_path: Path,
-) -> None:
+def _unresolved_version_catalog() -> dict[str, Any]:
+    """Baseline whose pinned version registry is the stale default.
+
+    Every strategy has backtest UNAVAILABLE, version UNRESOLVED and compatibility
+    UNRESOLVED; strategy-1 additionally carries a hash-pinned live boundary.
+    """
+
     catalog = _baseline_catalog()
     unavailable = {
         "source_ids": ["synthetic-source"],
@@ -2895,6 +2899,13 @@ def test_effective_dated_strategy_version_registry_projects_into_report(
             for index in range(1, 10)
         ],
     }
+    return catalog
+
+
+def test_effective_dated_strategy_version_registry_projects_into_report(
+    tmp_path: Path,
+) -> None:
+    catalog = _unresolved_version_catalog()
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(baseline_root)
@@ -2914,6 +2925,159 @@ def test_effective_dated_strategy_version_registry_projects_into_report(
     )
     assert first["live_plus_backtest_reason"].startswith("UNRESOLVED:")
     assert first["strategy_evidence_layers"][0]["evidence_layer"] == "ACCOUNT_LIVE"
+
+
+ADMITTED_VERSION_REF = "accepted-live-path:" + "a" * 64
+
+
+def _history_rows(
+    accepted: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """History contract rows keyed by strategy name, accepted ones as supplied."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    for index in range(1, 10):
+        name = f"Synthetic Strategy {index}"
+        rows[name] = dict(
+            accepted.get(
+                name,
+                {
+                    "backtest_observations": 0,
+                    "history_disposition_reason": "No version-matched prehistory.",
+                    "history_status": "UNAVAILABLE_NO_MATCHED_BACKTEST_PREHISTORY",
+                    "implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE",
+                    "series_id": name,
+                    "strategy_version": f"unmatched-v{index}",
+                },
+            )
+        )
+    return rows, {
+        "as_of_date": "2026-01-03",
+        "evaluated_on": "2026-01-03",
+        "evidence_mode_policy": {},
+        "returns_sha256": "b" * 64,
+        "returns_size_bytes": 100,
+        "schema": "portfolio-current-dependence-source/1",
+        "series_count": 9,
+        "sha256": "c" * 64,
+        "size_bytes": 100,
+    }
+
+
+def _accepted_history_row(name: str, version: str = ADMITTED_VERSION_REF) -> dict:
+    return {
+        "backtest_observations": 3912,
+        "compatibility_basis": (
+            "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
+        ),
+        "history_disposition_reason": "Version-matched prehistory is admitted.",
+        "history_status": "ACCEPTED_VERSION_COMPATIBLE_PREHISTORY",
+        "implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE",
+        "series_id": name,
+        "strategy_version": version,
+    }
+
+
+def _report_with_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog: dict[str, Any],
+    accepted: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    baseline_root = _published_baseline(tmp_path, catalog)
+    monkeypatch.setattr(
+        reporter,
+        "_history_contract",
+        lambda *_args, **_kwargs: _history_rows(accepted),
+    )
+    report, _, _ = reporter.build_report_data(
+        baseline_root, history_contract_path=tmp_path / "dependence-source.json"
+    )
+    return {item["strategy_id"]: item for item in report["strategy_summary"]}
+
+
+def test_backtest_status_follows_the_admitted_prehistory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: the stale catalog default must not call admitted backtest UNAVAILABLE."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _unresolved_version_catalog(),
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "EVIDENCED"
+    assert first["backtest_version_ref"] == ADMITTED_VERSION_REF
+    # Regression guard: no admitted prehistory keeps the catalog's declaration.
+    second = rows["strategy-2"]
+    assert second["history_compatibility_status"] == "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+    assert second["backtest_status"] == "UNAVAILABLE"
+    assert second["backtest_version_ref"] is None
+
+
+def test_version_registry_binds_to_the_hash_bound_exact_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: history acceptance and the version registry name one exact version."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _unresolved_version_catalog(),
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_ref"] == ADMITTED_VERSION_REF
+    assert first["history_version_ref"] == ADMITTED_VERSION_REF
+    assert first["version_disposition"] == "EVIDENCED"
+    assert "history contract" in first["version_disposition_reason"]
+    assert "HASH_BOUND_EXACT_VERSION" in first["version_compatibility_reason"]
+    # Ruling 1: the pinned live-boundary identity window is not re-pinned.
+    assert first["live_boundary_status"] == "EVIDENCED"
+    assert first["live_boundary_observed_start"] == "2026-01-01"
+    assert first["live_boundary_observed_end"] == "2026-01-03"
+    # Registry window fields are the catalog's and are not rewritten.
+    assert first["version_effective_start"] == "2026-01-01"
+    assert first["version_effective_end"] is None
+    # Regression guard: an unaccepted strategy stays UNRESOLVED.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["version_disposition"] == "UNRESOLVED"
+    assert second["version_ref"] is None
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+
+
+def test_version_registry_is_not_bound_over_a_different_catalog_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog version that differs from the history's version stays visible."""
+
+    catalog = _unresolved_version_catalog()
+    first_version = catalog["strategy_version_catalog"]["strategies"][0]
+    first_version["disposition"] = "EVIDENCED"
+    first_version["version_ref"] = "catalog-v1"
+    first_version["disposition_reason"] = "SYNTHETIC catalog version."
+    first_version["gaps"] = []
+    baseline_catalog_strategies = catalog["strategies"]
+    baseline_catalog_strategies[0]["version_ref"] = "catalog-v1"
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        catalog,
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_ref"] == "catalog-v1"
+    assert first["version_compatibility_status"] == "UNRESOLVED"
+    assert first["history_version_ref"] == ADMITTED_VERSION_REF
 
 
 def test_transaction_without_amount_remains_explicitly_unavailable(
