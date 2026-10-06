@@ -294,6 +294,10 @@ class EagerDereference:
 _PATH_SEGMENT = r"[A-Za-z_$][\w$]*"
 
 
+_UNKNOWN_KEY = "<computed or spread>"
+_UNSAFE_KEYS = frozenset({"undefined", "null", "__proto__", _UNKNOWN_KEY})
+
+
 def _object_literal_keys(text: str) -> list[str] | None:
     """Top-level keys of the object literal that starts at the first ``{`` of ``text``."""
 
@@ -307,6 +311,10 @@ def _object_literal_keys(text: str) -> list[str] | None:
     index = start
     while index < len(text):
         char = text[index]
+        if depth == 1 and expect_key and (char == "[" or text.startswith("...", index)):
+            # A computed key or a spread names keys this scan cannot read: unknown.
+            keys.append(_UNKNOWN_KEY)
+            expect_key = False
         if char in "{[(":
             depth += 1
             expect_key = char == "{" and depth == 1
@@ -335,9 +343,10 @@ def _lookup_table_is_safe(js: str, table: str) -> bool:
     """Whether ``table[undefined]`` is falsy because of how the table is defined.
 
     The table must be defined as ``payload?.path || { ... }`` or as a plain object
-    literal, with a literal that has no key ``undefined`` or ``null``: a literal that has
-    one makes the lookup of a missing payload truthy, and a table read straight from the
-    payload (no literal fallback) is not a table at all with no payload.
+    literal whose keys are all plain names: a key ``undefined`` or ``null``, an inherited
+    ``__proto__``, a computed key or a spread makes the lookup of a missing payload
+    possibly truthy, and a table read straight from the payload (no literal fallback) is
+    not a table at all with no payload.
     """
 
     definition = re.search(
@@ -352,7 +361,7 @@ def _lookup_table_is_safe(js: str, table: str) -> bool:
     head = body[: body.find("{")].strip()
     if head and not head.endswith("||"):
         return False
-    return not {"undefined", "null"} & set(keys)
+    return not _UNSAFE_KEYS & set(keys)
 
 
 def _keyed_lookup_guards(
@@ -818,14 +827,29 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
 # ------------------------------------------------------- weekly render window (F4)
 
 
+def _slice_arguments(body: str) -> list[str]:
+    """The argument text of every ``.slice(...)`` call in a (masked) function body."""
+
+    found: list[str] = []
+    for call in re.finditer(r"\.\s*slice\s*\(", body):
+        depth = 1
+        index = call.end()
+        while index < len(body) and depth:
+            depth += {"(": 1, ")": -1}.get(body[index], 0)
+            index += 1
+        found.append(body[call.end() : index - 1])
+    return found
+
+
 def weekly_window_bound(js: str) -> int | None:
     """The default weekly window (weeks) the renderer really slices to, or ``None``.
 
     A heuristic over the structure, not an execution of the renderer: the bound counts
     only when the code (a comment or a string does not) declares the numeric default
-    ``selectedWeeklyWindow``, ``weeklyVisibleWeeks`` slices by that variable, and the
-    function is called. A declaration left behind after the slicing is removed, or never
-    used, gives no bound.
+    ``selectedWeeklyWindow``, ``weeklyVisibleWeeks`` has a ``slice`` whose argument is
+    that variable, and the function is called. A declaration left behind after the slicing
+    is removed or changed (``slice(0)``), or never used, gives no bound. ACCEPTED
+    RESIDUAL: this stays a structural heuristic, not an execution of the renderer.
     """
 
     masked = mask(js)
@@ -839,7 +863,9 @@ def weekly_window_bound(js: str) -> int | None:
     if visible is None:
         return None
     body = masked[visible.body_start : visible.body_end + 1]
-    if not (re.search(r"\.\s*slice\s*\(", body) and "selectedWeeklyWindow" in body):
+    if not any(
+        "selectedWeeklyWindow" in argument for argument in _slice_arguments(body)
+    ):
         return None
     used = any(
         not masked[max(0, call.start() - 9) : call.start()].strip().endswith("function")

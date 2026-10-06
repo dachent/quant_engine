@@ -117,14 +117,32 @@ def test_c5_a_live_window_after_the_cutoff_blocks(tmp_path: Path) -> None:
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
 
 
-def test_c5_retained_or_unavailable_live_windows_are_exempt(tmp_path: Path) -> None:
+def test_c5_producer_inactive_lifecycles_and_unavailable_windows_are_exempt(
+    tmp_path: Path,
+) -> None:
+    """The producer's lifecycle values are ACTIVE, DEPRECATED_HISTORY_ONLY and
+    IMMATERIAL_EXCLUDED (tools/portfolio_control_panel.py); exactly the last two exempt."""
+
     for name, changes in (
-        ("retained", {"lifecycle_status": "RETAINED"}),
-        ("excluded", {"lifecycle_status": "EXCLUDED"}),
+        ("deprecated", {"lifecycle_status": "DEPRECATED_HISTORY_ONLY"}),
+        ("immaterial", {"lifecycle_status": "IMMATERIAL_EXCLUDED"}),
         ("unavailable", {"account_live_status": "UNAVAILABLE_NO_NAV"}),
     ):
         spec = Spec(report=[_live(account_live_observed_end="2026-08-14", **changes)])
         assert _generation_findings(tmp_path / name, spec, SECTION) == [], name
+
+
+def test_c5_a_lifecycle_the_producer_does_not_define_exempts_nothing(
+    tmp_path: Path,
+) -> None:
+    for name, status in (("a", "RETAINED"), ("b", "EXCLUDED"), ("c", "PAUSED")):
+        spec = Spec(
+            report=[
+                _live(account_live_observed_end="2026-08-14", lifecycle_status=status)
+            ]
+        )
+        findings = _generation_findings(tmp_path / name, spec, SECTION)
+        assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY], status
 
 
 def test_c5_a_live_window_at_the_cutoff_is_silent(tmp_path: Path) -> None:

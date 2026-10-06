@@ -3213,6 +3213,32 @@ _CASH_EVENT_TOLERANCE = Decimal("0.000001")
 CASH_EVIDENCE_CHECK = "capital.derived_cash_evidence"
 
 
+def _native_event_problem(event: Mapping[str, Any]) -> str | None:
+    """An event's ``signed_usd`` must follow from its native amount and event-time rate.
+
+    Only an event that states a native amount is checked: ``|signed_usd|`` equals the
+    native amount times the event-time rate (1 for native USD). A foreign native amount
+    without a rate cannot be reproduced.
+    """
+
+    native = to_decimal(event.get("native_value"))
+    signed = to_decimal(event.get("signed_usd"))
+    if native is None or signed is None:
+        return None
+    fx = event.get("event_time_fx")
+    rate = to_decimal(fx.get("rate")) if isinstance(fx, Mapping) else None
+    if rate is None:
+        if event.get("native_currency") not in (None, "USD"):
+            return "a foreign native amount carries no event-time rate"
+        rate = Decimal(1)
+    if abs(abs(signed) - abs(native) * rate) > _CASH_EVENT_TOLERANCE:
+        return (
+            f"signed_usd {signed} is not the native amount {native} at the event-time "
+            f"rate {rate}"
+        )
+    return None
+
+
 def derived_cash_issues(line: Any) -> tuple[Decimal | None, list[str]]:
     """The amount of an AVAILABLE derived cash line and why it cannot be trusted.
 
@@ -3247,6 +3273,10 @@ def derived_cash_issues(line: Any) -> tuple[Decimal | None, list[str]]:
             problems.append(
                 f"the line's flow events sum to {total}, not the published {amount}"
             )
+    for position, event in enumerate(rows(line, "events")):
+        problem = _native_event_problem(event)
+        if problem is not None:
+            problems.append(f"event {position}: {problem}")
     return amount, problems
 
 
@@ -5837,6 +5867,8 @@ def _plan_sources_by_lens(
 
     The lag is read from the plan's freshness policy id (``..._45D_V1`` states 45 days);
     a source with no policy or an id that states no lag has ``None`` (not lagged).
+    ACCEPTED RESIDUAL: the lag is the id's suffix, not a policy document, because the
+    repository carries the policy only as that identifier.
     """
 
     plan = decomposition_plan(ctx)
@@ -6372,7 +6404,9 @@ def _cell_is_explained(
     ``NOT_APPLICABLE_OWNER_APPROVED``) is excused only when the plan carries that
     (series, source) pair with that same requirement; a ``DIAGNOSTIC_ONLY`` cell (the model-quality
     gate) only when the plan requires and readies that pair, so a REQUIRED cell can never
-    exempt itself with its own ``selection_status``.
+    exempt itself with its own ``selection_status``. ACCEPTED RESIDUAL: the plan confirms
+    the pair, not that the producer labelled this cell truthfully, so the cell's own label
+    still gates the excuse.
     """
 
     disposition = dispositions.get(
@@ -8355,12 +8389,19 @@ def check_corrections(ctx: Context) -> Iterator[Finding]:
 Check = Callable[[Context], Iterable[Finding]]
 
 
+# The producer's lifecycle values that make no live-window claim (tools/portfolio_control_
+# panel.py writes ACTIVE, DEPRECATED_HISTORY_ONLY and IMMATERIAL_EXCLUDED); any other value
+# is treated as an active strategy.
+_INACTIVE_LIFECYCLES = frozenset({"DEPRECATED_HISTORY_ONLY", "IMMATERIAL_EXCLUDED"})
+
+
 def check_account_live_window(ctx: Context) -> Iterator[Finding]:
     """C5: an active strategy's account live window reaches the cutoff.
 
     ``live_boundary_observed_end`` is a pinned identity window and is not compared (V2);
     this is the window the account live return is computed over. A strategy that is not
-    active (retained or excluded) or whose live status is not available makes no claim.
+    active (the producer's DEPRECATED_HISTORY_ONLY or IMMATERIAL_EXCLUDED) or whose live
+    status is not available makes no claim.
     An active, available strategy must publish a canonical end: a missing, null or
     malformed one is a blocker. An end before the cutoff is a blocker unless the report's
     ``value_basis_bounds`` explains it (FXB-1) and the oracle confirms that bound
@@ -8368,8 +8409,7 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
     """
 
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
-        lifecycle = row.get("lifecycle_status")
-        if isinstance(lifecycle, str) and lifecycle.upper() != "ACTIVE":
+        if row.get("lifecycle_status") in _INACTIVE_LIFECYCLES:
             continue
         status = row.get("account_live_status")
         if status is not None and not is_available(status):

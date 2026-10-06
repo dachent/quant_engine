@@ -235,7 +235,8 @@ def test_a_missing_end_is_exempt_for_inactive_or_unavailable_strategies(
     tmp_path: Path,
 ) -> None:
     for name, changes in (
-        ("retained", {"lifecycle_status": "RETAINED"}),
+        ("deprecated", {"lifecycle_status": "DEPRECATED_HISTORY_ONLY"}),
+        ("immaterial", {"lifecycle_status": "IMMATERIAL_EXCLUDED"}),
         ("unavailable", {"account_live_status": "UNAVAILABLE_NO_NAV"}),
     ):
         spec = Spec(report=[_live(account_live_observed_end=_GONE, **changes)])
