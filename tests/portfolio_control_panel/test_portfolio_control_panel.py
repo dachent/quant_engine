@@ -5866,6 +5866,90 @@ def test_publication_refuses_freshness_dated_after_the_data_cutoff(
     assert not (inputs["output"] / "CURRENT.json").exists()
 
 
+def test_publication_refuses_a_bound_input_dated_after_the_data_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A bound input dated at the execution clock must not reach the sealed manifest.
+
+    The manifest has one date field.  Weekly returns whose own ``as_of_date`` is after
+    the portfolio data cutoff would be sealed as an artifact newer than the manifest;
+    the publication refuses it by name, and nothing is published.
+    """
+
+    weekly_current = read_current(inputs["weekly"])
+    weekly_file = (
+        inputs["weekly"]
+        / "generations"
+        / weekly_current.generation_id
+        / "weekly-returns.json"
+    )
+    # Move the whole weekly source, week grid included, one week later so that it
+    # stays internally consistent and only its date disagrees with the cutoff.
+    weekly = json.loads(weekly_file.read_text(encoding="utf-8"))
+    old_week, new_week = "2026-07-27", "2026-08-03"
+    weekly["as_of_date"] = "2026-08-06"
+    weekly["current_week"].update(
+        data_through_date="2026-08-06", week_start=new_week, week_end="2026-08-09"
+    )
+    weekly["weeks"] = [new_week]
+    for series in weekly["series"]:
+        for field in (
+            "values",
+            "observation_meta",
+            "values_by_mode",
+            "observation_meta_by_mode",
+        ):
+            if field not in series:
+                continue
+            holder = series[field]
+            if field.endswith("_by_mode"):
+                for mode_rows in holder.values():
+                    mode_rows[new_week] = mode_rows.pop(old_week)
+            else:
+                holder[new_week] = holder.pop(old_week)
+    _publish_analytics(
+        inputs["weekly"], "weekly-returns.json", weekly, "synthetic-weekly-late"
+    )
+
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+        "weekly_returns_root": inputs["weekly"],
+        **financial,
+    }
+    built = panel.build_candidate(
+        inputs["report"], inputs["legacy"], inputs["output"], **kwargs
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    # Freeze the semantic QA over the same bound inputs the publication will use.
+    verification = panel.verify_candidate(
+        inputs["report"], inputs["legacy"], candidate, **kwargs
+    )
+    (qa / "semantic-validation.json").write_bytes(canonical_json_bytes(verification))
+    panel.validate_qa(candidate, qa)
+    receipt = _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="bound inputs are dated after the portfolio data cutoff: "
+        "input/portfolio-weekly-returns.json",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
+            coordinated_release_receipt=receipt,
+            **kwargs,
+        )
+
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
 def test_launcher_failure_restores_prior_pointer_and_launcher(
     inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
