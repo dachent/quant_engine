@@ -144,6 +144,45 @@ def _supports_fact(declared: Sequence[str], canonical_fact: str) -> bool:
     return any(token in item for item in normalized for token in tokens)
 
 
+# Canonical freshness fact -> the catalog admission fact types that attest it.
+_ADMISSION_FACTS = {
+    "balances": ("nav_observations",),
+    "positions": ("positions",),
+    "transactions": ("transactions",),
+    "flows": ("flows",),
+    "fx": (),
+    "costs": ("financing_cost_observations",),
+}
+
+
+def _admitted_windows(
+    catalog: Mapping[str, Any], provider_id: str, canonical_fact: str
+) -> list[tuple[date, date]]:
+    """Authoritative admitted windows of one provider for one canonical fact."""
+
+    windows: list[tuple[date, date]] = []
+    raw = catalog.get("admissions")
+    for item in raw if isinstance(raw, list) else []:
+        row = _object(item, "provider admission")
+        if (
+            row.get("provider_id") != provider_id
+            or row.get("disposition") != "AUTHORITATIVE"
+            or row.get("fact_type") not in _ADMISSION_FACTS[canonical_fact]
+        ):
+            continue
+        windows.append(
+            (
+                date.fromisoformat(
+                    _text(row.get("effective_start"), f"{provider_id}.effective_start")
+                ),
+                date.fromisoformat(
+                    _text(row.get("effective_end"), f"{provider_id}.effective_end")
+                ),
+            )
+        )
+    return windows
+
+
 def _assessment(
     *,
     policy: FreshnessPolicy,
@@ -158,15 +197,28 @@ def _assessment(
     required_for_current: bool,
     observed_start: date | None = None,
     declared_interval: bool = False,
+    admitted_windows: Sequence[tuple[date, date]] | None = None,
 ) -> dict[str, object]:
     # Judged as of the data cutoff, and ``last_accepted_date`` names a day on which an
     # observation is proven.  A declared contiguous interval that starts on or before
-    # the cutoff and ends after it covers the cutoff.  Anything else that ends after
-    # the cutoff (an interval starting after it, an undated start, or a lane summarised
-    # by its first and last row only) proves nothing at the cutoff and is unavailable.
+    # the cutoff and ends after it covers the cutoff.  A capture interval that starts
+    # after the cutoff (or has no start) is only a capture envelope, the date the run
+    # was taken, and proves nothing: the ledger's own authoritative admitted windows for
+    # the provider and fact decide instead.  A lane known only by its first and last row
+    # dates and ending after the cutoff proves nothing at the cutoff.
     if observed_end is not None and observed_end > as_of:
         if declared_interval and observed_start is not None and observed_start <= as_of:
             observed_end = as_of
+        elif declared_interval and admitted_windows is not None:
+            started = [end for start, end in admitted_windows if start <= as_of]
+            if started:
+                observed_end = min(max(started), as_of)
+            else:
+                observed_end = None
+                if not admitted_windows:
+                    # The ledger admits nothing of this fact from the provider, so
+                    # no current consumer reads it: disclosed, but not blocking.
+                    required_for_current = False
         else:
             observed_end = None
     assessed = policy.assess(observed_end, as_of).to_dict()
@@ -300,6 +352,7 @@ def build_health(
                     observed_end=observed_day if supported else None,
                     observed_start=observed_start,
                     declared_interval=True,
+                    admitted_windows=_admitted_windows(catalog, provider_id, fact_type),
                     as_of=as_of,
                     provider_id=provider_id,
                     subject_id=provider_id,

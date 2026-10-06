@@ -41,8 +41,10 @@ def _provider_ledger(
     ibkr_start: str = "2026-07-31",
     manifest_as_of: str | None = None,
     extra_strategy_evidence: list[dict[str, object]] | None = None,
+    admissions: list[dict[str, object]] | None = None,
 ) -> str:
     catalog = {
+        "admissions": admissions or [],
         "as_of_date": ledger_as_of,
         "provider_coverage": [
             {
@@ -428,6 +430,23 @@ def test_an_observation_after_the_cutoff_is_labelled_at_the_cutoff(
     assert capture["state"] == "FRESH"
 
 
+def _admission(
+    fact_type: str, start: str, end: str, provider: str = "ibkr"
+) -> dict[str, object]:
+    return {
+        "disposition": "AUTHORITATIVE",
+        "effective_end": end,
+        "effective_start": start,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": fact_type,
+        "provider_id": provider,
+    }
+
+
+def _nav_admission(start: str, end: str, provider: str = "ibkr") -> dict[str, object]:
+    return _admission("nav_observations", start, end, provider)
+
+
 def _ibkr_balances(result: dict[str, object]) -> dict[str, object]:
     return next(
         row
@@ -445,7 +464,10 @@ def test_a_capture_that_starts_after_the_cutoff_proves_nothing_at_it(
 
     root = tmp_path / "provider-ledger"
     generation_id = _provider_ledger(
-        root, ibkr_start="2026-08-02", ibkr_end="2026-08-02"
+        root,
+        ibkr_start="2026-08-02",
+        ibkr_end="2026-08-02",
+        admissions=[_nav_admission("2026-08-02", "2026-08-02")],
     )
 
     result = freshness.build_health(root, generation_id, date(2026, 10, 4))
@@ -612,7 +634,10 @@ def test_an_unavailable_capture_reaches_the_panel_as_a_blocking_escalation(
 
     root = tmp_path / "provider-ledger"
     generation_id = _provider_ledger(
-        root, ibkr_start="2026-08-02", ibkr_end="2026-08-02"
+        root,
+        ibkr_start="2026-08-02",
+        ibkr_end="2026-08-02",
+        admissions=[_nav_admission("2026-08-02", "2026-08-02")],
     )
     health = tmp_path / "freshness-health.json"
     freshness.write_health(root, generation_id, health, date(2026, 10, 4))
@@ -674,6 +699,202 @@ def test_an_unavailable_strategy_lane_blocks_the_hwm_perimeter(
     assert summary["status"] != "AVAILABLE_GOVERNED_HWM_PERIMETER"
 
 
+def _ibkr_capture_row(result: dict[str, object], fact: str) -> dict[str, object]:
+    return next(
+        row
+        for row in result["assessments"]  # type: ignore[attr-defined]
+        if row["subject_id"] == "ibkr"
+        and row["lane"] == "PROVIDER_CAPTURE"
+        and row["fact_type"] == fact
+    )
+
+
+def _late_capture_result(
+    tmp_path: Path, admissions: list[dict[str, object]]
+) -> dict[str, object]:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root, ibkr_start="2026-08-02", ibkr_end="2026-08-02", admissions=admissions
+    )
+    return freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+
+def test_an_earlier_admitted_window_through_the_cutoff_is_fresh(
+    tmp_path: Path,
+) -> None:
+    """Round 1b: the capture envelope proves nothing; the admitted window does."""
+
+    result = _late_capture_result(
+        tmp_path,
+        [
+            _nav_admission("2026-08-02", "2026-08-02"),
+            _nav_admission("2026-07-01", "2026-07-31"),
+        ],
+    )
+
+    row = _ibkr_balances(result)
+    assert row["last_accepted_date"] == "2026-07-31"
+    assert row["state"] == "FRESH"
+    assert row["blocks_current_consumers"] is False
+
+
+def test_an_admitted_window_ending_after_the_cutoff_is_capped_at_it(
+    tmp_path: Path,
+) -> None:
+    result = _late_capture_result(
+        tmp_path, [_nav_admission("2026-07-01", "2026-08-05")]
+    )
+
+    row = _ibkr_balances(result)
+    assert row["last_accepted_date"] == "2026-07-31"
+    assert row["state"] == "FRESH"
+
+
+def test_an_old_admitted_window_is_not_rounded_up_to_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    result = _late_capture_result(
+        tmp_path, [_nav_admission("2026-07-01", "2026-07-20")]
+    )
+
+    row = _ibkr_balances(result)
+    assert row["last_accepted_date"] == "2026-07-20"
+    assert row["state"] == "STALE"
+    assert row["required_for_current"] is True
+    assert row["blocks_current_consumers"] is True
+
+
+def test_a_fact_the_ledger_admits_nothing_of_is_disclosed_and_not_required(
+    tmp_path: Path,
+) -> None:
+    result = _late_capture_result(
+        tmp_path, [_nav_admission("2026-07-01", "2026-07-31")]
+    )
+
+    row = _ibkr_capture_row(result, "positions")
+    assert row["last_accepted_date"] is None
+    assert row["state"] == "UNAVAILABLE"
+    assert row["required_for_current"] is False
+    assert row["blocks_current_consumers"] is False
+    assert row["escalation_required"] is False
+
+
+def test_only_authoritative_admissions_of_the_matching_provider_and_fact_count(
+    tmp_path: Path,
+) -> None:
+    other_provider = _nav_admission("2026-07-01", "2026-07-31", provider="matrixport")
+    other_fact = _admission("positions", "2026-07-01", "2026-07-31")
+    declared = {**_nav_admission("2026-07-01", "2026-07-31"), "disposition": "EXCLUDED"}
+
+    result = _late_capture_result(tmp_path, [other_provider, other_fact, declared])
+
+    row = _ibkr_balances(result)
+    assert row["last_accepted_date"] is None
+    assert row["required_for_current"] is False
+
+
+def test_each_canonical_fact_reads_its_own_admission_type(tmp_path: Path) -> None:
+    result = _late_capture_result(
+        tmp_path,
+        [
+            _admission("positions", "2026-07-01", "2026-07-31"),
+            _admission("transactions", "2026-07-01", "2026-07-31"),
+            _admission("flows", "2026-07-01", "2026-07-31"),
+            _admission("financing_cost_observations", "2026-07-01", "2026-07-31"),
+        ],
+    )
+
+    for fact in ("positions", "transactions", "flows"):
+        assert _ibkr_capture_row(result, fact)["state"] == "FRESH", fact
+    assert _ibkr_capture_row(result, "balances")["required_for_current"] is False
+
+
+FV5_LEDGER = Path(
+    "C:/Dev/q/fv5/out/stages/ledger/generations/"
+    "d4d24f4cf839cfc14992d8e0af492096ddf05904d1bbc024da6fbfc3cb2d7308/"
+    "provider-ledger.json"
+)
+
+
+@pytest.mark.skipif(
+    not FV5_LEDGER.is_file(), reason="the FV-5 ledger is not on this machine"
+)
+def test_the_real_fv5_ledger_matrixport_is_fresh_where_the_ledger_admits_it(
+    tmp_path: Path,
+) -> None:
+    """The catalog is judged through the producer's own entry point, byte for byte.
+
+    The generation is re-staged around the real catalog bytes so build_health runs
+    unchanged; only the manifest wrapper is synthetic.
+    """
+
+    content = FV5_LEDGER.read_bytes()
+    catalog = json.loads(content)
+    cutoff = date.fromisoformat(catalog["as_of_date"])
+    root = tmp_path / "provider-ledger"
+    source = tmp_path / "provider-ledger.json"
+    source.write_bytes(content)
+    manifest = GenerationManifest.build(
+        as_of_date=cutoff,
+        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="real FV-5 catalog",
+            fact_types=("strategy_evidence",),
+            observed_start=date(2025, 12, 1),
+            observed_end=cutoff,
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                source,
+                artifact_id="normalized/provider-ledger.json",
+                as_of_date=cutoff,
+                schema_name="provider-ledger-catalog",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    staged = stage_generation(root, manifest)
+    (staged.parent / "provider-ledger.json").write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+
+    result = freshness.build_health(root, manifest.generation_id, date(2026, 10, 6))
+
+    rows = [
+        row
+        for row in result["assessments"]  # type: ignore[attr-defined]
+        if row["lane"] == "PROVIDER_CAPTURE" and row["provider_id"] == "matrixport"
+    ]
+    matrixport = {row["fact_type"]: row for row in rows}
+    for fact in ("balances", "flows"):
+        assert matrixport[fact]["state"] == "FRESH", fact
+        assert matrixport[fact]["last_accepted_date"] == "2026-09-17"
+        assert matrixport[fact]["blocks_current_consumers"] is False
+    for fact in ("positions", "transactions", "costs"):
+        assert matrixport[fact]["state"] == "UNAVAILABLE", fact
+        assert matrixport[fact]["last_accepted_date"] is None
+        assert matrixport[fact]["required_for_current"] is False
+        assert matrixport[fact]["blocks_current_consumers"] is False
+    assert matrixport["fx"]["coverage_status"] == "OUT_OF_BOUNDARY"
+    blocking_captures = [
+        row
+        for row in result["assessments"]  # type: ignore[attr-defined]
+        if row["lane"] == "PROVIDER_CAPTURE" and row["blocks_current_consumers"]
+    ]
+    assert not [r for r in blocking_captures if r["provider_id"] == "matrixport"]
+    for provider in ("ibkr", "schwab"):
+        straddled = [
+            row
+            for row in result["assessments"]  # type: ignore[attr-defined]
+            if row["lane"] == "PROVIDER_CAPTURE"
+            and row["provider_id"] == provider
+            and row["required_for_current"]
+        ]
+        assert straddled
+        assert {row["last_accepted_date"] for row in straddled} == {"2026-09-17"}
+
+
 def test_freshness_refuses_an_evaluation_before_the_data_cutoff(
     tmp_path: Path,
 ) -> None:
@@ -726,3 +947,32 @@ def test_hwm_coverage_is_not_stale_when_last_accepted_is_the_cutoff_boundary(
     assert rows[0]["hwm_freshness_status"] == "ACCEPTED"
     assert summary["uncovered_strategies"] == []
     assert summary["status"] == "AVAILABLE_GOVERNED_HWM_PERIMETER"
+
+
+def test_the_admission_map_covers_every_canonical_fact() -> None:
+    catalog = {
+        "admissions": [
+            _admission("nav_observations", "2026-07-01", "2026-07-02"),
+            _admission("positions", "2026-07-03", "2026-07-04"),
+            _admission("transactions", "2026-07-05", "2026-07-06"),
+            _admission("flows", "2026-07-07", "2026-07-08"),
+            _admission("financing_cost_observations", "2026-07-09", "2026-07-10"),
+            _admission("capital_anchors", "2026-07-11", "2026-07-12"),
+        ]
+    }
+
+    starts = {
+        fact: [
+            start.day for start, _ in freshness._admitted_windows(catalog, "ibkr", fact)
+        ]
+        for fact in freshness._CANONICAL_FACTS
+    }
+
+    assert starts == {
+        "balances": [1],
+        "positions": [3],
+        "transactions": [5],
+        "flows": [7],
+        "fx": [],
+        "costs": [9],
+    }

@@ -69,10 +69,18 @@ and manifest before its rows appear in the Data view. Both the panel build and
 coordinated publication recompute the assessment rather than trusting stored
 state labels. `last_accepted_date` always names a day on or before the cutoff
 on which an observation is proven: a declared capture interval that starts on or
-before the cutoff and ends after it is accepted through the cutoff, and a source
-that starts after the cutoff, or a strategy lane known only by its first and
-last row dates and ending after the cutoff, has no accepted date and is
-`UNAVAILABLE`.
+before the cutoff and ends after it is accepted through the cutoff, and a capture
+interval that starts after the cutoff, or has no start, is only a capture envelope
+(the date the run was taken) and proves nothing, so the provider-ledger catalog's own
+AUTHORITATIVE admissions for that provider and fact decide instead (balances read
+`nav_observations`, positions `positions`, transactions `transactions`, flows `flows`,
+costs `financing_cost_observations`, fx none). An admitted window that starts on or
+before the cutoff gives the latest such window end, capped at the cutoff, and the normal
+policy then decides FRESH, LATE or STALE; windows that all start after the cutoff are
+`UNAVAILABLE` and still block; a fact the ledger admits nothing of from that provider is
+`UNAVAILABLE`, disclosed, and not required for current consumers. A capture, generation
+or run date is never an observation date. A strategy lane known only by its first and
+last row dates and ending after the cutoff has no accepted date and is `UNAVAILABLE`.
 
 ## Failure and recovery
 
