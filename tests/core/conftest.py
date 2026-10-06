@@ -47,3 +47,23 @@ def real_verify_release_validation(
             release_module, "_verify_release_validation", lambda *args, **kwargs: None
         )
     return real
+
+
+@pytest.fixture(autouse=True)
+def attended_path_budget_off_for_deep_tmp_roots(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pytest's temp roots are far deeper than a supported attended run root.
+
+    The attended path-budget gate (portfolio_pipeline_materialize) refuses any root
+    under which the deepest generated path reaches the Windows limit, which every
+    `tmp_path` run root would. Tests of other behaviour do not exercise it; the
+    preflight-ladder tests do, and keep the real gate.
+    """
+    if "preflight_ladder" in request.node.nodeid:
+        return
+    import portfolio_pipeline_materialize as materializer
+
+    monkeypatch.setattr(
+        materializer, "_attended_path_budget", lambda *_args, **_kwargs: None
+    )

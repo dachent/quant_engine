@@ -5893,6 +5893,81 @@ def _attended_stage_financial_inputs(
     }
 
 
+WINDOWS_PATH_LIMIT: Final = 260
+_GENERATION_ID_LENGTH: Final = 64
+# The longest artifact names each stage's generations are known to hold. The ledger
+# stage carries captured provider responses; every analytics, baseline and report root
+# carries a target-series source id; the panel carries governance inputs. The values come
+# from the artifact ids the producers write (provider_ledger, portfolio_target_series,
+# portfolio_control_panel), not from a guess about the run.
+_LEDGER_ARTIFACT: Final = "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
+_SOURCE_ARTIFACT: Final = "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+_PANEL_ARTIFACT: Final = "inputs/governance/current-strategy-decomposition-plan.json"
+_CACHE_ARTIFACT: Final = _LEDGER_ARTIFACT
+
+
+def _generated_tail(stage_root: Path, artifact: str) -> str:
+    parts = [*stage_root.parts, "generations", "0" * _GENERATION_ID_LENGTH]
+    return "\\".join([*parts, *artifact.split("/")])
+
+
+def generated_tails() -> list[tuple[str, str]]:
+    """Every deepest known generated path below the output root, as (label, tail)."""
+
+    tails = []
+    for key, stage_root in PRODUCTION_STAGE_ROOTS.items():
+        artifact = (
+            _LEDGER_ARTIFACT
+            if key == "provider-ledger"
+            else _PANEL_ARTIFACT
+            if key == "portfolio-panel"
+            else _SOURCE_ARTIFACT
+        )
+        tails.append((key, _generated_tail(stage_root, artifact)))
+    return tails
+
+
+def longest_generated_tail() -> tuple[str, str]:
+    return max(generated_tails(), key=lambda item: len(item[1]))
+
+
+def _cache_tails() -> list[tuple[str, str]]:
+    generation = "0" * _GENERATION_ID_LENGTH
+    artifact = _CACHE_ARTIFACT.replace("/", "\\")
+    kind = PRODUCTION_STAGE_ROOTS["hybrid-us-industry"].name
+    return [
+        ("candidates", "\\".join(("candidates", generation, artifact))),
+        (
+            "training evidence",
+            "\\".join((".decomposition-training-evidence", f"{generation}.json")),
+        ),
+        ("generation", "\\".join((kind, "generations", generation, artifact))),
+    ]
+
+
+def _attended_path_budget(output_root: Path, retained_cache_root: Path) -> None:
+    """Refuse roots under which a generated path would reach the Windows limit.
+
+    A run that crosses it fails hours in, inside a child, at whichever artifact is
+    first to be written past 259 characters. The deepest names are known, so the
+    arithmetic is done before anything is created.
+    """
+
+    for label, root, tails in (
+        ("output", output_root, generated_tails()),
+        ("retained cache", retained_cache_root, _cache_tails()),
+    ):
+        base = len(str(root))
+        stage, tail = max(tails, key=lambda item: len(item[1]))
+        reached = base + 1 + len(tail)
+        if reached >= WINDOWS_PATH_LIMIT:
+            raise MaterializationError(
+                f"attended {label} root {root} would hold a generated path of "
+                f"{reached} characters ({stage}: ...{tail[-60:]}); the Windows limit "
+                f"is {WINDOWS_PATH_LIMIT}. Use a shorter {label} root"
+            )
+
+
 def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     """Validate the runner environment before source admission can have effects."""
 
@@ -5947,6 +6022,7 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
         raise MaterializationError("attended workspace dataPortfolio is unavailable")
     _attended_disjoint(output_root, portfolio_root, "output and portfolio")
     _attended_disjoint(output_root, retained_cache_root, "output and retained cache")
+    _attended_path_budget(output_root, retained_cache_root)
     try:
         requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
     except ValueError as exc:
