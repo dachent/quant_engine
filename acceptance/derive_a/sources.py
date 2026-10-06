@@ -258,6 +258,8 @@ class Ledger:
     flows: Mapping[str, AccountFlows]
     anchors: Mapping[str, Sequence[Anchor]]
     generations: Mapping[str, str]
+    # Every mapping_status the provider ledger carries for an account's NAV rows.
+    nav_mapping: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
@@ -265,8 +267,10 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
     nav: dict[str, dict[dt.date, Decimal]] = {}
     nav_rows: dict[str, dict[dt.date, Mapping[str, Any]]] = {}
     issues: dict[str, list[str]] = {}
+    mapping: dict[str, set[str]] = {}
     for row in document["nav_observations"]:
         account = str(row["account_id"])
+        mapping.setdefault(account, set()).add(str(row.get("mapping_status")))
         day = iso_date(row.get("as_of_date"))
         value_block = row.get("nav") or {}
         value = decimal_or_none(value_block.get("value"))
@@ -364,6 +368,7 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         flows=flows,
         anchors=anchors,
         generations=generations,
+        nav_mapping={account: frozenset(found) for account, found in mapping.items()},
     )
 
 

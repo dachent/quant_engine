@@ -570,6 +570,26 @@ def current_membership_starts(rows: list[dict[str, object]]) -> dict[str, date]:
     return starts
 
 
+UNMAPPED_NAV_REASON = (
+    "every provider-ledger NAV observation for this account is UNMAPPED (no admitted "
+    "strategy mapping), so no admitted source date exists"
+)
+
+
+def accounts_without_admitted_mapping(ledger: dict[str, object]) -> set[str]:
+    """Accounts whose provider-ledger NAV rows are all explicitly UNMAPPED.
+
+    V15: an account that carries ledger NAV observations and not one admitted (MAPPED)
+    row has no admitted source; its source-last-observation date is not derivable from
+    the unmapped rows. A row that states no mapping_status is not evidence of either.
+    """
+
+    statuses: dict[str, set[str]] = defaultdict(set)
+    for row in ledger["nav_observations"]:
+        statuses[str(row["account_id"])].add(str(row.get("mapping_status")))
+    return {account for account, found in statuses.items() if found == {"UNMAPPED"}}
+
+
 def latest_observations(
     ledger: dict[str, object],
 ) -> tuple[dict[str, list[tuple[date, Decimal]]], set[str]]:
@@ -3057,6 +3077,21 @@ def derive(
                     window="ITD",
                 )
             )
+    unadmitted = accounts_without_admitted_mapping(ledger)
+    withheld = [
+        row
+        for row in metrics
+        if row["metric_id"] == "date.source_last_observation"
+        and row["entity"] in unadmitted
+    ]
+    for row in withheld:
+        metrics.remove(row)
+        add_not_derivable(
+            output,
+            "date.source_last_observation",
+            str(row["entity"]),
+            UNMAPPED_NAV_REASON,
+        )
     return output
 
 

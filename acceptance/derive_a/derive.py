@@ -3647,7 +3647,7 @@ def _derive(
             sources = _account_sources(
                 crosswalk, ledger, files, None, cutoff, fx_v3=fx_v3, native=native
             )
-            _derive_accounts(output, crosswalk, membership, sources, cutoff)
+            _derive_accounts(output, crosswalk, membership, sources, cutoff, ledger)
             _derive_strategies_and_portfolio_v3(
                 output,
                 crosswalk,
@@ -3662,7 +3662,7 @@ def _derive(
         else:
             fx = _fx_source(files[FX_HISTORY], contract_bytes[MVP_CONTRACT])
             sources = _account_sources(crosswalk, ledger, files, fx, cutoff)
-            _derive_accounts(output, crosswalk, membership, sources, cutoff)
+            _derive_accounts(output, crosswalk, membership, sources, cutoff, ledger)
             _derive_strategies_and_portfolio(
                 output, crosswalk, membership, sources, cutoff
             )
@@ -3838,12 +3838,19 @@ def _last_value(
     return day, source.values[day]
 
 
+UNMAPPED_NAV_REASON = (
+    "every provider-ledger NAV observation for this account is UNMAPPED (no admitted "
+    "strategy mapping), so no admitted source date exists"
+)
+
+
 def _derive_accounts(
     output: Output,
     crosswalk: Crosswalk,
     membership: Membership,
     sources: Mapping[str, AccountSource],
     cutoff: dt.date,
+    ledger: Ledger,
 ) -> None:
     for account_id in sorted({row.account_id for row in crosswalk.rows}):
         source = sources[account_id]
@@ -3883,31 +3890,42 @@ def _derive_accounts(
                 source.value_inputs,
                 base_notes + extra + source.notes,
             )
-            # R6 v2: the source date is the last raw observation, which for
-            # Matrixport can be later than the last USD-convertible valuation.
-            observed = source.raw_last_observation or day
-            observed_stale = (cutoff - observed).days
-            output.metric(
-                "date.source_last_observation",
-                account_id,
-                None,
-                observed,
-                _day(observed),
-                "date",
-                source.value_inputs,
-                base_notes
-                + (
-                    [f"observation {observed_stale} day(s) before cutoff"]
-                    if observed_stale
-                    else []
+            # V15: an account whose ledger NAV rows are all UNMAPPED has no admitted
+            # source; its date is not derived from the unmapped rows.
+            found = ledger.nav_mapping.get(account_id)
+            if found == frozenset({"UNMAPPED"}):
+                output.missing(
+                    "date.source_last_observation",
+                    account_id,
+                    None,
+                    UNMAPPED_NAV_REASON,
                 )
-                + (
-                    [f"last USD-converted valuation {_day(day)} (FX boundary)"]
-                    if observed != day
-                    else []
+            else:
+                # R6 v2: the source date is the last raw observation, which for
+                # Matrixport can be later than the last USD-convertible valuation.
+                observed = source.raw_last_observation or day
+                observed_stale = (cutoff - observed).days
+                output.metric(
+                    "date.source_last_observation",
+                    account_id,
+                    None,
+                    observed,
+                    _day(observed),
+                    "date",
+                    source.value_inputs,
+                    base_notes
+                    + (
+                        [f"observation {observed_stale} day(s) before cutoff"]
+                        if observed_stale
+                        else []
+                    )
+                    + (
+                        [f"last USD-converted valuation {_day(day)} (FX boundary)"]
+                        if observed != day
+                        else []
+                    )
+                    + source.value_notes,
                 )
-                + source.value_notes,
-            )
         windowed = (
             "flows.account.net",
             "flows.account.count",
