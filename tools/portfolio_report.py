@@ -5943,14 +5943,30 @@ def _freshness_assessments(
         "assessments",
         "policy" if schema_version == 2 else "policies",
     }
+    if schema_version == 4:
+        # Version 4 is dated at the data cutoff and carries the execution date.
+        expected.add("evaluated_on")
     accepted = {frozenset(expected)}
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         accepted.add(frozenset(expected | {"provider_ledger"}))
-    if schema_version not in {2, 3} or frozenset(payload) not in accepted:
+    if schema_version not in {2, 3, 4} or frozenset(payload) not in accepted:
         raise ReportValidationError("freshness health contract differs")
     as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")
     if as_of < portfolio_as_of:
         raise ReportValidationError("freshness health predates the portfolio")
+    execution_date = as_of
+    if schema_version == 4:
+        if as_of != portfolio_as_of:
+            raise ReportValidationError(
+                "freshness health is not dated at the portfolio data cutoff"
+            )
+        execution_date = _date(
+            payload.get("evaluated_on"), "freshness health evaluated_on"
+        )
+        if execution_date < as_of:
+            raise ReportValidationError(
+                "freshness health was evaluated before its data date"
+            )
     if "provider_ledger" in payload:
         ledger = _object(payload.get("provider_ledger"), "freshness provider ledger")
         if set(ledger) != {
@@ -5965,7 +5981,7 @@ def _freshness_assessments(
         ledger_as_of = _date(
             ledger.get("as_of_date"), "freshness provider ledger as_of_date"
         )
-        if ledger_as_of > as_of:
+        if ledger_as_of > execution_date:
             raise ReportValidationError(
                 "freshness provider ledger postdates the evaluation"
             )

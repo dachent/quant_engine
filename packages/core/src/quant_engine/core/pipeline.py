@@ -4132,22 +4132,33 @@ def _verify_freshness_gate(
                 "assessments",
                 "policies",
             }
-            if schema_version == 3
+            if schema_version in {3, 4}
             else set()
         )
+        if schema_version == 4:
+            base_keys.add("evaluated_on")
         accepted_keys = {frozenset(base_keys)}
-        if schema_version == 3:
+        if schema_version in {3, 4}:
             accepted_keys.add(frozenset(base_keys | {"provider_ledger"}))
         if frozenset(payload) not in accepted_keys:
             raise PipelineValidationError("freshness gate schema differs")
         assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
-        if assessed_on != evaluation_date:
+        # Version 4 judges every assessment at its data cutoff and states the
+        # operational date separately; older versions judged at the operational date.
+        executed_on = assessed_on
+        if schema_version == 4:
+            executed_on = date.fromisoformat(str(payload.get("evaluated_on")))
+            if assessed_on > executed_on:
+                raise PipelineValidationError(
+                    "freshness gate data date follows its evaluation date"
+                )
+        if executed_on != evaluation_date:
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
             )
         if "provider_ledger" in payload:
             _verify_freshness_provider_ledger(
-                spec, payload.get("provider_ledger"), assessed_on
+                spec, payload.get("provider_ledger"), executed_on
             )
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
@@ -4179,7 +4190,7 @@ def _verify_freshness_gate(
                 if observed_text is None
                 else date.fromisoformat(str(observed_text))
             )
-            expected = policy.assess(observed, evaluation_date).to_dict()
+            expected = policy.assess(observed, assessed_on).to_dict()
             required_for_current = item.get("required_for_current", True)
             if not isinstance(required_for_current, bool):
                 raise PipelineValidationError(

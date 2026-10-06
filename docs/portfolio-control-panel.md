@@ -196,9 +196,17 @@ uv run --frozen --no-sync python tools/portfolio_freshness.py `
 ```
 
 Every material strategy must have a `nav` or `strategy-returns` assessment.
-The evaluation date is the local operational publication date, not merely the
-provider-ledger date. Pipeline preparation and commit both recompute every
-assessment from the embedded policy and reject an older or forged bundle.
+The evaluation date is the local operational publication date, recorded as the
+artifact's `evaluated_on`; the artifact itself (`as_of_date`) and every assessment
+are dated at the financial data cutoff (the provider-ledger catalog date), so a
+strategy last accepted on the cutoff is current as of it however late the run is,
+and a source that published past the cutoff is accepted through it. The panel
+generation manifest is dated at that same cutoff, never the later run date, and
+publication refuses a freshness artifact or any bound input dated after it.
+Pipeline preparation and commit both recompute every assessment from the embedded
+policy and reject an older or forged bundle. Portfolio123 is a finite source in
+the provider ledger and uses the `finite-history` policy: `FINITE_COMPLETE` at its
+own last accepted date, not a recurring cadence it never owed.
 `STALE`, `UNAVAILABLE`, or an absent assessment revokes the HWM-available
 claim and reduces freshness-adjusted NAV coverage. `LATE` remains visible and
 escalated but does not yet block current consumers. The exact freshness file

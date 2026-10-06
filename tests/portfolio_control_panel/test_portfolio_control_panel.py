@@ -5220,6 +5220,136 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
         panel._freshness_health(invalid, "2026-08-03")
 
 
+def _schema_v4_health(
+    tmp_path: Path, *, as_of: str, evaluated_on: str, ledger_as_of: str
+) -> dict[str, object]:
+    policy = {
+        "calendar": "CALENDAR_DAY",
+        "expected_interval_days": 1,
+        "grace_days": 2,
+        "mode": "RECURRING",
+        "policy_id": "daily-calendar-24x7",
+        "stale_after_days": 5,
+    }
+    computed = (
+        panel.FreshnessPolicy.from_dict(policy)
+        .assess(date(2026, 7, 20), date.fromisoformat(as_of))
+        .to_dict()
+    )
+    return {
+        "assessment_schema_version": 4,
+        "as_of_date": as_of,
+        "evaluated_on": evaluated_on,
+        "assessments": [
+            {
+                **computed,
+                "acquired_at": None,
+                "coverage_status": "AVAILABLE",
+                "fact_type": "strategy-returns",
+                "lane": "ACCOUNT",
+                "provider_id": "synthetic",
+                "required_for_current": True,
+                "revision_state": "ORIGINAL",
+                "subject_id": "strategy-one",
+                "subject_type": "STRATEGY",
+            }
+        ],
+        "policies": [policy],
+        "provider_ledger": {
+            "as_of_date": ledger_as_of,
+            "catalog_sha256": "a" * 64,
+            "catalog_size_bytes": 100,
+            "generation_id": "b" * 64,
+            "manifest_sha256": "c" * 64,
+            "manifest_size_bytes": 200,
+        },
+    }
+
+
+def test_schema_v4_freshness_is_dated_at_the_cutoff_and_names_the_execution_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the freshness artifact is dated at the data cutoff.
+
+    The ledger generation is dated one day past the cutoff by design and the run
+    executes much later; neither may move the freshness data date.
+    """
+
+    health = tmp_path / "freshness-v4.json"
+    _write_json(
+        health,
+        _schema_v4_health(
+            tmp_path,
+            as_of="2026-08-03",
+            evaluated_on="2026-10-04",
+            ledger_as_of="2026-08-04",
+        ),
+    )
+
+    rows = panel._freshness_health(health, "2026-08-03")
+
+    assert rows[0]["evaluated_on"] == "2026-08-03"
+    assert rows[0]["reconciled_on"] == "2026-08-03"
+    assert rows[0]["required_for_current"] is True
+
+    for label, payload, message, portfolio_as_of in (
+        (
+            "other-data-date",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-10-04",
+                ledger_as_of="2026-08-03",
+            ),
+            "not dated at the portfolio data cutoff",
+            "2026-08-04",
+        ),
+        (
+            "early-evaluation",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-08-02",
+                ledger_as_of="2026-08-02",
+            ),
+            "evaluated before its data date",
+            "2026-08-03",
+        ),
+        (
+            "future-ledger",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-10-04",
+                ledger_as_of="2026-10-05",
+            ),
+            "ledger postdates the evaluation",
+            "2026-08-03",
+        ),
+    ):
+        path = tmp_path / f"freshness-v4-{label}.json"
+        _write_json(path, payload)
+        with pytest.raises(panel.ControlPanelValidationError, match=message):
+            panel._freshness_health(path, portfolio_as_of)
+
+
+def test_schema_v4_freshness_requires_the_execution_date_key(tmp_path: Path) -> None:
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-10-04",
+        ledger_as_of="2026-08-03",
+    )
+    del payload["evaluated_on"]
+    health = tmp_path / "freshness-v4-missing.json"
+    _write_json(health, payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="freshness health keys differ"
+    ):
+        panel._freshness_health(health, "2026-08-03")
+
+
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
     with pytest.raises(
         panel.ControlPanelValidationError, match="freshness health is mandatory"
@@ -5525,13 +5655,9 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         )
 
 
-def test_publication_manifest_uses_later_operational_freshness_date(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
-    freshness["as_of_date"] = "2026-07-31"
-    for assessment in freshness["assessments"]:
-        assessment["evaluated_on"] = "2026-07-31"
+def _publish_with_freshness(
+    inputs: dict[str, Path], tmp_path: Path, freshness: dict[str, object]
+) -> dict[str, object]:
     _write_json(inputs["freshness"], freshness)
     financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
@@ -5545,8 +5671,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
-
-    published = panel.publish_panel(
+    return panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
         candidate,
@@ -5560,6 +5685,38 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         **financial,
     )
 
+
+def test_publication_manifest_is_dated_at_the_data_cutoff_not_the_execution_date(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """R2-3: replaces the test that pinned the execution date as the manifest date.
+
+    The manifest has one date field and the weekly anchor, retained cutoff and
+    provider ledger read it as the data date.  Freshness is dated at the cutoff and
+    carries the later execution date inside it, so the manifest stays at the cutoff.
+    """
+
+    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    policy = {**freshness.pop("policy"), "calendar": "CALENDAR_DAY"}
+    freshness.update(
+        {
+            "assessment_schema_version": 4,
+            "evaluated_on": "2026-08-04",
+            "policies": [policy],
+        }
+    )
+    for assessment in freshness["assessments"]:
+        assessment.update(
+            {
+                "coverage_status": "AVAILABLE",
+                "lane": "ACCOUNT",
+                "required_for_current": True,
+                "subject_type": "STRATEGY",
+            }
+        )
+
+    published = _publish_with_freshness(inputs, tmp_path, freshness)
+
     generation = inputs["output"] / "generations" / str(published["generation_id"])
     manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
     freshness_artifact = next(
@@ -5567,10 +5724,39 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         for item in manifest["artifacts"]
         if item["artifact_id"] == "input/freshness-health.json"
     )
-    assert manifest["as_of_date"] == "2026-07-31"
+    assert manifest["as_of_date"] == "2026-07-30"
     assert manifest["coverage"]["observed_start"] == "2026-07-30"
-    assert manifest["coverage"]["observed_end"] == "2026-07-31"
-    assert freshness_artifact["as_of_date"] == "2026-07-31"
+    assert manifest["coverage"]["observed_end"] == "2026-07-30"
+    assert freshness_artifact["as_of_date"] == "2026-07-30"
+    assert freshness_artifact["schema"]["version"] == "4"
+    assert {item["as_of_date"] for item in manifest["artifacts"]} <= {
+        "2026-07-30",
+        "2026-07-17",
+    }
+    shipped = json.loads(
+        (generation / "data" / "freshness-health.json").read_text(encoding="utf-8")
+    )
+    assert shipped["evaluated_on"] == "2026-08-04"
+    assert shipped["as_of_date"] == "2026-07-30"
+
+
+def test_publication_refuses_freshness_dated_after_the_data_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A freshness artifact dated at the execution clock must not date the manifest."""
+
+    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    freshness["as_of_date"] = "2026-07-31"
+    for assessment in freshness["assessments"]:
+        assessment["evaluated_on"] = "2026-07-31"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="freshness health is dated after the portfolio data cutoff",
+    ):
+        _publish_with_freshness(inputs, tmp_path, freshness)
+
+    assert not (inputs["output"] / "CURRENT.json").exists()
 
 
 def test_launcher_failure_restores_prior_pointer_and_launcher(

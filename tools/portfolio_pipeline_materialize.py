@@ -3606,7 +3606,10 @@ def _release_evaluation_date(recipe: Mapping[str, Any]) -> str:
 
 
 def _generation_as_of_allowed(
-    role: str, generation_as_of: date, release_as_of: date
+    role: str,
+    generation_as_of: date,
+    release_as_of: date,
+    cutoff: date | None = None,
 ) -> bool:
     """Allow data-dated roles to lag the release; keep the panel exact-date.
 
@@ -3624,15 +3627,15 @@ def _generation_as_of_allowed(
     still applies -- so the boundary is enforced where the data age is actually
     measured rather than duplicated here.
 
-    The panel is generated at release time and carries no upstream data date, so
-    it stays exact.
+    The panel manifest has one date field and downstream readers take it as the data
+    date, so it is dated at the financial cutoff exactly -- never at the later date the
+    release is cut, which the freshness artifact carries as its own ``evaluated_on``.
+    Without a cutoff the panel is held to the release date, as before.
     """
 
-    return (
-        generation_as_of <= release_as_of
-        if role in _DATA_DATED_RELEASE_ROLES
-        else generation_as_of == release_as_of
-    )
+    if role in _DATA_DATED_RELEASE_ROLES:
+        return generation_as_of <= release_as_of
+    return generation_as_of == (release_as_of if cutoff is None else cutoff)
 
 
 def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
@@ -3755,14 +3758,16 @@ def semantic(
     recipe = _recipe(recipe_path)
     output_root = output_path.parent.parent
     checks: dict[str, dict[str, Any]] = {}
-    # `_generation_as_of_allowed` reasons about the date the release is CUT -- data-dated
-    # roles "legitimately lag the evaluation date" and the panel "is generated at release
-    # time". Handing it the financial cutoff conflated the two clocks, so a ledger whose
-    # provenance is one day past the cutoff (which `provider_ledger._generation_as_of_date`
-    # produces by design) failed, and every freshness row had to be stamped with the data
-    # date to pass -- which is what the previous release did, asserting nothing.
+    # `_generation_as_of_allowed` reasons about the date the release is CUT for the
+    # data-dated roles, which "legitimately lag the evaluation date": handing them the
+    # financial cutoff conflated the two clocks, so a ledger whose provenance is one day
+    # past the cutoff (which `provider_ledger._generation_as_of_date` produces by design)
+    # failed.  The panel manifest is the one date readers take as the DATA date, so it is
+    # held to the financial cutoff exactly while the execution date is carried by the
+    # freshness artifact (`evaluated_on`) and this receipt.
     evaluated_on = _release_evaluation_date(recipe)
     release_as_of = date.fromisoformat(evaluated_on)
+    financial_cutoff = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     if recipe.get("schema_version") == 3:
         conformance = recipe["product_authority"]["conformance"]
         _result(
@@ -3827,14 +3832,16 @@ def semantic(
                 and manifest.verification is VerificationStatus.VERIFIED
                 and manifest.coverage.status
                 is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
-                and _generation_as_of_allowed(role, generation_as_of, release_as_of)
+                and _generation_as_of_allowed(
+                    role, generation_as_of, release_as_of, financial_cutoff
+                )
             )
             generation_rows[role] = {
                 "actual_generation_id": actual["generation_id"],
                 "as_of_rule": (
                     "ON_OR_BEFORE_RELEASE"
                     if role in _DATA_DATED_RELEASE_ROLES
-                    else "EXACT_RELEASE_DATE"
+                    else "EXACT_FINANCIAL_CUTOFF"
                 ),
                 "expected_generation_id": expected["generation_id"],
                 "file_count": len(inventory_files),
@@ -4072,8 +4079,19 @@ def semantic(
     assessment_shape_ok = isinstance(assessments, list) and len(assessment_rows) == len(
         assessments
     )
+    # Schema 4 judges every assessment at the financial cutoff and carries the
+    # execution date beside it; earlier schemas judged at the execution date.
+    if freshness.get("assessment_schema_version") == 4:
+        data_clock_ok = (
+            freshness.get("as_of_date") == recipe["as_of_date"]
+            and freshness.get("evaluated_on") == evaluated_on
+        )
+        row_clock = freshness.get("as_of_date")
+    else:
+        data_clock_ok = freshness.get("as_of_date") == evaluated_on
+        row_clock = evaluated_on
     evaluation_ok = assessment_shape_ok and all(
-        row.get("evaluated_on") == evaluated_on for row in assessment_rows
+        row.get("evaluated_on") == row_clock for row in assessment_rows
     )
     blocking = [
         row for row in assessment_rows if row.get("blocks_current_consumers") is True
@@ -4108,7 +4126,7 @@ def semantic(
     }
     rendered_disclosures_ok = blocking_disclosures == rendered_disclosures
     freshness_ok = (
-        freshness.get("as_of_date") == evaluated_on
+        data_clock_ok
         and evaluation_ok
         and blockers_disclosed
         and rendered_disclosures_ok
@@ -4118,6 +4136,7 @@ def semantic(
         "freshness",
         freshness_ok,
         as_of_date=freshness.get("as_of_date"),
+        evaluated_on=freshness.get("evaluated_on"),
         blocking_assessment_count=len(blocking),
         blockers_explicitly_disclosed=blockers_disclosed,
         blockers_rendered_in_panel=rendered_disclosures_ok,

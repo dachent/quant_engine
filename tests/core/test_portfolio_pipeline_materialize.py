@@ -1450,6 +1450,7 @@ def _fixture(
     *,
     evaluated_on: date | None = None,
     reserve_ready: bool = False,
+    panel_as_of: date | None = None,
 ) -> tuple[Path, Path]:
     output_root = tmp_path / "candidate"
     stages = output_root / "stages"
@@ -1587,11 +1588,11 @@ def _fixture(
         },
         "strategies": [{"strategy_id": f"strategy-{index}"} for index in range(9)],
     }
-    # The panel is generated at release time, so it carries the evaluation clock.
+    # The panel manifest is dated at the financial cutoff: readers take it as the data date.
     panel = _generation(
         stages / "panel",
         "panel",
-        as_of_date=evaluated_on or AS_OF,
+        as_of_date=panel_as_of or AS_OF,
         files={
             "data/dashboard_data.json": panel_payload,
             "qa/interaction-results.json": {"all_passed": True},
@@ -1603,8 +1604,10 @@ def _fixture(
     _write_json(
         stages / "ledger" / "freshness-health.json",
         {
-            "as_of_date": (evaluated_on or AS_OF).isoformat(),
+            "assessment_schema_version": 4,
+            "as_of_date": AS_OF.isoformat(),
             "assessments": [],
+            "evaluated_on": (evaluated_on or AS_OF).isoformat(),
         },
     )
     for key, root_name in (
@@ -3441,9 +3444,35 @@ def test_generation_date_rule_separates_data_date_from_calculation_date() -> Non
         # A generation dated after the release it belongs to is still refused.
         assert not materializer._generation_as_of_allowed(role, later, AS_OF)
 
-    # The panel is produced at release time and carries no upstream data date.
+    # With no cutoff the panel is held to the release date, as before.
     assert materializer._generation_as_of_allowed("panel", AS_OF, AS_OF)
     assert not materializer._generation_as_of_allowed("panel", earlier, AS_OF)
+
+
+def test_panel_manifest_must_be_dated_at_the_financial_cutoff() -> None:
+    """R2-3: the panel manifest date is read as the data date, so it is the cutoff.
+
+    Dating it at the later execution clock made weekly, retained-cutoff and ledger
+    readers take the execution date for data; the gate now refuses that, and refuses a
+    panel older than the cutoff just as firmly.
+    """
+
+    cutoff = date(2026, 7, 31)
+    execution = date(2026, 8, 4)
+
+    assert materializer._generation_as_of_allowed("panel", cutoff, execution, cutoff)
+    assert not materializer._generation_as_of_allowed(
+        "panel", execution, execution, cutoff
+    )
+    assert not materializer._generation_as_of_allowed(
+        "panel", date(2026, 7, 30), execution, cutoff
+    )
+    # Regression guard: the data-dated roles keep their on-or-before-release rule.
+    for role in ("ledger", "baseline", "report"):
+        assert materializer._generation_as_of_allowed(role, cutoff, execution, cutoff)
+        assert materializer._generation_as_of_allowed(
+            role, cutoff + timedelta(days=1), execution, cutoff
+        )
 
 
 def _hybrid_panel_lenses(analytics_ids: dict[str, str]) -> dict[str, object]:
@@ -4306,8 +4335,16 @@ def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
     # Provenance outran the cutoff and was allowed, not relabelled onto the cutoff.
     assert provenance > cutoff
     assert details["checks"]["freshness"]["evidence"]["as_of_date"] == (
+        cutoff.isoformat()
+    )
+    assert details["checks"]["freshness"]["evidence"]["evaluated_on"] == (
         evaluation.isoformat()
     )
+    panel_row = details["checks"]["generation_invariants"]["evidence"]["generations"][
+        "panel"
+    ]
+    assert panel_row["as_of_rule"] == "EXACT_FINANCIAL_CUTOFF"
+    assert panel_row["generation_as_of_date"] == cutoff.isoformat()
     # Both receipts must say which clock decided the verdict. Recording only the cutoff would
     # leave an auditor unable to tell a correct PASS from one produced by the old conflation --
     # and the two dates are equal in exactly the runs where that distinction is cheapest to lose.
@@ -4318,6 +4355,82 @@ def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
     )
     assert gate["as_of_date"] == cutoff.isoformat()
     assert gate["evaluated_on"] == evaluation.isoformat()
+
+
+def test_semantic_refuses_a_panel_manifest_dated_at_the_execution_clock(
+    tmp_path: Path,
+) -> None:
+    """R2-3: a panel manifest dated after the cutoff is read as data newer than it is."""
+
+    evaluation = AS_OF + timedelta(days=4)
+    recipe, output_root = _fixture(
+        tmp_path, evaluated_on=evaluation, panel_as_of=evaluation
+    )
+
+    with pytest.raises(
+        materializer.MaterializationError, match="generation_invariants"
+    ):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+    details = json.loads(
+        (output_root / "evidence" / "semantic-details.json").read_text("utf-8")
+    )
+    row = details["checks"]["generation_invariants"]["evidence"]["generations"]["panel"]
+    assert row["status"] == "FAIL"
+    assert row["generation_as_of_date"] == evaluation.isoformat()
+    assert row["as_of_rule"] == "EXACT_FINANCIAL_CUTOFF"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"evaluated_on": "2026-01-01"},
+        {"as_of_date": "2026-01-01"},
+    ),
+)
+def test_semantic_binds_schema_four_freshness_to_both_clocks(
+    tmp_path: Path, mutation: dict[str, str]
+) -> None:
+    """Schema 4 freshness is dated at the cutoff and names the release's execution date."""
+
+    evaluation = AS_OF + timedelta(days=4)
+    recipe, output_root = _fixture(tmp_path, evaluated_on=evaluation)
+    _mutate_json(
+        output_root / "stages" / "ledger" / "freshness-health.json",
+        lambda payload: payload.update(mutation),
+    )
+
+    with pytest.raises(materializer.MaterializationError, match="freshness"):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+
+def test_semantic_binds_schema_four_assessment_rows_to_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    evaluation = AS_OF + timedelta(days=4)
+    recipe, output_root = _fixture(tmp_path, evaluated_on=evaluation)
+    _mutate_json(
+        output_root / "stages" / "ledger" / "freshness-health.json",
+        lambda payload: payload.update(
+            {
+                "assessments": [
+                    {
+                        "blocks_current_consumers": False,
+                        "evaluated_on": evaluation.isoformat(),
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(materializer.MaterializationError, match="freshness"):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(

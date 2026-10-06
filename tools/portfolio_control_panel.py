@@ -775,13 +775,33 @@ def _freshness_health(
         "assessments",
         "policy" if schema_version == 2 else "policies",
     }
+    if schema_version == 4:
+        # Version 4 is dated at the data cutoff and carries the execution date.
+        expected_bundle_keys.add("evaluated_on")
     accepted_bundle_keys = {frozenset(expected_bundle_keys)}
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         accepted_bundle_keys.add(frozenset(expected_bundle_keys | {"provider_ledger"}))
     if frozenset(payload) not in accepted_bundle_keys:
         raise ControlPanelValidationError("freshness health keys differ")
-    if schema_version not in {2, 3}:
+    if schema_version not in {2, 3, 4}:
         raise ControlPanelValidationError("freshness health schema is unsupported")
+    if schema_version == 4:
+        execution_date = date.fromisoformat(
+            _text(payload.get("evaluated_on"), "freshness health evaluated_on")
+        )
+        data_date = date.fromisoformat(
+            _text(payload.get("as_of_date"), "freshness health as_of_date")
+        )
+        if data_date != date.fromisoformat(portfolio_as_of):
+            raise ControlPanelValidationError(
+                "freshness health is not dated at the portfolio data cutoff"
+            )
+        if execution_date < data_date:
+            raise ControlPanelValidationError(
+                "freshness health was evaluated before its data date"
+            )
+    else:
+        execution_date = None
     if "provider_ledger" in payload:
         provider_ledger = payload.get("provider_ledger")
         ledger_identity = _object(provider_ledger, "freshness provider ledger")
@@ -797,7 +817,7 @@ def _freshness_health(
         ledger_as_of = date.fromisoformat(
             _text(ledger_identity.get("as_of_date"), "freshness ledger as_of_date")
         )
-        freshness_as_of = date.fromisoformat(
+        freshness_as_of = execution_date or date.fromisoformat(
             _text(payload.get("as_of_date"), "freshness health as_of_date")
         )
         if ledger_as_of > freshness_as_of:
@@ -854,7 +874,7 @@ def _freshness_health(
         "state",
         "subject_id",
     }
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         expected |= {
             "coverage_status",
             "lane",
@@ -928,7 +948,7 @@ def _freshness_health(
             None if last is None else date.fromisoformat(last),
             date.fromisoformat(as_of),
         ).to_dict()
-        if schema_version == 3 and not required_for_current:
+        if schema_version in {3, 4} and not required_for_current:
             expected_assessment["blocks_current_consumers"] = False
             expected_assessment["escalation_required"] = False
         for field in (
@@ -982,7 +1002,7 @@ def _freshness_health(
                         "required_for_current": required_for_current,
                         "subject_type": subject_type,
                     }
-                    if schema_version == 3
+                    if schema_version in {3, 4}
                     else {}
                 ),
             }
@@ -13000,7 +13020,15 @@ def publish_panel(
             "freshness health artifact as_of_date",
         )
     )
-    publication_as_of = max(portfolio_as_of, freshness_as_of)
+    # The manifest has one date field and downstream readers take it as the data date
+    # (weekly anchor, retained cutoff, provider ledger), so it is the data cutoff the
+    # panel carries, never the later date the run executes on.  The execution date is
+    # recorded inside the freshness artifact as ``evaluated_on``.
+    if freshness_as_of > portfolio_as_of:
+        raise ControlPanelValidationError(
+            "freshness health is dated after the portfolio data cutoff"
+        )
+    publication_as_of = portfolio_as_of
     try:
         retained_report = _object(
             json.loads(input_snapshots["report"].decode("utf-8")),
@@ -13214,6 +13242,14 @@ def publish_panel(
                 sha256=hashlib.sha256(content).hexdigest(),
                 size_bytes=len(content),
             )
+        )
+    after_cutoff = sorted(
+        item.artifact_id for item in artifacts if item.as_of_date > publication_as_of
+    )
+    if after_cutoff:
+        raise ControlPanelValidationError(
+            "bound inputs are dated after the portfolio data cutoff: "
+            + ", ".join(after_cutoff)
         )
     qa, qa_snapshots = _validated_qa_snapshots(
         candidate_dir, published_panel_bytes, qa_dir, output_root

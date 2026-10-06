@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import sys
 
+import pytest
+
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -18,6 +20,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger.hwm import governed_hwm_coverage
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -30,14 +33,19 @@ sys.modules[SPEC.name] = freshness
 SPEC.loader.exec_module(freshness)
 
 
-def _provider_ledger(root: Path, portfolio123_end: str = "2026-07-31") -> str:
+def _provider_ledger(
+    root: Path,
+    portfolio123_end: str = "2026-07-31",
+    ledger_as_of: str = "2026-07-31",
+    ibkr_end: str = "2026-07-31",
+) -> str:
     catalog = {
-        "as_of_date": "2026-07-31",
+        "as_of_date": ledger_as_of,
         "provider_coverage": [
             {
                 "coverage": {
                     "fact_types": ["nav", "positions", "transactions", "cash_flows"],
-                    "observed_end": "2026-07-31",
+                    "observed_end": ibkr_end,
                     "observed_start": "2026-07-31",
                     "status": "PARTIAL",
                 },
@@ -136,20 +144,20 @@ def _provider_ledger(root: Path, portfolio123_end: str = "2026-07-31") -> str:
     source = root.parent / "provider-ledger.json"
     source.write_bytes(canonical_json_bytes(catalog))
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 31),
+        as_of_date=date.fromisoformat(ledger_as_of),
         adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic provider ledger",
             fact_types=("strategy_evidence",),
             observed_start=date(2026, 7, 17),
-            observed_end=date(2026, 7, 31),
+            observed_end=date.fromisoformat(ledger_as_of),
         ),
         artifacts=(
             SourceArtifact.from_path(
                 source,
                 artifact_id="normalized/provider-ledger.json",
-                as_of_date=date(2026, 7, 31),
+                as_of_date=date.fromisoformat(ledger_as_of),
                 schema_name="provider-ledger-catalog",
                 schema_version="1",
             ),
@@ -206,7 +214,7 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
         == "2026-07-26"
     )
     assert by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["state"] == ("LATE")
-    assert result["assessment_schema_version"] == 3
+    assert result["assessment_schema_version"] == 4
     assert result["provider_ledger"]["generation_id"] == generation_id
     assert len(result["provider_ledger"]["manifest_sha256"]) == 64
     assert len(result["provider_ledger"]["catalog_sha256"]) == 64
@@ -218,10 +226,11 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
 
 
 def test_freshness_distinguishes_weekend_from_missing_session(tmp_path: Path) -> None:
+    # The data cutoff is the Sunday; freshness is judged there, not on a later run date.
     root = tmp_path / "provider-ledger"
-    generation_id = _provider_ledger(root)
+    generation_id = _provider_ledger(root, ledger_as_of="2026-08-02")
 
-    result = freshness.build_health(root, generation_id, date(2026, 8, 2))
+    result = freshness.build_health(root, generation_id)
 
     by_id = {
         (row["subject_id"], row["lane"]): row
@@ -348,3 +357,122 @@ def test_freshness_finite_providers_match_the_ledger_finality_declaration() -> N
     declared = {item.strip().strip('"') for item in match.group(1).split(",")}
 
     assert declared == set(freshness.FINITE_HISTORY_PROVIDER_IDS)
+
+
+def test_freshness_is_judged_at_the_data_cutoff_and_carries_the_execution_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the artifact is dated at the data cutoff, not the execution clock.
+
+    The ledger cutoff is 2026-07-31 and the run executes on 2026-10-04.  A strategy
+    last accepted the day before the cutoff is FRESH as of the cutoff; judging it on
+    the execution date made it STALE for a data boundary the owner chose.  The
+    execution date is carried beside it as ``evaluated_on``.
+    """
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    assert result["assessment_schema_version"] == 4
+    assert result["as_of_date"] == "2026-07-31"
+    assert result["evaluated_on"] == "2026-10-04"
+    assert {row["evaluated_on"] for row in result["assessments"]} == {"2026-07-31"}
+    by_lane = {
+        (row["subject_id"], row["lane"], row["fact_type"]): row
+        for row in result["assessments"]
+    }
+    current = by_lane[("current-one", "ACCOUNT", "strategy-returns")]
+    assert current["state"] == "FRESH"
+    assert current["last_accepted_date"] == "2026-07-30"
+    assert current["blocks_current_consumers"] is False
+    # Regression guard: a source already stale at the cutoff is still STALE.
+    stale = by_lane[("recurring-stale", "ACCOUNT", "strategy-returns")]
+    assert stale["state"] == "STALE"
+    assert stale["blocks_current_consumers"] is True
+
+
+def test_freshness_without_an_evaluation_date_records_the_cutoff_twice(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    result = freshness.build_health(root, generation_id)
+
+    assert result["as_of_date"] == result["evaluated_on"] == "2026-07-31"
+
+
+def test_an_observation_after_the_cutoff_is_labelled_at_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A provider that published past the cutoff is accepted through the cutoff."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root, ibkr_end="2026-08-02")
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    capture = next(
+        row
+        for row in result["assessments"]
+        if row["subject_id"] == "ibkr" and row["fact_type"] == "balances"
+    )
+    assert capture["last_accepted_date"] == "2026-07-31"
+    assert capture["evaluated_on"] == "2026-07-31"
+    assert capture["state"] == "FRESH"
+
+
+def test_freshness_refuses_an_evaluation_before_the_data_cutoff(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    with pytest.raises(freshness.PortfolioFreshnessError, match="precedes the data"):
+        freshness.build_health(root, generation_id, date(2026, 7, 30))
+
+
+def test_hwm_coverage_is_not_stale_when_last_accepted_is_the_cutoff_boundary(
+    tmp_path: Path,
+) -> None:
+    """R2-3 / NEW-CL3: staleness is measured at the cutoff the HWM policy names.
+
+    The HWM policy boundary is the latest common complete accepted date.  A strategy
+    last accepted the day before that boundary was reported FRESHNESS_STALE only
+    because the freshness clock was the later execution date.
+    """
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+    health = freshness.build_health(root, generation_id, date(2026, 10, 4))
+    strategies = [
+        {
+            "current_value_usd": "100",
+            "nav_evidence_layer": "ACCOUNT_LIVE",
+            "nav_observed_end": "2026-07-30",
+            "nav_status": "AVAILABLE",
+            "strategy_id": "current-one",
+            "strategy_name": "Current One",
+            "systematic_weight": "1",
+        }
+    ]
+    policy = {
+        "accepted_daily_nav_evidence": ["ACCOUNT_LIVE"],
+        "accepted_provider_live_strategy_ids": [],
+        "excluded_strategy_ids": [],
+        "policy_id": "PORT-HWM-3",
+    }
+
+    rows, summary = governed_hwm_coverage(
+        strategies,
+        policy,
+        health["assessments"],  # type: ignore[arg-type]
+        require_freshness=True,
+        calculation_boundary="2026-07-30",
+    )
+
+    assert rows[0]["hwm_freshness_status"] == "ACCEPTED"
+    assert summary["uncovered_strategies"] == []
+    assert summary["status"] == "AVAILABLE_GOVERNED_HWM_PERIMETER"

@@ -164,19 +164,30 @@ def _validate_freshness(
     provider_ledger: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, object]]:
     freshness = _load(freshness_path.resolve(), "freshness health")
+    schema_version = freshness.get("assessment_schema_version")
+    if schema_version not in {3, 4}:
+        raise ControlRecomputeError("freshness health schema must be 3 or 4")
     expected_bundle_keys = {
         "assessment_schema_version",
         "as_of_date",
         "assessments",
         "policies",
         "provider_ledger",
+        *(("evaluated_on",) if schema_version == 4 else ()),
     }
     if set(freshness) != expected_bundle_keys:
         raise ControlRecomputeError("freshness health fields differ")
-    if freshness.get("assessment_schema_version") != 3:
-        raise ControlRecomputeError("freshness health schema must be 3")
-    if freshness.get("as_of_date") != evaluation_date.isoformat():
-        raise ControlRecomputeError("freshness evaluation date differs")
+    # Schema 4 is dated at the data cutoff and names the evaluation date separately.
+    if schema_version == 4:
+        if freshness.get("evaluated_on") != evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness evaluation date differs")
+        data_clock = freshness.get("as_of_date")
+        if not isinstance(data_clock, str) or data_clock > evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness data date follows the evaluation")
+    else:
+        if freshness.get("as_of_date") != evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness evaluation date differs")
+        data_clock = evaluation_date.isoformat()
     ledger = _strict_object(
         freshness.get("provider_ledger"),
         "freshness provider ledger",
@@ -243,7 +254,7 @@ def _validate_freshness(
     ):
         if set(assessment) != assessment_keys:
             raise ControlRecomputeError("freshness assessment fields differ")
-        if assessment.get("evaluated_on") != evaluation_date.isoformat():
+        if assessment.get("evaluated_on") != data_clock:
             raise ControlRecomputeError("freshness assessment date differs")
         for field in (
             "blocks_current_consumers",
@@ -433,7 +444,7 @@ def build_receipt(
         "panel_correlation_matches_current": panel_meta.get("correlation_generation_id")
         == correlation_identity["generation_id"],
         "panel_freshness_matches_selected": (
-            panel_meta.get("freshness_evaluated_on") == evaluation_date.isoformat()
+            panel_meta.get("freshness_evaluated_on") == _freshness.get("as_of_date")
             and panel_identity["freshness"]
             == {
                 "path": panel_identity["freshness"]["path"],

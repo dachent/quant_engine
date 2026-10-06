@@ -20,6 +20,12 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
+# Version 4 dates the artifact at the data cutoff and adds ``evaluated_on``, the
+# execution date.  Version 3 dated it at the execution date, which every consumer then
+# read as the data date.
+ASSESSMENT_SCHEMA_VERSION = 4
+
+
 class PortfolioFreshnessError(ValueError):
     """Provider-ledger freshness inputs violate the current-strategy contract."""
 
@@ -151,6 +157,10 @@ def _assessment(
     coverage_status: str,
     required_for_current: bool,
 ) -> dict[str, object]:
+    # Judged as of the data cutoff: an observation published after it is accepted
+    # through the cutoff, never labelled with a date later than the evaluation.
+    if observed_end is not None and observed_end > as_of:
+        observed_end = as_of
     assessed = policy.assess(observed_end, as_of).to_dict()
     if not required_for_current:
         assessed = {
@@ -178,11 +188,14 @@ def build_health(
     catalog, ledger_identity = _load_catalog(
         provider_ledger_root.resolve(), provider_ledger_generation_id
     )
-    ledger_as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
-    as_of = evaluation_date or ledger_as_of
-    if as_of < ledger_as_of:
+    # The catalog date is the owner-selected financial cutoff.  Freshness is judged
+    # there so that a source last accepted on the cutoff is current as of it; the date
+    # the run executes is a separate clock and is carried as ``evaluated_on``.
+    as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
+    evaluated_on = evaluation_date or as_of
+    if evaluated_on < as_of:
         raise PortfolioFreshnessError(
-            "freshness evaluation date precedes the provider ledger"
+            "freshness evaluation date precedes the data cutoff"
         )
     evidence = catalog.get("strategy_evidence")
     if not isinstance(evidence, list) or not evidence:
@@ -279,8 +292,9 @@ def build_health(
                 )
             )
     return {
-        "assessment_schema_version": 3,
+        "assessment_schema_version": ASSESSMENT_SCHEMA_VERSION,
         "as_of_date": as_of.isoformat(),
+        "evaluated_on": evaluated_on.isoformat(),
         "assessments": sorted(
             assessments,
             key=lambda item: (
@@ -324,6 +338,7 @@ def write_health(
     return {
         "assessment_count": len(assessments),
         "as_of_date": payload["as_of_date"],
+        "evaluated_on": payload["evaluated_on"],
         "output": str(output),
         "provider_ledger_generation_id": provider_ledger_generation_id,
         "sha256": digest,

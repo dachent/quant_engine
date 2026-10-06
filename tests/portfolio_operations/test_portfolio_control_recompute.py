@@ -164,12 +164,13 @@ def _candidate(
     correlation_generation: str,
     report_generation: str,
     freshness: dict[str, object],
+    freshness_evaluated_on: date = AS_OF,
 ) -> tuple[Path, Path]:
     dashboard = {
         "advisory": {"correlation_one_stress": "0.3"},
         "meta": {
             "correlation_generation_id": correlation_generation,
-            "freshness_evaluated_on": AS_OF.isoformat(),
+            "freshness_evaluated_on": freshness_evaluated_on.isoformat(),
             "report_generation_id": report_generation,
         },
     }
@@ -302,6 +303,101 @@ def test_independently_recomputes_panel_freshness_and_selected_ledger(
         == receipt["inputs"]["freshness"]["sha256"]
     )
     assert receipt["inputs"]["provider_ledger"]["generation_id"] == ledger_generation
+
+
+def _schema_four(ledger_identity: dict[str, object]) -> dict[str, object]:
+    """Judged at the data cutoff (PREVIOUS); the recompute date (AS_OF) is carried."""
+
+    payload = _freshness(ledger_identity)
+    payload["assessment_schema_version"] = 4
+    payload["as_of_date"] = PREVIOUS.isoformat()
+    payload["evaluated_on"] = AS_OF.isoformat()
+    for row in payload["assessments"]:  # type: ignore[attr-defined]
+        row["evaluated_on"] = PREVIOUS.isoformat()
+        row["last_accepted_date"] = PREVIOUS.isoformat()
+        row["next_expected_date"] = PREVIOUS.isoformat()
+    return payload
+
+
+def _schema_four_inputs(
+    tmp_path: Path, mutate: object = None
+) -> tuple[Path, Path, Path, Path, Path, str]:
+    (
+        correlation_root,
+        report_root,
+        _candidate_v3,
+        _freshness_v3,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
+    v3 = json.loads(
+        next((tmp_path / "candidates").glob("*/data/freshness-health.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    payload = _schema_four(v3["provider_ledger"])
+    if callable(mutate):
+        mutate(payload)
+    correlation_generation = next((correlation_root / "generations").iterdir()).name
+    report_generation = next((report_root / "generations").iterdir()).name
+    shutil.rmtree(tmp_path / "candidates")
+    candidate, candidate_freshness = _candidate(
+        tmp_path,
+        correlation_generation,
+        report_generation,
+        payload,
+        freshness_evaluated_on=PREVIOUS,
+    )
+    return (
+        correlation_root,
+        report_root,
+        candidate,
+        candidate_freshness,
+        ledger_root,
+        ledger_generation,
+    )
+
+
+def test_schema_four_freshness_is_dated_at_the_cutoff_and_names_the_recompute_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the recomputation accepts freshness judged at the data cutoff.
+
+    The panel's ``freshness_evaluated_on`` is the date its assessments were judged on,
+    which is the cutoff; the recompute date is carried by the freshness artifact.
+    """
+
+    inputs = _schema_four_inputs(tmp_path)
+
+    receipt = _recompute(*inputs)
+
+    assert receipt["status"] == "PASS"
+    assert all(receipt["generation_checks"].values())
+    assert receipt["inputs"]["freshness"]["as_of_date"] == AS_OF.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ({"evaluated_on": "2026-08-05"}, "freshness evaluation date differs"),
+        ({"as_of_date": "2026-08-07"}, "freshness data date follows the evaluation"),
+        ({"evaluated_on": None}, "freshness health fields differ"),
+    ),
+)
+def test_schema_four_freshness_clocks_are_bound(
+    tmp_path: Path, mutation: dict[str, str | None], message: str
+) -> None:
+    def mutate(payload: dict[str, object]) -> None:
+        for key, value in mutation.items():
+            if value is None:
+                payload.pop(key)
+            else:
+                payload[key] = value
+
+    inputs = _schema_four_inputs(tmp_path, mutate)
+
+    with pytest.raises(recompute.ControlRecomputeError, match=message):
+        _recompute(*inputs)
 
 
 def test_same_date_cross_pair_is_rejected(tmp_path: Path) -> None:

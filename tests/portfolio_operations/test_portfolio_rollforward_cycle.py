@@ -172,12 +172,13 @@ def _candidate(
     correlation_generation: str,
     report_generation: str,
     freshness: dict[str, object],
+    freshness_evaluated_on: date = CURRENT,
 ) -> tuple[Path, Path]:
     dashboard = {
         "advisory": {"correlation_one_stress": "0.3"},
         "meta": {
             "correlation_generation_id": correlation_generation,
-            "freshness_evaluated_on": CURRENT.isoformat(),
+            "freshness_evaluated_on": freshness_evaluated_on.isoformat(),
             "report_generation_id": report_generation,
         },
     }
@@ -206,8 +207,24 @@ def _candidate(
     return candidate, candidate / "data" / "freshness-health.json"
 
 
+def _schema_four(freshness: dict[str, object]) -> dict[str, object]:
+    """Judged at the data cutoff (PREVIOUS); the cycle date (CURRENT) is carried."""
+
+    payload = deepcopy(freshness)
+    payload["assessment_schema_version"] = 4
+    payload["as_of_date"] = PREVIOUS.isoformat()
+    payload["evaluated_on"] = CURRENT.isoformat()
+    for row in payload["assessments"]:  # type: ignore[attr-defined]
+        row["evaluated_on"] = PREVIOUS.isoformat()
+    return payload
+
+
 def _cycle_inputs(
-    tmp_path: Path, *, marker: str = "one", stale: bool = False
+    tmp_path: Path,
+    *,
+    marker: str = "one",
+    stale: bool = False,
+    schema_four: bool = False,
 ) -> tuple[Path, str, Path, dict[str, object]]:
     correlation_root = tmp_path / f"correlation-{marker}"
     correlation_generation = _publish(
@@ -243,11 +260,13 @@ def _cycle_inputs(
     )
     ledger_root = tmp_path / f"ledger-{marker}"
     ledger_generation, ledger_identity = _ledger(ledger_root, marker)
+    health = _freshness(ledger_identity, stale=stale)
     candidate, freshness = _candidate(
         tmp_path / f"panel-{marker}",
         correlation_generation,
         report_generation,
-        _freshness(ledger_identity, stale=stale),
+        _schema_four(health) if schema_four else health,
+        freshness_evaluated_on=PREVIOUS if schema_four else CURRENT,
     )
     recomputation = recompute.build_receipt(
         correlation_root,
@@ -320,6 +339,53 @@ def test_cycle_accepts_real_v2_recomputation_and_retains_escalation(
     extra["inputs"]["freshness"]["unexpected"] = True
     with pytest.raises(ValidationError):
         validator.validate(extra)
+
+
+def test_cycle_accepts_schema_four_freshness_dated_at_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """R2-3: a cycle accepts freshness judged at the data cutoff and named by its date."""
+
+    ledger_root, generation_id, freshness, recomputation = _cycle_inputs(
+        tmp_path, schema_four=True
+    )
+    recomputation_path = tmp_path / "schema-four-recomputation.json"
+    _write(recomputation_path, recomputation)
+
+    receipt = cycle.build_receipt(
+        ledger_root,
+        generation_id,
+        freshness,
+        recomputation_path,
+        CURRENT,
+        PREVIOUS,
+    )
+
+    assert receipt["evaluation_date"] == CURRENT.isoformat()
+    assert receipt["pointer_effects"]["advanced"] is False
+
+
+def test_cycle_rejects_schema_four_freshness_replayed_from_another_cycle(
+    tmp_path: Path,
+) -> None:
+    ledger_root, generation_id, freshness, recomputation = _cycle_inputs(
+        tmp_path, schema_four=True
+    )
+    payload = json.loads(freshness.read_text(encoding="utf-8"))
+    payload["evaluated_on"] = PREVIOUS.isoformat()
+    freshness.write_bytes(canonical_json_bytes(payload))
+    recomputation_path = tmp_path / "schema-four-recomputation.json"
+    _write(recomputation_path, recomputation)
+
+    with pytest.raises(cycle.RollforwardCycleError, match="evaluation date differs"):
+        cycle.build_receipt(
+            ledger_root,
+            generation_id,
+            freshness,
+            recomputation_path,
+            CURRENT,
+            PREVIOUS,
+        )
 
 
 def test_cycle_rejects_real_recomputation_cross_paired_to_other_valid_freshness_and_ledger(

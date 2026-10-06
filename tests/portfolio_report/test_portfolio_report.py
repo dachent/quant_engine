@@ -4700,6 +4700,7 @@ def test_product_report_output_obeys_current_allocation_schema(tmp_path: Path) -
 
 def _published_provider_ledger(
     tmp_path: Path,
+    generation_date: date = date(2026, 8, 3),
 ) -> tuple[Path, dict[str, object]]:
     root = tmp_path / "provider-ledger"
     content = canonical_json_bytes({"reconciliation_checks": []})
@@ -4707,12 +4708,12 @@ def _published_provider_ledger(
         artifact_id="normalized/provider-ledger.json",
         sha256=hashlib.sha256(content).hexdigest(),
         size_bytes=len(content),
-        as_of_date=date(2026, 8, 3),
+        as_of_date=generation_date,
         schema_name="provider-ledger-catalog",
         schema_version="1",
     )
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 8, 3),
+        as_of_date=generation_date,
         adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -4729,7 +4730,7 @@ def _published_provider_ledger(
     publish_generation(root, manifest.generation_id)
     manifest_sha256, manifest_size = reporter.hash_file(manifest_path)
     return root, {
-        "as_of_date": "2026-08-03",
+        "as_of_date": generation_date.isoformat(),
         "catalog_sha256": artifact.sha256,
         "catalog_size_bytes": artifact.size_bytes,
         "generation_id": manifest.generation_id,
@@ -7513,3 +7514,104 @@ def test_workbook_parity_accepts_report_schema1_and2(tmp_path: Path) -> None:
         reporter._workbook_parity_receipt(
             canonical_json_bytes(unsupported), workbook_bytes
         )
+
+
+def _schema_four_freshness_payload(
+    identity: dict[str, object], *, as_of: str, evaluated_on: str
+) -> dict[str, object]:
+    return {
+        "assessment_schema_version": 4,
+        "as_of_date": as_of,
+        "assessments": [{"evaluated_on": as_of}],
+        "evaluated_on": evaluated_on,
+        "policies": [],
+        "provider_ledger": identity,
+    }
+
+
+def test_freshness_assessments_schema_four_is_dated_at_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """R2-3: HWM staleness and the evaluation date use the data cutoff.
+
+    The run executes on 2026-08-07 and the ledger generation is dated 2026-08-04, one
+    day past the 2026-08-03 cutoff.  The returned evaluation date, which drives the HWM
+    policy and the report provenance, is the cutoff, not the run date.
+    """
+
+    provider_root, identity = _published_provider_ledger(
+        tmp_path, generation_date=date(2026, 8, 4)
+    )
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(
+        json.dumps(
+            _schema_four_freshness_payload(
+                identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+            )
+        ),
+        encoding="utf-8",
+    )
+    baseline_catalog = {
+        "source_artifacts": [
+            {
+                "schema_name": "provider-ledger-catalog",
+                "sha256": identity["catalog_sha256"],
+                "source_key": "provider-ledger-generation",
+            },
+            {
+                "schema_name": "generation-manifest",
+                "sha256": identity["manifest_sha256"],
+                "source_key": "provider-ledger-generation",
+            },
+        ]
+    }
+    assessments, as_of, _sha256 = reporter._freshness_assessments(
+        freshness, date(2026, 8, 3), provider_root, baseline_catalog
+    )
+
+    assert assessments == [{"evaluated_on": "2026-08-03"}]
+    assert as_of == date(2026, 8, 3)
+
+
+@pytest.mark.parametrize(
+    ("as_of", "evaluated_on", "ledger_as_of", "message"),
+    (
+        ("2026-08-04", "2026-08-07", "2026-08-03", "not dated at the portfolio data"),
+        ("2026-08-03", "2026-08-02", "2026-08-02", "evaluated before its data date"),
+        ("2026-08-03", "2026-08-07", "2026-08-08", "ledger postdates the evaluation"),
+    ),
+)
+def test_freshness_assessments_schema_four_orders_the_clocks(
+    tmp_path: Path, as_of: str, evaluated_on: str, ledger_as_of: str, message: str
+) -> None:
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    identity = {**identity, "as_of_date": ledger_as_of}
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(
+        json.dumps(
+            _schema_four_freshness_payload(
+                identity, as_of=as_of, evaluated_on=evaluated_on
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match=message):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_four_requires_the_run_date_key(
+    tmp_path: Path,
+) -> None:
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    payload = _schema_four_freshness_payload(
+        identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+    )
+    del payload["evaluated_on"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="freshness health contract differs"
+    ):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))

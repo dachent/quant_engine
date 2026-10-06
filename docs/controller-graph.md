@@ -64,7 +64,8 @@ records. The ledger freshness flow binds `build_ledger`'s literal
 `freshness-health.json` output, and the report/panel freshness consumers. Its
 provider-ledger input contract is bound; the existing core freshness schema is
 not listed as the output contract because it declares schema version 2 while
-the native producer and consumers use version 3. Report and panel candidates
+the native producer and consumers use version 4 (dated at the data cutoff,
+with `evaluated_on` for the run date). Report and panel candidates
 are distinct producer records, and `publish_catalog`,
 `publish_report`, and `publish_panel` are writers rather than relabelled
 validators. The actual delivery change range is resolved through these records,

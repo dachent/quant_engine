@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -1219,3 +1219,115 @@ def test_execute_pipeline_release_validation_succeeds_with_clean_findings(
 
     assert committed["release_state"] == "COMMITTED"
     assert read_current(target).generation_id == proposed.generation_id
+
+
+def _freshness_gate_v4(path: Path, cutoff: date, evaluated_on: date) -> Path:
+    """Schema 4: every assessment is judged at the cutoff; the run date is carried."""
+
+    policy = FreshnessPolicy(
+        policy_id="daily-current-strategy",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=2,
+        stale_after_days=5,
+    )
+    assessment = policy.assess(cutoff - timedelta(days=1), cutoff).to_dict()
+    assessment.update(
+        {
+            "coverage_status": "AVAILABLE",
+            "fact_type": "strategy-returns",
+            "lane": "ACCOUNT",
+            "provider_id": "synthetic-provider",
+            "required_for_current": True,
+            "subject_id": "synthetic-strategy",
+            "subject_type": "STRATEGY",
+        }
+    )
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 4,
+                "as_of_date": cutoff.isoformat(),
+                "assessments": [assessment],
+                "evaluated_on": evaluated_on.isoformat(),
+                "policies": [policy.to_dict()],
+            }
+        )
+    )
+    return path
+
+
+def _spec_with_freshness_gate(
+    tmp_path: Path, gate: Path
+) -> tuple[dict[str, object], GenerationManifest, Path]:
+    raw, previous, _, target = _spec_dict(tmp_path)
+    raw["gates"].append(
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+    return raw, previous, target
+
+
+def test_schema_four_freshness_gate_is_judged_at_the_cutoff_and_aged_by_run_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the gate checks the run date it names, and re-assesses at the data date.
+
+    The assessment was judged at the cutoff (one day before the operational date) and
+    is FRESH there.  Re-assessing it at the operational date would call it LATE; the
+    gate must hold it to the date the artifact says it was judged on, while still
+    refusing an artifact that was not produced on the day of the release.
+    """
+
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "freshness.json", cutoff, AS_OF)
+    raw, previous, target = _spec_with_freshness_gate(tmp_path, gate)
+    spec = _parse(raw)
+
+    prepared = execute_pipeline(spec, evaluation_date=AS_OF)
+
+    assert prepared["release_state"] == "PREPARED"
+    with pytest.raises(PipelineValidationError, match="operational date"):
+        execute_pipeline(spec, commit=True, evaluation_date=date(2026, 8, 4))
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_rejects_a_forged_cutoff_state(
+    tmp_path: Path,
+) -> None:
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "freshness.json", cutoff, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["assessments"][0]["state"] = "STALE"
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, previous, target = _spec_with_freshness_gate(tmp_path, gate)
+
+    with pytest.raises(PipelineValidationError, match="assessment is stale"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_requires_the_run_date_and_orders_the_clocks(
+    tmp_path: Path,
+) -> None:
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "missing.json", cutoff, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    del payload["evaluated_on"]
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, _, _ = _spec_with_freshness_gate(tmp_path, gate)
+    with pytest.raises(PipelineValidationError, match="schema differs"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+    early = tmp_path / "early"
+    early.mkdir()
+    gate = _freshness_gate_v4(early / "freshness.json", AS_OF, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["evaluated_on"] = (AS_OF - timedelta(days=1)).isoformat()
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, _, _ = _spec_with_freshness_gate(early, gate)
+    with pytest.raises(PipelineValidationError, match="follows its evaluation date"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF - timedelta(days=1))

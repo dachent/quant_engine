@@ -299,7 +299,9 @@ rollforward.
 ## 2. Build freshness and the complete vertical
 
 Create the same-day freshness artifact from the exact provider-ledger
-generation. The evaluation date is the Windows local operational date.
+generation. The evaluation date is the Windows local operational date; the
+artifact is dated at the financial data cutoff and carries the evaluation date as
+`evaluated_on` (schema 4).
 
 ```powershell
 & $enginePython tools\portfolio_freshness.py `
