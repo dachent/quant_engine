@@ -62,9 +62,10 @@ hooks return deterministic warning/error records without sending an external
 notification. The legacy version-2 freshness bundle is governed by the closed
 `schemas/core/freshness-assessment.schema.json` and embeds the complete policy
 with the operational publication date. The current panel freshness bundle is
-version 3 and includes provider-ledger identity; no matching governed JSON
-schema exists for v3. It is instead structurally validated with closed keys,
-types, dates, hashes, sizes, and the selected current provider-ledger catalog
+version 4 (the panel reader still accepts 3) and includes provider-ledger
+identity; the artifact is dated at the data cutoff and carries `evaluated_on`,
+the date the run assessed it. No matching governed JSON schema exists for it;
+it is instead structurally validated with closed keys, types, dates, hashes, sizes, and the selected current provider-ledger catalog
 and manifest before its rows appear in the Data view. Both the panel build and
 coordinated publication recompute the assessment rather than trusting stored
 state labels.
