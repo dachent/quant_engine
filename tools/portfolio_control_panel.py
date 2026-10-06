@@ -3183,17 +3183,6 @@ def _validate_twr_payload(row: Mapping[str, Any]) -> None:
         raise ControlPanelValidationError("unavailable TWR must carry no value")
 
 
-# An available MWR keeps its number when the report's own flows coverage row
-# denies a completeness proof; the status then names that row (D1/D2).
-_MWR_COVERAGE_ACCEPTED = frozenset(
-    {
-        "COMPLETE",
-        "NO_ACCEPTED_FACT_PATH",
-        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
-    }
-)
-
-
 def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
     """Keep the panel a strict projection of governed report TWR/MWR facts."""
     for row in rows:
@@ -3218,7 +3207,7 @@ def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
             )
             if any(row.get(field) is None for field in required):
                 raise ControlPanelValidationError("available MWR payload is incomplete")
-            if row.get("mwr_coverage_status") not in _MWR_COVERAGE_ACCEPTED:
+            if row.get("mwr_coverage_status") != "COMPLETE":
                 raise ControlPanelValidationError(
                     "available MWR coverage is incomplete"
                 )

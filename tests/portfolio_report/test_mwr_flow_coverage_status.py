@@ -87,46 +87,54 @@ def _rows(flows_status: str | None, coverage: str = "COMPLETE") -> list[dict[str
     return reporter._account_strategy_performance(catalog, None, set(details), details)
 
 
-def test_zero_leg_mwr_is_not_complete_beside_an_unproven_flows_row() -> None:
+def test_zero_leg_mwr_keeps_the_receipt_status_and_names_the_unproven_flow_path() -> (
+    None
+):
     row = _rows("NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF")[0]
 
     assert row["mwr_status"] == "AVAILABLE"
     assert row["mwr_xirr"] == "0.9"
-    assert row["mwr_coverage_status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    # The manifest's flow-coverage receipt status is copied, never overwritten.
+    assert row["mwr_coverage_status"] == "COMPLETE"
+    assert row["mwr_flow_path_status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
 
 
-def test_mwr_over_an_account_with_no_accepted_flow_path_is_not_complete() -> None:
+def test_mwr_over_an_account_with_no_accepted_flow_path_says_so() -> None:
     row = _rows("NO_ACCEPTED_FACT_PATH")[0]
 
-    assert row["mwr_coverage_status"] == "NO_ACCEPTED_FACT_PATH"
+    assert row["mwr_coverage_status"] == "COMPLETE"
+    assert row["mwr_flow_path_status"] == "NO_ACCEPTED_FACT_PATH"
 
 
-def test_complete_stays_when_the_flows_row_does_not_deny_it() -> None:
-    assert _rows("OBSERVED_NOT_COMPLETENESS_PROOF")[0]["mwr_coverage_status"] == (
-        "COMPLETE"
+def test_an_ordinary_flows_row_is_published_as_is_and_a_missing_row_is_null() -> None:
+    assert _rows("OBSERVED_NOT_COMPLETENESS_PROOF")[0]["mwr_flow_path_status"] == (
+        "OBSERVED_NOT_COMPLETENESS_PROOF"
     )
-    assert _rows(None)[0]["mwr_coverage_status"] == "COMPLETE"
+    assert _rows(None)[0]["mwr_flow_path_status"] is None
 
 
-def test_a_blocked_coverage_claim_is_never_widened() -> None:
+def test_a_blocked_receipt_status_is_never_widened() -> None:
     row = _rows("NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", coverage="BLOCKED")[0]
 
     assert row["mwr_coverage_status"] == "BLOCKED"
 
 
-def test_report_schema_admits_the_derived_coverage_values() -> None:
+def test_report_schema_keeps_the_receipt_enum_and_adds_the_flow_path_field() -> None:
     schema = json.loads(
         (ROOT / "schemas" / "portfolio" / "report-data.schema.json").read_text(
             encoding="utf-8"
         )
     )
-    enum = schema["$defs"]["performance"]["properties"]["mwr_coverage_status"]["enum"]
+    properties = schema["$defs"]["performance"]["properties"]
 
-    assert set(enum) >= {
+    assert set(properties["mwr_coverage_status"]["enum"]) == {
         "COMPLETE",
         "BLOCKED",
         None,
-        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
-        "NO_ACCEPTED_FACT_PATH",
     }
-    assert reporter.MWR_COVERAGE_DENIED_BY_FLOW_PATH <= set(enum)
+    assert properties["mwr_flow_path_status"] == {"type": ["string", "null"]}
+    assert "mwr_flow_path_status" not in schema["$defs"]["performance"]["required"]
+    assert reporter.MWR_FLOW_PATH_UNPROVEN == {
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+    }

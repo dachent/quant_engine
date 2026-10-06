@@ -8,7 +8,7 @@ The panel shell is a closed script, so these tests run the real
   is hatched and unsized, never painted as ``100 - x``, and the KPI cards never claim
   "Systematic plus reserve" while a component is not ready;
 * the dependence matrix heading counts the strategies of the payload, not a literal;
-* an epoch row opened from a provider capital anchor says that Invested / Net capital
+* an epoch row opened from a provider capital anchor says that Capital in / Net capital
   / Gain are on the sleeve allocation basis (T5d-lite) without changing one pinned
   header or cell text the attended interaction QA compares.
 """
@@ -379,7 +379,7 @@ _EPOCH_HEADERS = [
     "Account",
     "Strategy",
     "Observed interval",
-    "Invested",
+    "Capital in",
     "Withdrawn",
     "Net capital",
     "Current",
@@ -469,8 +469,13 @@ def test_provider_anchor_rows_say_sleeve_allocation_basis_and_pinned_texts_hold(
     assert "Sleeve allocation basis" in anchor_row
     assert 'data-opening-basis="PROVIDER_CAPITAL_ANCHOR"' in anchor_row
     assert "sleeve allocation basis" not in plain_row.lower()
+    # The Capital in cell of an anchor-opened row is marked as a sleeve allocation.
+    assert (
+        anchor_row.count('<span class="cell-secondary">sleeve allocation</span>') == 1
+    )
+    assert "sleeve allocation</span>" not in plain_row
     assert 'data-opening-basis="FIRST_AVAILABLE_NAV"' in plain_row
-    # Invested, Net capital and Gain of the anchor row carry the label.
+    # Capital in, Net capital and Gain of the anchor row carry the label.
     labelled = re.findall(r'<td class="numeric[^"]*"[^>]*title="([^"]*)"', anchor_row)
     assert len(labelled) == 3
     assert all("sleeve allocation basis" in title.lower() for title in labelled)

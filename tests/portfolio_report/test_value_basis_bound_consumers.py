@@ -1980,16 +1980,16 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     previous = content.replace(
         _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
     )
-    # D6/D1/N29 added the strategy MWR fields (35952 - 34412 = 1540 bytes); the
+    # D6/D1/N29 added the strategy MWR fields (36036 - 34412 = 1624 bytes); the
     # paired test below undoes them and reproduces cfb1ab00....
-    assert len(previous) == 35952
+    assert len(previous) == 36036
     assert hashlib.sha256(previous).hexdigest() == (
-        "e3b101bd5de5172cbeb5013d058a5396601083c1505077caafd843d5a3ce6f8c"
+        "f5a865e31e434e6ae28f3c51afcd94a2b63f660b14e1c9fc37c2a9fcf6924912"
     )
-    assert len(content) == 35997
+    assert len(content) == 36081
     assert (
         hashlib.sha256(content).hexdigest()
-        == "13592f616e15f5998ff3236c9967c79b4c765c3dfdea1d0eed6f865a4dfaaf69"
+        == "b1f6682dcbf87d81c9f12050c0170627b19d675f242422fdf4287e7ce6c3334d"
     )
 
 
@@ -2020,6 +2020,9 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
             "mwr_xirr",
         ):
             del row[key]
+    for row in undone["twr_mwr"]:
+        # D1/D2: the flow-path status of each MWR row is new since v1.
+        del row["mwr_flow_path_status"]
     for row in undone["allocation_history"]:
         del row["weight_basis"]
         if row["scope"] == "SYSTEMATIC":

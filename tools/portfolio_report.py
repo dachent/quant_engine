@@ -1958,7 +1958,7 @@ def _reconcile_multi_account_strategy_composite(
         )
 
 
-MWR_COVERAGE_DENIED_BY_FLOW_PATH = frozenset(
+MWR_FLOW_PATH_UNPROVEN = frozenset(
     {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
 )
 
@@ -2345,16 +2345,12 @@ def _account_strategy_performance(
         if item.get("fact_type") == "flows"
     }
     for row in rows:
-        # D1/D2: a COMPLETE claim cannot stand beside a flows coverage row that
-        # says the flow path is unproven.  The flow-path status is the report's
-        # own coverage row; the manifest value is kept whenever it does not
-        # deny that status.
-        denied_by = flows_status_by_account.get(str(row["account_id"]))
-        if (
-            row.get("mwr_coverage_status") == "COMPLETE"
-            and denied_by in MWR_COVERAGE_DENIED_BY_FLOW_PATH
-        ):
-            row["mwr_coverage_status"] = denied_by
+        # D1/D2: mwr_coverage_status is the manifest's flow-coverage receipt
+        # status and is copied verbatim.  The report's own flows coverage row is
+        # a separate fact, published beside it without overwriting it.
+        row["mwr_flow_path_status"] = flows_status_by_account.get(
+            str(row["account_id"])
+        )
     return sorted(
         rows,
         key=lambda item: (

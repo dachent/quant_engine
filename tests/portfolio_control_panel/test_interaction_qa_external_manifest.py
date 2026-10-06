@@ -204,7 +204,7 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
                 "Account",
                 "Strategy",
                 "Observed interval",
-                "Invested",
+                "Capital in",
                 "Withdrawn",
                 "Net capital",
                 "Current",

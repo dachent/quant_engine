@@ -3,8 +3,8 @@ capital reached the build.
 
 OWNER_318: a strategy's capital is its sleeve NAV plus the unallocated cash line,
 and the allocation to the sleeve is not invested capital.  The manifest table
-header text stays "Invested" because the attended interaction QA compares it, so
-the label rides on the row title and the legend, and both name the missing
+column is "Capital in" (opening capital + deposits + internal-in, never governed
+invested capital); the row title and the legend name the missing
 governed input instead of promising a separate report that was never supplied.
 """
 
@@ -29,7 +29,7 @@ def test_the_sleeve_label_depends_on_the_governed_capital_result() -> None:
     ) in APP_JS
     assert (
         "Governed invested capital was not supplied to this build: on these rows "
-        "Invested is an allocation to the strategy sleeve, not invested capital."
+        "Capital in is an allocation to the strategy sleeve, not invested capital."
     ) in APP_JS
 
 
@@ -42,9 +42,22 @@ def test_the_separate_report_claim_only_appears_when_the_input_was_supplied() ->
     assert f'governedCapitalSupplied ? "{sentence}"' in APP_JS
 
 
-def test_the_qa_compared_header_text_is_unchanged() -> None:
-    assert '["Invested", "numeric", sleeveHeader]' in APP_JS
-    assert '"Observed interval", "Invested", "Withdrawn"' in QA_JS
+def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
+    assert '["Capital in", "numeric", sleeveHeader]' in APP_JS
+    assert '["Invested", "numeric"' not in APP_JS
+    assert '"Observed interval", "Capital in", "Withdrawn"' in QA_JS
+    assert "Capital in = explicit opening capital + deposits + internal-in" in APP_JS
+    assert "Net capital = Capital in − Withdrawn." in APP_JS
+
+
+def test_the_performance_table_marks_an_unproven_flow_path() -> None:
+    assert "row.mwr_flow_path_status" in APP_JS
+    assert "flow path unproven" in APP_JS
+    for status in (
+        "NO_ACCEPTED_FACT_PATH",
+        "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
+    ):
+        assert f'"{status}"' in APP_JS
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")

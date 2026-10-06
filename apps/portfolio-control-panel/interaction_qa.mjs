@@ -329,7 +329,7 @@ const epochAuthority = await page.locator("#account-manifest-authority").textCon
 const epochLegend = await page.locator("#account-manifest-legend").textContent();
 const epochDisclosure = await page.locator("#account-manifest-disclosure-list").textContent();
 const epochHeaders = [
-  "Account", "Strategy", "Observed interval", "Invested", "Withdrawn", "Net capital",
+  "Account", "Strategy", "Observed interval", "Capital in", "Withdrawn", "Net capital",
   "Current", "Gain", "RONC", "Ann. RONC", "Observed return", "Observed HWM", "Observed Max DD",
 ];
 const authorityProfile = dashboardData.meta.account_manifest_authority_profile;
@@ -363,7 +363,8 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
         && rendered.cells.slice(3).every((cell) => cell.text === "—");
     }
     const expectedNumbers = [
-      exactMoney(row.invested), exactMoney(row.withdrawn), exactMoney(row.net_capital),
+      exactMoney(row.invested) + (row.opening_basis === "PROVIDER_CAPITAL_ANCHOR" ? "sleeve allocation" : ""),
+      exactMoney(row.withdrawn), exactMoney(row.net_capital),
       exactMoney(row.current_value), exactMoney(row.gain), exactPct(row.return_on_net_capital),
       exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
       exactFixed(row.observed_hwm_index, 2), exactPct(row.observed_max_drawdown),

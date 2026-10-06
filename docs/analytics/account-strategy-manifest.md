@@ -15,7 +15,7 @@ Coverage is schema version 2. It has exactly one row for each producer-selected
 mapped assignment key, retaining a nullable assignment end separately from the
 finite requested/covered receipt interval. The coverage artifact declares the
 exact selected receipt IDs, SHA-256 values, and byte sizes. `COMPLETE` requires
-`ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2`, one declared receipt, and null
+`ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2` or `STATIC_SNAPSHOT_COVERAGE_V1`, one declared receipt, and null
 blockers; that receipt must bind the exact account, full assignment interval,
 provider/source identity, issuer contract, evidence artifacts, categories, and
 terminal pagination. `BLOCKED` requires `NONE`, no receipt, and one closed
