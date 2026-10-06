@@ -562,9 +562,12 @@
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
-    const stress = Number(data.advisory.correlation_one_stress);
-    const passes = stress <= Number(data.advisory.hwm_limit);
-    $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
+    const stress = number(data.advisory.correlation_one_stress);
+    const limit = number(data.advisory.hwm_limit);
+    const comparable = Number.isFinite(stress) && Number.isFinite(limit);
+    const passes = comparable && stress <= limit;
+    const breaches = comparable && stress > limit;
+    $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${breaches ? "status-text danger" : ""}">${pct(stress)}</div></div>${breaches ? `<div class="callout callout-danger">Stress exceeds the ${pct(limit)} HWM boundary. This is advisory evidence, not a liquidation instruction.</div>` : ""}`;
     const unavailableHwmSummary = (data.hwm_summary.uncovered_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${humanStatus(item.qualification_gap)} · last accepted ${formatDate(item.last_accepted_date)} · ${item.freshness_reason || "No freshness reason recorded"}`).join(" · ");
     const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${hwmObservationSummary(row)}`).join(" · ");
     const portableProof = data.hwm_portable_proof;
@@ -751,7 +754,7 @@
   }
 
   const factorLensModes = data?.decomposition_lenses?.modes || { LIVE_ONLY: data?.decomposition_lenses?.lenses || [data?.factor_analysis] };
-  let selectedFactorEvidenceMode = factorLensModes[data?.decomposition_lenses?.default_evidence_mode] ? data.decomposition_lenses.default_evidence_mode : "LIVE_ONLY";
+  let selectedFactorEvidenceMode = factorLensModes[data?.decomposition_lenses?.default_evidence_mode] ? data?.decomposition_lenses?.default_evidence_mode : "LIVE_ONLY";
   const activeFactorLenses = () => factorLensModes[selectedFactorEvidenceMode] || factorLensModes.LIVE_ONLY || [];
   const replicationRows = data?.replication_analysis?.series || [];
   let selectedFactorLens = data?.decomposition_lenses?.default_lens || activeFactorLenses()[0]?.lens_id;
@@ -1160,7 +1163,7 @@
   let selectedCorrelationWindow = "full";
   let selectedPair = null;
   const dependenceModes = data?.dependence_modes || { LIVE_ONLY: data?.dependence_analysis };
-  let selectedEvidenceMode = dependenceModes[data?.default_dependence_mode] ? data.default_dependence_mode : "LIVE_ONLY";
+  let selectedEvidenceMode = dependenceModes[data?.default_dependence_mode] ? data?.default_dependence_mode : "LIVE_ONLY";
   const currentDependence = () => dependenceModes[selectedEvidenceMode] || data.dependence_analysis;
   const shortSeries = (value) => String(value).replace(" Portfolio", "").replace(" Strategy", "").replace(" Factor [P123]", " P123").replace("GrizzlyBears VTMA", "Grizzly").replace("Robuxio Crypto (High Sharpe High Vol)", "Robuxio").replace("[Composer] - The Holy Grail (Buy Copy)", "Composer").replace("Growth at Market Pivot Points [EchoTrade]", "EchoTrade");
   const pairKey = (left, right) => [left, right].sort().join("\u0000");
@@ -1300,7 +1303,7 @@
   let selectedWeeklyWindow = "13";
   let weeklyPage = 0;
   let weeklySearch = "";
-  let includeCurrentWeek = false;
+  let includeCurrentWeek = weekly?.current_week?.default_visible === true;
   let selectedWeeklyCell = null;
 
   function weeklyValue(row, week) {
@@ -1383,9 +1386,15 @@
       const partial = meta?.coverageStatus === "PARTIAL_BOUNDARY";
       return `<td><button type="button" class="weekly-cell ${numeric == null ? "is-unavailable" : numeric < 0 ? "is-negative" : "is-positive"} ${partial ? "is-partial" : ""}" style="--weekly-intensity:${intensity}" data-weekly-series="${safe(row.series_id)}" data-weekly-week="${safe(week)}" aria-label="${safe(row.display_name)} ${safe(week)} ${numeric == null ? "unavailable" : pct(value, 2)}${partial ? " partial boundary" : ""}">${numeric == null ? "—" : pct(value, 1)}</button></td>`;
     }).join("")}</tr>`).join("");
-    $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;
+    const currentWeek = weekly.current_week || {};
+    const currentWeekVisible = weeks.includes(currentWeek.week_start);
+    const partialLabel = currentWeekVisible && currentWeek.is_partial === true
+      ? ` · PARTIAL · data through ${safe(currentWeek.data_through_date || "unavailable")}`
+      : "";
+    $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns${partialLabel}; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;
     prepareScrollableTableRegions();
-    $("#weekly-table-title").textContent = selectedWeeklyWindow === "full" ? `Full history · 52-week page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow} completed weeks`;
+    const periodTitle = selectedWeeklyWindow === "full" ? `Full history · 52-week page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow} weeks`;
+    $("#weekly-table-title").textContent = `${periodTitle}${partialLabel}`;
     $("#weekly-page-older").disabled = selectedWeeklyWindow !== "full" || weeks[0] === (weekly.weeks || [])[0];
     $("#weekly-page-newer").disabled = selectedWeeklyWindow !== "full" || weeklyPage === 0;
     $$('[data-weekly-series]').forEach((button) => button.addEventListener("click", () => {
@@ -1396,6 +1405,7 @@
   }
 
   function renderWeekly() {
+    $("#weekly-current-toggle").checked = includeCurrentWeek;
     const groups = ["ALL", ...(weekly?.display_groups || [])];
     $("#weekly-group-selector").innerHTML = groups.map((group) => `<button type="button" class="segment ${group === selectedWeeklyGroup ? "is-active" : ""}" data-weekly-group="${safe(group)}" aria-pressed="${group === selectedWeeklyGroup}">${safe(weeklyGroupLabels[group] || group)}</button>`).join("");
     $$('[data-weekly-group]').forEach((button) => button.addEventListener("click", () => {

@@ -5678,7 +5678,8 @@ def _weekly_return_analysis(
     *,
     include_hybrid: bool = True,
 ) -> dict[str, Any]:
-    if weekly.get("analytics_schema_version") != 1:
+    weekly_schema_version = weekly.get("analytics_schema_version")
+    if weekly_schema_version not in {1, 2}:
         raise ControlPanelValidationError("weekly-return schema is unsupported")
     if weekly.get("default_evidence_mode") != "LIVE_ONLY":
         raise ControlPanelValidationError("weekly returns must default to LIVE_ONLY")
@@ -5694,8 +5695,32 @@ def _weekly_return_analysis(
     ):
         raise ControlPanelValidationError("weekly aggregation policy differs")
     current_week = _object(weekly.get("current_week"), "weekly current_week")
-    if current_week.get("default_visible") is not False:
-        raise ControlPanelValidationError("current partial week must default hidden")
+    if (
+        weekly_schema_version == 2
+        and weekly.get("status") != "UNAVAILABLE_NOT_CONFIGURED"
+    ):
+        try:
+            as_of = date.fromisoformat(
+                _text(weekly.get("as_of_date"), "weekly as_of_date")
+            )
+            week_start = as_of - timedelta(days=as_of.weekday())
+            week_end = week_start + timedelta(days=6)
+        except ValueError as error:
+            raise ControlPanelValidationError(
+                "weekly source cutoff is invalid"
+            ) from error
+        if (
+            current_week.get("default_visible") is not True
+            or current_week.get("week_start") != week_start.isoformat()
+            or current_week.get("week_end") != week_end.isoformat()
+            or current_week.get("data_through_date") != as_of.isoformat()
+            or current_week.get("is_partial") is not (as_of < week_end)
+            or not isinstance(weekly.get("weeks"), list)
+            or week_start.isoformat() not in weekly["weeks"]
+        ):
+            raise ControlPanelValidationError(
+                "weekly current week differs from the source cutoff"
+            )
     weeks_value = weekly.get("weeks")
     if not isinstance(weeks_value, list) or not weeks_value:
         raise ControlPanelValidationError("weekly week boundary is empty")
@@ -8634,9 +8659,15 @@ def _panel_data(
         dict(weekly_returns)
         if weekly_returns is not None
         else {
-            "analytics_schema_version": 1,
+            "analytics_schema_version": 2,
             "as_of_date": _text(report.get("as_of_date"), "report.as_of_date"),
-            "current_week": {"default_visible": False, "is_partial": False},
+            "current_week": {
+                "data_through_date": None,
+                "default_visible": True,
+                "is_partial": False,
+                "week_end": None,
+                "week_start": None,
+            },
             "default_evidence_mode": "LIVE_ONLY",
             "display_groups": [],
             "generation_id": None,
@@ -9209,7 +9240,7 @@ def _panel_data(
                 {
                     "artifact": "portfolio-weekly-return-generation",
                     "as_of_date": accepted_weekly_returns["as_of_date"],
-                    "schema": "portfolio-weekly-returns/1",
+                    "schema": "portfolio-weekly-returns/2",
                     "sha256": accepted_weekly_returns["source_sha256"],
                 }
             ]
@@ -10686,7 +10717,7 @@ def _rendered_files(
             weekly_returns_root,
             filename="weekly-returns.json",
             field_name="portfolio weekly returns",
-            expected_schema_version=1,
+            expected_schema_version=2,
         )
         weekly_payload = _weekly_return_analysis(
             weekly,
@@ -11618,7 +11649,11 @@ def verify_candidate(
                 and _object(
                     weekly_payload.get("current_week"), "weekly current_week"
                 ).get("default_visible")
-                is False
+                is True
+                and _object(
+                    weekly_payload.get("current_week"), "weekly current_week"
+                ).get("data_through_date")
+                == weekly_payload.get("as_of_date")
             )
             or (
                 not weekly_expected
@@ -13118,7 +13153,7 @@ def publish_panel(
                 artifact_id="input/portfolio-weekly-returns.json",
                 as_of_date=date.fromisoformat(data["weekly_returns"]["as_of_date"]),
                 schema_name="portfolio-weekly-returns",
-                schema_version="1",
+                schema_version="2",
             )
         )
     if "replication" in input_snapshots:

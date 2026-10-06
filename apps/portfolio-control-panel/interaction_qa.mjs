@@ -847,6 +847,45 @@ checks.push(check(
 
 await page.locator('[data-nav="weekly"]').click();
 const currentWeekIncluded = await page.locator("#weekly-current-toggle").isChecked();
+const weeklyDefaultVisible = await page.evaluate(() => window.PORTFOLIO_DATA?.weekly_returns?.current_week?.default_visible === true);
+const weeklyCurrentIsPartial = await page.evaluate(() => window.PORTFOLIO_DATA?.weekly_returns?.current_week?.is_partial === true);
+const weeklyDataThrough = await page.evaluate(() => window.PORTFOLIO_DATA?.weekly_returns?.current_week?.data_through_date ?? null);
+const weeklyTableTitle = (await page.locator("#weekly-table-title").textContent())?.trim() ?? "";
+const weeklyCurrentStart = await page.evaluate(() => window.PORTFOLIO_DATA?.weekly_returns?.current_week?.week_start ?? null);
+const weeklyHeaderDates = async () => page.locator("#weekly-table thead th").evaluateAll((nodes) => nodes.slice(1).map((node) => `${node.querySelector(".cell-secondary")?.textContent?.trim()}-${node.querySelector(".weekly-date")?.textContent?.trim()}`));
+const weeklyToggle = page.locator("#weekly-current-toggle");
+await weeklyToggle.uncheck();
+const hiddenWeekTitle = (await page.locator("#weekly-table-title").textContent())?.trim() ?? "";
+const hiddenWeekCaption = (await page.locator("#weekly-table caption").textContent())?.trim() ?? "";
+const hiddenWeekVisible = (await weeklyHeaderDates()).includes(weeklyCurrentStart?.slice(0, 4) + "-" + weeklyCurrentStart?.slice(5));
+const hiddenWeekDisclosureCorrect = !hiddenWeekTitle.includes("PARTIAL")
+  && !hiddenWeekCaption.includes("PARTIAL")
+  && !hiddenWeekVisible;
+await weeklyToggle.check();
+await page.locator('[data-weekly-window="full"]').click();
+const fullOlder = page.locator("#weekly-page-older");
+const fullOlderEnabled = !(await fullOlder.isDisabled());
+let olderPageDisclosureCorrect = true;
+if (fullOlderEnabled) {
+  await fullOlder.click();
+  const olderTitle = (await page.locator("#weekly-table-title").textContent())?.trim() ?? "";
+  const olderCaption = (await page.locator("#weekly-table caption").textContent())?.trim() ?? "";
+  const olderWeekVisible = (await weeklyHeaderDates()).includes(weeklyCurrentStart?.slice(0, 4) + "-" + weeklyCurrentStart?.slice(5));
+  olderPageDisclosureCorrect = !olderTitle.includes("PARTIAL")
+    && !olderCaption.includes("PARTIAL")
+    && !olderWeekVisible;
+  await page.locator("#weekly-page-newer").click();
+}
+await page.locator('[data-weekly-window="13"]').click();
+checks.push(check(
+  "Weekly partial disclosure follows the visible current-week column",
+  hiddenWeekDisclosureCorrect && olderPageDisclosureCorrect,
+  {
+    hidden_week_disclosure_correct: hiddenWeekDisclosureCorrect,
+    older_page_disclosure_correct: olderPageDisclosureCorrect,
+    older_page_exercised: fullOlderEnabled,
+  },
+));
 const weeklyGroupEvidence = [];
 for (const group of requiredWeeklyGroups) {
   await page.locator(`[data-weekly-group="${group}"]`).click();
@@ -884,10 +923,12 @@ if (!weeklyHybridDisabled) {
   weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
 }
 checks.push(check(
-  "Weekly returns disclose live and hybrid strategy evidence without enabling the partial week",
+  "Weekly returns show the source-bound current week by default",
   weeklyRows === expectedCurrentStrategies
     && benchmarkRows === 9
-    && currentWeekIncluded === false
+    && weeklyDefaultVisible === true
+    && currentWeekIncluded === weeklyDefaultVisible
+    && (!weeklyCurrentIsPartial || (weeklyDataThrough != null && weeklyTableTitle.includes(`PARTIAL · data through ${weeklyDataThrough}`)))
     && weeklyLivePressed === "true"
     && weeklyLiveDetail?.includes("Live only")
     && weeklyLiveDetail.includes("Accepted observations")
@@ -906,7 +947,10 @@ checks.push(check(
     live_detail_visible: weeklyLiveDetail?.includes("Live only"),
     live_pressed: weeklyLivePressed,
     partial_week_enabled: currentWeekIncluded,
+    partial_week_label_matches_source: !weeklyCurrentIsPartial || (weeklyDataThrough != null && weeklyTableTitle.includes(`PARTIAL · data through ${weeklyDataThrough}`)),
+    source_data_through: weeklyDataThrough,
     strategy_rows: weeklyRows,
+    weekly_default_visible: weeklyDefaultVisible,
   },
 ));
 

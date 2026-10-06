@@ -5455,7 +5455,7 @@ def _attended_completed_analytics(receipt: Mapping[str, Any], stage_root: Path) 
         receipt.get("weekly_generation_id"),
         "analytics weekly",
         filename="weekly-returns.json",
-        expected_schema_version=1,
+        expected_schema_version=2,
     )
     bindings = receipt.get("lens_generation_bindings")
     plan_bundles = receipt.get("plan_bundle_ids")

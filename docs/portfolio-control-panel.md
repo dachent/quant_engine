@@ -98,8 +98,9 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Weekly returns come only from the accepted
   `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as
-  `product(1 + r) - 1`. The current partial week is hidden by default; a missing
-  week remains unavailable rather than becoming zero. Strategy rows default to
+  `product(1 + r) - 1`. The current cutoff week is shown by default and, when
+  partial, is marked with its source-derived data-through date; a missing week
+  remains unavailable rather than becoming zero. Strategy rows default to
   account-live evidence and may optionally use the same version-matched
   pre-inception backtest boundary as Dependence. Factor rows remain labeled as
   excess or long-short returns; strategy, ETF style, sector, industry, and core
