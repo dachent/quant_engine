@@ -509,6 +509,55 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     assert "current_balances" in manifest.coverage.fact_types
 
 
+def test_partial_snapshot_balance_gap_is_scoped_to_the_provider_snapshot(
+    tmp_path: Path,
+) -> None:
+    """E9: the gap names the Schwab snapshot, never all account balances.
+
+    The portfolio gate copies this text as its positions note while the panel
+    shows cutoff balances from accepted NAV, so an unscoped "current account
+    balances remain unavailable" reads as a contradiction.
+    """
+
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+    snapshot_path = source_root / document["current_snapshot"]["relative_path"]
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["accounts"][0]["liquidation_value"] = {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    catalog, manifest, _ = build_generation(spec)
+
+    gaps = catalog["coverage"]["known_gaps"]
+    scoped = [item for item in gaps if "liquidation value" in item]
+    assert scoped == [
+        "Schwab current snapshot (DEVELOPER_API): liquidation value is not "
+        "available for 1 of 8 accounts"
+    ]
+    assert not any("balances remain unavailable" in item for item in gaps)
+    assert "current_balances" not in manifest.coverage.fact_types
+    # Regression guard: a complete snapshot records no balance gap at all.
+    (tmp_path / "complete").mkdir()
+    complete = _spec_with_current(tmp_path / "complete")
+    complete_catalog, complete_manifest, _ = build_generation(complete)
+    assert not any(
+        "liquidation value" in item or "balances" in item
+        for item in complete_catalog["coverage"]["known_gaps"]
+    )
+    assert "current_balances" in complete_manifest.coverage.fact_types
+
+
 def _assert_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer(
     tmp_path: Path,
 ) -> None:
