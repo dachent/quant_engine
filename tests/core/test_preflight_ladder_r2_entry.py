@@ -167,10 +167,19 @@ class _Gate(Exception):
 
 
 def _stub_storage(monkeypatch):
-    def storage(_args):
-        raise _Gate
+    # A resume reads receipts for the QA gate only after the environment admission
+    # (`_attended_preflight`); the gate precedes storage.admit.
+    class Storage:
+        def admit(self, **_kwargs):
+            raise _Gate
 
-    monkeypatch.setattr(materializer, "_attended_storage", storage)
+        def fail_if_open(self, _reason):
+            pass
+
+    monkeypatch.setattr(materializer, "_attended_storage", lambda _args: Storage())
+    monkeypatch.setattr(
+        materializer, "_attended_preflight", lambda _args: {"source_phase": {}}
+    )
 
 
 def test_cli_resume_with_panel_already_complete_needs_no_qa_declaration(
