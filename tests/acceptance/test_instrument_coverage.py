@@ -3,9 +3,7 @@
 C2   a labelled benchmark comparison whose ``observed_end`` is before the cutoff.
 C4   ``implementation_*_contract.as_of_date`` before the cutoff.
 N56  ``custody_current_capital`` as_of (the systematic total and the systematic strategies).
-N54  the evaluation clock published as a data date: ``generation.json`` ``as_of_date`` and
-     ``strategy_history_contract.evaluated_on`` against the declared cutoff, unless the
-     record labels it ``evaluated_on_basis: EXECUTION_CLOCK``.
+N54  (the evaluation clock: see test_r2_clock.py.)
 C5   the account live window (``account_live_observed_end``) restored after V2 dropped the
      identity-window yield: it must reach the cutoff unless the strategy is not active or
      the live status is not available.
@@ -124,56 +122,6 @@ def test_n56_capital_dated_at_the_cutoff_and_retained_rows_are_silent(
         ]
     )
     assert _generation_findings(tmp_path / "retained", retained, CAPITAL_AS_OF) == []
-
-
-# ----------------------------------------------------------------------------- N54
-
-
-def _clock_findings(tmp_path: Path, spec: Spec, manifest_as_of: str | None = None):
-    generation = load_generation(build(tmp_path, spec))
-    if manifest_as_of is not None:
-        generation.manifest["as_of_date"] = manifest_as_of
-    context = checks.Context(
-        gen=generation, cutoff=checks.date(2026, 9, 17), cutoff_source="test"
-    )
-    return list(checks.check_evaluation_clock(context))
-
-
-def _history(evaluated_on: str, **label: str):
-    def mutate(report: dict[str, Any]) -> None:
-        report["strategy_history_contract"] = {
-            "as_of_date": CUTOFF,
-            "evaluated_on": evaluated_on,
-            **label,
-        }
-
-    return mutate
-
-
-def test_n54_a_manifest_dated_at_the_execution_clock_blocks(tmp_path: Path) -> None:
-    findings = _clock_findings(tmp_path, Spec(), manifest_as_of="2026-10-04")
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("generation.json.as_of_date", checks.BLOCKER_AUTHORITY)
-    ]
-    assert findings[0].defect_ids == ("N54",)
-
-
-def test_n54_a_manifest_dated_at_the_cutoff_is_silent(tmp_path: Path) -> None:
-    assert _clock_findings(tmp_path, Spec(), manifest_as_of=CUTOFF) == []
-
-
-def test_n54_history_evaluated_after_the_requested_date_blocks_unless_labelled(
-    tmp_path: Path,
-) -> None:
-    bad = _clock_findings(tmp_path / "bad", Spec(report=[_history("2026-10-04")]))
-    assert [(f.entity, f.klass) for f in bad] == [
-        ("strategy_history_contract.evaluated_on", checks.BLOCKER_AUTHORITY)
-    ]
-    labelled = Spec(
-        report=[_history("2026-10-04", evaluated_on_basis="EXECUTION_CLOCK")]
-    )
-    assert _clock_findings(tmp_path / "labelled", labelled) == []
-    assert _clock_findings(tmp_path / "ok", Spec(report=[_history(CUTOFF)])) == []
 
 
 # ------------------------------------------------------------------------------ C5

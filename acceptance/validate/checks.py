@@ -8103,17 +8103,17 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
         )
 
 
-EXECUTION_CLOCK_LABEL = "EXECUTION_CLOCK"
-
-
 def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
-    """N54: the evaluation date must not be published as the data date.
+    """N54: the evaluation clock must not be published as the data date.
 
-    The sealed manifest's ``as_of_date`` and the strategy history's ``evaluated_on``
-    are compared with the requested (declared) cutoff. A later date is the execution
-    clock; it is acceptable only when the record says so
-    (``evaluated_on_basis: EXECUTION_CLOCK``). The freshness-health clock is an
-    operational clock by design and is not compared here.
+    The sealed manifest has one date field and downstream readers take it as the data
+    date, so it must be the requested cutoff: the panel producer stamps the later of the
+    data date and the freshness (execution) clock on it, which is a real defect (the
+    manifest is not exempt, nor is the freshness clock that drives it). The panel's own
+    data date (``meta.portfolio_as_of``) is checked beside it. The history contract keeps
+    two named clocks: ``as_of_date`` is the data date and must be the cutoff, and
+    ``evaluated_on`` is the execution clock, which may be later than the cutoff but never
+    earlier than the data date. No label a record declares about itself exempts a clock.
     """
 
     manifest_day = to_date(ctx.gen.manifest.get("as_of_date"))
@@ -8130,29 +8130,48 @@ def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
             "the generation manifest is dated at the evaluation clock, not the "
             "requested data cutoff",
         )
+    portfolio_as_of = node(ctx.panel, "meta", "portfolio_as_of")
+    if portfolio_as_of is not None and to_date(portfolio_as_of) != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "meta.portfolio_as_of",
+            portfolio_as_of,
+            ctx.cutoff,
+            PANEL,
+            "$.meta.portfolio_as_of",
+            ("N54",),
+            "the panel data date is not the requested data cutoff",
+        )
     history = node(ctx.report, "strategy_history_contract")
-    if isinstance(history, Mapping):
-        evaluated = to_date(history.get("evaluated_on"))
-        if (
-            evaluated is not None
-            and evaluated != ctx.cutoff
-            and history.get("evaluated_on_basis") != EXECUTION_CLOCK_LABEL
-        ):
-            yield _finding(
-                "dates.evaluation_clock",
-                BLOCKER_AUTHORITY,
-                "strategy_history_contract.evaluated_on",
-                history.get("evaluated_on"),
-                {
-                    "requested_as_of": ctx.cutoff.isoformat(),
-                    "or_label": {"evaluated_on_basis": EXECUTION_CLOCK_LABEL},
-                },
-                REPORT,
-                "$.strategy_history_contract.evaluated_on",
-                ("N54",),
-                "history freshness is evaluated at a date other than the requested "
-                "data cutoff and the record does not label it an execution clock",
-            )
+    if not isinstance(history, Mapping):
+        return
+    data_day = to_date(history.get("as_of_date"))
+    if data_day != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "strategy_history_contract.as_of_date",
+            history.get("as_of_date"),
+            ctx.cutoff,
+            REPORT,
+            "$.strategy_history_contract.as_of_date",
+            ("N54",),
+            "the strategy history data date is not the requested data cutoff",
+        )
+    evaluated = to_date(history.get("evaluated_on"))
+    if evaluated is not None and data_day is not None and evaluated < data_day:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_INVARIANT,
+            "strategy_history_contract.evaluated_on",
+            history.get("evaluated_on"),
+            {"not_before": data_day.isoformat()},
+            REPORT,
+            "$.strategy_history_contract.evaluated_on",
+            ("N54",),
+            "the history was evaluated before its own data date",
+        )
 
 
 CHECKS: tuple[tuple[str, Check], ...] = (
