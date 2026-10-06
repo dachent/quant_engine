@@ -880,23 +880,23 @@ def _validated_inputs(
             raise AttendedPreparationError(
                 "retained attribution differs from expected staged baseline"
             ) from exc
-    if (
-        isinstance(retained_generations, Mapping)
-        and isinstance(retained_generations.get("baseline"), Mapping)
-        and isinstance(retained_generations.get("attribution"), Mapping)
+    if isinstance(retained_generations, Mapping) and isinstance(
+        retained_generations.get("baseline"), Mapping
     ):
+        # The retained "baseline" entry is the ALLOCATION authority handed to
+        # dependence, not the staged baseline retained attribution names: join it to
+        # the ledger on its own. Attribution is joined through the baseline it
+        # actually names (expected_staged_baseline, checked above); that baseline is
+        # staged by this run, so it has no ledger identity to read yet.
         import check_retained_authority_pins as authority_pins
 
         try:
             authority_pins.check_ledger_pin_matrix(
                 Path(str(config["provider_ledger_generation_root"])).resolve(),
                 retained={
-                    "baseline": Path(
+                    "allocation": Path(
                         str(retained_generations["baseline"].get("root"))
-                    ).resolve(),
-                    "attribution": Path(
-                        str(retained_generations["attribution"].get("root"))
-                    ).resolve(),
+                    ).resolve()
                 },
             )
         except authority_pins.LedgerPinMismatch as exc:
