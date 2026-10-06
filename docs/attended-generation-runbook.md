@@ -47,8 +47,10 @@ instructions, or deletion/recovery commands into a current run.
    ledger the run consumed, and also when the manifest's ledger folder is a 64-hex
    generation id that differs from the run's generation. A preserved copy under any
    other folder name is accepted on sha alone (`generation_id_checked=false`).
-   Without the flag the join is reported `NOT_CHECKED` on stderr and in the result,
-   which is not a pass.
+   Two manifest entries naming the same ledger path with different sha256 are refused
+   as a conflicting duplicate. A plan-only run without the flag reports the join
+   `NOT_CHECKED` on stderr and in the result, which is not a pass; `--execute`
+   refuses `--declares-acceptance` unless `--oracle-manifest` is supplied.
 6. Settle the QA hold before `--execute`. The `panel` stage needs browser QA
    evidence that only exists after `panel-candidate`. The plan prints a `qa` block
    with the stage and the required `--qa-dir`; `--execute` refuses unless the

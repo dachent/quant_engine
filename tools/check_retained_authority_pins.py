@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -411,9 +412,12 @@ def check_ledger_pin_matrix(
         baseline_sha = _file_sha(
             baseline_dir / "portfolio-baseline.json", "retained baseline catalog"
         )
-        if (
-            bound.get("generation_id") != baseline_dir.name
-            or bound.get("catalog_sha256") != baseline_sha
+        # The identity is the catalog content; a folder name is compared only when it
+        # is itself a generation id, so a preserved copy under another name is accepted.
+        folder_is_generation = re.fullmatch(r"[0-9a-f]{64}", baseline_dir.name)
+        if bound.get("catalog_sha256") != baseline_sha or (
+            folder_is_generation is not None
+            and bound.get("generation_id") != baseline_dir.name
         ):
             raise LedgerPinMismatch(
                 "retained attribution baseline identity differs: attribution binds "

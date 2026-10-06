@@ -6118,18 +6118,72 @@ def _cache_tails() -> list[tuple[str, str]]:
     ]
 
 
+def _attended_plan_provenance_tails(
+    preparation_spec: Path | None,
+) -> list[tuple[str, str]]:
+    """Measure the provenance basenames the plan bundle will copy under the output root.
+
+    ``portfolio_current_decomposition_plan`` writes
+    ``inputs/base/provenance/<NN>-<basename>`` for every provenance source of each
+    mode's base spec template, so the names are known at preflight from the
+    preparation spec. An unreadable spec yields nothing: its own validation reports it.
+    """
+
+    if preparation_spec is None:
+        return []
+    try:
+        config = json.loads(Path(preparation_spec).read_bytes())
+        plans = config["plans"]
+        tails: list[tuple[str, str]] = []
+        for mode, definition in plans.items():
+            template = json.loads(
+                Path(definition["base_spec_template"]["path"]).read_bytes()
+            )
+            for index, source in enumerate(template.get("provenance_sources", [])):
+                name = Path(str(source["path"])).name
+                tails.append(
+                    (
+                        f"preparation plan {mode} provenance {name}",
+                        _backslash(
+                            "preparation",
+                            "plans",
+                            str(mode).lower(),
+                            _GENERATION,
+                            "inputs",
+                            "base",
+                            "provenance",
+                            f"{index:02d}-{name}",
+                        ),
+                    )
+                )
+        return tails
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
 def _attended_path_budget(
-    output_root: Path, retained_cache_root: Path, *, qa_dir: Path | None = None
+    output_root: Path,
+    retained_cache_root: Path,
+    *,
+    qa_dir: Path | None = None,
+    extra_tails: Sequence[tuple[str, str]] = (),
 ) -> None:
     """Refuse roots under which a generated path would reach the Windows limit.
 
     A run that crosses it fails hours in, inside a child, at whichever artifact is
     first to be written past 259 characters. The deepest names are known, so the
     arithmetic is done before anything is created.
+
+    Names the producers copy from inputs are measured when preflight can see them: the
+    QA evidence files and, for a preparation spec, the plan provenance basenames.
+    ACCEPTED RESIDUAL: the remaining data-dependent names (static-snapshot strategy ids
+    beyond the registry, and a source-run path whose recipe is not read here) use the
+    sampled maxima measured on the real runs, 183 characters below the output root and
+    102 below the cache; docs/attended-run-storage.md records them.
     """
 
     for label, root, tails in (
-        ("output", output_root, generated_tails(qa_dir)),
+        ("output", output_root, [*generated_tails(qa_dir), *extra_tails]),
         ("retained cache", retained_cache_root, _cache_tails()),
     ):
         base = len(str(root))
@@ -6202,6 +6256,9 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
         output_root,
         retained_cache_root,
         qa_dir=Path(qa_argument).resolve() if qa_argument is not None else None,
+        extra_tails=_attended_plan_provenance_tails(
+            getattr(args, "preparation_spec", None)
+        ),
     )
     try:
         requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
@@ -6253,7 +6310,13 @@ def _attended_oracle_ledger_identity(document: Path) -> dict[str, Any]:
             sha256 = entry.get("sha256")
             if not isinstance(sha256, str) or len(sha256) != 64:
                 raise MaterializationError("oracle ledger input is not sha256-pinned")
-            ledgers[raw] = sha256
+            key = raw.replace("\\", "/")
+            if ledgers.get(key, sha256) != sha256:
+                raise MaterializationError(
+                    f"oracle manifest names {raw} twice with different sha256: "
+                    "conflicting duplicate ledger entry"
+                )
+            ledgers[key] = sha256
     if not ledgers:
         raise MaterializationError(
             f"oracle document {document} names no ledger input "
@@ -6859,6 +6922,11 @@ def _attended_bind_qa(
     expected = _directory_definition(qa_dir) if qa_dir is not None else None
     if receipt.exists():
         observed = _load(receipt, "attended QA receipt")
+        if expected is None and "panel" in completed:
+            # The completed panel consumed the recorded QA evidence; resuming a
+            # finished run needs no --qa-dir, but the receipt must still verify.
+            _validate_directory_definition(observed, "attended QA receipt")
+            return
         if expected is None or canonical_json_bytes(observed) != canonical_json_bytes(
             expected
         ):
@@ -7525,6 +7593,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "attended":
             if args.resume and not args.execute:
                 raise MaterializationError("attended --resume requires --execute")
+            if (
+                args.execute
+                and args.declares_acceptance
+                and args.oracle_manifest is None
+            ):
+                # NOT_CHECKED has no mechanism behind it, so an executing acceptance
+                # run may not omit the oracle; plan-only still reports NOT_CHECKED.
+                raise MaterializationError(
+                    "attended --execute with --declares-acceptance requires "
+                    "--oracle-manifest (the acceptance inputs manifest)"
+                )
             if args.execute:
                 # The hold concerns the stages this run will still execute: a resume
                 # whose panel stage is already complete needs no declaration.
@@ -7580,19 +7659,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                         result["oracle_ledger_join"] = plan_join
                     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                     return 0
-                if args.oracle_manifest is not None or args.declares_acceptance:
-                    # Join against the already validated source phase BEFORE any
-                    # preparation stage can create output.
-                    planned = preparation.plan_attended_inputs(
-                        preparation_spec_path=args.preparation_spec,
-                        requested_as_of=args.requested_as_of,
-                        evaluated_on=args.evaluated_on,
-                    )
-                    oracle_join = _attended_oracle_ledger_join(
-                        planned.get("source_phase") or {},
-                        args.oracle_manifest,
-                        declares_acceptance=args.declares_acceptance,
-                    )
+                # The cheap declaration-only validation (pin matrix, source phase) and
+                # the oracle join run BEFORE storage is admitted or any preparation
+                # stage can create output, on every execute path.
+                planned = preparation.plan_attended_inputs(
+                    preparation_spec_path=args.preparation_spec,
+                    requested_as_of=args.requested_as_of,
+                    evaluated_on=args.evaluated_on,
+                )
+                oracle_join = _attended_oracle_ledger_join(
+                    planned.get("source_phase") or {},
+                    args.oracle_manifest,
+                    declares_acceptance=args.declares_acceptance,
+                )
                 storage = storage or _attended_storage(args)
                 storage.admit(resume=args.resume)
                 prepared = preparation.prepare_attended_inputs(

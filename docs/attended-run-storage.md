@@ -39,6 +39,21 @@ Bytes are recorded per stage in the running attempt's `storage` field of
 `attended-execution-observations.json`: `cache` (overlay and base identity), `start`,
 `stages` (`role`, `bytes_written`, `files`, `total_bytes`) and `end`.
 
+## Path budget
+
+Before anything is created, the preflight refuses an output or retained-cache root
+under which a generated path would reach 260 characters. The tails come from the
+layouts the producers write, measured on the real runs: at most 183 characters below
+the output root (the stage epoch static-snapshot receipt, then the deepest
+decomposition lens at 182) and 102 below the cache root
+(`.decomposition-training-evidence\<64 hex>.json`). The QA evidence file names under
+`--qa-dir` and, for `--preparation-spec`, the plan provenance basenames are measured
+from the supplied inputs and refused by name.
+
+Accepted residual: a name the preflight cannot see (a static-snapshot strategy id
+outside the registry, or the provenance basenames of a `--source-run` whose recipe is
+not read at preflight) is bounded by the sampled maxima above, not measured.
+
 ## Retained cache: shared base and per-run overlay
 
 The analytics producers add entries to the retained cache and never rewrite one that

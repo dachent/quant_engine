@@ -280,6 +280,12 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
         calls.append(argv[argv.index("--role") + 1])
         return subprocess.CompletedProcess(argv, 91, "", "first child stops here")
 
+    # Execution validates declaratively (pin matrix, source phase) before admitting.
+    monkeypatch.setattr(
+        preparation,
+        "plan_attended_inputs",
+        lambda **_kwargs: {"status": "PLANNED", "source_phase": {}},
+    )
     monkeypatch.setattr(preparation, "prepare_attended_inputs", prepared)
     monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
     monkeypatch.setattr(materializer, "_attended_basic_preflight", lambda _args: {})
@@ -4358,6 +4364,12 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
         assert isinstance(storage, run_storage.AttendedStorage)
         return 0, {"status": "EXECUTED"}
 
+    # Execution validates declaratively (pin matrix, source phase) before admitting.
+    monkeypatch.setattr(
+        preparation,
+        "plan_attended_inputs",
+        lambda **_kwargs: {"status": "PLANNED", "source_phase": {}},
+    )
     monkeypatch.setattr(preparation, "prepare_attended_inputs", prepare)
     monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
     monkeypatch.setattr(materializer, "_attended_preflight", check_handoff)
