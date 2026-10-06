@@ -5743,7 +5743,32 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
         if day is None or day == cutoff:
             continue
         after = day > cutoff
+        if (
+            role is not None
+            and not after
+            and role[0] == "c2_descriptive"
+            and isinstance(role[1], Mapping)
+            and role[1].get("account_series_source") == RETAINED_ACCOUNT_SOURCE
+        ):
+            # A retained strategy's reference-only account history ends where the
+            # retained history ends, by design (ruling S1 of N8).
+            continue
         if role is not None and not after:
+            # A labelled descriptive window or historical contract is not exempt from
+            # the cutoff: nothing here (no provider lag, no source clock) explains an
+            # end before it, so the stale date is reported (V16, C2 and C4).
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "labelled section ends before the declared cutoff and no source "
+                "clock explains it",
+            )
             continue
         bound = (
             verified_value_basis_bound(
@@ -7971,6 +7996,139 @@ def check_corrections(ctx: Context) -> Iterator[Finding]:
 
 Check = Callable[[Context], Iterable[Finding]]
 
+def check_account_live_window(ctx: Context) -> Iterator[Finding]:
+    """C5: an active strategy's account live window reaches the cutoff.
+
+    ``live_boundary_observed_end`` is a pinned identity window and is not compared (V2);
+    this is the window the account live return is computed over. A strategy that is not
+    active (retained or excluded) or whose live status is not available makes no claim.
+    """
+
+    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
+        end = to_date(row.get("account_live_observed_end"))
+        if end is None or end == ctx.cutoff:
+            continue
+        lifecycle = row.get("lifecycle_status")
+        if isinstance(lifecycle, str) and lifecycle.upper() != "ACTIVE":
+            continue
+        status = row.get("account_live_status")
+        if status is not None and not is_available(status):
+            continue
+        yield _finding(
+            "dates.section_as_of_vs_cutoff",
+            BLOCKER_AUTHORITY,
+            f"account_live:{row.get('strategy_id')}",
+            {"as_of": row.get("account_live_observed_end"), "status": status},
+            ctx.cutoff,
+            REPORT,
+            f"$.strategy_summary[{position}].account_live_observed_end",
+            ("C5",),
+            "section is dated after the declared cutoff"
+            if end > ctx.cutoff
+            else "account live window is presented as current but ends before the cutoff",
+        )
+
+
+def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
+    """N56: the custody capital labels carry the date they are valued at.
+
+    The systematic total and each systematic strategy are valued at the cutoff; an
+    as_of older than that (the last event date or the minimum over members) labels a
+    current value with a past date. Retained and excluded rows are not systematic.
+    """
+
+    custody = node(ctx.report, "custody_current_capital")
+    candidates: list[tuple[str, str, Mapping[str, Any]]] = []
+    systematic = node(custody, "systematic")
+    if isinstance(systematic, Mapping):
+        candidates.append(
+            ("current_capital:systematic", "$.custody_current_capital.systematic", systematic)
+        )
+    for position, row in enumerate(rows(custody, "strategies")):
+        if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":
+            candidates.append(
+                (
+                    f"current_capital:{row.get('strategy_id')}",
+                    f"$.custody_current_capital.strategies[{position}]",
+                    row,
+                )
+            )
+    for entity, pointer, row in candidates:
+        value = node(row, "current_value")
+        available = row.get("status") if "status" in row else None
+        if available is not None and not is_available(available):
+            continue
+        if isinstance(value, Mapping) and not is_available(value.get("status")):
+            continue
+        day = to_date(row.get("as_of_date"))
+        if day is None or day == ctx.cutoff:
+            continue
+        yield _finding(
+            "capital.as_of_cutoff",
+            BLOCKER_AUTHORITY,
+            entity,
+            row.get("as_of_date"),
+            ctx.cutoff,
+            REPORT,
+            f"{pointer}.as_of_date",
+            ("N56",),
+            "current capital is valued at the cutoff but labelled with an as_of "
+            f"{'after' if day > ctx.cutoff else 'before'} it",
+        )
+
+
+EXECUTION_CLOCK_LABEL = "EXECUTION_CLOCK"
+
+
+def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
+    """N54: the evaluation date must not be published as the data date.
+
+    The sealed manifest's ``as_of_date`` and the strategy history's ``evaluated_on``
+    are compared with the requested (declared) cutoff. A later date is the execution
+    clock; it is acceptable only when the record says so
+    (``evaluated_on_basis: EXECUTION_CLOCK``). The freshness-health clock is an
+    operational clock by design and is not compared here.
+    """
+
+    manifest_day = to_date(ctx.gen.manifest.get("as_of_date"))
+    if manifest_day is not None and manifest_day != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "generation.json.as_of_date",
+            ctx.gen.manifest.get("as_of_date"),
+            ctx.cutoff,
+            GENERATION_MANIFEST,
+            "$.as_of_date",
+            ("N54",),
+            "the generation manifest is dated at the evaluation clock, not the "
+            "requested data cutoff",
+        )
+    history = node(ctx.report, "strategy_history_contract")
+    if isinstance(history, Mapping):
+        evaluated = to_date(history.get("evaluated_on"))
+        if (
+            evaluated is not None
+            and evaluated != ctx.cutoff
+            and history.get("evaluated_on_basis") != EXECUTION_CLOCK_LABEL
+        ):
+            yield _finding(
+                "dates.evaluation_clock",
+                BLOCKER_AUTHORITY,
+                "strategy_history_contract.evaluated_on",
+                history.get("evaluated_on"),
+                {
+                    "requested_as_of": ctx.cutoff.isoformat(),
+                    "or_label": {"evaluated_on_basis": EXECUTION_CLOCK_LABEL},
+                },
+                REPORT,
+                "$.strategy_history_contract.evaluated_on",
+                ("N54",),
+                "history freshness is evaluated at a date other than the requested "
+                "data cutoff and the record does not label it an execution clock",
+            )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -8014,6 +8172,9 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
+    ("dates.account_live_window", check_account_live_window),
+    ("capital.current_capital_as_of", check_current_capital_as_of),
+    ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
     ("dates.weekly_current_week", check_weekly_current_week),
     ("completeness.required_outputs", check_completeness),

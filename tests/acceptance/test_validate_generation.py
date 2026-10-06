@@ -4457,7 +4457,13 @@ def _alpha_summary(**changes: str) -> Mutator:
     """Change alpha's summary row: the window it reports and its headline."""
 
     def mutate(report: dict[str, Any]) -> None:
-        report["strategy_summary"][0].update(changes)
+        row = report["strategy_summary"][0]
+        row.update(changes)
+        if "account_live_observed_end" in changes:
+            # These tests move the window edge on purpose to probe the return-view
+            # checks; V16 requires an active live window to reach the cutoff, so the
+            # fixture declares the live window as not claimed current.
+            row["account_live_status"] = "UNAVAILABLE_WINDOW_UNDER_TEST"
 
     return mutate
 
@@ -5523,7 +5529,7 @@ def _c2_c4_date_findings(found):
     ]
 
 
-def _c2_c4_contract(key, as_of_date="2026-08-03"):
+def _c2_c4_contract(key, as_of_date=CUTOFF):
     identity_key = (
         "reconciliation_id"
         if key == "implementation_reconciliation_contract"
@@ -5551,6 +5557,10 @@ def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_pa
                 "version_compatibility_status": "PROVEN_COMPATIBLE",
                 "observed_start": "2025-10-01",
                 "observed_end": "2025-11-24",
+                # V16: a retained strategy's reference-only account history ends where
+                # the retained history ends; every other labelled window and the
+                # contracts must reach the cutoff.
+                "account_series_source": "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY",
             }
         )
         report["strategy_attribution"]["benchmark_assignments"] = []
@@ -5558,7 +5568,7 @@ def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_pa
             "implementation_reconciliation_contract"
         )
         report["implementation_return_attribution_contract"] = _c2_c4_contract(
-            "implementation_return_attribution_contract", "2026-08-09"
+            "implementation_return_attribution_contract", CUTOFF
         )
 
     found = run(build(tmp_path, Spec(report=[mutate])))
