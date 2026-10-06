@@ -2109,7 +2109,16 @@ def check_publication_state(ctx: Context) -> Iterator[Finding]:
 
 
 def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
-    """A sealed manifest may not claim no known gaps while its payload fails gates."""
+    """A COMPLETE manifest's boundary must name every non-available fact it renders.
+
+    Ruling N6: a manifest cannot carry ``known_gaps`` and stay publishable, so the gaps are
+    disclosed in the payload ``fact_status`` and the manifest ``coverage.boundary`` text
+    ends ``; declared non-available facts: key=value, ...`` (or ``none``). The declared
+    entries come from ``fact_status`` only (FAILED, PARTIAL or UNAVAILABLE); readiness
+    NOT_READY / NOT_PERFORMED is ``identity.publication_state``'s. A WARNING, because the
+    gaps are rendered in the payload: this is a missing disclosure in the sealed identity,
+    not a false claim of availability.
+    """
 
     coverage = node(ctx.gen.manifest, "coverage")
     if not isinstance(coverage, Mapping):
@@ -2131,14 +2140,13 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
         )
         if value in ("FAILED", "PARTIAL", "UNAVAILABLE")
     }
-    declared.update(
-        {
-            k: v
-            for k, v in _readiness(ctx).items()
-            if v in ("NOT_READY", "NOT_PERFORMED")
-        }
+    boundary = str(coverage.get("boundary", ""))
+    missing = sorted(
+        key
+        for key, value in declared.items()
+        if f"{key.split('.', 1)[1]}={value}" not in boundary
     )
-    if declared:
+    if missing:
         yield _finding(
             "identity.manifest_coverage_claim",
             WARNING,
@@ -2146,14 +2154,15 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
             {
                 "coverage_status": status,
                 "known_gaps": gaps,
+                "missing": missing,
                 "payload_declares": declared,
             },
-            "known_gaps names every gap the payload declares",
+            "coverage.boundary names every non-available fact_status entry",
             GENERATION_MANIFEST,
-            "$.coverage.known_gaps",
+            "$.coverage.boundary",
             (),
-            "sealed manifest claims complete coverage with no known gaps while the "
-            "payload declares failed/partial facts or not-ready readiness",
+            "sealed manifest claims complete coverage but its boundary does not name "
+            f"the non-available facts the payload declares: {', '.join(missing)}",
         )
 
 
