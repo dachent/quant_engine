@@ -698,7 +698,12 @@
     // attended interaction QA compares.
     const sleeveRow = (row) => row.opening_basis === "PROVIDER_CAPITAL_ANCHOR";
     const hasSleeveRows = manifest.rows.some(sleeveRow);
-    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account.";
+    // Without a governed invested-capital result the sleeve allocation is the only
+    // capital figure on these rows, so the label says it is an allocation and that
+    // invested capital was not supplied (N36).
+    const governedCapitalSupplied = Boolean(data.invested_capital);
+    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account."
+      + (governedCapitalSupplied ? "" : " Governed invested capital was not supplied to this build, so this is an allocation, not invested capital.");
     const sleeveAttribute = (row) => (sleeveRow(row) ? ` title="${safe(sleeveTitle)}"` : "");
     const sleeveHeader = hasSleeveRows ? "Sleeve allocation basis for rows opened from a provider capital anchor" : "";
     const rows = manifest.rows.map((row) => {
@@ -715,7 +720,7 @@
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
     ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
-    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? " Rows opened from a provider capital anchor show Invested, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. Governed invested capital (the deposits) and the strategy cash line are reported separately." : ""}`;
+    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Invested, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. ${governedCapitalSupplied ? "Governed invested capital (the deposits) and the strategy cash line are reported separately." : "Governed invested capital was not supplied to this build: on these rows Invested is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;
     const notes = [
