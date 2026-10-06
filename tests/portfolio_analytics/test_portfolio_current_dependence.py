@@ -331,6 +331,27 @@ def _rewrite_bundle(source: Path, receipt: dict[str, Any]) -> Path:
     return destination
 
 
+def test_dependence_spec_is_dated_at_the_data_cutoff_and_the_receipt_keeps_the_run_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3: the spec feeds the correlation generation, which downstream reads as data.
+
+    The data is complete through 2026-01-02 and the run executes on 2026-01-03.  The
+    correlation spec (and so the correlation and weekly artifacts built from it) is
+    dated at the data; the execution date stays in the receipt as ``evaluated_on``.
+    """
+
+    source, _contract, _policy = _fixture(tmp_path, monkeypatch)
+
+    spec = json.loads((source / "spec.json").read_text(encoding="utf-8"))
+    receipt = json.loads((source / "dependence-source.json").read_text("utf-8"))
+
+    assert spec["as_of_date"] == "2026-01-02"
+    assert receipt["complete_through"] == "2026-01-02"
+    assert receipt["evaluated_on"] == "2026-01-03"
+    assert receipt["calculation_age_days"] == 1
+
+
 def test_packaged_current_dependence_is_exact_and_self_verifying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

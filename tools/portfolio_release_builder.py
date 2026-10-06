@@ -4829,6 +4829,53 @@ def _current_release_plan_specs(
     return sorted(rows, key=lambda row: str(row["spec_id"]))
 
 
+def _project_base_factors(
+    base_spec: Mapping[str, Any], factor_bytes: bytes
+) -> tuple[dict[str, Any], bytes]:
+    """Project the base factor file onto the base specification's own data date.
+
+    The base decomposition reads every factor observation and refuses one that follows
+    its ``as_of_date``.  A provider can publish a day past the financial cutoff, so a
+    spec dated at the data boundary needs the factor rows after it set aside, with the
+    source identity and its available-through anchor restated for what is read.  Bytes
+    that already end on or before the date are returned unchanged.
+    """
+
+    as_of = _text(base_spec.get("as_of_date"), "base specification as_of_date")
+    lines = factor_bytes.decode("utf-8").splitlines(keepends=True)
+    if not lines:
+        raise VerticalBuildError("base factor file is empty")
+    kept = [lines[0]] + [
+        line for line in lines[1:] if line.split(",", 1)[0].strip() <= as_of
+    ]
+    if len(kept) == len(lines):
+        return dict(base_spec), factor_bytes
+    projected = "".join(kept).encode("utf-8")
+    raw_source = base_spec.get("factor_source")
+    if not isinstance(raw_source, dict) or not isinstance(
+        raw_source.get("interval_policy"), dict
+    ):
+        raise VerticalBuildError("base factor source policy is invalid")
+    source = dict(raw_source)
+    policy = dict(raw_source["interval_policy"])
+    retained_sha256 = hashlib.sha256(factor_bytes).hexdigest()
+    projected_sha256 = hashlib.sha256(projected).hexdigest()
+    anchor = _text(policy.get("available_through_anchor"), "base factor anchor")
+    policy["available_through_anchor"] = min(anchor, as_of)
+    if policy.get("source_vintage") == retained_sha256:
+        policy["source_vintage"] = projected_sha256
+    source.update(
+        {
+            "expected_sha256": projected_sha256,
+            "expected_size_bytes": len(projected),
+            "interval_policy": policy,
+        }
+    )
+    derived = dict(base_spec)
+    derived["factor_source"] = source
+    return derived, projected
+
+
 def _build_base_analytics(
     attribution_bundle: Path,
     plan: Mapping[str, Any],
@@ -4848,7 +4895,7 @@ def _build_base_analytics(
     frozen_base = attribution_bundle / "inputs" / "base"
     for source in sorted(path for path in frozen_base.rglob("*") if path.is_file()):
         _write_exact(base_source / source.relative_to(frozen_base), source.read_bytes())
-    _write_exact(base_source / "factors.csv", base_factor.read_bytes())
+    factor_bytes = base_factor.read_bytes()
     base_spec_value = _load(base_spec, "base decomposition specification")
     if current_plan:
         selected_targets_relative = "inputs/history/selected-targets.csv"
@@ -4878,9 +4925,13 @@ def _build_base_analytics(
         derived_base_spec = dict(base_spec_value)
         derived_base_spec["target_source"] = derived_target_source
         derived_base_spec["evidence_mode"] = plan["policies"]["strategy_evidence_mode"]
+        derived_base_spec, factor_bytes = _project_base_factors(
+            derived_base_spec, factor_bytes
+        )
         base_spec = output_root / "base-decomposition-spec.json"
         _write_exact(base_spec, canonical_json_bytes(derived_base_spec))
         _write_exact(base_source / "targets.csv", selected_targets.read_bytes())
+    _write_exact(base_source / "factors.csv", factor_bytes)
     provenance_sources = base_spec_value.get("provenance_sources")
     if not isinstance(provenance_sources, list) or not provenance_sources:
         raise VerticalBuildError("base decomposition provenance sources are invalid")

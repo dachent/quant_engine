@@ -299,6 +299,33 @@ def _correlation_inputs(
     return correlation, manifest, correlation_path, manifest_path
 
 
+def _correlation_cutoff(
+    correlation: Mapping[str, Any], generation_manifest: GenerationManifest
+) -> date:
+    """Return the data cutoff the correlation generation covers.
+
+    The generation manifest date is the date the correlation was produced, which is
+    later than its data whenever the run executes after the cutoff.  The current week
+    is anchored to the data, so the cutoff is the declared coverage end; the
+    correlation's own ``complete_through``, when it carries one, must agree.
+    """
+
+    observed_end = generation_manifest.coverage.observed_end
+    if observed_end is None:
+        raise WeeklyReturnError("correlation coverage declares no observed end")
+    if observed_end > generation_manifest.as_of_date:
+        raise WeeklyReturnError("correlation coverage follows its generation date")
+    declared = correlation.get("complete_through")
+    if declared is not None:
+        try:
+            declared_day = date.fromisoformat(_text(declared, "complete_through"))
+        except ValueError as exc:
+            raise WeeklyReturnError("correlation complete_through is invalid") from exc
+        if declared_day != observed_end:
+            raise WeeklyReturnError("correlation cutoff differs from its coverage")
+    return observed_end
+
+
 def _strategy_rows(
     strategy_returns: Path,
     correlation: Mapping[str, Any],
@@ -607,7 +634,7 @@ def build_weekly_returns(
     correlation, generation_manifest, correlation_path, manifest_path = (
         _correlation_inputs(correlation_root)
     )
-    as_of = generation_manifest.as_of_date
+    as_of = _correlation_cutoff(correlation, generation_manifest)
     strategy_rows = _strategy_rows(
         strategy_returns, correlation, generation_manifest, as_of
     )
