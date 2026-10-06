@@ -10,12 +10,9 @@ from pathlib import Path
 
 import pytest
 
-import check_retained_authority_pins as pins
 import portfolio_pipeline_materialize as materializer
-from preflight_ladder_fixture import *  # noqa: F403
-from preflight_ladder_fixture import (  # noqa: F401
-    REFUSAL_SECONDS, ROOT, _json, _matrix, _refuses, _sha, good,
-    make_attribution, make_baseline, make_ledger,
+from preflight_ladder_fixture import (
+    REFUSAL_SECONDS,
 )
 
 # ---------------------------------------------------------------- (b) path budget
@@ -61,8 +58,6 @@ def test_path_budget_admits_the_supported_short_roots():
         Path("C:\\Dev\\scratch\\quant_engine\\runs\\r1\\out"),
         Path("C:\\Dev\\scratch\\quant_engine\\runs\\r1\\cache"),
     )
-
-
 
 
 def _preflight_args(base: Path, repo: Path):

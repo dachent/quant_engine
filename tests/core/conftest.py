@@ -67,3 +67,11 @@ def attended_path_budget_off_for_deep_tmp_roots(
     monkeypatch.setattr(
         materializer, "_attended_path_budget", lambda *_args, **_kwargs: None
     )
+
+
+@pytest.fixture
+def good(tmp_path):
+    """A consistent retained set (ledger, baseline, allocation, attribution, dependence)."""
+    from preflight_ladder_fixture import build_good
+
+    return build_good(tmp_path)

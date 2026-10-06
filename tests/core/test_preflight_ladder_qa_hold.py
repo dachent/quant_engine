@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import time
 
 import pytest
 
-import check_retained_authority_pins as pins
 import portfolio_pipeline_materialize as materializer
-from preflight_ladder_fixture import *  # noqa: F403
-from preflight_ladder_fixture import (  # noqa: F401
-    REFUSAL_SECONDS, ROOT, _json, _matrix, _refuses, _sha, good,
-    make_attribution, make_baseline, make_ledger,
+from preflight_ladder_fixture import (
+    REFUSAL_SECONDS,
+    ROOT,
 )
 
 # ---------------------------------------------------------------- (c) QA hold
@@ -93,5 +90,3 @@ def test_storage_doc_invocation_declares_the_hold_or_qa_dir():
         and "--execute" in line
     )
     assert "--qa-dir" in invocation or "--qa-hold" in invocation
-
-

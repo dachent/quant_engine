@@ -8,12 +8,13 @@ import time
 
 import pytest
 
-import check_retained_authority_pins as pins
 import portfolio_pipeline_materialize as materializer
-from preflight_ladder_fixture import *  # noqa: F403
-from preflight_ladder_fixture import (  # noqa: F401
-    REFUSAL_SECONDS, ROOT, _json, _matrix, _refuses, _sha, good,
-    make_attribution, make_baseline, make_ledger,
+from preflight_ladder_fixture import (
+    REFUSAL_SECONDS,
+    ROOT,
+    _json,
+    _sha,
+    make_ledger,
 )
 
 # ---------------------------------------------------------------- (d) oracle join
@@ -123,5 +124,7 @@ def test_oracle_flags_are_parsed():
 
 
 def test_runbook_names_the_oracle_join():
-    text = (ROOT / "docs" / "attended-generation-runbook.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "attended-generation-runbook.md").read_text(
+        encoding="utf-8"
+    )
     assert "--oracle-manifest" in text and "NOT_CHECKED" in text

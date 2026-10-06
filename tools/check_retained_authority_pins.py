@@ -310,7 +310,9 @@ def ledger_identity_of_root(root: Path) -> dict[str, str]:
     """The identity the run selects: the shas of the ledger manifest and catalog."""
     return {
         "generation_id": root.name,
-        LEDGER_SCHEMAS[0]: _file_sha(root / "generation.json", "provider ledger manifest"),
+        LEDGER_SCHEMAS[0]: _file_sha(
+            root / "generation.json", "provider ledger manifest"
+        ),
         LEDGER_SCHEMAS[1]: _file_sha(
             root / "provider-ledger.json", "provider ledger catalog"
         ),

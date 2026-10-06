@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import time
 
 import pytest
 
 import check_retained_authority_pins as pins
 import portfolio_pipeline_materialize as materializer
-from preflight_ladder_fixture import *  # noqa: F403
-from preflight_ladder_fixture import (  # noqa: F401
-    REFUSAL_SECONDS, ROOT, _json, _matrix, _refuses, _sha, good,
-    make_attribution, make_baseline, make_ledger,
+from preflight_ladder_fixture import (
+    REFUSAL_SECONDS,
+    _json,
+    _matrix,
+    _refuses,
+    _sha,
+    make_attribution,
+    make_baseline,
+    make_ledger,
 )
 
 # ---------------------------------------------------------------- (a) pin matrix
@@ -65,7 +68,10 @@ def test_attribution_built_on_another_baseline_is_refused_naming_both(good, tmp_
     stale = make_attribution(tmp_path / "attr2" / ("d" * 64), other)
     seconds = _refuses(
         lambda: _matrix(good, attribution=stale),
-        r"attribution baseline identity differs.*" + other.name + r".*" + good["baseline"].name,
+        r"attribution baseline identity differs.*"
+        + other.name
+        + r".*"
+        + good["baseline"].name,
     )
     print(f"refusal seconds (attribution): {seconds:.3f}")
 
@@ -82,7 +88,9 @@ def test_missing_ledger_rows_are_refused_not_skipped(good, tmp_path):
     empty = tmp_path / "empty" / ("c" * 64)
     empty.mkdir(parents=True)
     (empty / "portfolio-baseline.json").write_bytes(_json({"source_artifacts": []}))
-    _refuses(lambda: _matrix(good, allocation=empty), r"carries no provider ledger identity")
+    _refuses(
+        lambda: _matrix(good, allocation=empty), r"carries no provider ledger identity"
+    )
 
 
 def test_pin_matrix_cli_refuses_and_passes(good, tmp_path, capsys):
@@ -127,5 +135,3 @@ def test_attended_preflight_helper_raises_materialization_error(good, tmp_path):
             dependence_ledger_root=good["dependence"],
         )
     assert time.monotonic() - started < REFUSAL_SECONDS
-
-

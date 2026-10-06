@@ -15,7 +15,6 @@ REFUSAL_SECONDS = 60.0
 ROOT = Path(__file__).resolve().parents[2]
 
 
-
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -77,8 +76,7 @@ def make_attribution(root: Path, baseline: Path) -> Path:
     return root
 
 
-@pytest.fixture
-def good(tmp_path: Path) -> dict[str, Path]:
+def build_good(tmp_path: Path) -> dict[str, Path]:
     ledger = make_ledger(tmp_path / "ledger" / ("a" * 64), "v6")
     baseline = make_baseline(tmp_path / "baseline" / ("b" * 64), ledger)
     return {
@@ -98,10 +96,8 @@ def _matrix(good: dict[str, Path], **override: Path) -> list[dict[str, str]]:
 
 def _refuses(callable_, match: str) -> float:
     started = time.monotonic()
-    with pytest.raises(Exception, match=match) as caught:
+    with pytest.raises(Exception, match=match):
         callable_()
     elapsed = time.monotonic() - started
     assert elapsed < REFUSAL_SECONDS
     return elapsed
-
-

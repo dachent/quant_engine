@@ -5940,7 +5940,9 @@ _GENERATION_ID_LENGTH: Final = 64
 # carries a target-series source id; the panel carries governance inputs. The values come
 # from the artifact ids the producers write (provider_ledger, portfolio_target_series,
 # portfolio_control_panel), not from a guess about the run.
-_LEDGER_ARTIFACT: Final = "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
+_LEDGER_ARTIFACT: Final = (
+    "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
+)
 _SOURCE_ARTIFACT: Final = "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
 _PANEL_ARTIFACT: Final = "inputs/governance/current-strategy-decomposition-plan.json"
 _CACHE_ARTIFACT: Final = _LEDGER_ARTIFACT
