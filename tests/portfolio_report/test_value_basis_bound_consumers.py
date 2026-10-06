@@ -1980,14 +1980,16 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     previous = content.replace(
         _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
     )
-    assert len(previous) == 34412
+    # D6/D1/N29 added the strategy MWR fields (35952 - 34412 = 1540 bytes); the
+    # paired test below undoes them and reproduces cfb1ab00....
+    assert len(previous) == 35952
     assert hashlib.sha256(previous).hexdigest() == (
-        "be07aae5f33b896f4b541af5b6c53b3cca3373770bcbb4a4ca952827f4e4e2f3"
+        "e3b101bd5de5172cbeb5013d058a5396601083c1505077caafd843d5a3ce6f8c"
     )
-    assert len(content) == 34457
+    assert len(content) == 35997
     assert (
         hashlib.sha256(content).hexdigest()
-        == "32f2364a2d9891250e984678f160a1dcc822dddd69731f66832740931feb7679"
+        == "13592f616e15f5998ff3236c9967c79b4c765c3dfdea1d0eed6f865a4dfaaf69"
     )
 
 
@@ -2006,6 +2008,17 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     }
     for row in undone["strategy_summary"]:
         for key in ("capital_as_of_date", "capital_status", "weight_basis"):
+            del row[key]
+        # N29: the pooled strategy MWR fields did not exist in v1 either.
+        for key in (
+            "mwr_basis",
+            "mwr_member_account_ids",
+            "mwr_opening_date",
+            "mwr_reason",
+            "mwr_status",
+            "mwr_terminal_date",
+            "mwr_xirr",
+        ):
             del row[key]
     for row in undone["allocation_history"]:
         del row["weight_basis"]
