@@ -69,7 +69,10 @@ def _event(signed: str, native: str, currency: str, rate: str | None) -> dict[st
 def _line(*events: dict[str, Any]) -> dict[str, Any]:
     total = sum((Decimal(e["signed_usd"]) for e in events), Decimal(0))
     line = _cash_line(str(total))
-    line["events"] = list(events)
+    line["events"] = [
+        {"event_date": "2025-01-01", "record_id": f"e{position}", **event}
+        for position, event in enumerate(events)
+    ]
     return line
 
 

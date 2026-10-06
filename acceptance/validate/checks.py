@@ -3213,24 +3213,76 @@ _CASH_EVENT_TOLERANCE = Decimal("0.000001")
 CASH_EVIDENCE_CHECK = "capital.derived_cash_evidence"
 
 
-def _native_event_problem(event: Mapping[str, Any]) -> str | None:
+def _event_key(event: Mapping[str, Any]) -> str:
+    """The identity an event is counted by: its record id, else its whole content."""
+
+    for name in ("record_id", "event_sha256"):
+        value = event.get(name)
+        if isinstance(value, str) and value:
+            return f"{name}:{value}"
+    return "content:" + json.dumps(event, sort_keys=True, default=str)
+
+
+RateTable = Mapping[tuple[str, str], frozenset[str]]
+
+
+def cash_rate_table(report: Mapping[str, Any]) -> RateTable:
+    """Every event-time rate the custody cash events state, by (currency, date).
+
+    The report carries no FX-rate table, only each event's own ``event_time_fx``; this is
+    the table those statements make together, so an event can be held to its siblings.
+    """
+
+    found: dict[tuple[str, str], set[str]] = {}
+    for strategy in rows(node(report, "custody_current_capital"), "strategies"):
+        for line in rows(strategy, "derived_cash"):
+            for event in rows(line, "events"):
+                fx = event.get("event_time_fx")
+                rate = to_decimal(fx.get("rate")) if isinstance(fx, Mapping) else None
+                if rate is None or not isinstance(fx, Mapping):
+                    continue
+                currency = str(event.get("native_currency") or fx.get("currency"))
+                day = str(fx.get("date") or event.get("event_date"))
+                found.setdefault((currency, day), set()).add(str(rate.normalize()))
+    return {key: frozenset(rates) for key, rates in found.items()}
+
+
+def _native_event_problem(
+    event: Mapping[str, Any], rates: RateTable | None = None
+) -> str | None:
     """An event's ``signed_usd`` must follow from its native amount and event-time rate.
 
     Only an event that states a native amount is checked: ``|signed_usd|`` equals the
-    native amount times the event-time rate (1 for native USD). A foreign native amount
-    without a rate cannot be reproduced.
+    native amount times the event-time rate. A native USD amount carries rate exactly 1; a
+    foreign native amount needs a positive rate, the same one every event of that currency
+    and date states (``rates``). ACCEPTED RESIDUAL: the report carries no FX-rate table, so
+    the absolute rate is not independently recomputed here; the oracle's
+    ``capital.strategy_cash.cutoff`` row is the independent check of the amount.
     """
 
     native = to_decimal(event.get("native_value"))
     signed = to_decimal(event.get("signed_usd"))
     if native is None or signed is None:
         return None
+    currency = event.get("native_currency")
     fx = event.get("event_time_fx")
     rate = to_decimal(fx.get("rate")) if isinstance(fx, Mapping) else None
-    if rate is None:
-        if event.get("native_currency") not in (None, "USD"):
-            return "a foreign native amount carries no event-time rate"
+    if currency in (None, "USD"):
+        if rate is not None and rate != 1:
+            return f"a native USD amount cannot carry the rate {rate}"
         rate = Decimal(1)
+    elif rate is None:
+        return "a foreign native amount carries no event-time rate"
+    elif rate <= 0:
+        return f"the event-time rate {rate} is not positive"
+    elif rates is not None and isinstance(fx, Mapping):
+        day = str(fx.get("date") or event.get("event_date"))
+        stated = rates.get((str(currency), day), frozenset())
+        if len(stated) > 1:
+            return (
+                f"{currency} carries {len(stated)} different event-time rates on {day} "
+                "across the custody cash events"
+            )
     if abs(abs(signed) - abs(native) * rate) > _CASH_EVENT_TOLERANCE:
         return (
             f"signed_usd {signed} is not the native amount {native} at the event-time "
@@ -3239,13 +3291,55 @@ def _native_event_problem(event: Mapping[str, Any]) -> str | None:
     return None
 
 
-def derived_cash_issues(line: Any) -> tuple[Decimal | None, list[str]]:
+def _balance_and_identity_problems(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Dated running balance and event identity of one line's flow events.
+
+    The custody contract forbids negative cash: the balance at the end of every event date
+    (events of one day are netted, so a same-day withdrawal listed before its deposit is
+    fine) must not be negative. An event with no canonical date cannot be ordered, and one
+    record counted twice is summed twice.
+    """
+
+    problems: list[str] = []
+    seen: set[str] = set()
+    by_day: dict[date, Decimal] = {}
+    undated = 0
+    for event in events:
+        key = _event_key(event)
+        if key in seen:
+            problems.append(f"the event {key} is counted twice in the line")
+        seen.add(key)
+        signed = to_decimal(event.get("signed_usd"))
+        day = _canonical_iso_day(event.get("event_date"))
+        if day is None:
+            undated += 1
+        elif signed is not None:
+            by_day[day] = by_day.get(day, Decimal(0)) + signed
+    if undated:
+        problems.append(
+            f"{undated} event(s) have no canonical event_date to order them by"
+        )
+    balance = Decimal(0)
+    for day in sorted(by_day):
+        balance += by_day[day]
+        if balance < -_CASH_EVENT_TOLERANCE:
+            problems.append(
+                f"the running balance is negative ({balance}) at the end of {day}"
+            )
+            break
+    return problems
+
+
+def derived_cash_issues(
+    line: Any, rates: RateTable | None = None
+) -> tuple[Decimal | None, list[str]]:
     """The amount of an AVAILABLE derived cash line and why it cannot be trusted.
 
     OWNER_318 and the custody contract: the line is derived (admitted deposits less
     withdrawals less sleeve allocations plus redemptions) in USD at event-date FX and a
-    negative line fails closed. So the line must be USD, not negative, carry the derived
-    basis, and reproduce from its own flow events (the sum of their ``signed_usd``); a
+    negative line fails closed. So the line must be USD, not negative at any dated point,
+    carry the derived basis, count each event once, and reproduce from its own flow events
+    (the sum of their ``signed_usd``, each following from its native amount and rate); a
     producer-supplied total is never evidence of itself. ``(None, [])`` is a line that is
     not AVAILABLE (not evidence, not a finding).
     """
@@ -3273,68 +3367,116 @@ def derived_cash_issues(line: Any) -> tuple[Decimal | None, list[str]]:
             problems.append(
                 f"the line's flow events sum to {total}, not the published {amount}"
             )
+        problems.extend(_balance_and_identity_problems(rows(line, "events")))
     for position, event in enumerate(rows(line, "events")):
-        problem = _native_event_problem(event)
+        problem = _native_event_problem(event, rates)
         if problem is not None:
             problems.append(f"event {position}: {problem}")
     return amount, problems
 
 
-def verified_cash_amount(line: Any) -> Decimal | None:
-    amount, problems = derived_cash_issues(line)
-    return amount if amount is not None and not problems else None
+@dataclass(frozen=True)
+class CashLine:
+    strategy_id: str
+    position: int
+    line_position: int
+    account_id: Any
+    amount: Decimal | None
+    problems: tuple[str, ...]
+    counted: bool
 
 
-def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
-    """The unallocated cash each strategy's custody row publishes (OWNER_318).
+def derived_cash_lines(ctx: Context) -> list[CashLine]:
+    """Every derived cash component with its verdict, repeats marked and not counted.
 
-    A strategy's capital is its sleeve account NAV plus this derived cash; only a line
-    that ``derived_cash_issues`` finds sound counts, so an unverified line cannot make a
-    total agree with itself.
+    A component repeats when its account id was already listed for the strategy or any of
+    its events was already counted in an earlier component anywhere in the custody block:
+    the repeat is a finding and its amount is not summed again.
     """
 
-    cash: dict[str, Decimal] = {}
-    for strategy in rows(node(ctx.report, "custody_current_capital"), "strategies"):
-        lines = strategy.get("derived_cash")
-        if not isinstance(lines, list):
-            continue
-        for line in lines:
-            amount = verified_cash_amount(line)
-            if amount is not None:
-                key = str(strategy.get("strategy_id"))
-                cash[key] = cash.get(key, Decimal(0)) + amount
-    return cash
-
-
-def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
-    """B13: every AVAILABLE derived cash line is USD, non-negative and reproducible."""
-
+    cached = ctx._cache.get("derived_cash_lines")
+    if isinstance(cached, list):
+        return cast(list[CashLine], cached)
+    rates = cash_rate_table(ctx.report)
+    seen_events: set[str] = set()
+    seen_accounts: set[tuple[str, str]] = set()
+    found: list[CashLine] = []
     custody = node(ctx.report, "custody_current_capital")
     for position, strategy in enumerate(rows(custody, "strategies")):
         lines = strategy.get("derived_cash")
         if not isinstance(lines, list):
             continue
+        strategy_id = str(strategy.get("strategy_id"))
         for line_position, line in enumerate(lines):
-            amount, problems = derived_cash_issues(line)
-            if not problems:
+            amount, problems = derived_cash_issues(line, rates)
+            if amount is None and not problems:
                 continue
-            yield _finding(
-                CASH_EVIDENCE_CHECK,
-                BLOCKER_INVARIANT,
-                f"cash:{strategy.get('strategy_id')}:{node(line, 'account_id')}",
-                amount,
-                {
-                    "currency": "USD",
-                    "non_negative": True,
-                    "basis": _CASH_BASIS,
-                    "events_reproduce_the_amount": True,
-                },
-                REPORT,
-                f"$.custody_current_capital.strategies[{position}]"
-                f".derived_cash[{line_position}]",
-                ("B13",),
-                "derived cash is not sound: " + "; ".join(problems),
+            keys = {_event_key(event) for event in rows(line, "events")}
+            account = (strategy_id, str(node(line, "account_id")))
+            repeated = bool(keys & seen_events) or account in seen_accounts
+            if repeated:
+                problems.append(
+                    "the component repeats an account or events already counted in "
+                    "the custody block (it would be summed twice)"
+                )
+            seen_events |= keys
+            seen_accounts.add(account)
+            found.append(
+                CashLine(
+                    strategy_id,
+                    position,
+                    line_position,
+                    node(line, "account_id"),
+                    amount,
+                    tuple(problems),
+                    counted=not problems,
+                )
             )
+    ctx._cache["derived_cash_lines"] = found
+    return found
+
+
+def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
+    """The unallocated cash each strategy's custody row publishes (OWNER_318).
+
+    A strategy's capital is its sleeve account NAV plus this derived cash; only a component
+    that ``derived_cash_lines`` finds sound counts, so an unverified or repeated line
+    cannot make a total agree with itself.
+    """
+
+    cash: dict[str, Decimal] = {}
+    for line in derived_cash_lines(ctx):
+        if line.counted and line.amount is not None:
+            cash[line.strategy_id] = (
+                cash.get(line.strategy_id, Decimal(0)) + line.amount
+            )
+    return cash
+
+
+def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
+    """B13: every AVAILABLE derived cash line is sound, and counted once."""
+
+    for line in derived_cash_lines(ctx):
+        if not line.problems:
+            continue
+        yield _finding(
+            CASH_EVIDENCE_CHECK,
+            BLOCKER_INVARIANT,
+            f"cash:{line.strategy_id}:{line.account_id}",
+            line.amount,
+            {
+                "currency": "USD",
+                "non_negative_dated_balance": True,
+                "basis": _CASH_BASIS,
+                "events_reproduce_the_amount": True,
+                "each_event_counted_once": True,
+            },
+            REPORT,
+            f"$.custody_current_capital.strategies[{line.position}]"
+            f".derived_cash[{line.line_position}]",
+            ("B13",),
+            "derived cash is not sound: " + "; ".join(line.problems),
+        )
 
 
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
@@ -7300,21 +7442,23 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
         for position, row in enumerate(
             rows(node(report, "custody_current_capital"), "strategies")
         ):
-            lines = row.get("derived_cash")
-            if row.get("strategy_id") != entity or not isinstance(lines, list):
+            if row.get("strategy_id") != entity:
                 continue
-            cash_total = Decimal(0)
-            counted = 0
-            for line in lines:
-                amount = verified_cash_amount(line)
-                if amount is not None:
-                    cash_total += amount
-                    counted += 1
+            counted = [
+                line
+                for line in derived_cash_lines(ctx)
+                if line.strategy_id == entity
+                and line.position == position
+                and line.counted
+                and line.amount is not None
+            ]
             if counted:
                 out.append(
                     Observed(
                         "report:custody_current_capital.strategies.derived_cash",
-                        cash_total,
+                        sum(
+                            (line.amount or Decimal(0) for line in counted), Decimal(0)
+                        ),
                         None,
                         None,
                         row.get("as_of_date"),
