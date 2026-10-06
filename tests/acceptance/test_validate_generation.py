@@ -359,12 +359,13 @@ def base_report() -> dict[str, Any]:
         ],
         "leverage_disclosures": [
             {
-                "account_id": "A1",
-                "strategy_id": "alpha",
+                "account_id": account,
+                "strategy_id": strategy,
                 "data_class": data_class,
                 "measurement_basis": basis,
                 "coverage_status": "AVAILABLE",
             }
+            for account, strategy in (("A1", "alpha"), ("B1", "beta"), ("B2", "beta"))
             for data_class, basis in (
                 ("LEVERAGE_EXPOSURE", "HOLDINGS_GROSS_MARKET_VALUE"),
                 ("FINANCING_COST", "FINANCING_COST"),

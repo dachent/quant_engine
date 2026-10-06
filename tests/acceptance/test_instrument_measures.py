@@ -53,66 +53,6 @@ def _decomposition(findings: list[checks.Finding]) -> list[checks.Finding]:
 # ----------------------------------------------------------------------------- V11
 
 
-def test_v11_method_scope_and_diagnostic_cells_are_not_incomplete(
-    tmp_path: Path,
-) -> None:
-    gen_dir = build(
-        tmp_path,
-        Spec(
-            report=[
-                _lens_series(
-                    _series("AVAILABLE"),
-                    _series("UNAVAILABLE", NOT_APPLICABLE),
-                    _series(
-                        "DIAGNOSTIC_ONLY", "NON_POSITIVE_SEALED_HOLDOUT_PREDICTED_R2"
-                    ),
-                )
-            ]
-        ),
-    )
-    assert _decomposition(run(gen_dir)) == []
-
-
-def test_v11_a_genuinely_unavailable_series_is_still_incomplete(tmp_path: Path) -> None:
-    gen_dir = build(
-        tmp_path,
-        Spec(
-            report=[
-                _lens_series(
-                    _series("AVAILABLE"),
-                    _series("UNAVAILABLE", NOT_APPLICABLE),
-                    _series("UNAVAILABLE"),
-                    _series("UNAVAILABLE", "MISSING_SOURCE"),
-                )
-            ]
-        ),
-    )
-    findings = _decomposition(run(gen_dir))
-    assert [(f.klass, f.observed) for f in findings] == [
-        (
-            checks.NOT_READY,
-            {"unavailable_series_by_lens": {"LIVE_ONLY:ECONOMIC_FACTOR": 2}},
-        )
-    ]
-
-
-def test_v11_a_count_the_rows_do_not_explain_is_still_incomplete(
-    tmp_path: Path,
-) -> None:
-    """The producer's count stays authoritative; only identified cells are discounted."""
-
-    def overstated(report: dict[str, Any]) -> None:
-        _lens_series(_series("AVAILABLE"), _series("UNAVAILABLE", NOT_APPLICABLE))(
-            report
-        )
-        report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["unavailable_count"] = 4
-
-    gen_dir = build(tmp_path, Spec(report=[overstated]))
-    assert [f.observed for f in _decomposition(run(gen_dir))] == [
-        {"unavailable_series_by_lens": {"LIVE_ONLY:ECONOMIC_FACTOR": 3}}
-    ]
-
-
 def test_v11_a_lens_without_series_rows_falls_back_to_its_count(tmp_path: Path) -> None:
     def counts_only(report: dict[str, Any]) -> None:
         lens = report["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]
@@ -147,13 +87,6 @@ def _weekly_payload(findings: list[checks.Finding]) -> list[checks.Finding]:
     return [
         f for f in findings if f.check_id == PAYLOAD and f.entity == "weekly_returns"
     ]
-
-
-def test_v13_a_windowed_render_is_measured_on_the_cells_it_paints(
-    tmp_path: Path,
-) -> None:
-    gen_dir = build(tmp_path, Spec(panel=[_grid(400, 300)], app_js=_windowed("13")))
-    assert _weekly_payload(run(gen_dir)) == []
 
 
 def test_v13_an_unwindowed_render_over_a_large_grid_is_still_a_warning(

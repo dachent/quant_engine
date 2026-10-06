@@ -6176,30 +6176,99 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
 # ------------------------------------------------------------- completeness (E*)
 
 
-def _incomplete_series_count(lens: Mapping[str, Any]) -> int:
-    """The lens's unavailable cells, less the ones that are not an incomplete lens.
+_DECOMPOSITION_PLAN = "docs/analytics/current-strategy-decomposition-plan.json"
+_NOT_APPLICABLE = "NOT_APPLICABLE_METHOD_SCOPE"
 
-    The producer's ``unavailable_count`` stays authoritative; only the cells the series
-    rows identify as ``NOT_APPLICABLE_METHOD_SCOPE`` (outside the owner-accepted strategy
-    to lens routing) or ``DIAGNOSTIC_ONLY`` (the model-quality gate working) are
-    discounted, so a count that exceeds what the rows explain still counts as incomplete.
+
+def decomposition_plan(ctx: Context) -> Mapping[str, Any] | None:
+    """The governed decomposition plan the repository carries, or ``None`` if unreadable.
+
+    It is the owner-accepted authority for which strategy needs which source and which
+    lens a source belongs to (ISSUE_328 routing); no report field stands in for it.
     """
 
-    count = int(lens.get("unavailable_count") or 0)
+    if "decomposition_plan" in ctx._cache:
+        cached = ctx._cache["decomposition_plan"]
+        return cached if isinstance(cached, Mapping) else None
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    plan: Any
+    try:
+        plan = json.loads((root / _DECOMPOSITION_PLAN).read_bytes())
+    except (OSError, ValueError):
+        plan = None
+    ctx._cache["decomposition_plan"] = plan if isinstance(plan, dict) else None
+    return plan if isinstance(plan, dict) else None
+
+
+def _plan_dispositions(ctx: Context) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The plan's per (series, source) disposition: requirement, readiness, reason."""
+
+    plan = decomposition_plan(ctx)
+    found: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for strategy in rows(plan, "strategies") if plan is not None else []:
+        dispositions = strategy.get("source_dispositions")
+        if not isinstance(dispositions, Mapping):
+            continue
+        for source_key, disposition in dispositions.items():
+            if isinstance(disposition, Mapping):
+                found[(str(strategy.get("series_id")), str(source_key))] = disposition
+    return found
+
+
+def _cell_is_explained(
+    cell: Mapping[str, Any],
+    dispositions: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> bool:
+    """Whether the governed plan confirms why a non-available cell is not a gap.
+
+    A ``NOT_APPLICABLE_METHOD_SCOPE`` cell is excused only when the plan routes that
+    (series, source) pair out of scope; a ``DIAGNOSTIC_ONLY`` cell (the model-quality
+    gate) only when the plan requires and readies that pair, so a REQUIRED cell can never
+    exempt itself with its own ``selection_status``.
+    """
+
+    disposition = dispositions.get(
+        (str(cell.get("series_id")), str(cell.get("source_key")))
+    )
+    if disposition is None:
+        return False
+    if cell.get("status") == "DIAGNOSTIC_ONLY":
+        return (
+            disposition.get("requirement") == "REQUIRED"
+            and disposition.get("readiness") == "READY_TO_MODEL"
+        )
+    return (
+        cell.get("selection_status") == _NOT_APPLICABLE
+        and disposition.get("requirement") == _NOT_APPLICABLE
+    )
+
+
+def _incomplete_series_count(
+    lens: Mapping[str, Any],
+    dispositions: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> int:
+    """The cells of a lens that are unavailable and not explained by the governed plan.
+
+    Recomputed from the series rows; the producer's ``unavailable_count`` is only
+    reconciled (a count larger than the unavailable rows shows is unexplained and counts
+    as incomplete). A lens without series rows is measured by its own counter.
+    """
+
+    declared = int(lens.get("unavailable_count") or 0)
     series = lens.get("series")
     if not isinstance(series, list):
-        return count
-    discounted = sum(
-        1
+        return declared
+    unavailable = [
+        row
         for row in series
-        if isinstance(row, Mapping)
-        and not is_available(row.get("status"))
-        and (
-            row.get("status") == "DIAGNOSTIC_ONLY"
-            or row.get("selection_status") == "NOT_APPLICABLE_METHOD_SCOPE"
-        )
-    )
-    return max(0, count - discounted)
+        if isinstance(row, Mapping) and not is_available(row.get("status"))
+    ]
+    gaps = sum(1 for row in unavailable if not _cell_is_explained(row, dispositions))
+    return gaps + max(0, declared - len(unavailable))
 
 
 def check_completeness(ctx: Context) -> Iterator[Finding]:
@@ -6253,13 +6322,14 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             "FX evidence gate not passed",
         )
     modes = node(ctx.report, "decomposition_lenses", "modes")
+    dispositions = _plan_dispositions(ctx)
     if isinstance(modes, Mapping):
         incomplete = {}
         for mode, lenses in sorted(modes.items()):
             for lens in lenses if isinstance(lenses, list) else []:
                 if not isinstance(lens, dict):
                     continue
-                count = _incomplete_series_count(lens)
+                count = _incomplete_series_count(lens, dispositions)
                 if count > 0:
                     incomplete[f"{mode}:{lens.get('lens_id')}"] = count
         if incomplete:
@@ -6316,52 +6386,70 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             "provider strategy returns empty",
         )
     # The contract (leverage_accounting, required_facts) requires gross exposure and
-    # financing cost to be disclosed; it names no ``leverage_ratio`` field. Read the
-    # disclosure rows by data class and coverage, not a key.
+    # financing cost to be disclosed for the levered accounts; it names no
+    # ``leverage_ratio`` field. Coverage is read per applicable account and measure: the
+    # active accounts of the crosswalk (the accounts named in the disclosures when there
+    # is no crosswalk), each needing a covered row of each measure. A missing row, an
+    # unavailable one and an observed-only one all leave that account uncovered.
     disclosures = rows(ctx.report, "leverage_disclosures")
     if disclosures:
-        exposure = [
-            row for row in disclosures if row.get("data_class") == "LEVERAGE_EXPOSURE"
-        ]
-        if not any(is_available(row.get("coverage_status")) for row in exposure):
-            yield _finding(
-                "completeness.required_outputs",
-                NOT_READY,
+        reference = universe(ctx)
+        applicable = sorted(
+            reference.active_accounts
+            if reference is not None
+            else {
+                str(row["account_id"])
+                for row in disclosures
+                if row.get("account_id") is not None
+            }
+        )
+        for measure, entity, basis in (
+            (
+                "LEVERAGE_EXPOSURE",
                 "leverage_disclosures.gross_exposure",
-                {
-                    "rows": len(disclosures),
-                    "leverage_exposure_rows": len(exposure),
-                    "leverage_exposure_rows_available": 0,
-                },
-                "a gross-exposure disclosure for the levered accounts",
-                REPORT,
-                "$.leverage_disclosures",
-                ("E8",),
-                "no gross leverage exposure row is covered (observed only or unavailable)",
-            )
-        financing = [
-            row for row in disclosures if row.get("data_class") == "FINANCING_COST"
-        ]
-        if not any(is_available(row.get("coverage_status")) for row in financing):
-            yield _finding(
-                "completeness.required_outputs",
-                NOT_READY,
+                "a gross-exposure disclosure for each levered account",
+            ),
+            (
+                "FINANCING_COST",
                 "leverage_disclosures.financing_cost",
-                {
-                    "financing_cost_rows": len(financing),
-                    "financing_cost_rows_available": 0,
-                    "unavailable_financing_cost_rows": sum(
-                        1
-                        for row in financing
-                        if row.get("coverage_status") == "UNAVAILABLE"
-                    ),
-                },
-                "a reconciled financing cost basis",
-                REPORT,
-                "$.leverage_disclosures",
-                ("E8",),
-                "financing cost is not reconciled (observed only or unavailable)",
-            )
+                "a reconciled financing cost basis for each levered account",
+            ),
+        ):
+            measured = [row for row in disclosures if row.get("data_class") == measure]
+            state: dict[str, str] = {}
+            for account in applicable:
+                statuses = [
+                    str(row.get("coverage_status"))
+                    for row in measured
+                    if str(row.get("account_id")) == account
+                ]
+                if not any(is_available(status) for status in statuses):
+                    state[account] = (
+                        "NO_ROW" if not statuses else "|".join(sorted(set(statuses)))
+                    )
+            if applicable:
+                gap = bool(state)
+            else:
+                gap = not any(
+                    is_available(row.get("coverage_status")) for row in measured
+                )
+            if gap:
+                yield _finding(
+                    "completeness.required_outputs",
+                    NOT_READY,
+                    entity,
+                    {
+                        "rows": len(measured),
+                        "applicable_accounts": len(applicable),
+                        "uncovered_accounts": state,
+                    },
+                    basis,
+                    REPORT,
+                    "$.leverage_disclosures",
+                    ("E8",),
+                    f"{measure.lower().replace('_', ' ')} is not covered for every "
+                    "levered account (missing, observed only or unavailable)",
+                )
 
 
 # -------------------------------------------------------------------- code checks
@@ -6855,13 +6943,12 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
         else 0
     )
     # The cells painted are the default window's weeks times the series, not the whole
-    # grid: the renderer pages a bounded window. An unwindowed render (no recognisable
-    # default window, or ``full``) is measured on the whole payload.
-    window = re.search(
-        r"""\bselectedWeeklyWindow\s*=\s*["'](\d+)["']""", ctx.gen.app_js or ""
-    )
+    # grid, when the renderer really slices to that window: ``shell.weekly_window_bound``
+    # checks the declaration, the slicing function and its use (a structural heuristic,
+    # not an execution of the renderer). Without it the whole payload is measured.
+    window = shell.weekly_window_bound(ctx.gen.app_js or "")
     cells = (
-        min(int(window.group(1)), len(weeks)) * len(series)
+        min(window, len(weeks)) * len(series)
         if window is not None and isinstance(weeks, list) and isinstance(series, list)
         else payload_cells
     )

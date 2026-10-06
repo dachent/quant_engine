@@ -294,13 +294,76 @@ class EagerDereference:
 _PATH_SEGMENT = r"[A-Za-z_$][\w$]*"
 
 
-def _keyed_lookup_guards(masked: str, position: int, escaped_name: str) -> bool:
+def _object_literal_keys(text: str) -> list[str] | None:
+    """Top-level keys of the object literal that starts at the first ``{`` of ``text``."""
+
+    start = text.find("{")
+    if start < 0:
+        return None
+    key = re.compile(r"""\s*(?:(["'])(.*?)\1|([A-Za-z_$][\w$]*))\s*:""")
+    depth = 0
+    keys: list[str] = []
+    expect_key = False
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char in "{[(":
+            depth += 1
+            expect_key = char == "{" and depth == 1
+        elif char in "}])":
+            depth -= 1
+            if depth == 0:
+                return keys
+        elif depth == 1 and char == ",":
+            expect_key = True
+        elif depth == 1 and expect_key and not char.isspace():
+            matched = key.match(text, index)
+            expect_key = False
+            if matched is not None:
+                keys.append(
+                    matched.group(2)
+                    if matched.group(2) is not None
+                    else matched.group(3)
+                )
+                index = matched.end()
+                continue
+        index += 1
+    return None
+
+
+def _lookup_table_is_safe(js: str, table: str) -> bool:
+    """Whether ``table[undefined]`` is falsy because of how the table is defined.
+
+    The table must be defined as ``payload?.path || { ... }`` or as a plain object
+    literal, with a literal that has no key ``undefined`` or ``null``: a literal that has
+    one makes the lookup of a missing payload truthy, and a table read straight from the
+    payload (no literal fallback) is not a table at all with no payload.
+    """
+
+    definition = re.search(
+        rf"\b(?:const|let|var)\s+{re.escape(table)}\s*=\s*([^;]*);", js, re.DOTALL
+    )
+    if definition is None:
+        return False
+    body = definition.group(1)
+    keys = _object_literal_keys(body)
+    if keys is None:
+        return False
+    head = body[: body.find("{")].strip()
+    if head and not head.endswith("||"):
+        return False
+    return not {"undefined", "null"} & set(keys)
+
+
+def _keyed_lookup_guards(
+    js: str, masked: str, position: int, escaped_name: str
+) -> bool:
     """``table[name?.a?.b] ? name.a.b : fallback``: the true branch reads what it keyed.
 
-    With no payload the key is ``undefined``, the lookup finds nothing in the table (the
-    table is a plain object literal or the payload's own optional-chained map) and the
-    branch that dereferences the payload is never evaluated. The branch must read
-    exactly the path the condition keyed by, immediately after the ternary ``?``.
+    With no payload the key is ``undefined``; the lookup is falsy only when the table
+    cannot hold an ``undefined`` key (``_lookup_table_is_safe``), and then the branch that
+    dereferences the payload is never evaluated. The branch must read exactly the path the
+    condition keyed by, immediately after the ternary ``?``.
     """
 
     chain = re.compile(
@@ -310,12 +373,14 @@ def _keyed_lookup_guards(masked: str, position: int, escaped_name: str) -> bool:
         return False
     read = re.findall(_PATH_SEGMENT, chain.group(1))
     condition = re.search(
-        rf"\[\s*{escaped_name}\s*\?\.\s*"
+        rf"({_PATH_SEGMENT})\s*\[\s*{escaped_name}\s*\?\.\s*"
         rf"({_PATH_SEGMENT}(?:\s*\??\.\s*{_PATH_SEGMENT})*)\s*\]\s*\?\s*$",
         masked[:position],
     )
     return (
-        condition is not None and re.findall(_PATH_SEGMENT, condition.group(1)) == read
+        condition is not None
+        and re.findall(_PATH_SEGMENT, condition.group(2)) == read
+        and _lookup_table_is_safe(js, condition.group(1))
     )
 
 
@@ -356,7 +421,7 @@ def payload_dereferences_before_guard(
                 continue
             if inside(match.start(), deferred):
                 continue
-            if _keyed_lookup_guards(masked, match.start(), escaped):
+            if _keyed_lookup_guards(js, masked, match.start(), escaped):
                 continue
             if any(guard < match.start() for guard in eager_guards):
                 break
@@ -748,3 +813,36 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
                 add(index, "template-expression-literal", literal.group(2))
     unique = {(item.line, item.context, item.literal): item for item in results}
     return [unique[key] for key in sorted(unique)]
+
+
+# ------------------------------------------------------- weekly render window (F4)
+
+
+def weekly_window_bound(js: str) -> int | None:
+    """The default weekly window (weeks) the renderer really slices to, or ``None``.
+
+    A heuristic over the structure, not an execution of the renderer: the bound counts
+    only when the code (a comment or a string does not) declares the numeric default
+    ``selectedWeeklyWindow``, ``weeklyVisibleWeeks`` slices by that variable, and the
+    function is called. A declaration left behind after the slicing is removed, or never
+    used, gives no bound.
+    """
+
+    masked = mask(js)
+    declaration = re.search(r"""\bselectedWeeklyWindow\s*=\s*["'](\d+)["']""", js)
+    if declaration is None or masked[declaration.start()] == " ":
+        return None
+    visible = next(
+        (item for item in functions(js, masked) if item.name == "weeklyVisibleWeeks"),
+        None,
+    )
+    if visible is None:
+        return None
+    body = masked[visible.body_start : visible.body_end + 1]
+    if not (re.search(r"\.\s*slice\s*\(", body) and "selectedWeeklyWindow" in body):
+        return None
+    used = any(
+        not masked[max(0, call.start() - 9) : call.start()].strip().endswith("function")
+        for call in re.finditer(r"\bweeklyVisibleWeeks\s*\(", masked)
+    )
+    return int(declaration.group(1)) if used else None

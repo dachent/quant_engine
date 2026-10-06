@@ -62,3 +62,53 @@ def test_v8_the_keyed_branch_does_not_excuse_a_later_eager_dereference() -> None
     )
     findings = payload_dereferences_before_guard(js, GLOBALS)
     assert [f.line for f in findings] == [8]
+
+
+def _table(definition: str) -> str:
+    return (
+        "\nconst data = window.PORTFOLIO_DATA;\n"
+        f"{definition}\n"
+        'const selected = modes[data?.mode] ? data.mode : "LIVE_ONLY";\n'
+    )
+
+
+def test_r2_a_table_with_an_undefined_key_does_not_guard() -> None:
+    """Astra 1: a missing payload takes the true branch and throws."""
+
+    for definition in (
+        "const modes = { undefined: true };",
+        'const modes = data?.modes || { "undefined": true, LIVE_ONLY: 1 };',
+        "const modes = data?.modes || { null: true };",
+    ):
+        findings = payload_dereferences_before_guard(_table(definition), GLOBALS)
+        assert [f.binding for f in findings] == ["data"], definition
+
+
+def test_r2_a_table_that_is_not_a_literal_fallback_does_not_guard() -> None:
+    for definition in (
+        "const modes = data?.modes;",
+        "const modes = makeModes(data);",
+        "const modes = data?.modes && { LIVE_ONLY: 1 };",
+    ):
+        findings = payload_dereferences_before_guard(_table(definition), GLOBALS)
+        assert [f.binding for f in findings] == ["data"], definition
+
+
+def test_r2_an_undefined_table_does_not_guard() -> None:
+    js = "\nconst data = window.PORTFOLIO_DATA;\n" + (
+        'const selected = modes[data?.mode] ? data.mode : "LIVE_ONLY";\n'
+    )
+    assert [f.binding for f in payload_dereferences_before_guard(js, GLOBALS)] == [
+        "data"
+    ]
+
+
+def test_r2_the_producer_shaped_tables_still_guard() -> None:
+    for definition in (
+        "const modes = data?.modes || { LIVE_ONLY: [] };",
+        "const modes = data?.modes || { LIVE_ONLY: data?.rows, OTHER: [1, 2] };",
+        "const modes = { LIVE_ONLY: 1 };",
+    ):
+        assert payload_dereferences_before_guard(_table(definition), GLOBALS) == [], (
+            definition
+        )
