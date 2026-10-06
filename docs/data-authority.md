@@ -59,16 +59,20 @@ in-place edit.
 evaluation date, acquisition timestamp, original/revised state, human-readable
 reason, escalation flag, and whether current consumers must block. Local alert
 hooks return deterministic warning/error records without sending an external
-notification. The legacy version-2 freshness bundle is governed by the closed
-`schemas/core/freshness-assessment.schema.json` and embeds the complete policy
-with the operational publication date. The current panel freshness bundle is
-version 4 (the panel reader still accepts 3) and includes provider-ledger
-identity; the artifact is dated at the data cutoff and carries `evaluated_on`,
-the date the run assessed it. No matching governed JSON schema exists for it;
-it is instead structurally validated with closed keys, types, dates, hashes, sizes, and the selected current provider-ledger catalog
+notification. The current freshness bundle is version 4, dated at the data
+cutoff with the operational date carried as `evaluated_on`; it is governed by
+the closed `schemas/core/freshness-assessment.schema.json`, which a test
+validates the producer output against so the two cannot drift. It includes the
+provider-ledger identity and is also structurally validated with closed keys,
+types, dates, hashes, sizes, and the selected current provider-ledger catalog
 and manifest before its rows appear in the Data view. Both the panel build and
 coordinated publication recompute the assessment rather than trusting stored
-state labels.
+state labels. `last_accepted_date` always names a day on or before the cutoff
+on which an observation is proven: a declared capture interval that starts on or
+before the cutoff and ends after it is accepted through the cutoff, and a source
+that starts after the cutoff, or a strategy lane known only by its first and
+last row dates and ending after the cutoff, has no accepted date and is
+`UNAVAILABLE`.
 
 ## Failure and recovery
 

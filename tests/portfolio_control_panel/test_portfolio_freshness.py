@@ -38,6 +38,8 @@ def _provider_ledger(
     portfolio123_end: str = "2026-07-31",
     ledger_as_of: str = "2026-07-31",
     ibkr_end: str = "2026-07-31",
+    ibkr_start: str = "2026-07-31",
+    extra_strategy_evidence: list[dict[str, object]] | None = None,
 ) -> str:
     catalog = {
         "as_of_date": ledger_as_of,
@@ -46,7 +48,7 @@ def _provider_ledger(
                 "coverage": {
                     "fact_types": ["nav", "positions", "transactions", "cash_flows"],
                     "observed_end": ibkr_end,
-                    "observed_start": "2026-07-31",
+                    "observed_start": ibkr_start,
                     "status": "PARTIAL",
                 },
                 "generation_as_of_date": "2026-07-31",
@@ -139,6 +141,7 @@ def _provider_ledger(
                 "provider_id": "matrixport",
                 "strategy_id": "late-one",
             },
+            *(extra_strategy_evidence or []),
         ],
     }
     source = root.parent / "provider-ledger.json"
@@ -422,6 +425,157 @@ def test_an_observation_after_the_cutoff_is_labelled_at_the_cutoff(
     assert capture["last_accepted_date"] == "2026-07-31"
     assert capture["evaluated_on"] == "2026-07-31"
     assert capture["state"] == "FRESH"
+
+
+def _ibkr_balances(result: dict[str, object]) -> dict[str, object]:
+    return next(
+        row
+        for row in result["assessments"]  # type: ignore[attr-defined]
+        if row["subject_id"] == "ibkr"
+        and row["lane"] == "PROVIDER_CAPTURE"
+        and row["fact_type"] == "balances"
+    )
+
+
+def test_a_capture_that_starts_after_the_cutoff_proves_nothing_at_it(
+    tmp_path: Path,
+) -> None:
+    """Ruling item 4: no observation on or before the cutoff means no accepted date."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root, ibkr_start="2026-08-02", ibkr_end="2026-08-02"
+    )
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    capture = _ibkr_balances(result)
+    assert capture["last_accepted_date"] is None
+    assert capture["state"] == "UNAVAILABLE"
+    assert capture["required_for_current"] is True
+    assert capture["blocks_current_consumers"] is True
+    assert capture["escalation_required"] is True
+
+
+def test_a_capture_that_straddles_the_cutoff_is_accepted_through_it(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root, ibkr_start="2026-07-30", ibkr_end="2026-08-02"
+    )
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    capture = _ibkr_balances(result)
+    assert capture["last_accepted_date"] == "2026-07-31"
+    assert capture["state"] == "FRESH"
+    assert capture["blocks_current_consumers"] is False
+
+
+def test_a_capture_without_a_start_is_not_accepted_past_the_cutoff() -> None:
+    assessed = freshness._assessment(
+        policy=freshness._policies()["daily-weekday-session"],
+        observed_end=date(2026, 8, 2),
+        observed_start=None,
+        declared_interval=True,
+        as_of=date(2026, 7, 31),
+        provider_id="ibkr",
+        subject_id="ibkr",
+        subject_type="DATASET",
+        fact_type="balances",
+        lane="PROVIDER_CAPTURE",
+        coverage_status="PARTIAL",
+        required_for_current=True,
+    )
+
+    assert assessed["last_accepted_date"] is None
+    assert assessed["state"] == "UNAVAILABLE"
+
+
+def test_a_strategy_lane_ending_after_the_cutoff_proves_nothing_at_it(
+    tmp_path: Path,
+) -> None:
+    """A row-derived lane (first and last row only) cannot prove the cutoff day."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root,
+        extra_strategy_evidence=[
+            {
+                "account": {
+                    "observed_end": "2026-08-05",
+                    "observed_start": "2026-07-01",
+                    "provider_id": "ibkr",
+                },
+                "provider_id": "ibkr",
+                "strategy_id": "future-rows",
+            }
+        ],
+    )
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    lane = next(
+        row
+        for row in result["assessments"]
+        if row["subject_id"] == "future-rows" and row["lane"] == "ACCOUNT"
+    )
+    assert lane["last_accepted_date"] is None
+    assert lane["state"] == "UNAVAILABLE"
+    assert lane["required_for_current"] is True
+    assert lane["blocks_current_consumers"] is True
+
+
+def test_a_strategy_lane_ending_on_the_cutoff_is_still_fresh(tmp_path: Path) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root,
+        extra_strategy_evidence=[
+            {
+                "account": {"observed_end": "2026-07-31", "provider_id": "ibkr"},
+                "provider_id": "ibkr",
+                "strategy_id": "on-cutoff",
+            }
+        ],
+    )
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    lane = next(
+        row
+        for row in result["assessments"]
+        if row["subject_id"] == "on-cutoff" and row["lane"] == "ACCOUNT"
+    )
+    assert lane["last_accepted_date"] == "2026-07-31"
+    assert lane["state"] == "FRESH"
+
+
+def test_the_freshness_schema_governs_what_the_producer_emits(tmp_path: Path) -> None:
+    """The governed schema and the producer must not drift apart again."""
+
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "core" / "freshness-assessment.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    jsonschema.Draft202012Validator.check_schema(schema)
+    jsonschema.Draft202012Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(result)
+    assert schema["properties"]["assessment_schema_version"] == {
+        "const": freshness.ASSESSMENT_SCHEMA_VERSION
+    }
+    # A payload missing a field the producer always emits must not validate.
+    broken = {key: value for key, value in result.items() if key != "evaluated_on"}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(broken)
 
 
 def test_freshness_refuses_an_evaluation_before_the_data_cutoff(

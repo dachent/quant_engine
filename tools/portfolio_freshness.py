@@ -156,11 +156,23 @@ def _assessment(
     lane: str,
     coverage_status: str,
     required_for_current: bool,
+    observed_start: date | None = None,
+    declared_interval: bool = False,
 ) -> dict[str, object]:
-    # Judged as of the data cutoff: an observation published after it is accepted
-    # through the cutoff, never labelled with a date later than the evaluation.
+    # Judged as of the data cutoff, and ``last_accepted_date`` names a day on which an
+    # observation is proven.  A declared contiguous interval that starts on or before
+    # the cutoff and ends after it covers the cutoff.  Anything else that ends after
+    # the cutoff (an interval starting after it, an undated start, or a lane summarised
+    # by its first and last row only) proves nothing at the cutoff and is unavailable.
     if observed_end is not None and observed_end > as_of:
-        observed_end = as_of
+        if (
+            declared_interval
+            and observed_start is not None
+            and observed_start <= as_of
+        ):
+            observed_end = as_of
+        else:
+            observed_end = None
     assessed = policy.assess(observed_end, as_of).to_dict()
     if not required_for_current:
         assessed = {
@@ -269,6 +281,14 @@ def build_health(
                 _text(observed_end, f"{provider_id}.coverage.observed_end")
             )
         )
+        observed_start_raw = coverage.get("observed_start")
+        observed_start = (
+            None
+            if observed_start_raw is None
+            else date.fromisoformat(
+                _text(observed_start_raw, f"{provider_id}.coverage.observed_start")
+            )
+        )
         policy = _provider_policy(provider_id, policies)
         for fact_type in _CANONICAL_FACTS:
             supported = _supports_fact(declared_raw, fact_type)
@@ -276,6 +296,8 @@ def build_health(
                 _assessment(
                     policy=policy,
                     observed_end=observed_day if supported else None,
+                    observed_start=observed_start,
+                    declared_interval=True,
                     as_of=as_of,
                     provider_id=provider_id,
                     subject_id=provider_id,
