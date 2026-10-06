@@ -291,6 +291,32 @@ class EagerDereference:
     guard_line: int | None
 
 
+_PATH_SEGMENT = r"[A-Za-z_$][\w$]*"
+
+
+def _keyed_lookup_guards(masked: str, position: int, escaped_name: str) -> bool:
+    """``table[name?.a?.b] ? name.a.b : fallback``: the true branch reads what it keyed.
+
+    With no payload the key is ``undefined``, the lookup finds nothing in the table (the
+    table is a plain object literal or the payload's own optional-chained map) and the
+    branch that dereferences the payload is never evaluated. The branch must read
+    exactly the path the condition keyed by, immediately after the ternary ``?``.
+    """
+
+    chain = re.compile(
+        rf"{escaped_name}((?:\s*\.\s*{_PATH_SEGMENT})+)", re.ASCII
+    ).match(masked, position)
+    if chain is None:
+        return False
+    read = re.findall(_PATH_SEGMENT, chain.group(1))
+    condition = re.search(
+        rf"\[\s*{escaped_name}\s*\?\.\s*"
+        rf"({_PATH_SEGMENT}(?:\s*\??\.\s*{_PATH_SEGMENT})*)\s*\]\s*\?\s*$",
+        masked[:position],
+    )
+    return condition is not None and re.findall(_PATH_SEGMENT, condition.group(1)) == read
+
+
 def payload_dereferences_before_guard(
     js: str, payload_globals: set[str]
 ) -> list[EagerDereference]:
@@ -327,6 +353,8 @@ def payload_dereferences_before_guard(
             if masked[match.end() : match.end() + 1] == "?":
                 continue
             if inside(match.start(), deferred):
+                continue
+            if _keyed_lookup_guards(masked, match.start(), escaped):
                 continue
             if any(guard < match.start() for guard in eager_guards):
                 break

@@ -4028,6 +4028,9 @@ def check_epoch_hpr_receipts(ctx: Context) -> Iterator[Finding]:
     yield from _epoch_receipt_index(ctx)[1]
 
 
+RETAINED_ACCOUNT_SOURCE = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
+
+
 def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
     """B3: the account return inside a benchmark comparison equals the live series."""
 
@@ -4051,6 +4054,10 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
         computed, count = compound_window(ctx, strategy, start, end)
         pointer = f"$.strategy_attribution.benchmark_comparisons[{position}].metrics"
         if shown is None:
+            continue
+        if count == 0 and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE:
+            # A retained strategy's comparison discloses a reference-only account
+            # series (ruling S1 of N8): it has no live series by design.
             continue
         if count == 0:
             yield _finding(
@@ -5595,6 +5602,83 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
     return False
 
 
+# Provider publication lag (V10). A public factor provider that publishes monthly with a
+# fixed lag has no observation past its last eligible month, so a lens built only on its
+# sources ends there at any later cutoff. The lag is the policy's, the sources are the
+# governed decomposition plan's: the report's own lens row is never taken at its word.
+_PUBLICATION_LAG_DAYS = {"KENNETH_FRENCH_MONTHLY_DAILY_45D_V1": 45}
+_DECOMPOSITION_PLAN = "docs/analytics/current-strategy-decomposition-plan.json"
+
+
+def _lagged_sources(ctx: Context) -> dict[str, int]:
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    try:
+        plan = json.loads((root / _DECOMPOSITION_PLAN).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    sources = plan.get("sources") if isinstance(plan, dict) else None
+    if not isinstance(sources, dict):
+        return {}
+    return {
+        str(key): _PUBLICATION_LAG_DAYS[config["freshness_policy_id"]]
+        for key, config in sources.items()
+        if isinstance(config, dict)
+        and config.get("freshness_policy_id") in _PUBLICATION_LAG_DAYS
+    }
+
+
+def _last_eligible_month_end(cutoff: date, lag_days: int) -> date:
+    month_end = cutoff.replace(day=1) - timedelta(days=1)
+    while month_end + timedelta(days=lag_days) > cutoff:
+        month_end = month_end.replace(day=1) - timedelta(days=1)
+    return month_end
+
+
+def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
+    """Why a lens may end before the cutoff because its providers publish late.
+
+    ``entity`` is ``decomposition:{lens_id}:{mode}``. Every source the lens row names
+    must be a lagged source of the governed plan and the lens must end in the last
+    month that is publishable at the cutoff (its final observation can fall up to four
+    days before that month end). ``None`` leaves the finding unchanged.
+    """
+
+    lagged = _lagged_sources(ctx)
+    lens_id, _, mode = entity.removeprefix("decomposition:").partition(":")
+    modes = node(ctx.report, "decomposition_lenses", "modes")
+    candidates = list(rows(node(ctx.report, "decomposition_lenses"), "lenses"))
+    if isinstance(modes, Mapping):
+        for mode_name, mode_rows in modes.items():
+            if mode in ("", str(mode_name)) and isinstance(mode_rows, list):
+                candidates += [row for row in mode_rows if isinstance(row, dict)]
+    keys: set[str] = set()
+    for row in candidates:
+        if row.get("lens_id") != lens_id or to_date(row.get("as_of_date")) != day:
+            continue
+        keys |= {
+            str(source.get("source_key"))
+            for source in rows(row, "sources")
+            if source.get("source_key") is not None
+        }
+    if not keys or not keys <= set(lagged):
+        return None
+    lag = max(lagged[key] for key in keys)
+    eligible = _last_eligible_month_end(ctx.cutoff, lag)
+    if (day.year, day.month) != (eligible.year, eligible.month) or (
+        eligible - day
+    ).days > 4:
+        return None
+    return (
+        f"lens ends {day} because its providers ({', '.join(sorted(keys))}) publish "
+        f"monthly with a {lag} day publication lag: the last eligible month at the "
+        f"cutoff is {eligible:%Y-%m} (governed decomposition plan freshness policy)"
+    )
+
+
 def check_section_dates(ctx: Context) -> Iterator[Finding]:
     """C2-C5: a section's as-of must be the cutoff, or be labelled as not current."""
 
@@ -5670,9 +5754,20 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
             and entity.startswith("decomposition:")
             else None
         )
+        lag = (
+            provider_lag_bound(ctx, entity, day)
+            if bound is None
+            and not after
+            and is_available(status)
+            and entity.startswith("decomposition:")
+            else None
+        )
         if bound is not None:
             klass = NOT_READY
             message = _bound_message(bound, "section")
+        elif lag is not None:
+            klass = NOT_READY
+            message = lag
         elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
