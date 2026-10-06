@@ -10,6 +10,7 @@ it; otherwise it is a blocker and never passes silently.
 from __future__ import annotations
 
 import copy
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,67 @@ def test_rule_4_a_disclosed_value_basis_bound_downgrades_to_not_ready(
         ("current_capital:systematic", checks.NOT_READY),
     ]
     assert all("value basis" in f.message for f in findings)
+
+
+def test_rule_4_the_native_producers_own_disclosure_downgrades_to_not_ready(
+    tmp_path: Path,
+) -> None:
+    """Seam: the report tool's real ``value_basis_bounds`` block, not a handwritten one.
+
+    The block is built by ``_value_basis_bounds_disclosure`` over the report the
+    validator then reads; with no handwritten ``bounded_sections`` the member-less
+    cash line, the strategy row and the Systematic total are NOT_READY, never
+    BLOCKER_AUTHORITY.
+    """
+
+    from quant_engine.portfolio_ledger.value_basis_bounds import (
+        StrategyValueBound,
+        ValueBasisBounds,
+    )
+    from test_validate_alignment import _load_report_tool
+
+    prototype = _bound_strategy("beta")
+    day = date.fromisoformat(prototype["effective_end"])
+    unconverted = prototype["unconverted_native_observations"]
+    bounds = ValueBasisBounds(
+        calculation_cutoff=date.fromisoformat(CUTOFF),
+        strategies={
+            "beta": StrategyValueBound(
+                strategy_id="beta",
+                effective_end=day,
+                bound_kind=prototype["bound_kind"],
+                provider_ids=tuple(prototype["provider_ids"]),
+                account_ids=tuple(prototype["account_ids"]),
+                fx_source_id=prototype["fx_source_id"],
+                fx_generation_id=prototype["fx_generation_id"],
+                fx_observed_end=date.fromisoformat(prototype["fx_observed_end"]),
+                unconverted_count=unconverted["count"],
+                first_unconverted=date.fromisoformat(unconverted["first_date"]),
+                last_unconverted=date.fromisoformat(unconverted["last_date"]),
+            )
+        },
+    )
+    world: dict[str, Any] = {}
+    _bound_world(BOUND_DAY)(world)
+    block = _load_report_tool()._value_basis_bounds_disclosure(
+        bounds,
+        world,
+        required_strategy_ids={"beta"},
+        history_end=None,
+        hwm_end=None,
+    )
+    assert block is not None
+    findings = _findings(
+        tmp_path,
+        _bound_world(BOUND_DAY),
+        expected=[_strategy_cutoff("beta")],
+        block=block,
+    )
+    assert _view(findings) == [
+        ("current_capital:beta", checks.NOT_READY),
+        ("current_capital:beta:cash:CASH1", checks.NOT_READY),
+        ("current_capital:systematic", checks.NOT_READY),
+    ]
 
 
 def test_rule_4_an_undisclosed_pre_cutoff_date_blocks(tmp_path: Path) -> None:
