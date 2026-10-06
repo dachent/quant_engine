@@ -1424,7 +1424,7 @@
         "mwr_terminal_date": {"type": ["string", "null"], "format": "date"},
         "mwr_terminal_value": {"type": ["string", "null"]},
         "mwr_currency": {"type": ["string", "null"], "pattern": "^[A-Z]{3}$"},
-        "mwr_coverage_status": {"enum": ["COMPLETE", "BLOCKED", null]},
+        "mwr_coverage_status": {"enum": ["COMPLETE", "BLOCKED", "NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", null]},
         "mwr_cashflows": {
           "type": "array",
           "items": {

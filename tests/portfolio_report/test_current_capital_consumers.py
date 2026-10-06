@@ -249,6 +249,48 @@ def _strategy_rows(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(row["strategy_id"]): row for row in rows}
 
 
+def test_strategy_summary_publishes_the_pooled_funded_epoch_mwr() -> None:
+    """N29: two funded accounts plus a blocked predecessor give one strategy MWR."""
+
+    def epoch(account_id: str, admission: str, flows: list[tuple[str, str]]) -> Any:
+        return {
+            "account_id": account_id,
+            "strategy_id": "s-alpha",
+            "epoch_admission_status": admission,
+            "mwr_status": "AVAILABLE" if flows else "BLOCKED_ADMISSION",
+            "mwr_cashflows": [
+                {"date": day, "amount": amount, "source_record_ids": ["x"]}
+                for day, amount in flows
+            ],
+        }
+
+    performance = [
+        epoch("acct-a1", "FUNDED", [("2026-01-01", "-100"), ("2026-01-06", "110")]),
+        epoch("acct-a2", "FUNDED", [("2026-01-01", "-40"), ("2026-01-06", "44")]),
+        epoch("acct-old", "BLOCKED", []),
+    ]
+
+    rows = {
+        str(row["strategy_id"]): row
+        for row in reporter._strategies(
+            _world(),
+            performance,
+            strategy_product_controls=_controls(),
+            strategy_provider_evidence=[],
+        )
+    }
+
+    alpha = rows["s-alpha"]
+    assert alpha["mwr_status"] == "AVAILABLE"
+    assert alpha["mwr_member_account_ids"] == ["acct-a1", "acct-a2"]
+    assert alpha["mwr_opening_date"] == "2026-01-01"
+    assert alpha["mwr_terminal_date"] == "2026-01-06"
+    assert Decimal(alpha["mwr_xirr"]) > 0
+    # A strategy with no performance rows publishes an honest status, not a gap.
+    assert rows["s-beta"]["mwr_status"] == "UNAVAILABLE_NO_FUNDED_EPOCH_MWR"
+    assert rows["s-beta"]["mwr_xirr"] is None
+
+
 # ---- B4: strategy values and weights are the current capital ------------------
 
 

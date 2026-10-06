@@ -6168,6 +6168,125 @@ def test_report_projects_hash_bound_leverage_disclosures_to_report(
         reporter.build_report_data(baseline_root, provider_ledger_root=provider_root)
 
 
+def _coverage_detail(account_id: str, fact_type: str) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "admission_effective_end": None,
+        "admission_effective_start": None,
+        "authority": "LEGACY_ACCEPTED_FACTS",
+        "boundary_basis": "OBSERVED_RECORDS_ONLY",
+        "cadence": "EVENT_STREAM",
+        "declared_end": None,
+        "declared_start": None,
+        "disposition": "RETAINED_ACCEPTED_REPORTED_FACTS_ONLY",
+        "fact_type": fact_type,
+        "missing_interval_end": None,
+        "missing_interval_reason": "synthetic",
+        "missing_interval_start": None,
+        "missing_intervals": [],
+        "observed_end": "2026-01-03",
+        "observed_start": "2026-01-01",
+        "provider_id": "SYNTHETIC",
+        "record_count": 1,
+        "status": "OBSERVED_NOT_COMPLETENESS_PROOF",
+        "unavailable_amount_count": 0,
+    }
+
+
+def test_report_labels_non_product_coverage_and_leverage_rows_with_their_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: a reserve component and a history-only account are never unlabelled.
+
+    `account-b` is the current product account, `reserve` the custody reserve
+    component, `account-stray` has no current assignment and is not a reserve
+    component (the real 2d0a shape: history only, last NAV zero).
+    """
+
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        _bind_synthetic_product_contract(tmp_path / "report-contract"),
+    )
+    provider_generation = "a" * 64
+
+    def financing(account_id: str, index: int) -> dict[str, Any]:
+        return {
+            "account_id": account_id,
+            "accounting_date": "2026-01-03",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+            "classification": "BROKER_DEBIT_INTEREST",
+            "generation_id": "b" * 64,
+            "included_in_nav": None,
+            "measurement_basis": "VALUE_DATE_INTEREST_DETAIL",
+            "native_source_record_id": f"native-{index}",
+            "provider_id": "ibkr",
+            "record_id": f"ibkr:tier-{index}",
+            "source_amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1"},
+            "source_artifact_id": "selected/ibkr.xml",
+            "source_record_id": f"catalog-{index}",
+            "strategy_id": None,
+            "value_date": "2026-01-02",
+        }
+
+    accounts = ("account-b", "reserve", "account-stray")
+    provider_bytes = canonical_json_bytes(
+        {
+            "financing_cost_observations": [
+                financing(account, index) for index, account in enumerate(accounts)
+            ],
+            "financing_liability_observations": [],
+            "leverage_exposure_observations": [],
+            "provider_generations": [{"provider_id": "ibkr"}],
+            "reconciliation_checks": [],
+        }
+    )
+    provider_root = tmp_path / "provider-ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "2",
+            "sha256": hashlib.sha256(provider_bytes).hexdigest(),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    catalog["fact_coverage_matrix"] = [
+        _coverage_detail(account, "flows") for account in accounts
+    ]
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+
+    expected = {
+        "account-b": "PRODUCT",
+        "reserve": "RESERVE",
+        "account-stray": "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT",
+    }
+    assert {
+        row["account_id"]: row["account_role"] for row in report["fact_coverage_matrix"]
+    } == expected
+    leverage = {
+        row["account_id"]: row["account_role"]
+        for row in report["leverage_disclosures"]
+        if row["account_id"] is not None
+    }
+    assert leverage == expected
+    # Provider-level rows name no account, so they carry no account role.
+    assert {
+        row["account_role"]
+        for row in report["leverage_disclosures"]
+        if row["account_id"] is None
+    } <= {None}
+
+
 def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
     tmp_path: Path,
 ) -> None:

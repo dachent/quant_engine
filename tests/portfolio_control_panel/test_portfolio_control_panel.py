@@ -12563,6 +12563,56 @@ def test_panel_mwr_projection_rejects_label_perimeter_mismatch() -> None:
         panel._validate_mwr_perimeter([row])
 
 
+@pytest.mark.parametrize(
+    ("coverage", "accepted"),
+    [
+        ("COMPLETE", True),
+        ("NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", True),
+        ("NO_ACCEPTED_FACT_PATH", True),
+        ("BLOCKED", False),
+        ("ANYTHING_ELSE", False),
+    ],
+)
+def test_panel_keeps_an_available_mwr_whose_flow_path_denies_completeness(
+    coverage: str, accepted: bool
+) -> None:
+    row = {
+        "mwr_status": "AVAILABLE",
+        "mwr_xirr": "0.10",
+        "mwr_opening_date": "2025-01-01",
+        "mwr_opening_value": "100",
+        "mwr_terminal_date": "2026-01-01",
+        "mwr_terminal_value": "110",
+        "mwr_currency": "USD",
+        "mwr_coverage_status": coverage,
+        "mwr_cashflows": [
+            {
+                "date": "2025-01-01",
+                "amount": "-100",
+                "source_record_ids": ["synthetic-opening-nav"],
+            },
+            {
+                "date": "2026-01-01",
+                "amount": "110",
+                "source_record_ids": ["synthetic-terminal-nav"],
+            },
+        ],
+        "mwr_label": "ACCOUNT_EPOCH_MWR",
+        "mwr_value_basis": "ACCOUNT_TOTAL",
+        "mwr_valuation_timing": "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE",
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+    }
+    if accepted:
+        panel._validate_mwr_perimeter([row])
+    else:
+        with pytest.raises(
+            panel.ControlPanelValidationError, match="coverage is incomplete"
+        ):
+            panel._validate_mwr_perimeter([row])
+
+
 def test_embedded_download_chunk_cap_is_one_shared_constant() -> None:
     """The producer's cap and the renderer's cap must be the same number.
 

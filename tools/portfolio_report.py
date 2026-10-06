@@ -76,6 +76,7 @@ from quant_engine.portfolio_ledger.returns import (
     ReturnsError,
     ReturnSpan,
     ValuePeriod,
+    classify_xirr,
     splice_spans,
     summed_value_composite,
     value_periods,
@@ -1957,6 +1958,11 @@ def _reconcile_multi_account_strategy_composite(
         )
 
 
+MWR_COVERAGE_DENIED_BY_FLOW_PATH = frozenset(
+    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+)
+
+
 def _account_strategy_performance(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
@@ -2331,6 +2337,24 @@ def _account_strategy_performance(
             # arrived through the epoch manifest performance payload or the
             # account-live return path.
             row["source_last_observation"] = raw_day
+    flows_status_by_account = {
+        str(item.get("account_id")): item.get("status")
+        for item in _objects(
+            catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix"
+        )
+        if item.get("fact_type") == "flows"
+    }
+    for row in rows:
+        # D1/D2: a COMPLETE claim cannot stand beside a flows coverage row that
+        # says the flow path is unproven.  The flow-path status is the report's
+        # own coverage row; the manifest value is kept whenever it does not
+        # deny that status.
+        denied_by = flows_status_by_account.get(str(row["account_id"]))
+        if (
+            row.get("mwr_coverage_status") == "COMPLETE"
+            and denied_by in MWR_COVERAGE_DENIED_BY_FLOW_PATH
+        ):
+            row["mwr_coverage_status"] = denied_by
     return sorted(
         rows,
         key=lambda item: (
@@ -3912,6 +3936,57 @@ def _current_product_fact_rows(
     return accepted
 
 
+ACCOUNT_ROLE_PRODUCT = "PRODUCT"
+ACCOUNT_ROLE_RESERVE = "RESERVE"
+ACCOUNT_ROLE_HISTORY_ONLY = "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT"
+
+
+def _label_account_roles(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    product_account_ids: set[str] | None,
+    reserve_account_ids: set[str],
+    excluded_account_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Name the role of every account row and drop owner-excluded accounts.
+
+    A product account is a current product member, a reserve account a component
+    of the custody reserve; any other account has no current assignment and is
+    labelled history only, so it cannot pass for a current account.  An account
+    the current-epoch crosswalk excludes (deprecated or immaterial) is not a
+    current output at all, like its siblings in `provider_admissions`.  Without a
+    known product perimeter (a legacy report) the rows stay as the baseline wrote
+    them.  A row that names no account carries no account role.
+    """
+
+    if product_account_ids is None:
+        return [dict(row) for row in rows]
+    labelled: list[dict[str, Any]] = []
+    for row in rows:
+        account_id = row.get("account_id")
+        if not isinstance(account_id, str):
+            labelled.append({**row, "account_role": None})
+            continue
+        if account_id in product_account_ids:
+            role = ACCOUNT_ROLE_PRODUCT
+        elif account_id in excluded_account_ids:
+            continue
+        elif account_id in reserve_account_ids:
+            role = ACCOUNT_ROLE_RESERVE
+        else:
+            role = ACCOUNT_ROLE_HISTORY_ONLY
+        labelled.append({**row, "account_role": role})
+    return labelled
+
+
+def _reserve_account_ids(current_capital: Mapping[str, Any]) -> set[str]:
+    reserve = current_capital.get("reserve")
+    components = reserve.get("components") if isinstance(reserve, Mapping) else None
+    if not isinstance(components, list):
+        return set()
+    return {item for item in components if isinstance(item, str)}
+
+
 def _strategy_attribution_section(
     attribution_catalog: Mapping[str, Any],
     attribution_ref: Mapping[str, str],
@@ -4716,6 +4791,58 @@ _ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
 _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
 
 
+def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One MWR per strategy over its funded epochs' pooled investor cash flows.
+
+    Plan v5 4.5 D lists MWR per account and per strategy.  The funded epochs'
+    own cash flows (opening, interior legs, terminal value) are netted by date
+    and classified by the one XIRR classifier, the pooling both oracles use.  An
+    epoch the manifest did not fund (an assignment-only predecessor) carries no
+    capital and stays out.  A funded epoch without an available MWR leaves the
+    strategy without a number, with a named reason, never a partial pool.
+    """
+
+    unavailable: dict[str, Any] = {
+        "mwr_xirr": None,
+        "mwr_opening_date": None,
+        "mwr_terminal_date": None,
+        "mwr_member_account_ids": [],
+        "mwr_basis": "POOLED_FUNDED_EPOCH_CASHFLOWS",
+    }
+    funded = [item for item in items if item.get("epoch_admission_status") == "FUNDED"]
+    if not funded:
+        return {
+            **unavailable,
+            "mwr_status": "UNAVAILABLE_NO_FUNDED_EPOCH_MWR",
+            "mwr_reason": "NO_FUNDED_EPOCH_ROWS",
+        }
+    pooled: dict[date, Decimal] = defaultdict(Decimal)
+    for item in funded:
+        flows = item.get("mwr_cashflows")
+        if item.get("mwr_status") != "AVAILABLE" or not flows:
+            return {
+                **unavailable,
+                "mwr_status": "UNAVAILABLE_MEMBER_MWR_NOT_AVAILABLE",
+                "mwr_reason": "MEMBER_MWR_NOT_AVAILABLE",
+            }
+        for flow in _objects(flows, "mwr_cashflows"):
+            pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
+                flow.get("amount"), "mwr cashflow amount"
+            )
+    ordered = sorted(pooled.items())
+    result = classify_xirr(ordered)
+    rate = result["rate"]
+    return {
+        "mwr_basis": "POOLED_FUNDED_EPOCH_CASHFLOWS",
+        "mwr_member_account_ids": sorted(str(item["account_id"]) for item in funded),
+        "mwr_opening_date": ordered[0][0].isoformat(),
+        "mwr_reason": result["reason"],
+        "mwr_status": result["status"],
+        "mwr_terminal_date": ordered[-1][0].isoformat(),
+        "mwr_xirr": None if rate is None else decimal_text(cast(Decimal, rate)),
+    }
+
+
 def _strategies(
     catalog: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
@@ -5107,6 +5234,13 @@ def _strategies(
                 ),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
+                **_strategy_mwr(
+                    [
+                        item
+                        for item in performance
+                        if item.get("strategy_id") == strategy_id
+                    ]
+                ),
                 "account_live_status": (
                     "HISTORICAL_ONLY"
                     if historical_account
@@ -6864,6 +6998,7 @@ def build_report_data(
         dict[tuple[str, str, str, str | None], dict[str, Any]] | None
     ) = None
     current_epoch_account_details: dict[str, dict[str, Any]] | None = None
+    excluded_epoch_account_ids: set[str] = set()
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_supplied = _require_epoch_manifest_triplet(
@@ -6942,6 +7077,11 @@ def build_report_data(
                     "last_four": row["last_four"],
                 }
         current_account_ids = {row[0] for row in current_epoch_tuples}
+        excluded_epoch_account_ids = {
+            row["account_id"]
+            for row in crosswalk_payload["rows"]
+            if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH"
+        } - current_account_ids
         catalog = _calculation_catalog_through(catalog, calculation_cutoff_date)
         current_product_catalog = _current_product_baseline_projection(
             catalog, strategy_product_controls
@@ -7385,6 +7525,21 @@ def build_report_data(
     verified_capital = _current_capital(catalog)
     _verify_current_capital_perimeter(verified_capital, strategy_product_controls)
     _verify_current_capital_accounts(verified_capital, account_summary)
+    product_account_ids = (
+        current_account_ids
+        if current_account_ids is not None
+        else baseline_current_account_ids
+    )
+    reserve_account_ids = _reserve_account_ids(verified_capital)
+
+    def with_account_roles(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return _label_account_roles(
+            rows,
+            product_account_ids=product_account_ids,
+            reserve_account_ids=reserve_account_ids,
+            excluded_account_ids=excluded_epoch_account_ids,
+        )
+
     report: dict[str, Any] = {
         "account_summary": account_summary,
         "allocation_history": allocation_history,
@@ -7394,7 +7549,9 @@ def build_report_data(
         "coverage_data_quality": coverage,
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
-        "fact_coverage_matrix": catalog.get("fact_coverage_matrix", []),
+        "fact_coverage_matrix": with_account_roles(
+            _objects(catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix")
+        ),
         "flow_reconciliation": _flow_reconciliation(
             catalog,
             strategy_product_controls,
@@ -7584,8 +7741,8 @@ def build_report_data(
         **({"source_clock": source_clock} if source_clock is not None else {}),
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
-        "leverage_disclosures": _leverage_disclosures(
-            catalog, baseline_root, provider_ledger_root
+        "leverage_disclosures": with_account_roles(
+            _leverage_disclosures(catalog, baseline_root, provider_ledger_root)
         ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
