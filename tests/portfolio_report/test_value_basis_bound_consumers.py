@@ -1942,6 +1942,17 @@ def test_public_builder_lists_the_lens_rows_of_every_mode_the_panel_publishes(
     ]
 
 
+_MWR_SENTENCE_V1 = (
+    "UNAVAILABLE unless complete eligible flows, signs, and terminal NAV are "
+    "proven; the first baseline does not meet that gate."
+)
+_MWR_SENTENCE_CURRENT = (
+    "Source-bound MWR is calculated only when complete eligible flows, signs, and "
+    "terminal NAV are proven; otherwise it remains unavailable with the row's "
+    "status and reason."
+)
+
+
 def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged(
     full: Any, tmp_path: Path
 ) -> None:
@@ -1963,9 +1974,20 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     report, content, _path = full.reporter.build_report_data(baseline_root)
 
     assert "value_basis_bounds" not in report
-    assert len(content) == 34412
-    assert hashlib.sha256(content).hexdigest() == (
+    # 8302d4e reworded the always-emitted MWR sentence of the report, nothing else:
+    # restoring the previous sentence reproduces the previously pinned bytes exactly.
+    assert content.count(_MWR_SENTENCE_CURRENT.encode()) == 1
+    previous = content.replace(
+        _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
+    )
+    assert len(previous) == 34412
+    assert hashlib.sha256(previous).hexdigest() == (
         "be07aae5f33b896f4b541af5b6c53b3cca3373770bcbb4a4ca952827f4e4e2f3"
+    )
+    assert len(content) == 34457
+    assert (
+        hashlib.sha256(content).hexdigest()
+        == "32f2364a2d9891250e984678f160a1dcc822dddd69731f66832740931feb7679"
     )
 
 
@@ -2008,6 +2030,9 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     ]
     undone["report_schema_version"] = 1
     content = canonical_json_bytes(undone)
+    # 8302d4e reworded the always-emitted MWR sentence; v1 carried the old one.
+    assert content.count(_MWR_SENTENCE_CURRENT.encode()) == 1
+    content = content.replace(_MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode())
     # The published synthetic baseline now carries its `current_capital` block and the
     # funding accounts, so its catalog bytes and generation identity differ from v1's;
     # those two identities are the only other bytes that moved.
