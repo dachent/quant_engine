@@ -2349,6 +2349,50 @@ def test_bad_fixture_fires_and_good_does_not(tmp_path: Path, case: str) -> None:
     assert fired, [(f.check_id, f.klass, f.entity) for f in bad]
 
 
+def _unproven_flow_path(disclosed: str | None) -> Mutator:
+    """Account A1's flows coverage row is unproven; its MWR rows disclose ``disclosed``."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["fact_coverage_matrix"][0]["status"] = (
+            "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+        )
+        for row in report["twr_mwr"]:
+            if row.get("account_id") == "A1":
+                row["mwr_flow_path_status"] = disclosed
+
+    return mutate
+
+
+def test_a_truthful_receipt_beside_a_disclosed_unproven_flow_path_passes(
+    tmp_path: Path,
+) -> None:
+    """The receipt's COMPLETE and the flow-path status are two claims (R1 profile).
+
+    mwr_coverage_status is the manifest receipt, copied verbatim; the report's own
+    flows coverage status is published beside it as mwr_flow_path_status.  A COMPLETE
+    receipt whose row discloses the unproven path is truthful, not BLOCKER_AUTHORITY.
+    """
+
+    status = "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    findings = run(
+        build(tmp_path / "ok", Spec(report=[_unproven_flow_path(status)]))
+    )
+    assert not [f for f in findings if f.check_id == "flows.admission_consistency"]
+
+
+@pytest.mark.parametrize(
+    "disclosed", [None, "OBSERVED_NOT_COMPLETENESS_PROOF"], ids=["absent", "mismatch"]
+)
+def test_a_complete_receipt_without_the_matching_disclosure_still_blocks(
+    tmp_path: Path, disclosed: str | None
+) -> None:
+    findings = run(
+        build(tmp_path / "bad", Spec(report=[_unproven_flow_path(disclosed)]))
+    )
+    fired = [f for f in findings if f.check_id == "flows.admission_consistency"]
+    assert [f.klass for f in fired] == [checks.BLOCKER_AUTHORITY]
+
+
 def test_expected_regression_fires_on_mismatch(tmp_path: Path) -> None:
     gen_dir = build(tmp_path)
     expected = [

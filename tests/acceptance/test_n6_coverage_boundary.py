@@ -89,6 +89,25 @@ def test_a_boundary_naming_the_fact_with_another_value_still_fires(
     assert [f.observed["missing"] for f in findings] == [["fact_status.fx"]]
 
 
+def test_a_longer_key_with_the_same_value_does_not_name_a_shorter_key(
+    tmp_path: Path,
+) -> None:
+    """The boundary list is matched by exact ``key=value`` entries, not by substring.
+
+    ``fx=FAILED`` is a suffix of ``nfx=FAILED``; naming only the longer key must not
+    count as naming ``fx``.
+    """
+
+    boundary = f"{BOUNDARY}; declared non-available facts: nfx=FAILED"
+    findings = _findings(tmp_path, _fx_failed(boundary))
+    assert [f.observed["missing"] for f in findings] == [["fact_status.fx"]]
+
+
+def test_an_exact_entry_among_several_names_the_fact(tmp_path: Path) -> None:
+    boundary = f"{BOUNDARY}; declared non-available facts: nfx=FAILED, fx=FAILED"
+    assert _findings(tmp_path, _fx_failed(boundary)) == []
+
+
 def test_a_missing_boundary_fires(tmp_path: Path) -> None:
     findings = _findings(tmp_path, _fx_failed(None))
     assert [f.observed["missing"] for f in findings] == [["fact_status.fx"]]

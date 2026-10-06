@@ -2141,10 +2141,13 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
         if value in ("FAILED", "PARTIAL", "UNAVAILABLE")
     }
     boundary = str(coverage.get("boundary", ""))
+    marker = "declared non-available facts:"
+    _, found, tail = boundary.rpartition(marker)
+    named = {entry.strip() for entry in tail.split(",")} if found else set()
     missing = sorted(
         key
         for key, value in declared.items()
-        if f"{key.split('.', 1)[1]}={value}" not in boundary
+        if f"{key.split('.', 1)[1]}={value}" not in named
     )
     if missing:
         yield _finding(
@@ -5103,6 +5106,12 @@ def check_flow_admission(ctx: Context) -> Iterator[Finding]:
             located is not None
             and located[1].get("status") in _UNADMITTED_FLOW_PATHS
             and row.get("mwr_coverage_status") == "COMPLETE"
+            # mwr_coverage_status is the manifest's flow-coverage receipt, copied
+            # verbatim; the report's flows coverage status travels beside it as
+            # mwr_flow_path_status.  A row that discloses the very status the
+            # coverage matrix carries makes the receipt truthful, not a claim of
+            # an admitted path.
+            and row.get("mwr_flow_path_status") != located[1].get("status")
         ):
             yield _finding(
                 "flows.admission_consistency",
@@ -8700,6 +8709,9 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     custody = node(ctx.report, "custody_current_capital")
     base = "$.custody_current_capital"
     findings: list[Finding] = []
+    declared_version = ctx.report.get("report_schema_version")
+    if isinstance(declared_version, bool):
+        declared_version = None
 
     def emit(
         klass: str,
@@ -8815,7 +8827,13 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             line_pointer = f"{pointer}.derived_cash[{line_position}]"
             entity = f"current_capital:{strategy}:cash:{line.get('account_id')}"
             honest = True
-            stated = "last_event_date" in line or "coverage_end" in line
+            # The exemption is a property of the declared report schema, not of
+            # field absence: a version-3 line must carry both fields.
+            stated = (
+                declared_version == 3
+                or "last_event_date" in line
+                or "coverage_end" in line
+            )
             if stated:
                 last = _canonical_iso_day(line.get("last_event_date"))
                 coverage_end = _canonical_iso_day(line.get("coverage_end"))

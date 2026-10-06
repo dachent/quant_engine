@@ -321,6 +321,36 @@ def test_an_old_version_line_without_the_new_fields_keeps_the_previous_behaviour
     assert not [f for f in findings if f.klass == checks.BLOCKER_INVARIANT]
 
 
+def _declare(version: int):
+    def mutate(report: dict[str, Any]) -> None:
+        report["report_schema_version"] = version
+
+    return mutate
+
+
+def test_a_v3_cash_line_without_the_new_fields_is_a_finding(tmp_path: Path) -> None:
+    """The legacy exemption keys on the declared version, not on field absence.
+
+    Deleting both mandatory fields from a report-schema-3 line, labelled the cutoff,
+    must not switch rule 2 off.
+    """
+
+    findings = _findings(tmp_path, _declare(3), _custody(cash=_cash(versioned=False)))
+    invariant = [f for f in findings if f.klass == checks.BLOCKER_INVARIANT]
+    assert [f.entity for f in invariant] == ["current_capital:beta:cash:CASH1"]
+    assert "last_event_date" in invariant[0].message
+
+
+def test_a_declared_older_version_line_stays_exempt(tmp_path: Path) -> None:
+    old = _cash(as_of=EARLY, versioned=False)
+    findings = _findings(
+        tmp_path,
+        _declare(2),
+        _custody(cash=old, row=EARLY, systematic=EARLY),
+    )
+    assert not [f for f in findings if f.klass == checks.BLOCKER_INVARIANT]
+
+
 def test_retained_rows_and_unavailable_lines_stay_out(tmp_path: Path) -> None:
     stale = _custody(
         member=_member("2025-11-24"),
