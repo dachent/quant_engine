@@ -142,6 +142,13 @@ PATCH_INVENTORY: dict[tuple[str, str], tuple[int | tuple[int, int], str]] = {
         1,
         "materializer reads the world's HWM policy",
     ),
+    ("portfolio_pipeline_materialize", "_attended_path_budget"): (
+        1,
+        "tests/core/conftest.py (attended_path_budget_off_for_deep_tmp_roots) "
+        "disables the Windows path-budget gate for every test not marked "
+        "real_attended_path_budget, because pytest's temp roots are deeper than "
+        "a supported attended run root; the real gate has its own tests",
+    ),
     ("portfolio_report", "CURRENT_EPOCH_CROSSWALK_AS_OF_DATE"): (
         1,
         "report binds the world's crosswalk as-of",

@@ -216,7 +216,8 @@ def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> lis
         str(tmp_path / "native-inputs.json"),
     ]
     if execute:
-        argv.append("--execute")
+        # The run stages no QA evidence; --qa-hold is the declared plan for that.
+        argv.extend(["--qa-hold", "--execute"])
     if resume:
         argv.append("--resume")
     return argv
@@ -279,6 +280,12 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
         calls.append(argv[argv.index("--role") + 1])
         return subprocess.CompletedProcess(argv, 91, "", "first child stops here")
 
+    # Execution validates declaratively (pin matrix, source phase) before admitting.
+    monkeypatch.setattr(
+        preparation,
+        "plan_attended_inputs",
+        lambda **_kwargs: {"status": "PLANNED", "source_phase": {}},
+    )
     monkeypatch.setattr(preparation, "prepare_attended_inputs", prepared)
     monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
     monkeypatch.setattr(materializer, "_attended_basic_preflight", lambda _args: {})
@@ -415,7 +422,16 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
                 "source_selection": pin(selection_path.name),
                 "provider_ledger_generation_root": str(tmp_path / "ledger"),
                 "retained_verified_generations": {
-                    "history": {"root": str(tmp_path / "history")}
+                    "history": {"root": str(tmp_path / "history")},
+                    "attribution": {
+                        "root": str(
+                            tmp_path / "attribution" / "generations" / ("a" * 64)
+                        )
+                    },
+                },
+                "expected_staged_baseline": {
+                    "generation_id": "b" * 64,
+                    "catalog_sha256": "c" * 64,
                 },
                 "plans": modes,
             }
@@ -445,6 +461,7 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     plan_calls: list[dict[str, object]] = []
     import portfolio_current_decomposition_plan as plans
     import portfolio_target_series as history
+    import portfolio_release_builder as release
     import provider_ledger
 
     monkeypatch.setattr(
@@ -459,6 +476,14 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     # its own actual-reader rejection regression above.
     monkeypatch.setattr(
         preparation, "_validate_hwm_authority_inputs", lambda _config: None
+    )
+    attribution_preflight_calls: list[tuple[Path, object, object]] = []
+    monkeypatch.setattr(
+        release,
+        "_validate_strategy_attribution_expected_baseline_binding",
+        lambda root, generation_id, expected: attribution_preflight_calls.append(
+            (root, generation_id, expected)
+        ),
     )
     monkeypatch.setattr(
         materializer, "validate_source_phase", lambda **_kwargs: source_phase
@@ -476,6 +501,14 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
 
     preparation._validated_inputs(config_path, "2026-09-17", "2026-09-19")
 
+    assert attribution_preflight_calls == [
+        (
+            tmp_path / "attribution",
+            "a" * 64,
+            {"generation_id": "b" * 64, "catalog_sha256": "c" * 64},
+        )
+    ]
+
     expected = {name: tmp_path / f"{name}.json" for name in authority_names}
     assert [
         {name: call[name] for name in authority_names} for call in history_calls
@@ -491,6 +524,19 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         expected_captures["LIVE_ONLY"],
         expected_captures["LIVE_PLUS_BACKTEST"],
     ]
+
+    config = json.loads(config_path.read_bytes())
+    config.pop("expected_staged_baseline")
+    config_path.write_bytes(preparation.canonical_json_bytes(config))
+    prior_history_calls = len(history_calls)
+    prior_plan_calls = len(plan_calls)
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="expected staged baseline identity is required",
+    ):
+        preparation._validated_inputs(config_path, "2026-09-17", "2026-09-19")
+    assert len(history_calls) == prior_history_calls
+    assert len(plan_calls) == prior_plan_calls
 
 
 def test_selected_dependence_handoff_replaces_every_stale_authority(
@@ -2526,6 +2572,33 @@ def _stage_attended_attribution(root: Path, baseline: dict[str, str]) -> str:
     return manifest.generation_id
 
 
+def _import_report_before_stubs() -> None:
+    """Load the report producer under the real kernel before any test patches it."""
+
+    import portfolio_report  # noqa: F401
+
+
+def test_preparation_stubs_do_not_leak_into_first_report_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stubbed preparation world must not become portfolio_report's kernel."""
+
+    from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
+
+    real_verify = hwm.verify_governed_hwm_result
+    # Simulate a session in which nothing has imported the report producer yet;
+    # monkeypatch restores the original entries (or removes the fresh ones).
+    for name in ("portfolio_report", "portfolio_attribution"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    _preparation_function_fixture(tmp_path, monkeypatch)
+    assert hwm.verify_governed_hwm_result is not real_verify
+
+    import portfolio_report
+
+    assert portfolio_report.verify_governed_hwm_result is real_verify
+
+
 def _preparation_function_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2553,6 +2626,12 @@ def _preparation_function_fixture(
     import stage_current_epoch_manifest as epoch_stage
     from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
     import rebind_current_epoch_crosswalk as rebind
+
+    # The retained-attribution preflight lazily imports portfolio_attribution, which
+    # imports portfolio_report, and portfolio_report binds verify_governed_hwm_result
+    # by name at import.  Importing it first time under the stubs below would cache
+    # the stub in sys.modules for every later test in the session.
+    _import_report_before_stubs()
 
     source_selection = tmp_path / "selection.json"
     source_selection.write_text('{"files":{}}', encoding="utf-8")
@@ -2625,6 +2704,7 @@ def _preparation_function_fixture(
             "baseline": {"root": str(baseline_source)},
             "history": {"root": str(history_root)},
         },
+        "expected_staged_baseline": attributed_baseline,
         "source_selection": str(source_selection),
     }
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
@@ -4284,6 +4364,12 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
         assert isinstance(storage, run_storage.AttendedStorage)
         return 0, {"status": "EXECUTED"}
 
+    # Execution validates declaratively (pin matrix, source phase) before admitting.
+    monkeypatch.setattr(
+        preparation,
+        "plan_attended_inputs",
+        lambda **_kwargs: {"status": "PLANNED", "source_phase": {}},
+    )
     monkeypatch.setattr(preparation, "prepare_attended_inputs", prepare)
     monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
     monkeypatch.setattr(materializer, "_attended_preflight", check_handoff)

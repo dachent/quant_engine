@@ -856,6 +856,51 @@ def _validated_inputs(
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
     _pins(config, "preparation specification")
+    retained_generations = config.get("retained_verified_generations")
+    if isinstance(retained_generations, Mapping) and isinstance(
+        retained_generations.get("attribution"), Mapping
+    ):
+        attribution_source = Path(
+            str(retained_generations["attribution"].get("root"))
+        ).resolve()
+        expected_baseline = config.get("expected_staged_baseline")
+        if not isinstance(expected_baseline, Mapping):
+            raise AttendedPreparationError(
+                "expected staged baseline identity is required for retained attribution"
+            )
+        import portfolio_release_builder as release
+
+        try:
+            release._validate_strategy_attribution_expected_baseline_binding(
+                attribution_source.parents[1],
+                attribution_source.name,
+                expected_baseline,
+            )
+        except release.VerticalBuildError as exc:
+            raise AttendedPreparationError(
+                "retained attribution differs from expected staged baseline"
+            ) from exc
+    if isinstance(retained_generations, Mapping) and isinstance(
+        retained_generations.get("baseline"), Mapping
+    ):
+        # The retained "baseline" entry is the ALLOCATION authority handed to
+        # dependence, not the staged baseline retained attribution names: join it to
+        # the ledger on its own. Attribution is joined through the baseline it
+        # actually names (expected_staged_baseline, checked above); that baseline is
+        # staged by this run, so it has no ledger identity to read yet.
+        import check_retained_authority_pins as authority_pins
+
+        try:
+            authority_pins.check_ledger_pin_matrix(
+                Path(str(config["provider_ledger_generation_root"])).resolve(),
+                retained={
+                    "allocation": Path(
+                        str(retained_generations["baseline"].get("root"))
+                    ).resolve()
+                },
+            )
+        except authority_pins.LedgerPinMismatch as exc:
+            raise AttendedPreparationError(str(exc)) from exc
     _validate_product_contract_currency(config)
     _validate_hwm_authority_inputs(config)
     # Capital consumes this replay specification transitively. Verify the exact

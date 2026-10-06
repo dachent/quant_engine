@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -739,7 +740,8 @@ def _read_census(ctx: Context) -> CensusState:
     if not digests:
         return CensusState(
             None,
-            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT}",
+            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT} "
+            f"(the census authority pin) on any of its {len(ctx.expected)} row(s)",
         )
     if len(digests) > 1:
         return CensusState(
@@ -1574,8 +1576,21 @@ def universe(ctx: Context) -> Universe | None:
     return result
 
 
-def reserve_accounts(ctx: Context) -> set[str]:
-    """Reserve/mandate buckets, recognised from the data rather than by id."""
+# The views a custody reserve component list can excuse an account in: the coverage and
+# leverage disclosures that describe the custody perimeter. Performance and account
+# tables are not custody views, so a retired account there stays reported even when the
+# report's own reserve list names it.
+_RESERVE_LABEL_VIEWS = frozenset(
+    {"report.fact_coverage_matrix", "report.leverage_disclosures"}
+)
+
+
+def reserve_accounts(ctx: Context, view: str | None = None) -> set[str]:
+    """Reserve/mandate buckets, recognised from the data rather than by id.
+
+    The role and allocation-scope labels apply to every view; the custody reserve
+    component list only to the custody views (``_RESERVE_LABEL_VIEWS``).
+    """
 
     accounts = {
         str(row.get("account_id"))
@@ -1587,6 +1602,11 @@ def reserve_accounts(ctx: Context) -> set[str]:
         for row in rows(ctx.report, "allocation_history")
         if row.get("scope") == "RESERVE" and row.get("account_id") is not None
     }
+    # The reserve component list is the label: a reserve account is expected in the
+    # current coverage and leverage views once it is named there.
+    components = node(ctx.report, "custody_current_capital", "reserve", "components")
+    if isinstance(components, list) and view in _RESERVE_LABEL_VIEWS:
+        accounts |= {str(account) for account in components if account is not None}
     return accounts
 
 
@@ -1931,21 +1951,139 @@ def _readiness(ctx: Context) -> dict[str, Any]:
     return values
 
 
+# The panel's root in a coordinated release (packages/core pipeline: ``portfolio-panel``).
+PANEL_ROOT_ID = "portfolio-panel"
+_RELEASE_ROOT_ID = re.compile(r"[a-z][a-z0-9-]*")
+_RELEASE_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def _release_evidence_problem(ctx: Context) -> tuple[str, str] | None:
+    """Why a committed release pointer's evidence cannot be used, if it cannot.
+
+    ``None`` when there is no release pointer (nothing is committed, nothing to read) or
+    its release manifest is readable and well formed. ``("unreadable", why)`` when the
+    pointer names a release whose ``release.json`` is missing, a placeholder or not a
+    JSON object; ``("malformed", why)`` when its ``targets`` are not a list of objects
+    that each name a ``proposed_generation_id``. Either is broken publication
+    authority, never an inapplicable check.
+    """
+
+    external = ctx.gen.external
+    pointer = external.release_pointer
+    if not isinstance(pointer, dict) or not isinstance(pointer.get("release_id"), str):
+        return None
+    manifest = external.release_manifest
+    if not isinstance(manifest, dict):
+        return (
+            "unreadable",
+            f"release {pointer['release_id']} names a release.json that is missing, "
+            "not hydrated or not a JSON object",
+        )
+    targets = manifest.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return "malformed", "the release manifest has no non-empty list of targets"
+    for position, target in enumerate(targets):
+        if not isinstance(target, dict):
+            return "malformed", f"release target {position} is not an object"
+        root_id = target.get("root_id")
+        generation_id = target.get("proposed_generation_id")
+        if not isinstance(root_id, str) or not _RELEASE_ROOT_ID.fullmatch(root_id):
+            return (
+                "malformed",
+                f"release target {position} has no valid root_id "
+                "(schemas/core/release-manifest.schema.json)",
+            )
+        # A target that names this very generation is bound to its id by the
+        # generation-id check; every other target must carry a real digest.
+        if not isinstance(generation_id, str) or not (
+            _RELEASE_DIGEST.fullmatch(generation_id)
+            or generation_id == ctx.gen.generation_id
+        ):
+            return (
+                "malformed",
+                f"release target {position} has no valid proposed_generation_id "
+                "(64 lowercase hex characters)",
+            )
+    return None
+
+
+def _release_evidence_finding(
+    ctx: Context, check_id: str, defect: str
+) -> Finding | None:
+    problem = _release_evidence_problem(ctx)
+    if problem is None:
+        return None
+    kind, why = problem
+    return _finding(
+        check_id,
+        NOT_READY if kind == "unreadable" else BLOCKER_AUTHORITY,
+        "release",
+        kind,
+        "a readable release manifest whose targets each name a generation",
+        "(release manifest)",
+        "$.targets",
+        (defect,),
+        f"committed release evidence cannot be used: {why}",
+    )
+
+
+def _release_targets(ctx: Context) -> list[tuple[dict[str, Any], str]]:
+    """Every committed release target that pins this generation under the panel root.
+
+    Publication is the committed release (``CURRENT_RELEASE`` and its ``release.json``
+    targets), not a stage ``CURRENT.json``: a stage pointer can only ever say PUBLISHED.
+    A target counts only when it names the panel root (``portfolio-panel``) and this
+    generation id; one that names the generation under another root does not.
+    """
+
+    external = ctx.gen.external
+    manifest = external.release_manifest
+    targets = manifest.get("targets") if isinstance(manifest, dict) else None
+    if not isinstance(targets, list):
+        return []
+    return [
+        (target, f"{external.release_manifest_path}#$.targets[{position}]")
+        for position, target in enumerate(targets)
+        if isinstance(target, dict)
+        and target.get("root_id") == PANEL_ROOT_ID
+        and target.get("proposed_generation_id") == ctx.gen.generation_id
+    ]
+
+
+def _release_misrooted(ctx: Context) -> list[tuple[str, str]]:
+    """Targets that name this generation under a root other than the panel's."""
+
+    external = ctx.gen.external
+    manifest = external.release_manifest
+    targets = manifest.get("targets") if isinstance(manifest, dict) else None
+    if not isinstance(targets, list):
+        return []
+    return [
+        (
+            str(target.get("root_id")),
+            f"{external.release_manifest_path}#$.targets[{position}]",
+        )
+        for position, target in enumerate(targets)
+        if isinstance(target, dict)
+        and target.get("root_id") != PANEL_ROOT_ID
+        and target.get("proposed_generation_id") == ctx.gen.generation_id
+    ]
+
+
 def _is_published(ctx: Context) -> tuple[bool, str | None]:
-    pointer = ctx.gen.external.current_pointer
-    if (
-        isinstance(pointer, dict)
-        and pointer.get("generation_id") == ctx.gen.generation_id
-    ):
-        state = pointer.get("state")
-        if state == "PUBLISHED":
-            return True, f"{ctx.gen.external.current_pointer_path}#$.state"
-    return False, None
+    found = _release_targets(ctx)
+    if not found:
+        return False, None
+    return True, found[0][1]
 
 
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
     """D8: a published generation cannot declare itself not ready / unverified."""
 
+    evidence = _release_evidence_finding(ctx, "identity.publication_state", "D8")
+    if evidence is not None:
+        yield evidence
+        return
     published, where = _is_published(ctx)
     if not published:
         return
@@ -2020,7 +2158,13 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
 
 
 def check_release_pinned(ctx: Context) -> Iterator[Finding]:
-    """F8: the release that publishes this generation must be named in its bytes."""
+    """F8: the committed release target for the panel must name this generation.
+
+    A reverse binding: the release id is a hash over the proposed generation id, and the
+    generation id hashes the sealed panel bytes, so those bytes cannot contain the release
+    id. The release that publishes the generation is therefore checked from its side: its
+    target must carry this generation id and the sha256 of this ``generation.json``.
+    """
 
     external = ctx.gen.external
     pointer = external.release_pointer
@@ -2037,40 +2181,46 @@ def check_release_pinned(ctx: Context) -> Iterator[Finding]:
             "no release pointer found; release pinning cannot be evaluated",
         )
         return
-    release_id = pointer["release_id"]
-    manifest = external.release_manifest
-    targets: list[str] = []
-    if isinstance(manifest, dict):
-        _collect_strings(manifest, targets)
-    if ctx.gen.generation_id not in targets:
+    evidence = _release_evidence_finding(ctx, "identity.release_pinned", "F8")
+    if evidence is not None:
+        yield evidence
         return
-    hits = {
-        rel: count for rel, count in ctx.gen.scan.release_id_counts.items() if count
-    }
-    if not hits:
-        yield _finding(
-            "identity.release_pinned",
-            BLOCKER_AUTHORITY,
-            release_id,
-            {"files_naming_release_id": 0},
-            {"release_id": release_id},
-            GENERATION_MANIFEST,
-            "$",
-            ("F8",),
-            "the committed release that publishes this generation is not named "
-            "anywhere in the panel bytes",
-        )
-
-
-def _collect_strings(value: Any, into: list[str]) -> None:
-    if isinstance(value, str):
-        into.append(value)
-    elif isinstance(value, Mapping):
-        for item in value.values():
-            _collect_strings(item, into)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_strings(item, into)
+    found = _release_targets(ctx)
+    if not found:
+        for root_id, where in _release_misrooted(ctx):
+            yield _finding(
+                "identity.release_pinned",
+                BLOCKER_AUTHORITY,
+                pointer["release_id"],
+                {"root_id": root_id},
+                {"root_id": PANEL_ROOT_ID},
+                "(release manifest)",
+                where,
+                ("F8",),
+                "the committed release names this generation under a root other than "
+                "the panel's, so it does not pin the panel",
+            )
+        return
+    manifest_path = ctx.gen.gen_dir / GENERATION_MANIFEST
+    actual = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    for target, where in found:
+        bound = target.get("proposed_manifest_sha256")
+        if bound != actual:
+            yield _finding(
+                "identity.release_pinned",
+                BLOCKER_AUTHORITY,
+                pointer["release_id"],
+                {"proposed_manifest_sha256": bound},
+                {
+                    "proposed_generation_id": ctx.gen.generation_id,
+                    "proposed_manifest_sha256": actual,
+                },
+                "(release manifest)",
+                where,
+                ("F8",),
+                "a committed release target that names this generation does not carry "
+                "the sha256 of its generation.json",
+            )
 
 
 def check_absolute_paths(ctx: Context) -> Iterator[Finding]:
@@ -3056,14 +3206,334 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
                 )
 
 
+_CASH_BASIS = (
+    "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
+)
+_CASH_EVENT_TOLERANCE = Decimal("0.000001")
+CASH_EVIDENCE_CHECK = "capital.derived_cash_evidence"
+
+
+def _event_key(event: Mapping[str, Any]) -> str:
+    """The identity an event is counted by: its record id, else its whole content."""
+
+    for name in ("record_id", "event_sha256"):
+        value = event.get(name)
+        if isinstance(value, str) and value:
+            return f"{name}:{value}"
+    return "content:" + json.dumps(event, sort_keys=True, default=str)
+
+
+RateTable = Mapping[tuple[str, str], frozenset[str]]
+
+
+def cash_rate_table(report: Mapping[str, Any]) -> RateTable:
+    """Every event-time rate the custody cash events state, by (currency, date).
+
+    The report carries no FX-rate table, only each event's own ``event_time_fx``; this is
+    the table those statements make together, so an event can be held to its siblings.
+    """
+
+    found: dict[tuple[str, str], set[str]] = {}
+    for strategy in rows(node(report, "custody_current_capital"), "strategies"):
+        for line in rows(strategy, "derived_cash"):
+            for event in rows(line, "events"):
+                fx = event.get("event_time_fx")
+                rate = to_decimal(fx.get("rate")) if isinstance(fx, Mapping) else None
+                if rate is None or not isinstance(fx, Mapping):
+                    continue
+                currency = str(event.get("native_currency") or fx.get("currency"))
+                day = str(fx.get("date") or event.get("event_date"))
+                found.setdefault((currency, day), set()).add(str(rate.normalize()))
+    return {key: frozenset(rates) for key, rates in found.items()}
+
+
+def _amount_text(value: Any) -> bool:
+    """A non-empty string that parses to a finite number (the schema types amounts so)."""
+
+    return (
+        isinstance(value, str) and bool(value.strip()) and to_decimal(value) is not None
+    )
+
+
+def _event_shape_problems(event: Mapping[str, Any]) -> list[str]:
+    """Fields every custody cash event must carry (report-data.schema.json).
+
+    ``event_date``, ``record_id``, ``event_sha256``, ``native_currency``, ``native_value``,
+    ``event_time_fx`` (an object, or null for native USD) and ``signed_usd`` are all required;
+    a missing, null, boolean, numeric-typed, non-numeric or non-finite value is not evidence,
+    and an event that fails here is not run through the native-amount check.
+    """
+
+    problems: list[str] = []
+    if _canonical_iso_day(event.get("event_date")) is None:
+        problems.append("event_date is missing or not a canonical ISO date")
+    record = event.get("record_id")
+    if not isinstance(record, str) or not record:
+        problems.append("record_id is missing or not a non-empty string")
+    digest = event.get("event_sha256")
+    if not isinstance(digest, str) or not _RELEASE_DIGEST.fullmatch(digest):
+        problems.append(
+            "event_sha256 is missing or not a 64 character lowercase digest"
+        )
+    currency = event.get("native_currency")
+    if not isinstance(currency, str) or not currency:
+        problems.append("native_currency is missing or not a non-empty string")
+    if not _amount_text(event.get("native_value")):
+        problems.append("native_value is missing or not a finite numeric string")
+    if not _amount_text(event.get("signed_usd")):
+        problems.append("signed_usd is missing or not a finite numeric string")
+    if "event_time_fx" not in event or not (
+        event["event_time_fx"] is None or isinstance(event["event_time_fx"], Mapping)
+    ):
+        problems.append("event_time_fx is missing or neither an object nor null")
+    return problems
+
+
+def _native_event_problem(
+    event: Mapping[str, Any], rates: RateTable | None = None
+) -> str | None:
+    """An event's ``signed_usd`` must follow from its native amount and event-time rate.
+
+    Only an event that states a native amount is checked: ``|signed_usd|`` equals the
+    native amount times the event-time rate. A native USD amount carries rate exactly 1; a
+    foreign native amount needs a positive rate, the same one every event of that currency
+    and date states (``rates``). ACCEPTED RESIDUAL: the report carries no FX-rate table, so
+    the absolute rate is not independently recomputed here; the oracle's
+    ``capital.strategy_cash.cutoff`` row is the independent check of the amount.
+    """
+
+    native = to_decimal(event.get("native_value"))
+    signed = to_decimal(event.get("signed_usd"))
+    if native is None or signed is None:
+        return None
+    currency = event.get("native_currency")
+    fx = event.get("event_time_fx")
+    rate = to_decimal(fx.get("rate")) if isinstance(fx, Mapping) else None
+    if currency in (None, "USD"):
+        if rate is not None and rate != 1:
+            return f"a native USD amount cannot carry the rate {rate}"
+        rate = Decimal(1)
+    elif rate is None:
+        return "a foreign native amount carries no event-time rate"
+    elif rate <= 0:
+        return f"the event-time rate {rate} is not positive"
+    elif rates is not None and isinstance(fx, Mapping):
+        day = str(fx.get("date") or event.get("event_date"))
+        stated = rates.get((str(currency), day), frozenset())
+        if len(stated) > 1:
+            return (
+                f"{currency} carries {len(stated)} different event-time rates on {day} "
+                "across the custody cash events"
+            )
+    if abs(abs(signed) - abs(native) * rate) > _CASH_EVENT_TOLERANCE:
+        return (
+            f"signed_usd {signed} is not the native amount {native} at the event-time "
+            f"rate {rate}"
+        )
+    return None
+
+
+def _balance_and_identity_problems(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Dated running balance and event identity of one line's flow events.
+
+    The custody contract forbids negative cash: the balance at the end of every event date
+    (events of one day are netted, so a same-day withdrawal listed before its deposit is
+    fine) must not be negative. An event with no canonical date cannot be ordered, and one
+    record counted twice is summed twice.
+    """
+
+    problems: list[str] = []
+    seen: set[str] = set()
+    by_day: dict[date, Decimal] = {}
+    undated = 0
+    for event in events:
+        key = _event_key(event)
+        if key in seen:
+            problems.append(f"the event {key} is counted twice in the line")
+        seen.add(key)
+        signed = to_decimal(event.get("signed_usd"))
+        day = _canonical_iso_day(event.get("event_date"))
+        if day is None:
+            undated += 1
+        elif signed is not None:
+            by_day[day] = by_day.get(day, Decimal(0)) + signed
+    if undated:
+        problems.append(
+            f"{undated} event(s) have no canonical event_date to order them by"
+        )
+    balance = Decimal(0)
+    for day in sorted(by_day):
+        balance += by_day[day]
+        if balance < -_CASH_EVENT_TOLERANCE:
+            problems.append(
+                f"the running balance is negative ({balance}) at the end of {day}"
+            )
+            break
+    return problems
+
+
+def derived_cash_issues(
+    line: Any, rates: RateTable | None = None
+) -> tuple[Decimal | None, list[str]]:
+    """The amount of an AVAILABLE derived cash line and why it cannot be trusted.
+
+    OWNER_318 and the custody contract: the line is derived (admitted deposits less
+    withdrawals less sleeve allocations plus redemptions) in USD at event-date FX and a
+    negative line fails closed. So the line must be USD, not negative at any dated point,
+    carry the derived basis, count each event once, and reproduce from its own flow events
+    (the sum of their ``signed_usd``, each following from its native amount and rate); a
+    producer-supplied total is never evidence of itself. ``(None, [])`` is a line that is
+    not AVAILABLE (not evidence, not a finding).
+    """
+
+    value = node(line, "current_value")
+    if not isinstance(value, Mapping) or not is_available(value.get("status")):
+        return None, []
+    problems: list[str] = []
+    amount = to_decimal(value.get("value"))
+    if amount is None:
+        return None, ["the line has no numeric amount"]
+    if value.get("currency") != "USD":
+        problems.append(f"the line is not in USD ({value.get('currency')})")
+    if amount < 0:
+        problems.append("the line is negative (a negative cash line fails closed)")
+    if node(line, "basis") != _CASH_BASIS:
+        problems.append("the line does not carry the derived basis")
+    events = node(line, "events")
+    signed = [to_decimal(item.get("signed_usd")) for item in rows(line, "events")]
+    if not isinstance(events, list) or not events or None in signed:
+        problems.append("the line has no flow events to reproduce it from")
+    else:
+        total = sum((item for item in signed if item is not None), Decimal(0))
+        if abs(total - amount) > _CASH_EVENT_TOLERANCE:
+            problems.append(
+                f"the line's flow events sum to {total}, not the published {amount}"
+            )
+        problems.extend(_balance_and_identity_problems(rows(line, "events")))
+    for position, event in enumerate(rows(line, "events")):
+        shape = _event_shape_problems(event)
+        if shape:
+            problems.extend(f"event {position}: {problem}" for problem in shape)
+            continue
+        problem = _native_event_problem(event, rates)
+        if problem is not None:
+            problems.append(f"event {position}: {problem}")
+    return amount, problems
+
+
+@dataclass(frozen=True)
+class CashLine:
+    strategy_id: str
+    position: int
+    line_position: int
+    account_id: Any
+    amount: Decimal | None
+    problems: tuple[str, ...]
+    counted: bool
+
+
+def derived_cash_lines(ctx: Context) -> list[CashLine]:
+    """Every derived cash component with its verdict, repeats marked and not counted.
+
+    A component repeats when its account id was already listed for the strategy or any of
+    its events was already counted in an earlier component anywhere in the custody block:
+    the repeat is a finding and its amount is not summed again.
+    """
+
+    cached = ctx._cache.get("derived_cash_lines")
+    if isinstance(cached, list):
+        return cast(list[CashLine], cached)
+    rates = cash_rate_table(ctx.report)
+    seen_events: set[str] = set()
+    seen_accounts: set[tuple[str, str]] = set()
+    found: list[CashLine] = []
+    custody = node(ctx.report, "custody_current_capital")
+    for position, strategy in enumerate(rows(custody, "strategies")):
+        lines = strategy.get("derived_cash")
+        if not isinstance(lines, list):
+            continue
+        strategy_id = str(strategy.get("strategy_id"))
+        for line_position, line in enumerate(lines):
+            amount, problems = derived_cash_issues(line, rates)
+            if amount is None and not problems:
+                continue
+            keys = {_event_key(event) for event in rows(line, "events")}
+            account = (strategy_id, str(node(line, "account_id")))
+            repeated = bool(keys & seen_events) or account in seen_accounts
+            if repeated:
+                problems.append(
+                    "the component repeats an account or events already counted in "
+                    "the custody block (it would be summed twice)"
+                )
+            seen_events |= keys
+            seen_accounts.add(account)
+            found.append(
+                CashLine(
+                    strategy_id,
+                    position,
+                    line_position,
+                    node(line, "account_id"),
+                    amount,
+                    tuple(problems),
+                    counted=not problems,
+                )
+            )
+    ctx._cache["derived_cash_lines"] = found
+    return found
+
+
+def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
+    """The unallocated cash each strategy's custody row publishes (OWNER_318).
+
+    A strategy's capital is its sleeve account NAV plus this derived cash; only a component
+    that ``derived_cash_lines`` finds sound counts, so an unverified or repeated line
+    cannot make a total agree with itself.
+    """
+
+    cash: dict[str, Decimal] = {}
+    for line in derived_cash_lines(ctx):
+        if line.counted and line.amount is not None:
+            cash[line.strategy_id] = (
+                cash.get(line.strategy_id, Decimal(0)) + line.amount
+            )
+    return cash
+
+
+def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
+    """B13: every AVAILABLE derived cash line is sound, and counted once."""
+
+    for line in derived_cash_lines(ctx):
+        if not line.problems:
+            continue
+        yield _finding(
+            CASH_EVIDENCE_CHECK,
+            BLOCKER_INVARIANT,
+            f"cash:{line.strategy_id}:{line.account_id}",
+            line.amount,
+            {
+                "currency": "USD",
+                "non_negative_dated_balance": True,
+                "basis": _CASH_BASIS,
+                "events_reproduce_the_amount": True,
+                "each_event_counted_once": True,
+            },
+            REPORT,
+            f"$.custody_current_capital.strategies[{line.position}]"
+            f".derived_cash[{line.line_position}]",
+            ("B13",),
+            "derived cash is not sound: " + "; ".join(line.problems),
+        )
+
+
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
     values = {
         str(row.get("account_id")): to_decimal(row.get("latest_value_usd"))
         for row in rows(ctx.report, "account_summary")
     }
+    cash = derived_cash_by_strategy(ctx)
     totals: dict[str, tuple[Decimal, list[str]]] = {}
     for strategy, accounts in current_accounts_by_strategy(ctx).items():
-        amount = Decimal(0)
+        amount = cash.get(strategy, Decimal(0))
         for account in accounts:
             amount += values.get(account) or Decimal(0)
         totals[strategy] = (amount, sorted(accounts))
@@ -3546,8 +4016,8 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
     reference = universe(ctx)
     if reference is None:
         return
-    allowed = set(reference.active_accounts) | reserve_accounts(ctx)
     for label, file, path, key in _ACCOUNT_VIEWS:
+        allowed = set(reference.active_accounts) | reserve_accounts(ctx, label)
         ids = _view_ids(ctx, file, path, key)
         if ids is None:
             continue
@@ -3976,6 +4446,25 @@ def check_epoch_hpr_receipts(ctx: Context) -> Iterator[Finding]:
     yield from _epoch_receipt_index(ctx)[1]
 
 
+RETAINED_ACCOUNT_SOURCE = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
+
+
+def strategy_confirmed_retained(ctx: Context, strategy_id: str) -> bool:
+    """Whether the authoritative crosswalk shows this strategy as not active.
+
+    A comparison's own ``account_series_source`` label never establishes that: the
+    strategy has to be absent from the active universe and present among the
+    crosswalk's excluded strategies (retained or ended product epochs).
+    """
+
+    reference = universe(ctx)
+    return (
+        reference is not None
+        and strategy_id in reference.excluded_strategies
+        and strategy_id not in reference.active_strategies
+    )
+
+
 def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
     """B3: the account return inside a benchmark comparison equals the live series."""
 
@@ -3999,6 +4488,15 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
         computed, count = compound_window(ctx, strategy, start, end)
         pointer = f"$.strategy_attribution.benchmark_comparisons[{position}].metrics"
         if shown is None:
+            continue
+        if (
+            count == 0
+            and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE
+            and strategy_confirmed_retained(ctx, strategy)
+        ):
+            # A retained strategy's comparison discloses a reference-only account
+            # series (ruling S1 of N8): it has no live series by design. The label
+            # alone grants nothing: the crosswalk has to show the strategy as retained.
             continue
         if count == 0:
             yield _finding(
@@ -5465,17 +5963,10 @@ def _dated_sections(
                 ("C4",),
                 ("c4_historical", (metadata_key, metadata)),
             )
-    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
-        if row.get("live_boundary_observed_end") is not None:
-            yield (
-                f"live_boundary:{row.get('strategy_id')}",
-                REPORT,
-                f"$.strategy_summary[{position}].live_boundary_observed_end",
-                row.get("live_boundary_observed_end"),
-                row.get("live_boundary_status"),
-                ("C5",),
-                None,
-            )
+    # ``strategy_summary.live_boundary_observed_end`` is deliberately not a section
+    # as-of: it is a pinned version-identity window (the targets rows hashed into the
+    # version reference, tools/portfolio_provenance.py), and extending it to the cutoff
+    # would re-pin the identity (D4 ruling 1 of the S2.1 decision seat).
 
 
 def _canonical_iso_day(value: Any) -> date | None:
@@ -5550,6 +6041,93 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
     return False
 
 
+# Provider publication lag (V10). A public factor provider that publishes monthly with a
+# fixed lag has no observation past its last eligible month, so a lens built only on its
+# sources ends there at any later cutoff. The lag is the policy's, the sources are the
+# governed decomposition plan's: the report's own lens row is never taken at its word.
+_LAG_POLICY_ID = re.compile(r"_(\d+)D_V\d+$")
+
+
+def _plan_sources_by_lens(
+    ctx: Context,
+) -> dict[str, dict[str, int | None]]:
+    """Per lens, the sources the governed plan assigns it and each one's publication lag.
+
+    The lag is read from the plan's freshness policy id (``..._45D_V1`` states 45 days);
+    a source with no policy or an id that states no lag has ``None`` (not lagged).
+    ACCEPTED RESIDUAL: the lag is the id's suffix, not a policy document, because the
+    repository carries the policy only as that identifier.
+    """
+
+    plan = decomposition_plan(ctx)
+    sources = plan.get("sources") if plan is not None else None
+    found: dict[str, dict[str, int | None]] = {}
+    for key, config in sources.items() if isinstance(sources, Mapping) else []:
+        if not isinstance(config, Mapping) or not isinstance(config.get("lens"), str):
+            continue
+        policy = config.get("freshness_policy_id")
+        matched = _LAG_POLICY_ID.search(policy) if isinstance(policy, str) else None
+        found.setdefault(str(config["lens"]), {})[str(key)] = (
+            int(matched.group(1)) if matched else None
+        )
+    return found
+
+
+def _last_eligible_month_end(cutoff: date, lag_days: int) -> date:
+    month_end = cutoff.replace(day=1) - timedelta(days=1)
+    while month_end + timedelta(days=lag_days) > cutoff:
+        month_end = month_end.replace(day=1) - timedelta(days=1)
+    return month_end
+
+
+def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
+    """Why a lens may end before the cutoff because its providers publish late.
+
+    ``entity`` is ``decomposition:{lens_id}:{mode}``. The lens's expected sources are the
+    governed plan's assignments for that lens; the row's own ``sources`` must equal them,
+    every one of them must carry a publication lag, and the lens must end in the last
+    month publishable at the cutoff under the longest lag (its final observation can fall
+    up to four days before that month end). ``None`` leaves the finding unchanged.
+    """
+
+    lens_id, _, mode = entity.removeprefix("decomposition:").partition(":")
+    expected = _plan_sources_by_lens(ctx).get(lens_id)
+    if not expected or any(lag is None for lag in expected.values()):
+        return None
+    modes = node(ctx.report, "decomposition_lenses", "modes")
+    candidates = list(rows(node(ctx.report, "decomposition_lenses"), "lenses"))
+    if isinstance(modes, Mapping):
+        for mode_name, mode_rows in modes.items():
+            if mode in ("", str(mode_name)) and isinstance(mode_rows, list):
+                candidates += [row for row in mode_rows if isinstance(row, dict)]
+    matching = [
+        row
+        for row in candidates
+        if row.get("lens_id") == lens_id and to_date(row.get("as_of_date")) == day
+    ]
+    if not matching:
+        return None
+    for row in matching:
+        named = {
+            str(source.get("source_key"))
+            for source in rows(row, "sources")
+            if source.get("source_key") is not None
+        }
+        if named != set(expected):
+            return None
+    lag = max(lag for lag in expected.values() if lag is not None)
+    eligible = _last_eligible_month_end(ctx.cutoff, lag)
+    if (day.year, day.month) != (eligible.year, eligible.month) or (
+        eligible - day
+    ).days > 4:
+        return None
+    return (
+        f"lens ends {day} because its governed sources ({', '.join(sorted(expected))}) "
+        f"publish monthly with a {lag} day publication lag: the last eligible month at "
+        f"the cutoff is {eligible:%Y-%m} (governed decomposition plan freshness policy)"
+    )
+
+
 def check_section_dates(ctx: Context) -> Iterator[Finding]:
     """C2-C5: a section's as-of must be the cutoff, or be labelled as not current."""
 
@@ -5615,6 +6193,32 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
             continue
         after = day > cutoff
         if role is not None and not after:
+            if (
+                role[0] == "c2_descriptive"
+                and isinstance(role[1], Mapping)
+                and role[1].get("account_series_source") == RETAINED_ACCOUNT_SOURCE
+                and strategy_confirmed_retained(ctx, str(role[1].get("strategy_id")))
+            ):
+                # A retained strategy's reference-only account history ends where the
+                # retained history ends, by design (ruling S1 of N8); the crosswalk
+                # lifecycle confirms the strategy is retained.
+                continue
+            # A role that passed the validation above and ends before the cutoff keeps
+            # its true end date and is NOT_READY (descriptive benchmark windows, the
+            # recipe-pinned historical contracts); an invalid role, a missing label or
+            # a date after the cutoff never reaches this branch as NOT_READY.
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                NOT_READY,
+                entity,
+                {"as_of": value, "status": status},
+                cutoff,
+                file,
+                path,
+                defects,
+                "labelled section ends before the declared cutoff (its true end date "
+                "is published, not presented as current)",
+            )
             continue
         bound = (
             verified_value_basis_bound(
@@ -5625,9 +6229,20 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
             and entity.startswith("decomposition:")
             else None
         )
+        lag = (
+            provider_lag_bound(ctx, entity, day)
+            if bound is None
+            and not after
+            and is_available(status)
+            and entity.startswith("decomposition:")
+            else None
+        )
         if bound is not None:
             klass = NOT_READY
             message = _bound_message(bound, "section")
+        elif lag is not None:
+            klass = NOT_READY
+            message = lag
         elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
@@ -5704,29 +6319,195 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
-    """C6: the current week is the cutoff's week, partial, visible and labelled."""
+    """C6: the current week is source-bound, partial as applicable, and visible."""
 
     weekly = node(ctx.panel, "weekly_returns")
+    source_artifact_id = "input/portfolio-weekly-returns.json"
+    artifacts = [
+        artifact
+        for artifact in rows(ctx.gen.manifest, "artifacts")
+        if artifact.get("artifact_id") == source_artifact_id
+    ]
+    has_source_identity = any(
+        weekly.get(name) is not None for name in ("generation_id", "source_sha256")
+    )
+    if weekly.get("status") == "UNAVAILABLE_NOT_CONFIGURED":
+        current = node(weekly, "current_week")
+        has_current_week_data = isinstance(current, Mapping) and any(
+            current.get(name) is not None
+            for name in ("week_start", "week_end", "data_through_date")
+        )
+        payload_rows = {
+            name: len(weekly[name])
+            for name in ("weeks", "series")
+            if isinstance(weekly.get(name), list) and weekly[name]
+        }
+        if artifacts or has_source_identity or has_current_week_data or payload_rows:
+            yield _finding(
+                "dates.weekly_current_week",
+                BLOCKER_AUTHORITY,
+                "weekly_returns.status",
+                {
+                    "source_artifact_count": len(artifacts),
+                    "current_week_data_present": has_current_week_data,
+                    "source_identity_present": has_source_identity,
+                    "payload_rows": payload_rows,
+                },
+                "UNAVAILABLE only when no source artifact or source identity is bound "
+                "and the weekly payload is empty",
+                PANEL,
+                "$.weekly_returns.status",
+                ("C6",),
+                "configured weekly-source evidence or an unbound weekly payload "
+                "cannot be labelled unavailable",
+            )
+        return
+
+    if len(artifacts) != 1:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source",
+            len(artifacts),
+            "exactly one manifest-bound weekly source artifact",
+            GENERATION_MANIFEST,
+            "$.artifacts",
+            ("C6",),
+            "available weekly returns require one bound source snapshot",
+        )
+        return
+
+    artifact = artifacts[0]
+    manifest_as_of = to_date(artifact.get("as_of_date"))
+    source_hash = artifact.get("sha256")
+    # A manifest entry nests its schema identity as ``schema {name, version}``; the
+    # version is a string in the sealed manifest (generation.json) and 2 from 8302d4e.
+    schema = artifact.get("schema")
+    schema_name = schema.get("name") if isinstance(schema, Mapping) else None
+    schema_version = schema.get("version") if isinstance(schema, Mapping) else None
+    artifact_valid = (
+        schema_name == "portfolio-weekly-returns"
+        and not isinstance(schema_version, bool)
+        and str(schema_version) == "2"
+        and isinstance(source_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None
+        and isinstance(artifact.get("size_bytes"), int)
+        and not isinstance(artifact.get("size_bytes"), bool)
+        and artifact.get("size_bytes", 0) > 0
+    )
+    if not artifact_valid or manifest_as_of is None:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source",
+            {
+                "schema": schema,
+                "sha256_valid": isinstance(source_hash, str)
+                and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None,
+                "size_bytes": artifact.get("size_bytes"),
+            },
+            "valid portfolio-weekly-returns/2 manifest identity and source cutoff",
+            GENERATION_MANIFEST,
+            "$.artifacts",
+            ("C6",),
+            "weekly source artifact metadata is incomplete or invalid (its nested "
+            "schema must be portfolio-weekly-returns version 2)",
+        )
+        return
+    # The source is judged against the DECLARED cutoff, not against its own manifest
+    # date: the manifest ``as_of_date`` is an execution date and may lie after the
+    # cutoff (N54), and a source that trails the cutoff by more than the last completed
+    # week is stale. A week closes on its Friday: for a Friday, Saturday or Sunday
+    # cutoff the cutoff's own week is complete and its Friday is the floor, otherwise the
+    # last completed week is the previous one (its Friday).
+    latest_allowed = ctx.cutoff
+    this_friday = iso_week_start(ctx.cutoff) + timedelta(days=4)
+    earliest_allowed = (
+        this_friday if ctx.cutoff.weekday() >= 4 else this_friday - timedelta(days=7)
+    )
+    if manifest_as_of > latest_allowed or manifest_as_of < earliest_allowed:
+        after = manifest_as_of > latest_allowed
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source_cutoff",
+            manifest_as_of.isoformat(),
+            {"source_as_of_not_after": latest_allowed.isoformat()}
+            if after
+            else {"source_as_of_at_least": earliest_allowed.isoformat()},
+            GENERATION_MANIFEST,
+            "$.artifacts[input/portfolio-weekly-returns.json].as_of_date",
+            ("C6",),
+            "weekly source is dated after the declared cutoff (an execution date, not "
+            "the data cutoff)"
+            if after
+            else "weekly source ends before the last completed week at the declared "
+            "cutoff (stale)",
+        )
+        return
+    if weekly.get("source_sha256") != source_hash:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source_sha256",
+            weekly.get("source_sha256"),
+            source_hash,
+            PANEL,
+            "$.weekly_returns.source_sha256",
+            ("C6",),
+            "panel weekly source hash differs from the manifest-bound snapshot",
+        )
+        return
+    source_cutoff = manifest_as_of.isoformat()
+    if weekly.get("as_of_date") != source_cutoff:
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.as_of_date",
+            weekly.get("as_of_date"),
+            source_cutoff,
+            PANEL,
+            "$.weekly_returns.as_of_date",
+            ("C6",),
+            "panel weekly cutoff differs from its manifest-bound source",
+        )
+        return
+
     current = node(weekly, "current_week")
     if not isinstance(current, Mapping):
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.current_week",
+            current,
+            "source-bound current-week object",
+            PANEL,
+            "$.weekly_returns.current_week",
+            ("C6",),
+            "available weekly source requires a current-week record",
+        )
         return
-    cutoff_week = iso_week_start(ctx.cutoff)
+
+    source_week_start = iso_week_start(manifest_as_of)
     week_start = to_date(current.get("week_start"))
-    if week_start != cutoff_week:
+    if week_start != source_week_start:
         yield _finding(
             "dates.weekly_current_week",
             BLOCKER_AUTHORITY,
             "weekly_returns.current_week",
             current.get("week_start"),
-            cutoff_week,
+            source_week_start.isoformat(),
             PANEL,
             "$.weekly_returns.current_week.week_start",
             ("C6",),
-            "current week is anchored to the evaluation date, not the declared cutoff",
+            "current week must be anchored to the verified weekly-source cutoff",
         )
-    cutoff_week_partial = ctx.cutoff.weekday() < 6
-    if cutoff_week_partial and (
-        current.get("is_partial") is not True
+    expected_week_end = source_week_start + timedelta(days=6)
+    expected_partial = manifest_as_of < expected_week_end
+    if (
+        current.get("week_end") != expected_week_end.isoformat()
+        or current.get("data_through_date") != source_cutoff
+        or current.get("is_partial") is not expected_partial
         or current.get("default_visible") is not True
     ):
         yield _finding(
@@ -5736,16 +6517,122 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             {
                 "is_partial": current.get("is_partial"),
                 "default_visible": current.get("default_visible"),
+                "week_end": current.get("week_end"),
+                "data_through_date": current.get("data_through_date"),
             },
-            {"is_partial": True, "default_visible": True},
+            {
+                "is_partial": expected_partial,
+                "default_visible": True,
+                "week_end": expected_week_end.isoformat(),
+                "data_through_date": source_cutoff,
+            },
             PANEL,
             "$.weekly_returns.current_week",
             ("C6",),
-            "the partial cutoff week must be shown by default and marked partial (#417)",
+            "the current week must match the verified source cutoff and visibility (#417)",
         )
 
 
 # ------------------------------------------------------------- completeness (E*)
+
+
+_DECOMPOSITION_PLAN = "docs/analytics/current-strategy-decomposition-plan.json"
+_NOT_APPLICABLE = "NOT_APPLICABLE_METHOD_SCOPE"
+# The two out-of-scope requirement values the governed plan carries (a test pins the plan's
+# set to exactly these; a new kind in the plan is not honoured until it is added here).
+_OUT_OF_SCOPE = frozenset({_NOT_APPLICABLE, "NOT_APPLICABLE_OWNER_APPROVED"})
+
+
+def decomposition_plan(ctx: Context) -> Mapping[str, Any] | None:
+    """The governed decomposition plan the repository carries, or ``None`` if unreadable.
+
+    It is the owner-accepted authority for which strategy needs which source and which
+    lens a source belongs to (ISSUE_328 routing); no report field stands in for it.
+    """
+
+    if "decomposition_plan" in ctx._cache:
+        cached = ctx._cache["decomposition_plan"]
+        return cached if isinstance(cached, Mapping) else None
+    root = (
+        ctx.repo_root
+        if ctx.repo_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+    plan: Any
+    try:
+        plan = json.loads((root / _DECOMPOSITION_PLAN).read_bytes())
+    except (OSError, ValueError):
+        plan = None
+    ctx._cache["decomposition_plan"] = plan if isinstance(plan, dict) else None
+    return plan if isinstance(plan, dict) else None
+
+
+def _plan_dispositions(ctx: Context) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """The plan's per (series, source) disposition: requirement, readiness, reason."""
+
+    plan = decomposition_plan(ctx)
+    found: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for strategy in rows(plan, "strategies") if plan is not None else []:
+        dispositions = strategy.get("source_dispositions")
+        if not isinstance(dispositions, Mapping):
+            continue
+        for source_key, disposition in dispositions.items():
+            if isinstance(disposition, Mapping):
+                found[(str(strategy.get("series_id")), str(source_key))] = disposition
+    return found
+
+
+def _cell_is_explained(
+    cell: Mapping[str, Any],
+    dispositions: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> bool:
+    """Whether the governed plan confirms why a non-available cell is not a gap.
+
+    A cell labelled with an out-of-scope kind (``NOT_APPLICABLE_METHOD_SCOPE`` or
+    ``NOT_APPLICABLE_OWNER_APPROVED``) is excused only when the plan carries that
+    (series, source) pair with that same requirement; a ``DIAGNOSTIC_ONLY`` cell (the model-quality
+    gate) only when the plan requires and readies that pair, so a REQUIRED cell can never
+    exempt itself with its own ``selection_status``. ACCEPTED RESIDUAL: the plan confirms
+    the pair, not that the producer labelled this cell truthfully, so the cell's own label
+    still gates the excuse.
+    """
+
+    disposition = dispositions.get(
+        (str(cell.get("series_id")), str(cell.get("source_key")))
+    )
+    if disposition is None:
+        return False
+    if cell.get("status") == "DIAGNOSTIC_ONLY":
+        return (
+            disposition.get("requirement") == "REQUIRED"
+            and disposition.get("readiness") == "READY_TO_MODEL"
+        )
+    requirement = disposition.get("requirement")
+    return requirement in _OUT_OF_SCOPE and cell.get("selection_status") == requirement
+
+
+def _incomplete_series_count(
+    lens: Mapping[str, Any],
+    dispositions: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> int:
+    """The cells of a lens that are unavailable and not explained by the governed plan.
+
+    Recomputed from the series rows; the producer's ``unavailable_count`` is only
+    reconciled (a count larger than the unavailable rows shows is unexplained and counts
+    as incomplete). A lens without series rows is measured by its own counter.
+    """
+
+    declared = int(lens.get("unavailable_count") or 0)
+    series = lens.get("series")
+    if not isinstance(series, list):
+        return declared
+    unavailable = [
+        row
+        for row in series
+        if isinstance(row, Mapping) and not is_available(row.get("status"))
+    ]
+    gaps = sum(1 for row in unavailable if not _cell_is_explained(row, dispositions))
+    return gaps + max(0, declared - len(unavailable))
 
 
 def check_completeness(ctx: Context) -> Iterator[Finding]:
@@ -5799,14 +6686,16 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             "FX evidence gate not passed",
         )
     modes = node(ctx.report, "decomposition_lenses", "modes")
+    dispositions = _plan_dispositions(ctx)
     if isinstance(modes, Mapping):
         incomplete = {}
         for mode, lenses in sorted(modes.items()):
             for lens in lenses if isinstance(lenses, list) else []:
-                if isinstance(lens, dict) and (lens.get("unavailable_count") or 0) > 0:
-                    incomplete[f"{mode}:{lens.get('lens_id')}"] = lens.get(
-                        "unavailable_count"
-                    )
+                if not isinstance(lens, dict):
+                    continue
+                count = _incomplete_series_count(lens, dispositions)
+                if count > 0:
+                    incomplete[f"{mode}:{lens.get('lens_id')}"] = count
         if incomplete:
             yield _finding(
                 "completeness.required_outputs",
@@ -5860,30 +6749,71 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             ("E7",),
             "provider strategy returns empty",
         )
+    # The contract (leverage_accounting, required_facts) requires gross exposure and
+    # financing cost to be disclosed for the levered accounts; it names no
+    # ``leverage_ratio`` field. Coverage is read per applicable account and measure: the
+    # active accounts of the crosswalk (the accounts named in the disclosures when there
+    # is no crosswalk), each needing a covered row of each measure. A missing row, an
+    # unavailable one and an observed-only one all leave that account uncovered.
     disclosures = rows(ctx.report, "leverage_disclosures")
-    has_ratio = any("leverage_ratio" in row for row in disclosures)
-    unavailable_financing = sum(
-        1
-        for row in disclosures
-        if row.get("data_class") == "FINANCING_COST"
-        and row.get("coverage_status") == "UNAVAILABLE"
-    )
-    if disclosures and not has_ratio:
-        yield _finding(
-            "completeness.required_outputs",
-            NOT_READY,
-            "leverage_disclosures",
-            {
-                "rows": len(disclosures),
-                "leverage_ratio_fields": 0,
-                "unavailable_financing_cost_rows": unavailable_financing,
-            },
-            "a leverage ratio per levered account",
-            REPORT,
-            "$.leverage_disclosures",
-            ("E8",),
-            "leverage ratio absent; financing cost unmapped",
+    if disclosures:
+        reference = universe(ctx)
+        applicable = sorted(
+            reference.active_accounts
+            if reference is not None
+            else {
+                str(row["account_id"])
+                for row in disclosures
+                if row.get("account_id") is not None
+            }
         )
+        for measure, entity, basis in (
+            (
+                "LEVERAGE_EXPOSURE",
+                "leverage_disclosures.gross_exposure",
+                "a gross-exposure disclosure for each levered account",
+            ),
+            (
+                "FINANCING_COST",
+                "leverage_disclosures.financing_cost",
+                "a reconciled financing cost basis for each levered account",
+            ),
+        ):
+            measured = [row for row in disclosures if row.get("data_class") == measure]
+            state: dict[str, str] = {}
+            for account in applicable:
+                statuses = [
+                    str(row.get("coverage_status"))
+                    for row in measured
+                    if str(row.get("account_id")) == account
+                ]
+                if not any(is_available(status) for status in statuses):
+                    state[account] = (
+                        "NO_ROW" if not statuses else "|".join(sorted(set(statuses)))
+                    )
+            if applicable:
+                gap = bool(state)
+            else:
+                gap = not any(
+                    is_available(row.get("coverage_status")) for row in measured
+                )
+            if gap:
+                yield _finding(
+                    "completeness.required_outputs",
+                    NOT_READY,
+                    entity,
+                    {
+                        "rows": len(measured),
+                        "applicable_accounts": len(applicable),
+                        "uncovered_accounts": state,
+                    },
+                    basis,
+                    REPORT,
+                    "$.leverage_disclosures",
+                    ("E8",),
+                    f"{measure.lower().replace('_', ' ')} is not covered for every "
+                    "levered account (missing, observed only or unavailable)",
+                )
 
 
 # -------------------------------------------------------------------- code checks
@@ -6371,10 +7301,20 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     weekly = node(ctx.panel, "weekly_returns")
     weeks = node(weekly, "weeks")
     series = node(weekly, "series")
-    cells = (
+    payload_cells = (
         len(weeks) * len(series)
         if isinstance(weeks, list) and isinstance(series, list)
         else 0
+    )
+    # The cells painted are the default window's weeks times the series, not the whole
+    # grid, when the renderer really slices to that window: ``shell.weekly_window_bound``
+    # checks the declaration, the slicing function and its use (a structural heuristic,
+    # not an execution of the renderer). Without it the whole payload is measured.
+    window = shell.weekly_window_bound(ctx.gen.app_js or "")
+    cells = (
+        min(window, len(weeks)) * len(series)
+        if window is not None and isinstance(weeks, list) and isinstance(series, list)
+        else payload_cells
     )
     if large or duplicates:
         yield _finding(
@@ -6396,6 +7336,8 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
             {
                 "weeks": len(weeks) if isinstance(weeks, list) else 0,
                 "series": len(series) if isinstance(series, list) else 0,
+                "rendered_cells": cells,
+                "payload_cells": payload_cells,
             },
             "lazy or bounded weekly render",
             PANEL,
@@ -6431,7 +7373,7 @@ def metric_unit(metric_id: str, declared: Any) -> str:
         return declared
     if metric_id.startswith("capital.") or metric_id == "flows.account.net":
         return "USD"
-    if metric_id.startswith(("twr.", "mwr.")):
+    if metric_id.startswith(("twr.", "mwr.", "weight.")):
         return "ratio"
     if metric_id.endswith("_ids"):
         return "list"
@@ -6485,6 +7427,30 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"$.account_summary[{position}].latest_value_usd",
                         )
                     )
+        # The custody block carries every account the capital identity names, including
+        # a retained or excluded account that has no account_summary row.
+        for position, row in enumerate(
+            rows(node(report, "custody_current_capital"), "strategies")
+        ):
+            for member_position, member in enumerate(rows(row, "members")):
+                value = member.get("value")
+                if (
+                    member.get("account_id") == entity
+                    and isinstance(value, Mapping)
+                    and is_available(value.get("status"))
+                ):
+                    out.append(
+                        Observed(
+                            "report:custody_current_capital.strategies.members.value",
+                            value.get("value"),
+                            None,
+                            None,
+                            member.get("as_of_date"),
+                            REPORT,
+                            f"$.custody_current_capital.strategies[{position}]"
+                            f".members[{member_position}].value.value",
+                        )
+                    )
         for position, row in manifest_rows(ctx):
             if (
                 str(row.get("account_id")) == entity
@@ -6499,6 +7465,51 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         row.get("end"),
                         PANEL,
                         f"$.account_manifest.rows[{position}].current_value",
+                    )
+                )
+    elif metric_id == "weight.strategy.cutoff":
+        for file, key in ((REPORT, "strategy_summary"), (PANEL, "strategies")):
+            for position, row in enumerate(
+                rows(report if file == REPORT else panel, key)
+            ):
+                if row.get("strategy_id") == entity and "systematic_weight" in row:
+                    out.append(
+                        Observed(
+                            f"{file}:{key}.systematic_weight",
+                            row.get("systematic_weight"),
+                            None,
+                            None,
+                            None,
+                            file,
+                            f"$.{key}[{position}].systematic_weight",
+                        )
+                    )
+    elif metric_id == "capital.strategy_cash.cutoff":
+        for position, row in enumerate(
+            rows(node(report, "custody_current_capital"), "strategies")
+        ):
+            if row.get("strategy_id") != entity:
+                continue
+            counted = [
+                line
+                for line in derived_cash_lines(ctx)
+                if line.strategy_id == entity
+                and line.position == position
+                and line.counted
+                and line.amount is not None
+            ]
+            if counted:
+                out.append(
+                    Observed(
+                        "report:custody_current_capital.strategies.derived_cash",
+                        sum(
+                            (line.amount or Decimal(0) for line in counted), Decimal(0)
+                        ),
+                        None,
+                        None,
+                        row.get("as_of_date"),
+                        REPORT,
+                        f"$.custody_current_capital.strategies[{position}].derived_cash",
                     )
                 )
     elif metric_id == "capital.strategy.cutoff":
@@ -7265,6 +8276,63 @@ def recompute_metric(
     ]
 
 
+# Per-account performance is not a required output for an owner-excluded account (its
+# capital is: the retained-excluded identity), so only these metrics are expected
+# exclusions when the oracle states them not derivable.
+_PERFORMANCE_METRICS = frozenset(
+    {"twr.account", "mwr.account", "flows.account.net", "flows.account.count"}
+)
+
+
+# The only EXCLUDED_ dispositions the crosswalk contract defines. An out-of-vocabulary
+# value (a corrupted or new label) is not an owner exclusion and excludes nothing.
+OWNER_EXCLUSION_DISPOSITIONS = frozenset(
+    {"EXCLUDED_DEPRECATED_HISTORY_ONLY", "EXCLUDED_IMMATERIAL"}
+)
+
+
+def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
+    """Accounts the crosswalk excludes by an owner disposition, by account."""
+
+    reference = universe(ctx)
+    if reference is None:
+        return {}
+    return {
+        account: disposition
+        for account, disposition in reference.excluded_accounts.items()
+        if disposition in OWNER_EXCLUSION_DISPOSITIONS
+    }
+
+
+def _is_owner_exclusion(
+    row: Mapping[str, Any], owner_excluded: Mapping[str, str]
+) -> bool:
+    return (
+        row.get("metric_id") in _PERFORMANCE_METRICS
+        and str(row.get("entity")) in owner_excluded
+    )
+
+
+def expected_exclusions(ctx: Context) -> list[dict[str, Any]]:
+    """Oracle not-derivable performance rows of owner-excluded accounts.
+
+    They are not findings (the findings contract has five classes and the oracle states
+    them not derivable by design): the validator writes them to its details file.
+    """
+
+    owner_excluded = _owner_excluded_accounts(ctx)
+    return [
+        {
+            "metric_id": row.get("metric_id"),
+            "entity": row.get("entity"),
+            "disposition": owner_excluded[str(row.get("entity"))],
+            "reason": row.get("reason"),
+        }
+        for row in ctx.expected_not_derivable
+        if _is_owner_exclusion(row, owner_excluded)
+    ]
+
+
 def check_expected(ctx: Context) -> Iterator[Finding]:
     if ctx.expected is None:
         yield _finding(
@@ -7279,7 +8347,10 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
             "no fixed-baseline expectations supplied; regression checks skipped",
         )
         return
+    owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
+        if _is_owner_exclusion(row, owner_excluded):
+            continue
         yield _finding(
             "expected.not_derivable",
             NOT_READY,
@@ -7507,6 +8578,228 @@ def check_corrections(ctx: Context) -> Iterator[Finding]:
 
 Check = Callable[[Context], Iterable[Finding]]
 
+
+# The producer's lifecycle values that make no live-window claim (tools/portfolio_control_
+# panel.py writes ACTIVE, DEPRECATED_HISTORY_ONLY and IMMATERIAL_EXCLUDED); any other value
+# is treated as an active strategy.
+_INACTIVE_LIFECYCLES = frozenset({"DEPRECATED_HISTORY_ONLY", "IMMATERIAL_EXCLUDED"})
+
+
+def check_account_live_window(ctx: Context) -> Iterator[Finding]:
+    """C5: an active strategy's account live window reaches the cutoff.
+
+    ``live_boundary_observed_end`` is a pinned identity window and is not compared (V2);
+    this is the window the account live return is computed over. A strategy that is not
+    active (the producer's DEPRECATED_HISTORY_ONLY or IMMATERIAL_EXCLUDED) or whose live
+    status is not available makes no claim.
+    An active, available strategy must publish a canonical end: a missing, null or
+    malformed one is a blocker. An end before the cutoff is a blocker unless the report's
+    ``value_basis_bounds`` explains it (FXB-1) and the oracle confirms that bound
+    (``verified_value_basis_bound``), when it is NOT_READY with the bound message.
+    """
+
+    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
+        if row.get("lifecycle_status") in _INACTIVE_LIFECYCLES:
+            continue
+        status = row.get("account_live_status")
+        if status is not None and not is_available(status):
+            continue
+        strategy = str(row.get("strategy_id"))
+        raw = row.get("account_live_observed_end")
+        entity = f"account_live:{strategy}"
+        pointer = f"$.strategy_summary[{position}].account_live_observed_end"
+        end = _canonical_iso_day(raw)
+        if end is None:
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": raw, "status": status},
+                ctx.cutoff,
+                REPORT,
+                pointer,
+                ("C5",),
+                "an active strategy with an available live status does not publish a "
+                "canonical account live window end",
+            )
+            continue
+        if end == ctx.cutoff:
+            continue
+        bound = (
+            verified_value_basis_bound(ctx, "strategy_summary", strategy, end)
+            if end < ctx.cutoff
+            else None
+        )
+        yield _finding(
+            "dates.section_as_of_vs_cutoff",
+            NOT_READY if bound is not None else BLOCKER_AUTHORITY,
+            entity,
+            {"as_of": raw, "status": status},
+            ctx.cutoff,
+            REPORT,
+            pointer,
+            ("C5",),
+            _bound_message(bound, "account live window")
+            if bound is not None
+            else "section is dated after the declared cutoff"
+            if end > ctx.cutoff
+            else "account live window is presented as current but ends before the cutoff",
+        )
+
+
+CAPITAL_SCOPES = frozenset({"SYSTEMATIC", "RETAINED_EXCLUDED"})
+
+
+def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
+    """N56: the custody capital labels carry the date they are valued at.
+
+    The systematic total and each systematic strategy are valued at the cutoff; an
+    as_of older than that (the last event date or the minimum over members) labels a
+    current value with a past date. An AVAILABLE value must carry a canonical ISO
+    ``as_of_date``: a missing, null or malformed one is a finding, not a pass. Retained
+    and excluded rows (``RETAINED_EXCLUDED``) are not systematic; a scope outside the
+    producer's vocabulary is itself a finding (it would switch this check off).
+    """
+
+    custody = node(ctx.report, "custody_current_capital")
+    candidates: list[tuple[str, str, Mapping[str, Any]]] = []
+    systematic = node(custody, "systematic")
+    if isinstance(systematic, Mapping):
+        candidates.append(
+            (
+                "current_capital:systematic",
+                "$.custody_current_capital.systematic",
+                systematic,
+            )
+        )
+    for position, row in enumerate(rows(custody, "strategies")):
+        pointer = f"$.custody_current_capital.strategies[{position}]"
+        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
+            yield _finding(
+                "capital.as_of_cutoff",
+                BLOCKER_AUTHORITY,
+                f"current_capital:{row.get('strategy_id')}:scope",
+                row.get("scope"),
+                sorted(CAPITAL_SCOPES),
+                REPORT,
+                f"{pointer}.scope",
+                ("N56",),
+                "the custody scope is outside the producer's vocabulary, so the "
+                "capital date check cannot classify the row",
+            )
+            continue
+        if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":
+            candidates.append(
+                (f"current_capital:{row.get('strategy_id')}", pointer, row)
+            )
+    for entity, pointer, entry in candidates:
+        value = node(entry, "current_value")
+        available = entry.get("status") if "status" in entry else None
+        if available is not None and not is_available(available):
+            continue
+        if isinstance(value, Mapping) and not is_available(value.get("status")):
+            continue
+        day = _canonical_iso_day(entry.get("as_of_date"))
+        if day is None:
+            yield _finding(
+                "capital.as_of_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                "a canonical ISO as_of_date",
+                REPORT,
+                f"{pointer}.as_of_date",
+                ("N56",),
+                "an available current-capital value carries no canonical as_of_date",
+            )
+            continue
+        if day == ctx.cutoff:
+            continue
+        yield _finding(
+            "capital.as_of_cutoff",
+            BLOCKER_AUTHORITY,
+            entity,
+            entry.get("as_of_date"),
+            ctx.cutoff,
+            REPORT,
+            f"{pointer}.as_of_date",
+            ("N56",),
+            "current capital is valued at the cutoff but labelled with an as_of "
+            f"{'after' if day > ctx.cutoff else 'before'} it",
+        )
+
+
+def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
+    """N54: the evaluation clock must not be published as the data date.
+
+    The sealed manifest has one date field and downstream readers take it as the data
+    date, so it must be the requested cutoff: the panel producer stamps the later of the
+    data date and the freshness (execution) clock on it, which is a real defect (the
+    manifest is not exempt, nor is the freshness clock that drives it). The panel's own
+    data date (``meta.portfolio_as_of``) is checked beside it. The history contract keeps
+    two named clocks: ``as_of_date`` is the data date and must be the cutoff, and
+    ``evaluated_on`` is the execution clock, which may be later than the cutoff but never
+    earlier than the data date. No label a record declares about itself exempts a clock.
+    """
+
+    manifest_day = to_date(ctx.gen.manifest.get("as_of_date"))
+    if manifest_day is not None and manifest_day != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "generation.json.as_of_date",
+            ctx.gen.manifest.get("as_of_date"),
+            ctx.cutoff,
+            GENERATION_MANIFEST,
+            "$.as_of_date",
+            ("N54",),
+            "the generation manifest is dated at the evaluation clock, not the "
+            "requested data cutoff",
+        )
+    portfolio_as_of = node(ctx.panel, "meta", "portfolio_as_of")
+    if portfolio_as_of is not None and to_date(portfolio_as_of) != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "meta.portfolio_as_of",
+            portfolio_as_of,
+            ctx.cutoff,
+            PANEL,
+            "$.meta.portfolio_as_of",
+            ("N54",),
+            "the panel data date is not the requested data cutoff",
+        )
+    history = node(ctx.report, "strategy_history_contract")
+    if not isinstance(history, Mapping):
+        return
+    data_day = to_date(history.get("as_of_date"))
+    if data_day != ctx.cutoff:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_AUTHORITY,
+            "strategy_history_contract.as_of_date",
+            history.get("as_of_date"),
+            ctx.cutoff,
+            REPORT,
+            "$.strategy_history_contract.as_of_date",
+            ("N54",),
+            "the strategy history data date is not the requested data cutoff",
+        )
+    evaluated = to_date(history.get("evaluated_on"))
+    if evaluated is not None and data_day is not None and evaluated < data_day:
+        yield _finding(
+            "dates.evaluation_clock",
+            BLOCKER_INVARIANT,
+            "strategy_history_contract.evaluated_on",
+            history.get("evaluated_on"),
+            {"not_before": data_day.isoformat()},
+            REPORT,
+            "$.strategy_history_contract.evaluated_on",
+            ("N54",),
+            "the history was evaluated before its own data date",
+        )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -7550,6 +8843,10 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
+    ("dates.section_as_of_vs_cutoff", check_account_live_window),
+    ("capital.as_of_cutoff", check_current_capital_as_of),
+    (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
+    ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
     ("dates.weekly_current_week", check_weekly_current_week),
     ("completeness.required_outputs", check_completeness),

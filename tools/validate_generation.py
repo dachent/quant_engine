@@ -40,6 +40,7 @@ from acceptance.validate.checks import (  # noqa: E402
     CLASSES,
     Context,
     Finding,
+    expected_exclusions,
     findings_document,
     rollup,
     run_checks,
@@ -296,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "cutoff_source": cutoff_source,
                     "reference_notes": generation.external.notes,
                     "rollup": rollup(findings),
+                    "expected_exclusions": expected_exclusions(context),
                     "findings": [
                         {**finding.as_json(), "message": finding.message}
                         for finding in findings

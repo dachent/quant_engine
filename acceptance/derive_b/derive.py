@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, cast
 
 
 getcontext().prec = 50
@@ -568,6 +568,37 @@ def current_membership_starts(rows: list[dict[str, object]]) -> dict[str, date]:
             if account_id not in starts:
                 starts[account_id] = start
     return starts
+
+
+UNMAPPED_NAV_REASON = (
+    "no provider-ledger NAV observation of this account on or before the cutoff carries "
+    "an admitted (MAPPED) strategy mapping, so no admitted source date exists"
+)
+
+
+def accounts_without_admitted_mapping(ledger: dict[str, object]) -> set[str]:
+    """Accounts with ledger NAV observations in the cutoff window and none MAPPED.
+
+    V15: only observations dated on or before the cutoff count (a later MAPPED row cannot
+    admit an account whose valued window is unmapped); a row that states no
+    mapping_status is not admitted either. An account with no observation in the window
+    is not judged here.
+    """
+
+    statuses: dict[str, list[str]] = defaultdict(list)
+    for row in cast(list[dict[str, object]], ledger["nav_observations"]):
+        observed_on = row.get("as_of_date")
+        try:
+            day = parse_date(str(observed_on))
+        except ValueError:
+            continue
+        if day > CUTOFF:
+            continue
+        status = row.get("mapping_status")
+        statuses[str(row["account_id"])].append(
+            status if isinstance(status, str) and status else "MISSING"
+        )
+    return {account for account, found in statuses.items() if "MAPPED" not in found}
 
 
 def latest_observations(
@@ -3057,6 +3088,21 @@ def derive(
                     window="ITD",
                 )
             )
+    unadmitted = accounts_without_admitted_mapping(ledger)
+    withheld = [
+        row
+        for row in metrics
+        if row["metric_id"] == "date.source_last_observation"
+        and row["entity"] in unadmitted
+    ]
+    for row in withheld:
+        metrics.remove(row)
+        add_not_derivable(
+            output,
+            "date.source_last_observation",
+            str(row["entity"]),
+            UNMAPPED_NAV_REASON,
+        )
     return output
 
 

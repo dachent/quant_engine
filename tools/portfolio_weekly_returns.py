@@ -33,7 +33,7 @@ from quant_engine.portfolio_ledger import decimal_text
 
 
 BUILDER_VERSION: Final = "0.1.0"
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 STRATEGY_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 PUBLIC_SOURCES: Final = {
     "us-economic": (
@@ -153,6 +153,18 @@ def _decimal_text(value: Decimal) -> str:
 
 def _week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
+
+
+def _current_week(as_of: date) -> dict[str, Any]:
+    start = _week_start(as_of)
+    end = start + timedelta(days=6)
+    return {
+        "data_through_date": as_of.isoformat(),
+        "default_visible": True,
+        "is_partial": as_of < end,
+        "week_end": end.isoformat(),
+        "week_start": start.isoformat(),
+    }
 
 
 def _weekly_series(
@@ -611,18 +623,14 @@ def build_weekly_returns(
         else:
             for values in row["values_by_mode"].values():
                 weeks.update(values)
-    current_week_start = _week_start(as_of)
-    current_week_end = current_week_start + timedelta(days=6)
+    current_week = _current_week(as_of)
+    current_week_start = date.fromisoformat(current_week["week_start"])
+    weeks.add(current_week_start.isoformat())
     payload: dict[str, Any] = {
         "analytics_schema_version": SCHEMA_VERSION,
         "as_of_date": as_of.isoformat(),
         "builder_version": BUILDER_VERSION,
-        "current_week": {
-            "default_visible": False,
-            "is_partial": as_of < current_week_end,
-            "week_end": current_week_end.isoformat(),
-            "week_start": current_week_start.isoformat(),
-        },
+        "current_week": current_week,
         "default_evidence_mode": "LIVE_ONLY",
         "display_groups": [
             "STRATEGY",
@@ -733,8 +741,15 @@ def verify_candidate(
         "content_exact": path.is_file()
         and not path.is_symlink()
         and path.read_bytes() == expected,
-        "current_week_hidden_by_default": payload["current_week"]["default_visible"]
-        is False,
+        "current_week_visible_by_default": payload["current_week"]["default_visible"]
+        is True,
+        "current_week_source_cutoff": payload["current_week"]["data_through_date"]
+        == payload["as_of_date"]
+        and payload["current_week"]["is_partial"]
+        == (
+            date.fromisoformat(payload["as_of_date"])
+            < date.fromisoformat(payload["current_week"]["week_end"])
+        ),
         "evidence_modes_exact": payload["strategy_evidence_modes"]
         == list(STRATEGY_MODES),
         "strategy_boundary": bool(expected_strategies)
@@ -779,7 +794,7 @@ def publish(
             artifact_id="output/weekly-returns.json",
             as_of_date=as_of,
             schema_name="portfolio-weekly-returns",
-            schema_version="1",
+            schema_version="2",
         )
     )
     manifest = GenerationManifest.build(

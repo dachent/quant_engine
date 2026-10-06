@@ -319,6 +319,8 @@ def _nav(
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
             "provider_id": provider,
             "record_id": f"{provider}:{when}",
+            # V15: a ledger row states its mapping; one that does not is not admitted.
+            "mapping_status": "MAPPED",
         }
         if fx:
             row["valuation_fx"] = [

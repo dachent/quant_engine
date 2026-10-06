@@ -1229,7 +1229,7 @@ def test_staged_catalog_matches_verified_baseline_in_guard_and_report_reader(
     assert stale_baseline_identity != baseline_identity
     with pytest.raises(
         release.VerticalBuildError,
-        match="baseline identity differs from staged baseline",
+        match="baseline identity differs from expected staged baseline",
     ):
         release._validate_strategy_attribution_baseline_binding(
             attribution_root,

@@ -51,6 +51,7 @@ def _attended_cli(output_root: Path, *, resume: bool = False) -> list[str]:
         "2026-09-17",
         "--source-run",
         str(output_root / "source-run.json"),
+        "--qa-hold",
         "--execute",
     ]
     if resume:

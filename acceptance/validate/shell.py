@@ -291,6 +291,137 @@ class EagerDereference:
     guard_line: int | None
 
 
+_PATH_SEGMENT = r"[A-Za-z_$][\w$]*"
+
+
+_UNKNOWN_KEY = "<computed or spread>"
+_UNSAFE_KEYS = frozenset({"undefined", "null", "__proto__", _UNKNOWN_KEY})
+_KEY = re.compile(r"""\s*(?:(["'`])( *)\1|([A-Za-z_$][\w$]*))\s*:""")
+
+
+def _object_literal_keys(js: str, masked: str, start: int) -> list[str] | None:
+    """Top-level keys of the object literal whose ``{`` is at ``start``.
+
+    The structure is read from the masked text (``mask`` blanks comments, string and
+    template contents, so a comma, bracket, colon or semicolon inside a value or a comment
+    is never structure) and the text of a quoted key is read back from the source at the
+    same offsets. A computed key or a spread names keys this scan cannot read: unknown.
+    """
+
+    depth = 0
+    keys: list[str] = []
+    expect_key = False
+    index = start
+    while index < len(masked):
+        char = masked[index]
+        if (
+            depth == 1
+            and expect_key
+            and (char == "[" or masked.startswith("...", index))
+        ):
+            keys.append(_UNKNOWN_KEY)
+            expect_key = False
+        if char in "{[(":
+            depth += 1
+            expect_key = char == "{" and depth == 1
+        elif char in "}])":
+            depth -= 1
+            if depth == 0:
+                return keys
+        elif depth == 1 and char == ",":
+            expect_key = True
+        elif depth == 1 and expect_key and not char.isspace():
+            matched = _KEY.match(masked, index)
+            expect_key = False
+            if matched is not None:
+                if matched.group(1) is not None:
+                    begin = matched.start(1) + 1
+                    keys.append(js[begin : begin + len(matched.group(2))])
+                else:
+                    keys.append(matched.group(3))
+                index = matched.end()
+                continue
+        index += 1
+    return None
+
+
+def _definition_span(masked: str, table: str) -> tuple[int, int] | None:
+    """Where ``const|let|var table = <expression>;`` has its expression (masked offsets)."""
+
+    found = re.search(rf"\b(?:const|let|var)\s+{re.escape(table)}\s*=\s*", masked)
+    if found is None:
+        return None
+    depth = 0
+    index = found.end()
+    while index < len(masked):
+        char = masked[index]
+        if char in "{[(":
+            depth += 1
+        elif char in "}])":
+            depth -= 1
+            if depth < 0:
+                break
+        elif char == ";" and depth == 0:
+            break
+        index += 1
+    return found.end(), index
+
+
+def _lookup_table_is_safe(js: str, masked: str, table: str) -> bool:
+    """Whether ``table[undefined]`` is falsy because of how the table is defined.
+
+    The table must be defined as ``payload?.path || { ... }`` or as a plain object
+    literal whose keys are all plain names: a key ``undefined`` or ``null``, an inherited
+    ``__proto__``, a computed key or a spread makes the lookup of a missing payload
+    possibly truthy, and a table read straight from the payload (no literal fallback) is
+    not a table at all with no payload. ACCEPTED RESIDUAL: the definition is found by name
+    (the first ``const|let|var`` of it), not by a scope analysis.
+    """
+
+    span = _definition_span(masked, table)
+    if span is None:
+        return False
+    first = masked.find("{", span[0], span[1])
+    if first < 0:
+        return False
+    keys = _object_literal_keys(js, masked, first)
+    if keys is None:
+        return False
+    head = masked[span[0] : first].strip()
+    if head and not head.endswith("||"):
+        return False
+    return not _UNSAFE_KEYS & set(keys)
+
+
+def _keyed_lookup_guards(
+    js: str, masked: str, position: int, escaped_name: str
+) -> bool:
+    """``table[name?.a?.b] ? name.a.b : fallback``: the true branch reads what it keyed.
+
+    With no payload the key is ``undefined``; the lookup is falsy only when the table
+    cannot hold an ``undefined`` key (``_lookup_table_is_safe``), and then the branch that
+    dereferences the payload is never evaluated. The branch must read exactly the path the
+    condition keyed by, immediately after the ternary ``?``.
+    """
+
+    chain = re.compile(
+        rf"{escaped_name}((?:\s*\.\s*{_PATH_SEGMENT})+)", re.ASCII
+    ).match(masked, position)
+    if chain is None:
+        return False
+    read = re.findall(_PATH_SEGMENT, chain.group(1))
+    condition = re.search(
+        rf"({_PATH_SEGMENT})\s*\[\s*{escaped_name}\s*\?\.\s*"
+        rf"({_PATH_SEGMENT}(?:\s*\??\.\s*{_PATH_SEGMENT})*)\s*\]\s*\?\s*$",
+        masked[:position],
+    )
+    return (
+        condition is not None
+        and re.findall(_PATH_SEGMENT, condition.group(2)) == read
+        and _lookup_table_is_safe(js, masked, condition.group(1))
+    )
+
+
 def payload_dereferences_before_guard(
     js: str, payload_globals: set[str]
 ) -> list[EagerDereference]:
@@ -314,21 +445,25 @@ def payload_dereferences_before_guard(
         guards = [
             re.compile(template.format(name=escaped)) for template in _GUARD_TEMPLATES
         ]
-        eager_guards = [
-            match.start()
+        guard_matches = [
+            match
             for guard in guards
             for match in guard.finditer(masked)
             if not inside(match.start(), deferred)
+            and masked[match.end() : match.end() + 2] != "?."
         ]
+        eager_guards = [match.start() for match in guard_matches]
         for match in dereference.finditer(masked):
+            # The dot in ``data?.field`` is itself a safe optional access.
+            if masked[match.end() : match.end() + 1] == "?":
+                continue
             if inside(match.start(), deferred):
+                continue
+            if _keyed_lookup_guards(js, masked, match.start(), escaped):
                 continue
             if any(guard < match.start() for guard in eager_guards):
                 break
-            first_guard = min(
-                (m.start() for guard in guards for m in guard.finditer(masked)),
-                default=None,
-            )
+            first_guard = min((guard.start() for guard in guard_matches), default=None)
             results.append(
                 EagerDereference(
                     binding=name,
@@ -716,3 +851,53 @@ def hard_coded_statuses(file: str, text: str) -> list[StatusLiteral]:
                 add(index, "template-expression-literal", literal.group(2))
     unique = {(item.line, item.context, item.literal): item for item in results}
     return [unique[key] for key in sorted(unique)]
+
+
+# ------------------------------------------------------- weekly render window (F4)
+
+
+def _slice_arguments(body: str) -> list[str]:
+    """The argument text of every ``.slice(...)`` call in a (masked) function body."""
+
+    found: list[str] = []
+    for call in re.finditer(r"\.\s*slice\s*\(", body):
+        depth = 1
+        index = call.end()
+        while index < len(body) and depth:
+            depth += {"(": 1, ")": -1}.get(body[index], 0)
+            index += 1
+        found.append(body[call.end() : index - 1])
+    return found
+
+
+def weekly_window_bound(js: str) -> int | None:
+    """The default weekly window (weeks) the renderer really slices to, or ``None``.
+
+    A heuristic over the structure, not an execution of the renderer: the bound counts
+    only when the code (a comment or a string does not) declares the numeric default
+    ``selectedWeeklyWindow``, ``weeklyVisibleWeeks`` has a ``slice`` whose argument is
+    that variable, and the function is called. A declaration left behind after the slicing
+    is removed or changed (``slice(0)``), or never used, gives no bound. ACCEPTED
+    RESIDUAL: this stays a structural heuristic, not an execution of the renderer.
+    """
+
+    masked = mask(js)
+    declaration = re.search(r"""\bselectedWeeklyWindow\s*=\s*["'](\d+)["']""", js)
+    if declaration is None or masked[declaration.start()] == " ":
+        return None
+    visible = next(
+        (item for item in functions(js, masked) if item.name == "weeklyVisibleWeeks"),
+        None,
+    )
+    if visible is None:
+        return None
+    body = masked[visible.body_start : visible.body_end + 1]
+    if not any(
+        "selectedWeeklyWindow" in argument for argument in _slice_arguments(body)
+    ):
+        return None
+    used = any(
+        not masked[max(0, call.start() - 9) : call.start()].strip().endswith("function")
+        for call in re.finditer(r"\bweeklyVisibleWeeks\s*\(", masked)
+    )
+    return int(declaration.group(1)) if used else None

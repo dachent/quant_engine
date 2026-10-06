@@ -47,3 +47,43 @@ def real_verify_release_validation(
             release_module, "_verify_release_validation", lambda *args, **kwargs: None
         )
     return real
+
+
+REAL_PATH_BUDGET_MARKER = "real_attended_path_budget"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        f"{REAL_PATH_BUDGET_MARKER}: keep the real attended path-budget gate "
+        "(tests/core/conftest.py otherwise disables it for deep tmp_path roots)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def attended_path_budget_off_for_deep_tmp_roots(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pytest's temp roots are far deeper than a supported attended run root.
+
+    The attended path-budget gate (portfolio_pipeline_materialize) refuses any root
+    under which the deepest generated path reaches the Windows limit, which every
+    `tmp_path` run root would. Tests of other behaviour do not exercise it; a test
+    that does exercises it opts in with ``@pytest.mark.real_attended_path_budget``
+    (or a module-level ``pytestmark``) and keeps the real gate.
+    """
+    if request.node.get_closest_marker(REAL_PATH_BUDGET_MARKER) is not None:
+        return
+    import portfolio_pipeline_materialize as materializer
+
+    monkeypatch.setattr(
+        materializer, "_attended_path_budget", lambda *_args, **_kwargs: None
+    )
+
+
+@pytest.fixture
+def good(tmp_path):
+    """A consistent retained set (ledger, baseline, allocation, attribution, dependence)."""
+    from preflight_ladder_fixture import build_good
+
+    return build_good(tmp_path)

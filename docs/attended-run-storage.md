@@ -39,6 +39,21 @@ Bytes are recorded per stage in the running attempt's `storage` field of
 `attended-execution-observations.json`: `cache` (overlay and base identity), `start`,
 `stages` (`role`, `bytes_written`, `files`, `total_bytes`) and `end`.
 
+## Path budget
+
+Before anything is created, the preflight refuses an output or retained-cache root
+under which a generated path would reach 260 characters. The tails come from the
+layouts the producers write, measured on the real runs: at most 183 characters below
+the output root (the stage epoch static-snapshot receipt, then the deepest
+decomposition lens at 182) and 102 below the cache root
+(`.decomposition-training-evidence\<64 hex>.json`). The QA evidence file names under
+`--qa-dir` and, for `--preparation-spec`, the plan provenance basenames are measured
+from the supplied inputs and refused by name.
+
+Accepted residual: a name the preflight cannot see (a static-snapshot strategy id
+outside the registry, or the provenance basenames of a `--source-run` whose recipe is
+not read at preflight) is bounded by the sampled maxima above, not measured.
+
 ## Retained cache: shared base and per-run overlay
 
 The analytics producers add entries to the retained cache and never rewrite one that
@@ -115,5 +130,18 @@ Windows is a launcher; the PID recorded is the interpreter it starts.
 ## A supported invocation
 
 ```powershell
-python tools/portfolio_pipeline_materialize.py attended --repo-root C:\Dev\scratch\quant_engine\cp\main --python C:\Dev\scratch\quant_engine\cp\main\.venv\Scripts\python.exe --workspace-root C:\Dev\scratch\quant_engine\runs\r1\workspace --output-root C:\Dev\scratch\quant_engine\runs\r1\out --retained-cache-base C:\Dev\scratch\quant_engine\cache\retained --retained-cache-root C:\Dev\scratch\quant_engine\runs\r1\cache --requested-as-of 2026-09-17 --evaluated-on 2026-09-23 --preparation-spec C:\Dev\scratch\quant_engine\runs\r1\runner-input-config.json --execute
+python tools/portfolio_pipeline_materialize.py attended --repo-root C:\Dev\scratch\quant_engine\cp\main --python C:\Dev\scratch\quant_engine\cp\main\.venv\Scripts\python.exe --workspace-root C:\Dev\scratch\quant_engine\runs\r1\workspace --output-root C:\Dev\scratch\quant_engine\runs\r1\out --retained-cache-base C:\Dev\scratch\quant_engine\cache\retained --retained-cache-root C:\Dev\scratch\quant_engine\runs\r1\cache --requested-as-of 2026-09-17 --evaluated-on 2026-09-23 --preparation-spec C:\Dev\scratch\quant_engine\runs\r1\runner-input-config.json --qa-hold --execute
 ```
+
+The plan includes the `panel` stage, which consumes browser QA evidence produced from
+the `panel-candidate` output; no earlier stage produces it. `--execute` therefore
+refuses to start unless the invocation says how that evidence arrives:
+
+- `--qa-dir <directory>` when the evidence already exists, or
+- `--qa-hold` to declare a hold: the run builds every stage through `panel-candidate`
+  and stops at `panel` (the run is recorded `FAILED` with the QA instruction as its
+  reason); run the browser QA against the `panel-candidate` output, then continue the
+  same root with `--execute --resume --qa-dir <directory>`.
+
+A plan-only invocation (no `--execute`) prints a `qa` block naming the stage, the
+required flag, whether `--qa-dir` was supplied, and these instructions.

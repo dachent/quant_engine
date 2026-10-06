@@ -258,6 +258,11 @@ class Ledger:
     flows: Mapping[str, AccountFlows]
     anchors: Mapping[str, Sequence[Anchor]]
     generations: Mapping[str, str]
+    # Per account, every NAV observation as (date, mapping_status): the status text, or
+    # MISSING when the row states none. The derivation filters it to its cutoff window.
+    nav_mapping: Mapping[str, tuple[tuple[dt.date | None, str], ...]] = field(
+        default_factory=dict
+    )
 
 
 def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
@@ -265,9 +270,14 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
     nav: dict[str, dict[dt.date, Decimal]] = {}
     nav_rows: dict[str, dict[dt.date, Mapping[str, Any]]] = {}
     issues: dict[str, list[str]] = {}
+    mapping: dict[str, list[tuple[dt.date | None, str]]] = {}
     for row in document["nav_observations"]:
         account = str(row["account_id"])
         day = iso_date(row.get("as_of_date"))
+        status = row.get("mapping_status")
+        mapping.setdefault(account, []).append(
+            (day, status if isinstance(status, str) and status else "MISSING")
+        )
         value_block = row.get("nav") or {}
         value = decimal_or_none(value_block.get("value"))
         if (
@@ -364,6 +374,7 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         flows=flows,
         anchors=anchors,
         generations=generations,
+        nav_mapping={account: tuple(found) for account, found in mapping.items()},
     )
 
 

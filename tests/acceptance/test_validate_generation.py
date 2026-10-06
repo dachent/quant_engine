@@ -359,12 +359,17 @@ def base_report() -> dict[str, Any]:
         ],
         "leverage_disclosures": [
             {
-                "account_id": "A1",
-                "strategy_id": "alpha",
-                "leverage_ratio": "1.0",
-                "data_class": "FINANCING_COST",
+                "account_id": account,
+                "strategy_id": strategy,
+                "data_class": data_class,
+                "measurement_basis": basis,
                 "coverage_status": "AVAILABLE",
             }
+            for account, strategy in (("A1", "alpha"), ("B1", "beta"), ("B2", "beta"))
+            for data_class, basis in (
+                ("LEVERAGE_EXPOSURE", "HOLDINGS_GROSS_MARKET_VALUE"),
+                ("FINANCING_COST", "FINANCING_COST"),
+            )
         ],
         "positions": [
             {
@@ -515,14 +520,19 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
         ],
         "fact_status": {"fx": "COMPLETE_WITHIN_DECLARED_BOUNDARY"},
         "weekly_returns": {
+            "status": "UNAVAILABLE_NOT_CONFIGURED",
+            "as_of_date": CUTOFF,
+            "generation_id": None,
+            "source_sha256": None,
             "current_week": {
-                "week_start": "2026-09-14",
-                "week_end": "2026-09-20",
-                "is_partial": True,
+                "week_start": None,
+                "week_end": None,
+                "is_partial": False,
                 "default_visible": True,
+                "data_through_date": None,
             },
-            "weeks": ["2026-09-07", "2026-09-14"],
-            "series": [{"series_id": "strategy:Alpha"}],
+            "weeks": [],
+            "series": [],
         },
         "hybrid_mode_gate": {
             "eligible_strategies": [
@@ -1039,7 +1049,15 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     (release_root / "CURRENT_RELEASE.json").write_bytes(_dump({"release_id": RELEASE}))
     (release_root / "releases" / RELEASE / "release.json").write_bytes(
         _dump(
-            {"targets": [{"root_id": "portfolio-panel", "proposed_generation_id": GEN}]}
+            {
+                "targets": [
+                    {
+                        "root_id": "portfolio-panel",
+                        "proposed_generation_id": GEN,
+                        "proposed_manifest_sha256": _sha(manifest_bytes),
+                    }
+                ]
+            }
         )
     )
     for hook in spec.post_write:
@@ -1399,6 +1417,15 @@ def _remove_crosswalk(gen_dir: Path) -> None:
     (path / "account-strategy-current-epoch-crosswalk.json").unlink()
 
 
+def _break_release_target_digest(gen_dir: Path) -> None:
+    """F8 reverse binding: the release target no longer carries the manifest digest."""
+
+    path = gen_dir.parents[2] / "releases-test" / "releases" / RELEASE / "release.json"
+    document = json.loads(path.read_bytes())
+    document["targets"][0]["proposed_manifest_sha256"] = "0" * 64
+    path.write_bytes(_dump(document))
+
+
 def _rewrite(rel: str, data: bytes) -> Callable[[Path], None]:
     def hook(gen_dir: Path) -> None:
         (gen_dir / rel).write_bytes(data)
@@ -1569,7 +1596,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "release_pinned": (
         "identity.release_pinned",
         checks.BLOCKER_AUTHORITY,
-        Spec(panel=[_set(("meta", "release_id"), None)]),
+        Spec(post_write=[_break_release_target_digest]),
     ),
     "absolute_paths": (
         "identity.absolute_local_paths",
@@ -4431,7 +4458,13 @@ def _alpha_summary(**changes: str) -> Mutator:
     """Change alpha's summary row: the window it reports and its headline."""
 
     def mutate(report: dict[str, Any]) -> None:
-        report["strategy_summary"][0].update(changes)
+        row = report["strategy_summary"][0]
+        row.update(changes)
+        if "account_live_observed_end" in changes:
+            # These tests move the window edge on purpose to probe the return-view
+            # checks; V16 requires an active live window to reach the cutoff, so the
+            # fixture declares the live window as not claimed current.
+            row["account_live_status"] = "UNAVAILABLE_WINDOW_UNDER_TEST"
 
     return mutate
 
@@ -5535,8 +5568,14 @@ def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_pa
             "implementation_return_attribution_contract", "2026-08-09"
         )
 
-    found = run(build(tmp_path, Spec(report=[mutate])))
-    assert not _c2_c4_date_findings(found)
+    found = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    # R4: valid labelled roles that end before the cutoff keep their true end date and
+    # are NOT_READY (never a blocker, never silent); the historical dates are restored.
+    assert {(f.entity, f.klass, f.observed["as_of"]) for f in found} == {
+        ("benchmark:echotrade-growth-pivots", "NOT_READY", "2025-11-24"),
+        ("implementation_reconciliation_contract", "NOT_READY", "2026-08-03"),
+        ("implementation_return_attribution_contract", "NOT_READY", "2026-08-09"),
+    }
 
 
 def test_c2_c4_descriptive_absent_optional_contracts_remain_absent(tmp_path):
@@ -5572,8 +5611,13 @@ def test_c2_c4_descriptive_unavailable_null_comparisons_remain_valid(tmp_path):
             "implementation_return_attribution_contract"
         )
 
-    found = run(build(tmp_path, Spec(report=[mutate])))
-    assert not _c2_c4_date_findings(found)
+    found = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    # The unavailable null comparisons are valid and silent; only the historical
+    # contracts (dated before the cutoff) report their true date, as NOT_READY (R4).
+    assert {(f.entity, f.klass) for f in found} == {
+        ("implementation_reconciliation_contract", "NOT_READY"),
+        ("implementation_return_attribution_contract", "NOT_READY"),
+    }
 
 
 def test_c2_c4_descriptive_unavailable_missing_null_field_blocks(tmp_path):

@@ -165,6 +165,7 @@ def _attended_argv(tmp_path: Path) -> list[str]:
         "2026-09-17",
         "--source-run",
         str(scratch / "source-run.json"),
+        "--qa-hold",
         "--execute",
     ]
 
@@ -260,6 +261,7 @@ def _argv(preflight: dict[str, object], output_root: Path, *extra: str) -> list[
         "2026-09-17",
         "--source-run",
         str(preflight["source_run"]),
+        "--qa-hold",
         "--execute",
         *extra,
     ]

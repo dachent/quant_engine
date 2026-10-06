@@ -5325,7 +5325,8 @@ def _attended_argv(
         str(preflight["source_run"]),
     ]
     if execute:
-        argv.append("--execute")
+        # These runs stage no QA evidence; the hold is the declared plan for that.
+        argv.extend(["--qa-hold", "--execute"])
     if resume:
         argv.append("--resume")
     return argv
@@ -5438,6 +5439,81 @@ def test_attended_resume_skips_only_verified_completed_stages(
         )
         == 1
     )
+
+
+def test_attended_resume_of_a_completed_panel_needs_no_qa_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run whose panel completed under --qa-dir resumes without repeating it.
+
+    Only the ledger and baseline stages have a verifier a fixture can satisfy, so the
+    completion probe is reduced to "the stage receipt exists" for the later stages.
+    """
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    qa_dir = preflight["qa_dir"]
+    (qa_dir / "evidence.json").write_bytes(b"{}")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    first = [
+        *_attended_argv(preflight, output_root, execute=True),
+        "--qa-dir",
+        str(qa_dir),
+    ]
+    assert materializer.main(first) == 0
+    for role in materializer.ATTENDED_STAGES:
+        if not (output_root / "stage-results" / f"{role}.json").exists():
+            _write_json(output_root / "stage-results" / f"{role}.json", {"role": role})
+    monkeypatch.setattr(
+        materializer,
+        "_attended_completed_stages",
+        lambda root, stages, **_kw: [
+            role
+            for role in stages
+            if (root / "stage-results" / f"{role}.json").exists()
+        ],
+    )
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a completed run must not start a child")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    resumed = {
+        **preflight,
+        "qa_dir": None,
+        "required_stages": materializer.ATTENDED_STAGES,
+    }
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: resumed)
+    argv = [
+        a
+        for a in _attended_argv(preflight, output_root, execute=True, resume=True)
+        if a != "--qa-hold"
+    ]
+    assert materializer.main(argv) == 0
+
+    # A different QA directory on resume is still refused.
+    other = tmp_path / "other-qa"
+    other.mkdir()
+    (other / "evidence.json").write_bytes(b"{}")
+    monkeypatch.setattr(
+        materializer,
+        "_attended_preflight",
+        lambda _args: {
+            **preflight,
+            "qa_dir": other,
+            "required_stages": materializer.ATTENDED_STAGES,
+        },
+    )
+    assert materializer.main([*argv, "--qa-dir", str(other)]) == 1
 
 
 def test_attended_resume_rejects_a_corrupt_completed_artifact(

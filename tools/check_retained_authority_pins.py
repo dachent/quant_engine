@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -280,8 +281,170 @@ def sweep(
     }
 
 
+LEDGER_SCHEMAS: tuple[str, str] = ("generation-manifest", "provider-ledger-catalog")
+LEDGER_SOURCE_KEY = "provider-ledger-generation"
+LEDGER_ROLES: tuple[str, ...] = ("allocation", "attribution", "baseline", "dependence")
+
+
+class LedgerPinMismatch(RuntimeError):
+    """A retained identity binds a different provider ledger than the run selects."""
+
+
+def _file_sha(path: Path, label: str) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise LedgerPinMismatch(f"{label} is unreadable at {path}") from exc
+
+
+def _json_file(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise LedgerPinMismatch(f"{label} is unreadable at {path}") from exc
+    if not isinstance(value, dict):
+        raise LedgerPinMismatch(f"{label} at {path} is not an object")
+    return value
+
+
+def ledger_identity_of_root(root: Path) -> dict[str, str]:
+    """The identity the run selects: the shas of the ledger manifest and catalog."""
+    return {
+        "generation_id": root.name,
+        LEDGER_SCHEMAS[0]: _file_sha(
+            root / "generation.json", "provider ledger manifest"
+        ),
+        LEDGER_SCHEMAS[1]: _file_sha(
+            root / "provider-ledger.json", "provider ledger catalog"
+        ),
+    }
+
+
+def ledger_identity_of_catalog(catalog: dict[str, Any]) -> dict[str, str]:
+    """The ledger identity a baseline-shaped catalog recorded, from its source links."""
+    rows = catalog.get("source_artifacts")
+    found: dict[str, str] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if (
+                isinstance(row, dict)
+                and row.get("source_key") == LEDGER_SOURCE_KEY
+                and row.get("schema_name") in LEDGER_SCHEMAS
+                and isinstance(row.get("sha256"), str)
+            ):
+                found[str(row["schema_name"])] = str(row["sha256"])
+    return found
+
+
+def _describe(identity: dict[str, str]) -> str:
+    parts = [
+        f"{key} {identity[key]}"
+        for key in ("generation_id", *LEDGER_SCHEMAS)
+        if key in identity
+    ]
+    return ", ".join(parts) or "none"
+
+
+def _compare_ledger(
+    role: str,
+    bound: dict[str, str],
+    run: dict[str, str],
+    source: Path | None = None,
+) -> None:
+    if not bound:
+        where = f" in {source}" if source is not None else ""
+        raise LedgerPinMismatch(
+            f"retained {role} carries no provider ledger identity{where} (no "
+            f"{LEDGER_SOURCE_KEY} source_artifacts rows; a legacy catalog); rebuild "
+            f"the {role} generation from the run's ledger [{_describe(run)}] rather "
+            "than relaxing this check"
+        )
+    if any(bound.get(key) != run[key] for key in LEDGER_SCHEMAS):
+        raise LedgerPinMismatch(
+            f"retained {role} provider ledger identity differs: "
+            f"{role} binds ledger [{_describe(bound)}] but the run selects "
+            f"[{_describe(run)}]"
+        )
+
+
+def check_ledger_pin_matrix(
+    run_ledger_root: Path, *, retained: dict[str, Path]
+) -> list[dict[str, str]]:
+    """Require every retained identity to bind the run's provider ledger generation.
+
+    ``allocation`` and ``baseline`` are generation directories holding
+    ``portfolio-baseline.json``; ``dependence`` is the ledger root its selected inputs
+    name; ``attribution`` is a generation directory holding
+    ``strategy-attribution.json``, which binds a baseline rather than a ledger, so it
+    must name the retained ``baseline`` (the ledger identity is then transitive).
+    Raises ``LedgerPinMismatch`` naming the two differing identities.
+    """
+    unknown = sorted(set(retained) - set(LEDGER_ROLES))
+    if unknown:
+        raise LedgerPinMismatch(f"unknown retained role(s): {', '.join(unknown)}")
+    run = ledger_identity_of_root(run_ledger_root)
+    rows: list[dict[str, str]] = []
+    for role in ("allocation", "baseline"):
+        if role in retained:
+            catalog_path = retained[role] / "portfolio-baseline.json"
+            catalog = _json_file(catalog_path, f"retained {role} catalog")
+            _compare_ledger(
+                role, ledger_identity_of_catalog(catalog), run, catalog_path
+            )
+            rows.append({"role": role, "status": "MATCH"})
+    if "dependence" in retained:
+        _compare_ledger(
+            "dependence", ledger_identity_of_root(retained["dependence"]), run
+        )
+        rows.append({"role": "dependence", "status": "MATCH"})
+    if "attribution" in retained:
+        attribution = _json_file(
+            retained["attribution"] / "strategy-attribution.json",
+            "retained attribution catalog",
+        )
+        bound = attribution.get("baseline")
+        if not isinstance(bound, dict) or "baseline" not in retained:
+            raise LedgerPinMismatch(
+                "retained attribution cannot be joined to a ledger without the "
+                "retained baseline it names"
+            )
+        baseline_dir = retained["baseline"]
+        baseline_sha = _file_sha(
+            baseline_dir / "portfolio-baseline.json", "retained baseline catalog"
+        )
+        # The identity is the catalog content; a folder name is compared only when it
+        # is itself a generation id, so a preserved copy under another name is accepted.
+        folder_is_generation = re.fullmatch(r"[0-9a-f]{64}", baseline_dir.name)
+        if bound.get("catalog_sha256") != baseline_sha or (
+            folder_is_generation is not None
+            and bound.get("generation_id") != baseline_dir.name
+        ):
+            raise LedgerPinMismatch(
+                "retained attribution baseline identity differs: attribution binds "
+                f"baseline {bound.get('generation_id')} "
+                f"(catalog {bound.get('catalog_sha256')}) but the retained "
+                f"baseline is {baseline_dir.name} (catalog {baseline_sha})"
+            )
+        rows.append({"role": "attribution", "status": "MATCH"})
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--ledger-root",
+        type=Path,
+        help="the provider ledger generation the run selects; with --retained, "
+        "run the ledger pin matrix and fail when any retained identity differs",
+    )
+    parser.add_argument(
+        "--retained",
+        action="append",
+        default=[],
+        metavar="ROLE=PATH",
+        help=f"retained generation to join to the ledger; ROLE is one of "
+        f"{', '.join(LEDGER_ROLES)}",
+    )
     parser.add_argument(
         "roots",
         nargs="+",
@@ -315,6 +478,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     arguments = parser.parse_args(argv)
+
+    if arguments.ledger_root is not None or arguments.retained:
+        if arguments.ledger_root is None:
+            parser.error("--retained requires --ledger-root")
+        try:
+            retained = {}
+            for item in arguments.retained:
+                role, separator, path = item.partition("=")
+                if not separator or not path:
+                    parser.error(f"--retained expects ROLE=PATH, got {item!r}")
+                retained[role] = Path(path).resolve()
+            matrix = check_ledger_pin_matrix(
+                arguments.ledger_root.resolve(), retained=retained
+            )
+        except LedgerPinMismatch as exc:
+            print(f"LEDGER PIN MISMATCH  {exc}")
+            return 1
+        print(json.dumps({"ledger_pin_matrix": matrix}))
 
     report = sweep(
         [root.resolve() for root in arguments.roots],

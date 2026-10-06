@@ -6000,6 +6000,43 @@ def test_strategy_attribution_baseline_must_match_verified_staged_baseline(
         )
 
 
+@pytest.mark.parametrize("mismatch", [None, "generation_id", "catalog_sha256"])
+def test_strategy_attribution_matches_explicit_expected_staged_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str | None
+) -> None:
+    attribution_id = "a" * 64
+    attribution_root = tmp_path / "attribution"
+    attribution_generation = attribution_root / "generations" / attribution_id
+    attribution_generation.mkdir(parents=True)
+    expected = {"generation_id": "b" * 64, "catalog_sha256": "c" * 64}
+    selected = dict(expected)
+    if mismatch == "generation_id":
+        selected["generation_id"] = "d" * 64
+    elif mismatch == "catalog_sha256":
+        selected["catalog_sha256"] = "d" * 64
+    (attribution_generation / "strategy-attribution.json").write_bytes(
+        canonical_json_bytes({"baseline": selected})
+    )
+    monkeypatch.setattr(
+        builder,
+        "_validated_strategy_attribution_generation",
+        lambda _root, generation_id: generation_id,
+    )
+
+    if mismatch is None:
+        builder._validate_strategy_attribution_expected_baseline_binding(
+            attribution_root, attribution_id, expected
+        )
+    else:
+        with pytest.raises(
+            builder.VerticalBuildError,
+            match="baseline identity differs from expected staged baseline",
+        ):
+            builder._validate_strategy_attribution_expected_baseline_binding(
+                attribution_root, attribution_id, expected
+            )
+
+
 def test_build_attribution_rejects_stale_baseline_binding_before_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
