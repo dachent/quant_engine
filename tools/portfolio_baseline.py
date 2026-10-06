@@ -2522,6 +2522,30 @@ def _strategy_members(
     return members
 
 
+def _contiguous_coverage_end(
+    windows: Sequence[tuple[date, date]], earliest_event: date | None
+) -> date:
+    """End of the merged window segment that holds the earliest event of one fact type.
+
+    Windows join when ``next.start <= previous.end + 1 day``; a day between two
+    disjoint windows is attested by nothing, so the larger end is not bridged to.  A
+    fact type with no event uses the earliest segment.
+    """
+
+    segments: list[list[date]] = []
+    for start, end in sorted(windows):
+        if segments and start <= segments[-1][1] + timedelta(days=1):
+            segments[-1][1] = max(segments[-1][1], end)
+        else:
+            segments.append([start, end])
+    if earliest_event is None:
+        return segments[0][1]
+    for start, end in segments:
+        if start <= earliest_event <= end:
+            return end
+    raise BaselineValidationError("custody event lacks authoritative account admission")
+
+
 def _derived_custody_cash(
     provider_catalog: Mapping[str, Any],
     valuation_date: date,
@@ -2596,7 +2620,9 @@ def _derived_custody_cash(
                 "custody ambiguous internal cash movement lacks admitted sleeve semantics"
             )
         movements: dict[date, list[Decimal]] = defaultdict(list)
-        events = []
+        fact_days: dict[str, list[date]] = defaultdict(list)
+        event_values: list[tuple[date, Decimal]] = []
+        events: list[dict[str, Any]] = []
         for row, fact_type, sign in selected:
             day = _date(row.get("event_date"), "custody event date")
             if day > valuation_date:
@@ -2646,6 +2672,8 @@ def _derived_custody_cash(
             except (RuntimeError, ValueError) as exc:
                 raise BaselineValidationError(f"custody event FX: {exc}") from exc
             movements[day].append(value)
+            fact_days[fact_type].append(day)
+            event_values.append((day, value))
             events.append(
                 {
                     "event_date": day.isoformat(),
@@ -2672,8 +2700,8 @@ def _derived_custody_cash(
         if not legacy:
             window_ends = []
             for fact_type in ("flows", "capital_anchors"):
-                ends = [
-                    item.effective_end
+                windows = [
+                    (item.effective_start, item.effective_end)
                     for item in admissions
                     if item.provider_id == provider_id
                     and item.account_id == account_id
@@ -2681,13 +2709,31 @@ def _derived_custody_cash(
                     and item.disposition is AdmissionDisposition.AUTHORITATIVE
                     and item.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
                 ]
-                if not ends:
+                if not windows:
                     raise BaselineValidationError(
                         "custody cash lacks an authoritative admission window"
                     )
-                window_ends.append(max(ends))
+                window_ends.append(
+                    _contiguous_coverage_end(
+                        windows, min(fact_days[fact_type], default=None)
+                    )
+                )
             coverage_end = min(window_ends)
             proven_through = min(valuation_date, coverage_end)
+            # The value is the balance as it stood on the label: an event dated after
+            # ``proven_through`` is not attested by every admission, so it is not counted.
+            counted = [
+                (day, value) for day, value in event_values if day <= proven_through
+            ]
+            if not counted:
+                raise BaselineValidationError(
+                    "custody cash has no event inside its proven coverage"
+                )
+            events = [
+                row for row in events if row["event_date"] <= proven_through.isoformat()
+            ]
+            balance = _exact_sum(value for _, value in counted)
+            last_event = max(day for day, _ in counted)
             coverage_fields = {
                 "coverage_end": coverage_end.isoformat(),
                 "last_event_date": last_event.isoformat(),
@@ -3370,7 +3416,18 @@ def _strategy_capital_check(
                     "strategy_id": strategy_id,
                 }
             )
-        if value is None and scopes[strategy_id] == _SCOPE_SYSTEMATIC:
+        if scopes[strategy_id] == _SCOPE_SYSTEMATIC and (
+            value is None
+            or any(
+                "coverage_end" in line
+                and _date(line.get("as_of_date"), "derived_cash.as_of_date")
+                < valuation_date
+                for line in _objects(row.get("derived_cash", []), "derived cash")
+            )
+        ):
+            # A cash line proven only to an earlier date states the row at that date, not
+            # at the cutoff; this check recomputes with the producer's own logic, so it
+            # must not echo the row as a cutoff-dated PASS (N56 rule 4: never passes).
             not_ready_ids.append(strategy_id)
     check: dict[str, Any] = {
         "check_id": _CAPITAL_STRATEGY_CHECK_ID,
@@ -3386,7 +3443,7 @@ def _strategy_capital_check(
         for strategy_id in recomputed
         if scopes[strategy_id] == _SCOPE_SYSTEMATIC
     ]
-    if check["status"] == "PASS" and required:
+    if check["status"] == "PASS" and required:  # no row is dated before the cutoff
         check["systematic_total_usd"] = decimal_text(
             _exact_sum(value for value in required if value is not None)
         )

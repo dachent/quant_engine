@@ -1214,6 +1214,27 @@ def test_cr2_custody_report_preserves_member_equality_with_separate_cash():
     )
 
 
+def test_n56_truncated_cash_line_is_consumed_by_report_and_acceptance_evidence():
+    """A line whose later 09-17 deposit is outside anchor coverage is stated at its
+    09-16 balance; the report boundary and the B13 evidence check agree with it."""
+    from acceptance.validate import checks
+
+    owner = _baseline_test_fixture()
+    case = owner._cr2_custody_cash_case()
+    owner._admission_ends(case, flows="2026-09-18", anchors="2026-09-16")
+    owner._later_deposit(case)
+    block = owner.baseline._build_current_capital(**case)
+
+    parsed = reporter._current_capital({"current_capital": block})
+
+    assert parsed == block
+    line = block["strategies"][0]["derived_cash"][0]
+    assert (line["current_value"]["value"], line["as_of_date"]) == ("4", "2026-09-16")
+    amount, problems = checks.derived_cash_issues(line)
+    assert str(amount) == "4"
+    assert not [p for p in problems if "sum to" in p]
+
+
 def test_cr2_custody_report_requires_source_authority_for_cash(tmp_path, full):
     catalog = fx.with_current_capital(full._baseline_catalog())
     catalog["current_capital"]["custody_authority"] = {"ledger_generation_id": "a" * 64}

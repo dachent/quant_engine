@@ -4970,6 +4970,148 @@ def test_n56_an_early_ending_flows_window_bounds_the_line_too() -> None:
     )
 
 
+def _flow_window(case: dict[str, Any], start: str, end: str) -> None:
+    """Append one more AUTHORITATIVE flows admission window to the catalog."""
+
+    admissions = case["provider_catalog"]["admissions"]
+    first = next(row for row in admissions if row["fact_type"] == "flows")
+    admissions.append({**first, "effective_start": start, "effective_end": end})
+
+
+def _later_deposit(case: dict[str, Any], day: str = "2026-09-17") -> None:
+    raw = case["provider_catalog"]
+    raw["flows"].append(
+        {
+            **raw["flows"][0],
+            "record_id": "later-deposit",
+            "event_date": day,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        }
+    )
+
+
+def test_n56_a_hole_between_flow_windows_is_not_bridged() -> None:
+    """Astra rg-9fb7125 item 1: flows are admitted to 09-16 and again from 09-18, so
+    09-17 is attested by nothing; the line is proven through 09-16, not the cutoff."""
+
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-16", anchors="2026-09-19")
+    _flow_window(case, "2026-09-18", "2026-09-19")
+
+    block = baseline._build_current_capital(**case)
+
+    line = _cash_line(block)
+    assert line["coverage_end"] == "2026-09-16"
+    assert line["as_of_date"] == "2026-09-16"
+    assert line["current_value"]["value"] == "4"
+    assert block["strategies"][0]["as_of_date"] == "2026-09-16"
+    assert block["systematic"]["as_of_date"] == "2026-09-16"
+
+
+def test_n56_adjacent_flow_windows_merge_into_one_segment() -> None:
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-16", anchors="2026-09-19")
+    _flow_window(case, "2026-09-17", "2026-09-19")
+
+    line = _cash_line(baseline._build_current_capital(**case))
+
+    assert line["coverage_end"] == "2026-09-19"
+    assert line["as_of_date"] == "2026-09-17"
+
+
+def test_n56_a_hole_in_the_anchor_windows_bounds_the_line_too() -> None:
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-19", anchors="2026-09-16")
+    admissions = case["provider_catalog"]["admissions"]
+    first = next(row for row in admissions if row["fact_type"] == "capital_anchors")
+    admissions.append(
+        {**first, "effective_start": "2026-09-18", "effective_end": "2026-09-19"}
+    )
+
+    line = _cash_line(baseline._build_current_capital(**case))
+
+    assert line["coverage_end"] == "2026-09-16"
+    assert line["as_of_date"] == "2026-09-16"
+
+
+def test_n56_the_value_is_the_balance_on_the_label_not_one_with_later_events() -> None:
+    """Astra item 2: a 09-17 deposit outruns anchor coverage ending 09-16.  The line
+    keeps the balance that was proven on 09-16 (4), not 24 labelled 09-16."""
+
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-16")
+    _later_deposit(case)
+
+    block = baseline._build_current_capital(**case)
+
+    line = _cash_line(block)
+    assert line["as_of_date"] == "2026-09-16"
+    assert line["current_value"]["value"] == "4"
+    assert line["last_event_date"] == "2026-09-16"
+    assert [event["record_id"] for event in line["events"]] == ["allocation", "deposit"]
+    assert all(event["event_date"] <= line["as_of_date"] for event in line["events"])
+    assert block["strategies"][0]["current_value"]["value"] == "109"
+    assert block["strategies"][0]["as_of_date"] == "2026-09-16"
+
+
+def test_n56_a_later_event_inside_full_coverage_is_counted_at_the_cutoff() -> None:
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-17")
+    _later_deposit(case)
+
+    block = baseline._build_current_capital(**case)
+
+    line = _cash_line(block)
+    assert line["as_of_date"] == "2026-09-17"
+    assert line["current_value"]["value"] == "24"
+    assert line["last_event_date"] == "2026-09-17"
+    assert len(line["events"]) == 3
+    assert block["strategies"][0]["current_value"]["value"] == "129"
+
+
+def test_n56_a_cash_dated_before_the_cutoff_keeps_the_native_check_not_ready() -> None:
+    """The native reconciliation recomputes with the producer's own logic, so it must
+    not turn a row dated before the cutoff into a PASS or a cutoff-labelled total."""
+
+    case = _cr2_custody_cash_case()
+    _admission_ends(case, flows="2026-09-18", anchors="2026-09-16")
+    _later_deposit(case)
+    block = baseline._build_current_capital(**case)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+
+    check = next(
+        row
+        for row in baseline._current_capital_checks(block, **arguments)
+        if row["check_id"] == "strategy-capital-to-cutoff-account-values"
+    )
+
+    assert check["status"] == "NOT_READY"
+    assert check["mismatches"] == []
+    assert check["not_ready_strategy_ids"] == ["alpha"]
+    assert "systematic_total_usd" not in check
+
+
+def test_n56_a_cash_dated_at_the_cutoff_keeps_the_native_check_passing() -> None:
+    case = _cr2_custody_cash_case()
+    block = baseline._build_current_capital(**case)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+
+    check = next(
+        row
+        for row in baseline._current_capital_checks(block, **arguments)
+        if row["check_id"] == "strategy-capital-to-cutoff-account-values"
+    )
+
+    assert check["status"] == "PASS"
+    assert check["systematic_total_usd"] == "109"
+
+
 def test_n56_baseline_check_recomputes_the_cash_label_and_rejects_a_forged_one() -> (
     None
 ):
