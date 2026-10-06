@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from cash_fixtures import complete_event
 from test_instrument_capital import _cash_line, _spec, _with_cash
 from test_r2_measures import GOOD_APP_JS, WEEKLY, _rendered
 from test_validate_generation import build
@@ -70,7 +71,9 @@ def _line(*events: dict[str, Any]) -> dict[str, Any]:
     total = sum((Decimal(e["signed_usd"]) for e in events), Decimal(0))
     line = _cash_line(str(total))
     line["events"] = [
-        {"event_date": "2025-01-01", "record_id": f"e{position}", **event}
+        complete_event(
+            {"event_date": "2025-01-01", "record_id": f"e{position}", **event}
+        )
         for position, event in enumerate(events)
     ]
     return line

@@ -3247,6 +3247,48 @@ def cash_rate_table(report: Mapping[str, Any]) -> RateTable:
     return {key: frozenset(rates) for key, rates in found.items()}
 
 
+def _amount_text(value: Any) -> bool:
+    """A non-empty string that parses to a finite number (the schema types amounts so)."""
+
+    return (
+        isinstance(value, str) and bool(value.strip()) and to_decimal(value) is not None
+    )
+
+
+def _event_shape_problems(event: Mapping[str, Any]) -> list[str]:
+    """Fields every custody cash event must carry (report-data.schema.json).
+
+    ``event_date``, ``record_id``, ``event_sha256``, ``native_currency``, ``native_value``,
+    ``event_time_fx`` (an object, or null for native USD) and ``signed_usd`` are all required;
+    a missing, null, boolean, numeric-typed, non-numeric or non-finite value is not evidence,
+    and an event that fails here is not run through the native-amount check.
+    """
+
+    problems: list[str] = []
+    if _canonical_iso_day(event.get("event_date")) is None:
+        problems.append("event_date is missing or not a canonical ISO date")
+    record = event.get("record_id")
+    if not isinstance(record, str) or not record:
+        problems.append("record_id is missing or not a non-empty string")
+    digest = event.get("event_sha256")
+    if not isinstance(digest, str) or not _RELEASE_DIGEST.fullmatch(digest):
+        problems.append(
+            "event_sha256 is missing or not a 64 character lowercase digest"
+        )
+    currency = event.get("native_currency")
+    if not isinstance(currency, str) or not currency:
+        problems.append("native_currency is missing or not a non-empty string")
+    if not _amount_text(event.get("native_value")):
+        problems.append("native_value is missing or not a finite numeric string")
+    if not _amount_text(event.get("signed_usd")):
+        problems.append("signed_usd is missing or not a finite numeric string")
+    if "event_time_fx" not in event or not (
+        event["event_time_fx"] is None or isinstance(event["event_time_fx"], Mapping)
+    ):
+        problems.append("event_time_fx is missing or neither an object nor null")
+    return problems
+
+
 def _native_event_problem(
     event: Mapping[str, Any], rates: RateTable | None = None
 ) -> str | None:
@@ -3369,6 +3411,10 @@ def derived_cash_issues(
             )
         problems.extend(_balance_and_identity_problems(rows(line, "events")))
     for position, event in enumerate(rows(line, "events")):
+        shape = _event_shape_problems(event)
+        if shape:
+            problems.extend(f"event {position}: {problem}" for problem in shape)
+            continue
         problem = _native_event_problem(event, rates)
         if problem is not None:
             problems.append(f"event {position}: {problem}")

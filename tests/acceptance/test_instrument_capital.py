@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from cash_fixtures import complete_event
 from test_validate_generation import Spec, build
 
 from acceptance.validate import checks
@@ -30,16 +31,20 @@ def _cash_line(value: str = CASH, status: str = "AVAILABLE") -> dict[str, Any]:
         "current_value": {"currency": "USD", "status": status, "value": value},
         # The flow arithmetic the line must reproduce (deposits less allocations).
         "events": [
-            {
-                "signed_usd": "1000.00",
-                "event_date": "2025-01-01",
-                "record_id": "cash:a",
-            },
-            {
-                "signed_usd": str(Decimal(value) - Decimal("1000.00")),
-                "event_date": "2025-01-02",
-                "record_id": "cash:b",
-            },
+            complete_event(
+                {
+                    "signed_usd": "1000.00",
+                    "event_date": "2025-01-01",
+                    "record_id": "cash:a",
+                }
+            ),
+            complete_event(
+                {
+                    "signed_usd": str(Decimal(value) - Decimal("1000.00")),
+                    "event_date": "2025-01-02",
+                    "record_id": "cash:b",
+                }
+            ),
         ],
     }
 

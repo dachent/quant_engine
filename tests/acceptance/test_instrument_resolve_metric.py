@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from cash_fixtures import complete_event
 from test_validate_generation import CUTOFF, W_ALPHA, Spec, build, run
 
 from acceptance.validate import checks
@@ -39,16 +40,20 @@ def _custody(report: dict[str, Any]) -> None:
                         "account_id": "CASH1",
                         "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
                         "events": [
-                            {
-                                "signed_usd": "1000",
-                                "event_date": "2025-01-01",
-                                "record_id": "r:a",
-                            },
-                            {
-                                "signed_usd": "-906.02525564432546719",
-                                "event_date": "2025-01-02",
-                                "record_id": "r:b",
-                            },
+                            complete_event(
+                                {
+                                    "signed_usd": "1000",
+                                    "event_date": "2025-01-01",
+                                    "record_id": "r:a",
+                                }
+                            ),
+                            complete_event(
+                                {
+                                    "signed_usd": "-906.02525564432546719",
+                                    "event_date": "2025-01-02",
+                                    "record_id": "r:b",
+                                }
+                            ),
                         ],
                         "current_value": {
                             "currency": "USD",

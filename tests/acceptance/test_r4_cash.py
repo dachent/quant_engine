@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cash_fixtures import complete_event
 from test_instrument_capital import _cash_line, _spec
 from test_r3_render_cash import _event, _issues, _line
 from test_validate_generation import build
@@ -40,7 +41,7 @@ def _dated(day: str, signed: str, record: str | None = None) -> dict[str, Any]:
     event["event_date"] = day
     if record is not None:
         event["record_id"] = record
-    return event
+    return complete_event(event)
 
 
 def _problems(line: dict[str, Any]) -> str:
@@ -179,7 +180,11 @@ def _fx_line(account: str, record: str, rate: str) -> dict[str, Any]:
         str(deposit_total + native * Decimal(rate) - native * Decimal(rate))
     )
     line["account_id"] = account
-    line["events"] = [_dated("2025-12-05", "2000", f"{record}:x"), event, deposit]
+    line["events"] = [
+        _dated("2025-12-05", "2000", f"{record}:x"),
+        complete_event(event),
+        deposit,
+    ]
     total = sum((Decimal(e["signed_usd"]) for e in line["events"]), Decimal(0))
     line["current_value"]["value"] = str(total)
     return line
