@@ -1044,7 +1044,15 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     (release_root / "CURRENT_RELEASE.json").write_bytes(_dump({"release_id": RELEASE}))
     (release_root / "releases" / RELEASE / "release.json").write_bytes(
         _dump(
-            {"targets": [{"root_id": "portfolio-panel", "proposed_generation_id": GEN}]}
+            {
+                "targets": [
+                    {
+                        "root_id": "portfolio-panel",
+                        "proposed_generation_id": GEN,
+                        "proposed_manifest_sha256": _sha(manifest_bytes),
+                    }
+                ]
+            }
         )
     )
     for hook in spec.post_write:
@@ -1404,6 +1412,15 @@ def _remove_crosswalk(gen_dir: Path) -> None:
     (path / "account-strategy-current-epoch-crosswalk.json").unlink()
 
 
+def _break_release_target_digest(gen_dir: Path) -> None:
+    """F8 reverse binding: the release target no longer carries the manifest digest."""
+
+    path = gen_dir.parents[2] / "releases-test" / "releases" / RELEASE / "release.json"
+    document = json.loads(path.read_bytes())
+    document["targets"][0]["proposed_manifest_sha256"] = "0" * 64
+    path.write_bytes(_dump(document))
+
+
 def _rewrite(rel: str, data: bytes) -> Callable[[Path], None]:
     def hook(gen_dir: Path) -> None:
         (gen_dir / rel).write_bytes(data)
@@ -1574,7 +1591,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "release_pinned": (
         "identity.release_pinned",
         checks.BLOCKER_AUTHORITY,
-        Spec(panel=[_set(("meta", "release_id"), None)]),
+        Spec(post_write=[_break_release_target_digest]),
     ),
     "absolute_paths": (
         "identity.absolute_local_paths",

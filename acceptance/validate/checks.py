@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -1931,16 +1932,32 @@ def _readiness(ctx: Context) -> dict[str, Any]:
     return values
 
 
+def _release_target(ctx: Context) -> tuple[dict[str, Any], str] | None:
+    """The committed release's target that names this generation, with where it is.
+
+    Publication is the committed release (``CURRENT_RELEASE`` and its ``release.json``
+    target), not a stage ``CURRENT.json``: a stage pointer can only ever say PUBLISHED.
+    """
+
+    external = ctx.gen.external
+    manifest = external.release_manifest
+    targets = manifest.get("targets") if isinstance(manifest, dict) else None
+    if not isinstance(targets, list):
+        return None
+    for position, target in enumerate(targets):
+        if (
+            isinstance(target, dict)
+            and target.get("proposed_generation_id") == ctx.gen.generation_id
+        ):
+            return target, f"{external.release_manifest_path}#$.targets[{position}]"
+    return None
+
+
 def _is_published(ctx: Context) -> tuple[bool, str | None]:
-    pointer = ctx.gen.external.current_pointer
-    if (
-        isinstance(pointer, dict)
-        and pointer.get("generation_id") == ctx.gen.generation_id
-    ):
-        state = pointer.get("state")
-        if state == "PUBLISHED":
-            return True, f"{ctx.gen.external.current_pointer_path}#$.state"
-    return False, None
+    found = _release_target(ctx)
+    if found is None:
+        return False, None
+    return True, found[1]
 
 
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
@@ -2020,7 +2037,13 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
 
 
 def check_release_pinned(ctx: Context) -> Iterator[Finding]:
-    """F8: the release that publishes this generation must be named in its bytes."""
+    """F8: the committed release target for the panel must name this generation.
+
+    A reverse binding: the release id is a hash over the proposed generation id, and the
+    generation id hashes the sealed panel bytes, so those bytes cannot contain the release
+    id. The release that publishes the generation is therefore checked from its side: its
+    target must carry this generation id and the sha256 of this ``generation.json``.
+    """
 
     external = ctx.gen.external
     pointer = external.release_pointer
@@ -2037,40 +2060,29 @@ def check_release_pinned(ctx: Context) -> Iterator[Finding]:
             "no release pointer found; release pinning cannot be evaluated",
         )
         return
-    release_id = pointer["release_id"]
-    manifest = external.release_manifest
-    targets: list[str] = []
-    if isinstance(manifest, dict):
-        _collect_strings(manifest, targets)
-    if ctx.gen.generation_id not in targets:
+    found = _release_target(ctx)
+    if found is None:
         return
-    hits = {
-        rel: count for rel, count in ctx.gen.scan.release_id_counts.items() if count
-    }
-    if not hits:
+    target, where = found
+    manifest_path = ctx.gen.gen_dir / GENERATION_MANIFEST
+    actual = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    bound = target.get("proposed_manifest_sha256")
+    if bound != actual:
         yield _finding(
             "identity.release_pinned",
             BLOCKER_AUTHORITY,
-            release_id,
-            {"files_naming_release_id": 0},
-            {"release_id": release_id},
-            GENERATION_MANIFEST,
-            "$",
+            pointer["release_id"],
+            {"proposed_manifest_sha256": bound},
+            {
+                "proposed_generation_id": ctx.gen.generation_id,
+                "proposed_manifest_sha256": actual,
+            },
+            "(release manifest)",
+            where,
             ("F8",),
-            "the committed release that publishes this generation is not named "
-            "anywhere in the panel bytes",
+            "the committed release target that names this generation does not carry "
+            "the sha256 of its generation.json",
         )
-
-
-def _collect_strings(value: Any, into: list[str]) -> None:
-    if isinstance(value, str):
-        into.append(value)
-    elif isinstance(value, Mapping):
-        for item in value.values():
-            _collect_strings(item, into)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_strings(item, into)
 
 
 def check_absolute_paths(ctx: Context) -> Iterator[Finding]:
@@ -5465,17 +5477,10 @@ def _dated_sections(
                 ("C4",),
                 ("c4_historical", (metadata_key, metadata)),
             )
-    for position, row in enumerate(rows(ctx.report, "strategy_summary")):
-        if row.get("live_boundary_observed_end") is not None:
-            yield (
-                f"live_boundary:{row.get('strategy_id')}",
-                REPORT,
-                f"$.strategy_summary[{position}].live_boundary_observed_end",
-                row.get("live_boundary_observed_end"),
-                row.get("live_boundary_status"),
-                ("C5",),
-                None,
-            )
+    # ``strategy_summary.live_boundary_observed_end`` is deliberately not a section
+    # as-of: it is a pinned version-identity window (the targets rows hashed into the
+    # version reference, tools/portfolio_provenance.py), and extending it to the cutoff
+    # would re-pin the identity (D4 ruling 1 of the S2.1 decision seat).
 
 
 def _canonical_iso_day(value: Any) -> date | None:
