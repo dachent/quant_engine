@@ -24,8 +24,7 @@ def _context(tmp_path: Path, weekly: dict[str, object], cutoff: date, source=Non
                 "sha256": digest,
                 "size_bytes": len(raw),
                 "as_of_date": source.get("as_of_date"),
-                "schema_name": "portfolio-weekly-returns",
-                "schema_version": "2",
+                "schema": {"name": "portfolio-weekly-returns", "version": "2"},
             }
         )
     generation = SimpleNamespace(

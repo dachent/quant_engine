@@ -31,8 +31,7 @@ def test_weekly_current_week_requires_source_through_date_to_equal_cutoff(tmp_pa
                         "as_of_date": "2026-09-17",
                         "size_bytes": len(raw),
                         "sha256": digest,
-                        "schema_name": "portfolio-weekly-returns",
-                        "schema_version": "2",
+                        "schema": {"name": "portfolio-weekly-returns", "version": "2"},
                     }
                 ]
             },

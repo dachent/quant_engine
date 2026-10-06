@@ -5757,9 +5757,15 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
     artifact = artifacts[0]
     manifest_as_of = to_date(artifact.get("as_of_date"))
     source_hash = artifact.get("sha256")
+    # A manifest entry nests its schema identity as ``schema {name, version}``; the
+    # version is a string in the sealed manifest (generation.json) and 2 from 8302d4e.
+    schema = artifact.get("schema")
+    schema_name = schema.get("name") if isinstance(schema, Mapping) else None
+    schema_version = schema.get("version") if isinstance(schema, Mapping) else None
     artifact_valid = (
-        artifact.get("schema_name") == "portfolio-weekly-returns"
-        and artifact.get("schema_version") == "2"
+        schema_name == "portfolio-weekly-returns"
+        and not isinstance(schema_version, bool)
+        and str(schema_version) == "2"
         and isinstance(source_hash, str)
         and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None
         and isinstance(artifact.get("size_bytes"), int)
@@ -5772,8 +5778,7 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             BLOCKER_AUTHORITY,
             "weekly_returns.source",
             {
-                "schema_name": artifact.get("schema_name"),
-                "schema_version": artifact.get("schema_version"),
+                "schema": schema,
                 "sha256_valid": isinstance(source_hash, str)
                 and re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None,
                 "size_bytes": artifact.get("size_bytes"),
@@ -5782,7 +5787,34 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             GENERATION_MANIFEST,
             "$.artifacts",
             ("C6",),
-            "weekly source artifact metadata is incomplete or invalid",
+            "weekly source artifact metadata is incomplete or invalid (its nested "
+            "schema must be portfolio-weekly-returns version 2)",
+        )
+        return
+    # The source is judged against the DECLARED cutoff, not against its own manifest
+    # date: the manifest ``as_of_date`` is an execution date and may lie after the
+    # cutoff (N54), and a source that trails the cutoff by more than the last completed
+    # week (its final trading day, the previous Friday) is stale.
+    latest_allowed = ctx.cutoff
+    earliest_allowed = iso_week_start(ctx.cutoff) - timedelta(days=3)
+    if manifest_as_of > latest_allowed or manifest_as_of < earliest_allowed:
+        after = manifest_as_of > latest_allowed
+        yield _finding(
+            "dates.weekly_current_week",
+            BLOCKER_AUTHORITY,
+            "weekly_returns.source_cutoff",
+            manifest_as_of.isoformat(),
+            {"source_as_of_not_after": latest_allowed.isoformat()}
+            if after
+            else {"source_as_of_at_least": earliest_allowed.isoformat()},
+            GENERATION_MANIFEST,
+            "$.artifacts[input/portfolio-weekly-returns.json].as_of_date",
+            ("C6",),
+            "weekly source is dated after the declared cutoff (an execution date, not "
+            "the data cutoff)"
+            if after
+            else "weekly source ends before the last completed week at the declared "
+            "cutoff (stale)",
         )
         return
     if weekly.get("source_sha256") != source_hash:
