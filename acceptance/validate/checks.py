@@ -54,7 +54,17 @@ BLOCKER_AUTHORITY = "BLOCKER_AUTHORITY"
 BLOCKER_REGRESSION = "BLOCKER_REGRESSION"
 NOT_READY = "NOT_READY"
 WARNING = "WARNING"
-CLASSES = (BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION, NOT_READY, WARNING)
+# An oracle row about something the owner excluded from the product: recorded, never a
+# blocker and never a not-ready (the oracle states it is not derivable by design).
+EXPECTED_EXCLUDED = "EXPECTED_EXCLUDED"
+CLASSES = (
+    BLOCKER_INVARIANT,
+    BLOCKER_AUTHORITY,
+    BLOCKER_REGRESSION,
+    NOT_READY,
+    WARNING,
+    EXPECTED_EXCLUDED,
+)
 BLOCKERS = frozenset({BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION})
 
 USD_TOLERANCE = Decimal("0.01")
@@ -740,7 +750,8 @@ def _read_census(ctx: Context) -> CensusState:
     if not digests:
         return CensusState(
             None,
-            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT}",
+            f"the expected baseline carries no authority pointer for {CENSUS_CONTRACT} "
+            f"(the census authority pin) on any of its {len(ctx.expected)} row(s)",
         )
     if len(digests) > 1:
         return CensusState(
@@ -1588,6 +1599,11 @@ def reserve_accounts(ctx: Context) -> set[str]:
         for row in rows(ctx.report, "allocation_history")
         if row.get("scope") == "RESERVE" and row.get("account_id") is not None
     }
+    # The reserve component list is the label: a reserve account is expected in the
+    # current coverage and leverage views once it is named there.
+    components = node(ctx.report, "custody_current_capital", "reserve", "components")
+    if isinstance(components, list):
+        accounts |= {str(account) for account in components if account is not None}
     return accounts
 
 
@@ -6023,30 +6039,53 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             ("E7",),
             "provider strategy returns empty",
         )
+    # The contract (leverage_accounting, required_facts) requires gross exposure and
+    # financing cost to be disclosed; it names no ``leverage_ratio`` field. Read the
+    # disclosure rows by data class and coverage, not a key.
     disclosures = rows(ctx.report, "leverage_disclosures")
-    has_ratio = any("leverage_ratio" in row for row in disclosures)
-    unavailable_financing = sum(
-        1
-        for row in disclosures
-        if row.get("data_class") == "FINANCING_COST"
-        and row.get("coverage_status") == "UNAVAILABLE"
-    )
-    if disclosures and not has_ratio:
-        yield _finding(
-            "completeness.required_outputs",
-            NOT_READY,
-            "leverage_disclosures",
-            {
-                "rows": len(disclosures),
-                "leverage_ratio_fields": 0,
-                "unavailable_financing_cost_rows": unavailable_financing,
-            },
-            "a leverage ratio per levered account",
-            REPORT,
-            "$.leverage_disclosures",
-            ("E8",),
-            "leverage ratio absent; financing cost unmapped",
-        )
+    if disclosures:
+        exposure = [
+            row for row in disclosures if row.get("data_class") == "LEVERAGE_EXPOSURE"
+        ]
+        if not any(is_available(row.get("coverage_status")) for row in exposure):
+            yield _finding(
+                "completeness.required_outputs",
+                NOT_READY,
+                "leverage_disclosures.gross_exposure",
+                {
+                    "rows": len(disclosures),
+                    "leverage_exposure_rows": len(exposure),
+                    "leverage_exposure_rows_available": 0,
+                },
+                "a gross-exposure disclosure for the levered accounts",
+                REPORT,
+                "$.leverage_disclosures",
+                ("E8",),
+                "gross leverage exposure is not disclosed",
+            )
+        financing = [
+            row for row in disclosures if row.get("data_class") == "FINANCING_COST"
+        ]
+        if not any(is_available(row.get("coverage_status")) for row in financing):
+            yield _finding(
+                "completeness.required_outputs",
+                NOT_READY,
+                "leverage_disclosures.financing_cost",
+                {
+                    "financing_cost_rows": len(financing),
+                    "financing_cost_rows_available": 0,
+                    "unavailable_financing_cost_rows": sum(
+                        1
+                        for row in financing
+                        if row.get("coverage_status") == "UNAVAILABLE"
+                    ),
+                },
+                "a reconciled financing cost basis",
+                REPORT,
+                "$.leverage_disclosures",
+                ("E8",),
+                "financing cost is not reconciled (observed only or unavailable)",
+            )
 
 
 # -------------------------------------------------------------------- code checks
@@ -7428,6 +7467,27 @@ def recompute_metric(
     ]
 
 
+# Per-account performance is not a required output for an owner-excluded account (its
+# capital is: the retained-excluded identity), so only these metrics are expected
+# exclusions when the oracle states them not derivable.
+_PERFORMANCE_METRICS = frozenset(
+    {"twr.account", "mwr.account", "flows.account.net", "flows.account.count"}
+)
+
+
+def _owner_excluded_accounts(ctx: Context) -> dict[str, str]:
+    """Accounts the crosswalk excludes by owner disposition (``EXCLUDED_*``), by account."""
+
+    reference = universe(ctx)
+    if reference is None:
+        return {}
+    return {
+        account: disposition
+        for account, disposition in reference.excluded_accounts.items()
+        if disposition.startswith("EXCLUDED_")
+    }
+
+
 def check_expected(ctx: Context) -> Iterator[Finding]:
     if ctx.expected is None:
         yield _finding(
@@ -7442,17 +7502,25 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
             "no fixed-baseline expectations supplied; regression checks skipped",
         )
         return
+    owner_excluded = _owner_excluded_accounts(ctx)
     for row in ctx.expected_not_derivable:
+        excluded = (
+            row.get("metric_id") in _PERFORMANCE_METRICS
+            and str(row.get("entity")) in owner_excluded
+        )
         yield _finding(
             "expected.not_derivable",
-            NOT_READY,
+            EXPECTED_EXCLUDED if excluded else NOT_READY,
             f"{row.get('metric_id')}:{row.get('entity')}",
             None,
             row.get("reason"),
             "(expected baseline)",
             "$.not_derivable",
             _METRIC_DEFECTS.get(str(row.get("metric_id")), ()),
-            "metric not derivable from upstream authority",
+            "per-account performance is not required for an owner-excluded account "
+            f"({owner_excluded[str(row.get('entity'))]})"
+            if excluded
+            else "metric not derivable from upstream authority",
         )
     for position, row in enumerate(ctx.expected):
         metric_id = str(row.get("metric_id"))
