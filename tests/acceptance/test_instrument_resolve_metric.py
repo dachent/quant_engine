@@ -37,6 +37,11 @@ def _custody(report: dict[str, Any]) -> None:
                 "derived_cash": [
                     {
                         "account_id": "CASH1",
+                        "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
+                        "events": [
+                            {"signed_usd": "1000"},
+                            {"signed_usd": "-906.02525564432546719"},
+                        ],
                         "current_value": {
                             "currency": "USD",
                             "status": "AVAILABLE",

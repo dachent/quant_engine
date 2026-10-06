@@ -26,8 +26,13 @@ SYSTEMATIC_WITH_CASH = "6693.97"
 def _cash_line(value: str = CASH, status: str = "AVAILABLE") -> dict[str, Any]:
     return {
         "account_id": "CASH1",
-        "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS",
+        "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
         "current_value": {"currency": "USD", "status": status, "value": value},
+        # The flow arithmetic the line must reproduce (deposits less allocations).
+        "events": [
+            {"signed_usd": "1000.00"},
+            {"signed_usd": str(Decimal(value) - Decimal("1000.00"))},
+        ],
     }
 
 

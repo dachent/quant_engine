@@ -1576,8 +1576,21 @@ def universe(ctx: Context) -> Universe | None:
     return result
 
 
-def reserve_accounts(ctx: Context) -> set[str]:
-    """Reserve/mandate buckets, recognised from the data rather than by id."""
+# The views a custody reserve component list can excuse an account in: the coverage and
+# leverage disclosures that describe the custody perimeter. Performance and account
+# tables are not custody views, so a retired account there stays reported even when the
+# report's own reserve list names it.
+_RESERVE_LABEL_VIEWS = frozenset(
+    {"report.fact_coverage_matrix", "report.leverage_disclosures"}
+)
+
+
+def reserve_accounts(ctx: Context, view: str | None = None) -> set[str]:
+    """Reserve/mandate buckets, recognised from the data rather than by id.
+
+    The role and allocation-scope labels apply to every view; the custody reserve
+    component list only to the custody views (``_RESERVE_LABEL_VIEWS``).
+    """
 
     accounts = {
         str(row.get("account_id"))
@@ -1592,7 +1605,7 @@ def reserve_accounts(ctx: Context) -> set[str]:
     # The reserve component list is the label: a reserve account is expected in the
     # current coverage and leverage views once it is named there.
     components = node(ctx.report, "custody_current_capital", "reserve", "components")
-    if isinstance(components, list):
+    if isinstance(components, list) and view in _RESERVE_LABEL_VIEWS:
         accounts |= {str(account) for account in components if account is not None}
     return accounts
 
@@ -3074,11 +3087,61 @@ def check_capital_as_of(ctx: Context) -> Iterator[Finding]:
                 )
 
 
-def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
-    """The unallocated cash line each strategy's custody row publishes (OWNER_318).
+_CASH_BASIS = (
+    "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
+)
+_CASH_EVENT_TOLERANCE = Decimal("0.000001")
+CASH_EVIDENCE_CHECK = "capital.derived_cash_evidence"
 
-    A strategy's capital is its sleeve account NAV plus this derived cash line; only an
-    AVAILABLE line with a numeric USD value counts.
+
+def derived_cash_issues(line: Any) -> tuple[Decimal | None, list[str]]:
+    """The amount of an AVAILABLE derived cash line and why it cannot be trusted.
+
+    OWNER_318 and the custody contract: the line is derived (admitted deposits less
+    withdrawals less sleeve allocations plus redemptions) in USD at event-date FX and a
+    negative line fails closed. So the line must be USD, not negative, carry the derived
+    basis, and reproduce from its own flow events (the sum of their ``signed_usd``); a
+    producer-supplied total is never evidence of itself. ``(None, [])`` is a line that is
+    not AVAILABLE (not evidence, not a finding).
+    """
+
+    value = node(line, "current_value")
+    if not isinstance(value, Mapping) or not is_available(value.get("status")):
+        return None, []
+    problems: list[str] = []
+    amount = to_decimal(value.get("value"))
+    if amount is None:
+        return None, ["the line has no numeric amount"]
+    if value.get("currency") != "USD":
+        problems.append(f"the line is not in USD ({value.get('currency')})")
+    if amount < 0:
+        problems.append("the line is negative (a negative cash line fails closed)")
+    if node(line, "basis") != _CASH_BASIS:
+        problems.append("the line does not carry the derived basis")
+    events = node(line, "events")
+    signed = [to_decimal(item.get("signed_usd")) for item in rows(line, "events")]
+    if not isinstance(events, list) or not events or None in signed:
+        problems.append("the line has no flow events to reproduce it from")
+    else:
+        total = sum((item for item in signed if item is not None), Decimal(0))
+        if abs(total - amount) > _CASH_EVENT_TOLERANCE:
+            problems.append(
+                f"the line's flow events sum to {total}, not the published {amount}"
+            )
+    return amount, problems
+
+
+def verified_cash_amount(line: Any) -> Decimal | None:
+    amount, problems = derived_cash_issues(line)
+    return amount if amount is not None and not problems else None
+
+
+def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
+    """The unallocated cash each strategy's custody row publishes (OWNER_318).
+
+    A strategy's capital is its sleeve account NAV plus this derived cash; only a line
+    that ``derived_cash_issues`` finds sound counts, so an unverified line cannot make a
+    total agree with itself.
     """
 
     cash: dict[str, Decimal] = {}
@@ -3087,14 +3150,42 @@ def derived_cash_by_strategy(ctx: Context) -> dict[str, Decimal]:
         if not isinstance(lines, list):
             continue
         for line in lines:
-            value = node(line, "current_value")
-            if not isinstance(value, Mapping) or not is_available(value.get("status")):
-                continue
-            amount = to_decimal(value.get("value"))
+            amount = verified_cash_amount(line)
             if amount is not None:
                 key = str(strategy.get("strategy_id"))
                 cash[key] = cash.get(key, Decimal(0)) + amount
     return cash
+
+
+def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
+    """B13: every AVAILABLE derived cash line is USD, non-negative and reproducible."""
+
+    custody = node(ctx.report, "custody_current_capital")
+    for position, strategy in enumerate(rows(custody, "strategies")):
+        lines = strategy.get("derived_cash")
+        if not isinstance(lines, list):
+            continue
+        for line_position, line in enumerate(lines):
+            amount, problems = derived_cash_issues(line)
+            if not problems:
+                continue
+            yield _finding(
+                CASH_EVIDENCE_CHECK,
+                BLOCKER_INVARIANT,
+                f"cash:{strategy.get('strategy_id')}:{node(line, 'account_id')}",
+                amount,
+                {
+                    "currency": "USD",
+                    "non_negative": True,
+                    "basis": _CASH_BASIS,
+                    "events_reproduce_the_amount": True,
+                },
+                REPORT,
+                f"$.custody_current_capital.strategies[{position}]"
+                f".derived_cash[{line_position}]",
+                ("B13",),
+                "derived cash is not sound: " + "; ".join(problems),
+            )
 
 
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
@@ -3588,8 +3679,8 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
     reference = universe(ctx)
     if reference is None:
         return
-    allowed = set(reference.active_accounts) | reserve_accounts(ctx)
     for label, file, path, key in _ACCOUNT_VIEWS:
+        allowed = set(reference.active_accounts) | reserve_accounts(ctx, label)
         ids = _view_ids(ctx, file, path, key)
         if ids is None:
             continue
@@ -6952,12 +7043,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             cash_total = Decimal(0)
             counted = 0
             for line in lines:
-                value = node(line, "current_value")
-                amount = (
-                    to_decimal(value.get("value"))
-                    if isinstance(value, Mapping) and is_available(value.get("status"))
-                    else None
-                )
+                amount = verified_cash_amount(line)
                 if amount is not None:
                     cash_total += amount
                     counted += 1
@@ -8102,12 +8188,18 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
         )
 
 
+CAPITAL_SCOPES = frozenset({"SYSTEMATIC", "RETAINED_EXCLUDED"})
+
+
 def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     """N56: the custody capital labels carry the date they are valued at.
 
     The systematic total and each systematic strategy are valued at the cutoff; an
     as_of older than that (the last event date or the minimum over members) labels a
-    current value with a past date. Retained and excluded rows are not systematic.
+    current value with a past date. An AVAILABLE value must carry a canonical ISO
+    ``as_of_date``: a missing, null or malformed one is a finding, not a pass. Retained
+    and excluded rows (``RETAINED_EXCLUDED``) are not systematic; a scope outside the
+    producer's vocabulary is itself a finding (it would switch this check off).
     """
 
     custody = node(ctx.report, "custody_current_capital")
@@ -8122,13 +8214,24 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             )
         )
     for position, row in enumerate(rows(custody, "strategies")):
+        pointer = f"$.custody_current_capital.strategies[{position}]"
+        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
+            yield _finding(
+                "capital.as_of_cutoff",
+                BLOCKER_AUTHORITY,
+                f"current_capital:{row.get('strategy_id')}:scope",
+                row.get("scope"),
+                sorted(CAPITAL_SCOPES),
+                REPORT,
+                f"{pointer}.scope",
+                ("N56",),
+                "the custody scope is outside the producer's vocabulary, so the "
+                "capital date check cannot classify the row",
+            )
+            continue
         if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":
             candidates.append(
-                (
-                    f"current_capital:{row.get('strategy_id')}",
-                    f"$.custody_current_capital.strategies[{position}]",
-                    row,
-                )
+                (f"current_capital:{row.get('strategy_id')}", pointer, row)
             )
     for entity, pointer, entry in candidates:
         value = node(entry, "current_value")
@@ -8137,8 +8240,21 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             continue
         if isinstance(value, Mapping) and not is_available(value.get("status")):
             continue
-        day = to_date(entry.get("as_of_date"))
-        if day is None or day == ctx.cutoff:
+        day = _canonical_iso_day(entry.get("as_of_date"))
+        if day is None:
+            yield _finding(
+                "capital.as_of_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                "a canonical ISO as_of_date",
+                REPORT,
+                f"{pointer}.as_of_date",
+                ("N56",),
+                "an available current-capital value carries no canonical as_of_date",
+            )
+            continue
+        if day == ctx.cutoff:
             continue
         yield _finding(
             "capital.as_of_cutoff",
@@ -8270,6 +8386,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("dates.section_as_of_vs_cutoff", check_section_dates),
     ("dates.account_live_window", check_account_live_window),
     ("capital.current_capital_as_of", check_current_capital_as_of),
+    (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
     ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
     ("dates.weekly_current_week", check_weekly_current_week),
