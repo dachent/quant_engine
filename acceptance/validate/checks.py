@@ -6197,9 +6197,14 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
     # The source is judged against the DECLARED cutoff, not against its own manifest
     # date: the manifest ``as_of_date`` is an execution date and may lie after the
     # cutoff (N54), and a source that trails the cutoff by more than the last completed
-    # week (its final trading day, the previous Friday) is stale.
+    # week is stale. A week closes on its Friday: for a Friday, Saturday or Sunday
+    # cutoff the cutoff's own week is complete and its Friday is the floor, otherwise the
+    # last completed week is the previous one (its Friday).
     latest_allowed = ctx.cutoff
-    earliest_allowed = iso_week_start(ctx.cutoff) - timedelta(days=3)
+    this_friday = iso_week_start(ctx.cutoff) + timedelta(days=4)
+    earliest_allowed = (
+        this_friday if ctx.cutoff.weekday() >= 4 else this_friday - timedelta(days=7)
+    )
     if manifest_as_of > latest_allowed or manifest_as_of < earliest_allowed:
         after = manifest_as_of > latest_allowed
         yield _finding(
@@ -6313,6 +6318,9 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
 
 _DECOMPOSITION_PLAN = "docs/analytics/current-strategy-decomposition-plan.json"
 _NOT_APPLICABLE = "NOT_APPLICABLE_METHOD_SCOPE"
+# The two out-of-scope requirement values the governed plan carries (a test pins the plan's
+# set to exactly these; a new kind in the plan is not honoured until it is added here).
+_OUT_OF_SCOPE = frozenset({_NOT_APPLICABLE, "NOT_APPLICABLE_OWNER_APPROVED"})
 
 
 def decomposition_plan(ctx: Context) -> Mapping[str, Any] | None:
@@ -6360,8 +6368,9 @@ def _cell_is_explained(
 ) -> bool:
     """Whether the governed plan confirms why a non-available cell is not a gap.
 
-    A ``NOT_APPLICABLE_METHOD_SCOPE`` cell is excused only when the plan routes that
-    (series, source) pair out of scope; a ``DIAGNOSTIC_ONLY`` cell (the model-quality
+    A cell labelled with an out-of-scope kind (``NOT_APPLICABLE_METHOD_SCOPE`` or
+    ``NOT_APPLICABLE_OWNER_APPROVED``) is excused only when the plan carries that
+    (series, source) pair with that same requirement; a ``DIAGNOSTIC_ONLY`` cell (the model-quality
     gate) only when the plan requires and readies that pair, so a REQUIRED cell can never
     exempt itself with its own ``selection_status``.
     """
@@ -6376,10 +6385,8 @@ def _cell_is_explained(
             disposition.get("requirement") == "REQUIRED"
             and disposition.get("readiness") == "READY_TO_MODEL"
         )
-    return (
-        cell.get("selection_status") == _NOT_APPLICABLE
-        and disposition.get("requirement") == _NOT_APPLICABLE
-    )
+    requirement = disposition.get("requirement")
+    return requirement in _OUT_OF_SCOPE and cell.get("selection_status") == requirement
 
 
 def _incomplete_series_count(
