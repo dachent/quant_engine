@@ -4,6 +4,7 @@ from datetime import date
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 
 from quant_engine.core import (
@@ -29,7 +30,7 @@ sys.modules[SPEC.name] = freshness
 SPEC.loader.exec_module(freshness)
 
 
-def _provider_ledger(root: Path) -> str:
+def _provider_ledger(root: Path, portfolio123_end: str = "2026-07-31") -> str:
     catalog = {
         "as_of_date": "2026-07-31",
         "provider_coverage": [
@@ -46,11 +47,11 @@ def _provider_ledger(root: Path) -> str:
             {
                 "coverage": {
                     "fact_types": ["equity_curve", "holdings", "transactions"],
-                    "observed_end": "2026-07-31",
-                    "observed_start": "2026-07-31",
+                    "observed_end": portfolio123_end,
+                    "observed_start": portfolio123_end,
                     "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
                 },
-                "generation_as_of_date": "2026-07-31",
+                "generation_as_of_date": portfolio123_end,
                 "provider_id": "portfolio123",
             },
             {
@@ -266,3 +267,84 @@ def test_freshness_output_is_create_only_and_deterministic(tmp_path: Path) -> No
     assert json.loads(output.read_text(encoding="utf-8"))["as_of_date"] == (
         "2026-07-31"
     )
+
+
+def test_finite_portfolio123_is_judged_against_its_own_declared_end(
+    tmp_path: Path,
+) -> None:
+    """R2-5: the ledger declares Portfolio123 FINITE; freshness must agree.
+
+    The capture ends on 2026-07-02 and is never due again, so a later evaluation
+    reports it FINITE_COMPLETE at its true end instead of a recurring STALE that
+    escalates and blocks current consumers.
+    """
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root, portfolio123_end="2026-07-02")
+
+    result = freshness.build_health(root, generation_id, date(2026, 8, 20))
+
+    p123 = [
+        row for row in result["assessments"] if row["provider_id"] == "portfolio123"
+    ]
+    capture = [row for row in p123 if row["lane"] == "PROVIDER_CAPTURE"]
+    supported = [row for row in capture if row["coverage_status"] != "OUT_OF_BOUNDARY"]
+    assert {row["fact_type"] for row in supported} == {
+        "balances",
+        "positions",
+        "transactions",
+    }
+    for row in supported:
+        assert row["policy_id"] == "finite-history"
+        assert row["state"] == "FINITE_COMPLETE"
+        assert row["last_accepted_date"] == "2026-07-02"
+        assert row["next_expected_date"] is None
+        assert row["required_for_current"] is False
+        assert row["blocks_current_consumers"] is False
+        assert row["escalation_required"] is False
+    provider_lane = next(
+        row
+        for row in p123
+        if row["subject_id"] == "current-one" and row["lane"] == "PROVIDER"
+    )
+    assert provider_lane["policy_id"] == "finite-history"
+    assert provider_lane["state"] == "FINITE_COMPLETE"
+
+
+def test_recurring_provider_stays_recurring_beside_finite_portfolio123(
+    tmp_path: Path,
+) -> None:
+    """Regression guard: only declared-finite sources leave the recurring policy."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root, portfolio123_end="2026-07-02")
+
+    result = freshness.build_health(root, generation_id, date(2026, 8, 20))
+
+    by_lane = {
+        (row["subject_id"], row["lane"], row["fact_type"]): row
+        for row in result["assessments"]
+    }
+    stale = by_lane[("recurring-stale", "ACCOUNT", "strategy-returns")]
+    assert stale["policy_id"] == "daily-weekday-session"
+    assert stale["state"] == "STALE"
+    assert stale["blocks_current_consumers"] is True
+    ibkr_capture = by_lane[("ibkr", "PROVIDER_CAPTURE", "balances")]
+    assert ibkr_capture["policy_id"] == "daily-weekday-session"
+    assert ibkr_capture["required_for_current"] is True
+
+
+def test_freshness_finite_providers_match_the_ledger_finality_declaration() -> None:
+    """Regression guard: one declared finite set, read from the ledger source."""
+
+    ledger_source = (REPOSITORY_ROOT / "tools" / "provider_ledger.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"if provider_id in \{([^}]*)\}:\s*\n\s*if digest != selected\[\"manifest_sha256\"\]",
+        ledger_source,
+    )
+    assert match is not None, "ledger finite finality declaration moved"
+    declared = {item.strip().strip('"') for item in match.group(1).split(",")}
+
+    assert declared == set(freshness.FINITE_HISTORY_PROVIDER_IDS)

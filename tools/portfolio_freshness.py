@@ -114,12 +114,20 @@ def _policies() -> dict[str, FreshnessPolicy]:
     }
 
 
+# Providers whose selected generation is a finite manifest boundary. The provider
+# ledger declares the same set as FINITE_SELECTED_MANIFEST_BOUNDARY finality
+# (tools/provider_ledger.py, _validate_observed_finality_evidence) and the report
+# source clock labels them applies_to_latest_common_eod false, so freshness judges
+# them against their own declared end instead of a recurring cadence they never owed.
+FINITE_HISTORY_PROVIDER_IDS = frozenset({"alpaca", "fidelity", "portfolio123"})
+
+
 def _provider_policy(
     provider_id: str, policies: Mapping[str, FreshnessPolicy]
 ) -> FreshnessPolicy:
     if provider_id == "matrixport":
         return policies["daily-calendar-24x7"]
-    if provider_id in {"alpaca", "fidelity"}:
+    if provider_id in FINITE_HISTORY_PROVIDER_IDS:
         return policies["finite-history"]
     return policies["daily-weekday-session"]
 
