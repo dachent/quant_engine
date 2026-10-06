@@ -1619,6 +1619,82 @@ def test_disclosure_states_every_date_that_the_bound_explains() -> None:
     assert len(block["bounded_sections"]) == 10
 
 
+def _custody_report() -> dict[str, Any]:
+    """The shadow report plus a custody capital block labelled the way N56 recomputes."""
+
+    report = _shadow_report()
+    bounded, current = "2026-09-03", "2026-09-17"
+    report["custody_current_capital"] = {
+        "systematic": {"as_of_date": bounded, "status": "AVAILABLE"},
+        "strategies": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "scope": "SYSTEMATIC",
+                "as_of_date": bounded,
+                "members": [{"account_id": SHADOW_ACCOUNT, "as_of_date": bounded}],
+                "derived_cash": [{"account_id": "cash-1", "as_of_date": bounded}],
+            },
+            {
+                "strategy_id": "qsi",
+                "scope": "SYSTEMATIC",
+                "as_of_date": current,
+                "members": [{"account_id": "account-38b6", "as_of_date": current}],
+                "derived_cash": [],
+            },
+            {
+                "strategy_id": "echotrade",
+                "scope": "RETAINED_EXCLUDED",
+                "as_of_date": bounded,
+                "members": [],
+                "derived_cash": [],
+            },
+        ],
+    }
+    return report
+
+
+def test_disclosure_states_the_custody_capital_dates_the_bound_explains() -> None:
+    """N56 (fail-before): the native producer emits ``current_capital`` entries.
+
+    The validator recomputes the custody labels and downgrades a pre-cutoff one to
+    NOT_READY only when ``bounded_sections`` carries ``current_capital`` entries for
+    the member, the cash line, the strategy row and the Systematic total; the
+    producer emitted none, so the path was reachable only with a handwritten block.
+    """
+
+    block = _disclosure(_custody_report())
+    assert block is not None
+    entries = [
+        (row["entity"], row["field"], row["date"], row["bounded_by"])
+        for row in block["bounded_sections"]
+        if row["section"] == "current_capital"
+    ]
+    assert entries == [
+        (entity, "as_of_date", "2026-09-03", ["robuxio-crypto"])
+        for entity in (
+            "robuxio-crypto",
+            f"robuxio-crypto:{SHADOW_ACCOUNT}",
+            "robuxio-crypto:cash-1",
+            "systematic",
+        )
+    ]
+
+
+def test_disclosure_adds_no_custody_entry_for_a_date_no_bound_explains() -> None:
+    report = _custody_report()
+    cash = report["custody_current_capital"]["strategies"][0]["derived_cash"][0]
+    cash["as_of_date"] = "2026-08-01"
+    report["custody_current_capital"]["systematic"]["as_of_date"] = "2026-08-01"
+    block = _disclosure(report)
+    assert block is not None
+    entities = [
+        row["entity"]
+        for row in block["bounded_sections"]
+        if row["section"] == "current_capital"
+    ]
+    assert entities == ["robuxio-crypto", f"robuxio-crypto:{SHADOW_ACCOUNT}"]
+
+
 def _lens_entries(block: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         row

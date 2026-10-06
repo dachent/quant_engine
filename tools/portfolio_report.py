@@ -1363,6 +1363,68 @@ def _value_basis_bounds_disclosure(
                 str(row["as_of_date"]),
                 bounded,
             )
+    custody = report.get("custody_current_capital")
+    if isinstance(custody, Mapping):
+        # N56: the dates the report labels on its custody current capital.  The
+        # entity names are the acceptance validator's: ``strategy:account`` for a
+        # NAV member or a derived cash line, ``strategy`` for a strategy row and
+        # ``systematic`` for the total.  A date is disclosed only where a bounded
+        # strategy's value basis really ends there.
+        for strategy_row in _objects(
+            custody.get("strategies", []), "custody_current_capital.strategies"
+        ):
+            strategy_id = strategy_row.get("strategy_id")
+            if (
+                not isinstance(strategy_id, str)
+                or strategy_id not in ends
+                or strategy_row.get("scope", "SYSTEMATIC") != "SYSTEMATIC"
+            ):
+                continue
+            for group in ("members", "derived_cash"):
+                for line in _objects(
+                    strategy_row.get(group, []),
+                    f"custody_current_capital.strategies.{group}",
+                ):
+                    if line.get("as_of_date") == ends[strategy_id]:
+                        add(
+                            "current_capital",
+                            f"{strategy_id}:{line.get('account_id')}",
+                            "as_of_date",
+                            ends[strategy_id],
+                            [strategy_id],
+                        )
+            if strategy_row.get("as_of_date") == ends[strategy_id]:
+                add(
+                    "current_capital",
+                    strategy_id,
+                    "as_of_date",
+                    ends[strategy_id],
+                    [strategy_id],
+                )
+        systematic = custody.get("systematic")
+        total_day = (
+            systematic.get("as_of_date") if isinstance(systematic, Mapping) else None
+        )
+        if isinstance(total_day, str):
+            total_bounded = [
+                strategy_id
+                for strategy_id, end in ends.items()
+                if end == total_day
+                and any(
+                    isinstance(item, Mapping)
+                    and item.get("strategy_id") == strategy_id
+                    and item.get("scope", "SYSTEMATIC") == "SYSTEMATIC"
+                    for item in custody.get("strategies", [])
+                )
+            ]
+            if total_bounded:
+                add(
+                    "current_capital",
+                    "systematic",
+                    "as_of_date",
+                    total_day,
+                    total_bounded,
+                )
     for row in _objects(report.get("strategy_summary", []), "strategy_summary"):
         strategy_id = row.get("strategy_id")
         if (
