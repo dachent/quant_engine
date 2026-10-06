@@ -531,8 +531,8 @@ def derive_panel(report: dict[str, Any]) -> dict[str, Any]:
                 "default_visible": True,
                 "data_through_date": None,
             },
-            "weeks": ["2026-09-07", "2026-09-14"],
-            "series": [{"series_id": "strategy:Alpha"}],
+            "weeks": [],
+            "series": [],
         },
         "hybrid_mode_gate": {
             "eligible_strategies": [

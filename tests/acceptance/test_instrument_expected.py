@@ -3,10 +3,7 @@
 Universe  A reserve account (``custody_current_capital.reserve.components``) is expected
           in current coverage and leverage views once labelled; an account that is not
           labelled and not a current product account is still reported.
-V12       No contract defines a field named ``leverage_ratio``.  The contract
-          (portfolio-financial-mvp-source-v1.json, leverage_accounting) requires gross
-          exposure and financing cost to be disclosed, so the check reads LEVERAGE_EXPOSURE
-          and FINANCING_COST disclosure rows, not a key.
+V12       (moved to test_r2_measures.py: coverage per active account and measure.)
 V7        (moved to test_r2_exclusions.py: owner-excluded performance rows are no finding.)
 Census    A baseline that does not pin the census contract yields the NOT_READY census
           finding saying so precisely; the same baseline with the pin skips the confirmed
@@ -15,7 +12,6 @@ Census    A baseline that does not pin the census contract yields the NOT_READY 
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import Any
 
@@ -125,77 +121,6 @@ def test_a_retired_account_is_still_a_blocker_unless_it_is_a_labelled_reserve(
         Spec(report=[_coverage_row("X1"), _reserve_components(["X1"])]),
     )
     assert _only(_generation_findings(labelled), INACTIVE) == []
-
-
-# ------------------------------------------------------------------------------ V12
-
-
-def _disclosures(*rows: dict[str, Any]):
-    def mutate(report: dict[str, Any]) -> None:
-        report["leverage_disclosures"] = [copy.deepcopy(row) for row in rows]
-
-    return mutate
-
-
-EXPOSURE = {
-    "account_id": "A1",
-    "strategy_id": "alpha",
-    "data_class": "LEVERAGE_EXPOSURE",
-    "measurement_basis": "HOLDINGS_GROSS_MARKET_VALUE",
-    "coverage_status": "AVAILABLE",
-}
-FINANCING = {
-    "account_id": "A1",
-    "strategy_id": "alpha",
-    "data_class": "FINANCING_COST",
-    "measurement_basis": "FINANCING_COST",
-    "coverage_status": "AVAILABLE",
-}
-
-
-def _leverage_findings(findings: list[checks.Finding]) -> list[checks.Finding]:
-    return [f for f in _only(findings, REQUIRED) if f.entity.startswith("leverage")]
-
-
-def test_v12_disclosed_gross_exposure_needs_no_leverage_ratio_field(
-    tmp_path: Path,
-) -> None:
-    assert all("leverage_ratio" not in row for row in (EXPOSURE, FINANCING))
-    gen_dir = build(tmp_path, Spec(report=[_disclosures(EXPOSURE, FINANCING)]))
-    assert _leverage_findings(_generation_findings(gen_dir)) == []
-
-
-def test_v12_the_old_field_name_does_not_stand_in_for_a_disclosure(
-    tmp_path: Path,
-) -> None:
-    with_key = {**FINANCING, "leverage_ratio": "1.0"}
-    gen_dir = build(tmp_path, Spec(report=[_disclosures(with_key)]))
-    findings = _leverage_findings(_generation_findings(gen_dir))
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("leverage_disclosures.gross_exposure", checks.NOT_READY)
-    ]
-
-
-def test_v12_exposure_rows_that_are_all_unavailable_are_not_a_disclosure(
-    tmp_path: Path,
-) -> None:
-    unavailable = {**EXPOSURE, "coverage_status": "UNAVAILABLE"}
-    gen_dir = build(tmp_path, Spec(report=[_disclosures(unavailable, FINANCING)]))
-    findings = _leverage_findings(_generation_findings(gen_dir))
-    assert [f.entity for f in findings] == ["leverage_disclosures.gross_exposure"]
-
-
-def test_v12_financing_cost_that_is_only_observed_stays_not_ready(
-    tmp_path: Path,
-) -> None:
-    """E8: gross exposure is disclosed, the financing cost basis is not reconciled."""
-
-    observed = {**FINANCING, "coverage_status": "OBSERVED_ONLY"}
-    gen_dir = build(tmp_path, Spec(report=[_disclosures(EXPOSURE, observed)]))
-    findings = _leverage_findings(_generation_findings(gen_dir))
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("leverage_disclosures.financing_cost", checks.NOT_READY)
-    ]
 
 
 # ----------------------------------------------------------------------------- census

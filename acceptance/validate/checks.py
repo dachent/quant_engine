@@ -1951,6 +1951,63 @@ def _readiness(ctx: Context) -> dict[str, Any]:
     return values
 
 
+def _release_evidence_problem(ctx: Context) -> tuple[str, str] | None:
+    """Why a committed release pointer's evidence cannot be used, if it cannot.
+
+    ``None`` when there is no release pointer (nothing is committed, nothing to read) or
+    its release manifest is readable and well formed. ``("unreadable", why)`` when the
+    pointer names a release whose ``release.json`` is missing, a placeholder or not a
+    JSON object; ``("malformed", why)`` when its ``targets`` are not a list of objects
+    that each name a ``proposed_generation_id``. Either is broken publication
+    authority, never an inapplicable check.
+    """
+
+    external = ctx.gen.external
+    pointer = external.release_pointer
+    if not isinstance(pointer, dict) or not isinstance(pointer.get("release_id"), str):
+        return None
+    manifest = external.release_manifest
+    if not isinstance(manifest, dict):
+        return (
+            "unreadable",
+            f"release {pointer['release_id']} names a release.json that is missing, "
+            "not hydrated or not a JSON object",
+        )
+    targets = manifest.get("targets")
+    if not isinstance(targets, list):
+        return "malformed", "the release manifest has no list of targets"
+    for position, target in enumerate(targets):
+        if not isinstance(target, dict) or not isinstance(
+            target.get("proposed_generation_id"), str
+        ):
+            return (
+                "malformed",
+                f"release target {position} is not an object naming a "
+                "proposed_generation_id",
+            )
+    return None
+
+
+def _release_evidence_finding(
+    ctx: Context, check_id: str, defect: str
+) -> Finding | None:
+    problem = _release_evidence_problem(ctx)
+    if problem is None:
+        return None
+    kind, why = problem
+    return _finding(
+        check_id,
+        NOT_READY if kind == "unreadable" else BLOCKER_AUTHORITY,
+        "release",
+        kind,
+        "a readable release manifest whose targets each name a generation",
+        "(release manifest)",
+        "$.targets",
+        (defect,),
+        f"committed release evidence cannot be used: {why}",
+    )
+
+
 def _release_target(ctx: Context) -> tuple[dict[str, Any], str] | None:
     """The committed release's target that names this generation, with where it is.
 
@@ -1982,6 +2039,10 @@ def _is_published(ctx: Context) -> tuple[bool, str | None]:
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
     """D8: a published generation cannot declare itself not ready / unverified."""
 
+    evidence = _release_evidence_finding(ctx, "identity.publication_state", "D8")
+    if evidence is not None:
+        yield evidence
+        return
     published, where = _is_published(ctx)
     if not published:
         return
@@ -2078,6 +2139,10 @@ def check_release_pinned(ctx: Context) -> Iterator[Finding]:
             ("F8",),
             "no release pointer found; release pinning cannot be evaluated",
         )
+        return
+    evidence = _release_evidence_finding(ctx, "identity.release_pinned", "F8")
+    if evidence is not None:
+        yield evidence
         return
     found = _release_target(ctx)
     if found is None:
@@ -5708,29 +5773,30 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
 # fixed lag has no observation past its last eligible month, so a lens built only on its
 # sources ends there at any later cutoff. The lag is the policy's, the sources are the
 # governed decomposition plan's: the report's own lens row is never taken at its word.
-_PUBLICATION_LAG_DAYS = {"KENNETH_FRENCH_MONTHLY_DAILY_45D_V1": 45}
-_DECOMPOSITION_PLAN = "docs/analytics/current-strategy-decomposition-plan.json"
+_LAG_POLICY_ID = re.compile(r"_(\d+)D_V\d+$")
 
 
-def _lagged_sources(ctx: Context) -> dict[str, int]:
-    root = (
-        ctx.repo_root
-        if ctx.repo_root is not None
-        else Path(__file__).resolve().parents[2]
-    )
-    try:
-        plan = json.loads((root / _DECOMPOSITION_PLAN).read_bytes())
-    except (OSError, ValueError):
-        return {}
-    sources = plan.get("sources") if isinstance(plan, dict) else None
-    if not isinstance(sources, dict):
-        return {}
-    return {
-        str(key): _PUBLICATION_LAG_DAYS[config["freshness_policy_id"]]
-        for key, config in sources.items()
-        if isinstance(config, dict)
-        and config.get("freshness_policy_id") in _PUBLICATION_LAG_DAYS
-    }
+def _plan_sources_by_lens(
+    ctx: Context,
+) -> dict[str, dict[str, int | None]]:
+    """Per lens, the sources the governed plan assigns it and each one's publication lag.
+
+    The lag is read from the plan's freshness policy id (``..._45D_V1`` states 45 days);
+    a source with no policy or an id that states no lag has ``None`` (not lagged).
+    """
+
+    plan = decomposition_plan(ctx)
+    sources = plan.get("sources") if plan is not None else None
+    found: dict[str, dict[str, int | None]] = {}
+    for key, config in sources.items() if isinstance(sources, Mapping) else []:
+        if not isinstance(config, Mapping) or not isinstance(config.get("lens"), str):
+            continue
+        policy = config.get("freshness_policy_id")
+        matched = _LAG_POLICY_ID.search(policy) if isinstance(policy, str) else None
+        found.setdefault(str(config["lens"]), {})[str(key)] = (
+            int(matched.group(1)) if matched else None
+        )
+    return found
 
 
 def _last_eligible_month_end(cutoff: date, lag_days: int) -> date:
@@ -5743,41 +5809,48 @@ def _last_eligible_month_end(cutoff: date, lag_days: int) -> date:
 def provider_lag_bound(ctx: Context, entity: str, day: date) -> str | None:
     """Why a lens may end before the cutoff because its providers publish late.
 
-    ``entity`` is ``decomposition:{lens_id}:{mode}``. Every source the lens row names
-    must be a lagged source of the governed plan and the lens must end in the last
-    month that is publishable at the cutoff (its final observation can fall up to four
-    days before that month end). ``None`` leaves the finding unchanged.
+    ``entity`` is ``decomposition:{lens_id}:{mode}``. The lens's expected sources are the
+    governed plan's assignments for that lens; the row's own ``sources`` must equal them,
+    every one of them must carry a publication lag, and the lens must end in the last
+    month publishable at the cutoff under the longest lag (its final observation can fall
+    up to four days before that month end). ``None`` leaves the finding unchanged.
     """
 
-    lagged = _lagged_sources(ctx)
     lens_id, _, mode = entity.removeprefix("decomposition:").partition(":")
+    expected = _plan_sources_by_lens(ctx).get(lens_id)
+    if not expected or any(lag is None for lag in expected.values()):
+        return None
     modes = node(ctx.report, "decomposition_lenses", "modes")
     candidates = list(rows(node(ctx.report, "decomposition_lenses"), "lenses"))
     if isinstance(modes, Mapping):
         for mode_name, mode_rows in modes.items():
             if mode in ("", str(mode_name)) and isinstance(mode_rows, list):
                 candidates += [row for row in mode_rows if isinstance(row, dict)]
-    keys: set[str] = set()
-    for row in candidates:
-        if row.get("lens_id") != lens_id or to_date(row.get("as_of_date")) != day:
-            continue
-        keys |= {
+    matching = [
+        row
+        for row in candidates
+        if row.get("lens_id") == lens_id and to_date(row.get("as_of_date")) == day
+    ]
+    if not matching:
+        return None
+    for row in matching:
+        named = {
             str(source.get("source_key"))
             for source in rows(row, "sources")
             if source.get("source_key") is not None
         }
-    if not keys or not keys <= set(lagged):
-        return None
-    lag = max(lagged[key] for key in keys)
+        if named != set(expected):
+            return None
+    lag = max(lag for lag in expected.values() if lag is not None)
     eligible = _last_eligible_month_end(ctx.cutoff, lag)
     if (day.year, day.month) != (eligible.year, eligible.month) or (
         eligible - day
     ).days > 4:
         return None
     return (
-        f"lens ends {day} because its providers ({', '.join(sorted(keys))}) publish "
-        f"monthly with a {lag} day publication lag: the last eligible month at the "
-        f"cutoff is {eligible:%Y-%m} (governed decomposition plan freshness policy)"
+        f"lens ends {day} because its governed sources ({', '.join(sorted(expected))}) "
+        f"publish monthly with a {lag} day publication lag: the last eligible month at "
+        f"the cutoff is {eligible:%Y-%m} (governed decomposition plan freshness policy)"
     )
 
 
@@ -5990,7 +6063,12 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             current.get(name) is not None
             for name in ("week_start", "week_end", "data_through_date")
         )
-        if artifacts or has_source_identity or has_current_week_data:
+        payload_rows = {
+            name: len(weekly[name])
+            for name in ("weeks", "series")
+            if isinstance(weekly.get(name), list) and weekly[name]
+        }
+        if artifacts or has_source_identity or has_current_week_data or payload_rows:
             yield _finding(
                 "dates.weekly_current_week",
                 BLOCKER_AUTHORITY,
@@ -5999,12 +6077,15 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
                     "source_artifact_count": len(artifacts),
                     "current_week_data_present": has_current_week_data,
                     "source_identity_present": has_source_identity,
+                    "payload_rows": payload_rows,
                 },
-                "UNAVAILABLE only when no source artifact or source identity is bound",
+                "UNAVAILABLE only when no source artifact or source identity is bound "
+                "and the weekly payload is empty",
                 PANEL,
                 "$.weekly_returns.status",
                 ("C6",),
-                "configured weekly-source evidence cannot be labelled unavailable",
+                "configured weekly-source evidence or an unbound weekly payload "
+                "cannot be labelled unavailable",
             )
         return
 

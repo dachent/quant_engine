@@ -296,3 +296,19 @@ def test_a_windowed_function_nobody_calls_is_not_a_bound(tmp_path: Path) -> None
         "function renderWeekly() { return weeklyVisibleWeeks(); }", ""
     )
     assert _rendered(tmp_path, GOOD_APP_JS + unused) == [120_000]
+
+
+def test_the_retired_leverage_ratio_key_does_not_stand_in_for_a_disclosure(
+    tmp_path: Path,
+) -> None:
+    def keyed(report: dict[str, Any]) -> None:
+        report["leverage_disclosures"] = [
+            {"account_id": account, "strategy_id": None, "leverage_ratio": "1.0"}
+            for account in ACCOUNTS
+        ]
+
+    found = _leverage(_findings(tmp_path, Spec(report=[keyed])))
+    assert set(found) == {
+        "leverage_disclosures.gross_exposure",
+        "leverage_disclosures.financing_cost",
+    }
