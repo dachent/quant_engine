@@ -296,23 +296,29 @@ _PATH_SEGMENT = r"[A-Za-z_$][\w$]*"
 
 _UNKNOWN_KEY = "<computed or spread>"
 _UNSAFE_KEYS = frozenset({"undefined", "null", "__proto__", _UNKNOWN_KEY})
+_KEY = re.compile(r"""\s*(?:(["'`])( *)\1|([A-Za-z_$][\w$]*))\s*:""")
 
 
-def _object_literal_keys(text: str) -> list[str] | None:
-    """Top-level keys of the object literal that starts at the first ``{`` of ``text``."""
+def _object_literal_keys(js: str, masked: str, start: int) -> list[str] | None:
+    """Top-level keys of the object literal whose ``{`` is at ``start``.
 
-    start = text.find("{")
-    if start < 0:
-        return None
-    key = re.compile(r"""\s*(?:(["'])(.*?)\1|([A-Za-z_$][\w$]*))\s*:""")
+    The structure is read from the masked text (``mask`` blanks comments, string and
+    template contents, so a comma, bracket, colon or semicolon inside a value or a comment
+    is never structure) and the text of a quoted key is read back from the source at the
+    same offsets. A computed key or a spread names keys this scan cannot read: unknown.
+    """
+
     depth = 0
     keys: list[str] = []
     expect_key = False
     index = start
-    while index < len(text):
-        char = text[index]
-        if depth == 1 and expect_key and (char == "[" or text.startswith("...", index)):
-            # A computed key or a spread names keys this scan cannot read: unknown.
+    while index < len(masked):
+        char = masked[index]
+        if (
+            depth == 1
+            and expect_key
+            and (char == "[" or masked.startswith("...", index))
+        ):
             keys.append(_UNKNOWN_KEY)
             expect_key = False
         if char in "{[(":
@@ -325,40 +331,63 @@ def _object_literal_keys(text: str) -> list[str] | None:
         elif depth == 1 and char == ",":
             expect_key = True
         elif depth == 1 and expect_key and not char.isspace():
-            matched = key.match(text, index)
+            matched = _KEY.match(masked, index)
             expect_key = False
             if matched is not None:
-                keys.append(
-                    matched.group(2)
-                    if matched.group(2) is not None
-                    else matched.group(3)
-                )
+                if matched.group(1) is not None:
+                    begin = matched.start(1) + 1
+                    keys.append(js[begin : begin + len(matched.group(2))])
+                else:
+                    keys.append(matched.group(3))
                 index = matched.end()
                 continue
         index += 1
     return None
 
 
-def _lookup_table_is_safe(js: str, table: str) -> bool:
+def _definition_span(masked: str, table: str) -> tuple[int, int] | None:
+    """Where ``const|let|var table = <expression>;`` has its expression (masked offsets)."""
+
+    found = re.search(rf"\b(?:const|let|var)\s+{re.escape(table)}\s*=\s*", masked)
+    if found is None:
+        return None
+    depth = 0
+    index = found.end()
+    while index < len(masked):
+        char = masked[index]
+        if char in "{[(":
+            depth += 1
+        elif char in "}])":
+            depth -= 1
+            if depth < 0:
+                break
+        elif char == ";" and depth == 0:
+            break
+        index += 1
+    return found.end(), index
+
+
+def _lookup_table_is_safe(js: str, masked: str, table: str) -> bool:
     """Whether ``table[undefined]`` is falsy because of how the table is defined.
 
     The table must be defined as ``payload?.path || { ... }`` or as a plain object
     literal whose keys are all plain names: a key ``undefined`` or ``null``, an inherited
     ``__proto__``, a computed key or a spread makes the lookup of a missing payload
     possibly truthy, and a table read straight from the payload (no literal fallback) is
-    not a table at all with no payload.
+    not a table at all with no payload. ACCEPTED RESIDUAL: the definition is found by name
+    (the first ``const|let|var`` of it), not by a scope analysis.
     """
 
-    definition = re.search(
-        rf"\b(?:const|let|var)\s+{re.escape(table)}\s*=\s*([^;]*);", js, re.DOTALL
-    )
-    if definition is None:
+    span = _definition_span(masked, table)
+    if span is None:
         return False
-    body = definition.group(1)
-    keys = _object_literal_keys(body)
+    first = masked.find("{", span[0], span[1])
+    if first < 0:
+        return False
+    keys = _object_literal_keys(js, masked, first)
     if keys is None:
         return False
-    head = body[: body.find("{")].strip()
+    head = masked[span[0] : first].strip()
     if head and not head.endswith("||"):
         return False
     return not _UNSAFE_KEYS & set(keys)
@@ -389,7 +418,7 @@ def _keyed_lookup_guards(
     return (
         condition is not None
         and re.findall(_PATH_SEGMENT, condition.group(2)) == read
-        and _lookup_table_is_safe(js, condition.group(1))
+        and _lookup_table_is_safe(js, masked, condition.group(1))
     )
 
 
