@@ -5927,6 +5927,32 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
 # ------------------------------------------------------------- completeness (E*)
 
 
+def _incomplete_series_count(lens: Mapping[str, Any]) -> int:
+    """The lens's unavailable cells, less the ones that are not an incomplete lens.
+
+    The producer's ``unavailable_count`` stays authoritative; only the cells the series
+    rows identify as ``NOT_APPLICABLE_METHOD_SCOPE`` (outside the owner-accepted strategy
+    to lens routing) or ``DIAGNOSTIC_ONLY`` (the model-quality gate working) are
+    discounted, so a count that exceeds what the rows explain still counts as incomplete.
+    """
+
+    count = int(lens.get("unavailable_count") or 0)
+    series = lens.get("series")
+    if not isinstance(series, list):
+        return count
+    discounted = sum(
+        1
+        for row in series
+        if isinstance(row, Mapping)
+        and not is_available(row.get("status"))
+        and (
+            row.get("status") == "DIAGNOSTIC_ONLY"
+            or row.get("selection_status") == "NOT_APPLICABLE_METHOD_SCOPE"
+        )
+    )
+    return max(0, count - discounted)
+
+
 def check_completeness(ctx: Context) -> Iterator[Finding]:
     """E1-E8: required outputs that are unavailable, as NOT_READY register entries."""
 
@@ -5982,10 +6008,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
         incomplete = {}
         for mode, lenses in sorted(modes.items()):
             for lens in lenses if isinstance(lenses, list) else []:
-                if isinstance(lens, dict) and (lens.get("unavailable_count") or 0) > 0:
-                    incomplete[f"{mode}:{lens.get('lens_id')}"] = lens.get(
-                        "unavailable_count"
-                    )
+                if not isinstance(lens, dict):
+                    continue
+                count = _incomplete_series_count(lens)
+                if count > 0:
+                    incomplete[f"{mode}:{lens.get('lens_id')}"] = count
         if incomplete:
             yield _finding(
                 "completeness.required_outputs",
@@ -6061,7 +6088,7 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                 REPORT,
                 "$.leverage_disclosures",
                 ("E8",),
-                "gross leverage exposure is not disclosed",
+                "no gross leverage exposure row is covered (observed only or unavailable)",
             )
         financing = [
             row for row in disclosures if row.get("data_class") == "FINANCING_COST"
@@ -6573,10 +6600,23 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     weekly = node(ctx.panel, "weekly_returns")
     weeks = node(weekly, "weeks")
     series = node(weekly, "series")
-    cells = (
+    payload_cells = (
         len(weeks) * len(series)
         if isinstance(weeks, list) and isinstance(series, list)
         else 0
+    )
+    # The cells painted are the default window's weeks times the series, not the whole
+    # grid: the renderer pages a bounded window. An unwindowed render (no recognisable
+    # default window, or ``full``) is measured on the whole payload.
+    window = re.search(
+        r"""\bselectedWeeklyWindow\s*=\s*["'](\d+)["']""", ctx.gen.app_js or ""
+    )
+    cells = (
+        min(int(window.group(1)), len(weeks)) * len(series)
+        if window is not None
+        and isinstance(weeks, list)
+        and isinstance(series, list)
+        else payload_cells
     )
     if large or duplicates:
         yield _finding(
@@ -6598,6 +6638,8 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
             {
                 "weeks": len(weeks) if isinstance(weeks, list) else 0,
                 "series": len(series) if isinstance(series, list) else 0,
+                "rendered_cells": cells,
+                "payload_cells": payload_cells,
             },
             "lazy or bounded weekly render",
             PANEL,

@@ -23,7 +23,6 @@ import shutil
 from typing import Any
 
 from test_validate_generation import (
-    CUTOFF,
     GEN,
     Spec,
     _dump,
