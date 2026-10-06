@@ -2566,6 +2566,33 @@ def _stage_attended_attribution(root: Path, baseline: dict[str, str]) -> str:
     return manifest.generation_id
 
 
+def _import_report_before_stubs() -> None:
+    """Load the report producer under the real kernel before any test patches it."""
+
+    import portfolio_report  # noqa: F401
+
+
+def test_preparation_stubs_do_not_leak_into_first_report_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stubbed preparation world must not become portfolio_report's kernel."""
+
+    from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
+
+    real_verify = hwm.verify_governed_hwm_result
+    # Simulate a session in which nothing has imported the report producer yet;
+    # monkeypatch restores the original entries (or removes the fresh ones).
+    for name in ("portfolio_report", "portfolio_attribution"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    _preparation_function_fixture(tmp_path, monkeypatch)
+    assert hwm.verify_governed_hwm_result is not real_verify
+
+    import portfolio_report
+
+    assert portfolio_report.verify_governed_hwm_result is real_verify
+
+
 def _preparation_function_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2593,6 +2620,12 @@ def _preparation_function_fixture(
     import stage_current_epoch_manifest as epoch_stage
     from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
     import rebind_current_epoch_crosswalk as rebind
+
+    # The retained-attribution preflight lazily imports portfolio_attribution, which
+    # imports portfolio_report, and portfolio_report binds verify_governed_hwm_result
+    # by name at import.  Importing it first time under the stubs below would cache
+    # the stub in sys.modules for every later test in the session.
+    _import_report_before_stubs()
 
     source_selection = tmp_path / "selection.json"
     source_selection.write_text('{"files":{}}', encoding="utf-8")
