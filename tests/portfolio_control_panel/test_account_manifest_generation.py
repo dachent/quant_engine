@@ -4144,6 +4144,64 @@ def test_c4c1_xirr_aggregation_order_and_no_unique_sign_change(
     )
 
 
+def test_independent_mwr_classification_proves_uniqueness_by_partial_sums(
+    verifier_module: Any,
+) -> None:
+    """N57: the producer and its independent verifier accept and reject alike.
+
+    The p123-eu shape has many raw sign changes but a running total that is
+    negative until the terminal value, so its root is unique.
+    """
+
+    def flows(
+        rows: list[tuple[str, str]],
+    ) -> list[tuple[date, Decimal]]:
+        return [(date.fromisoformat(day), Decimal(amount)) for day, amount in rows]
+
+    shape = flows(
+        [
+            ("2025-11-20", "-4700"),
+            ("2025-12-10", "-3000"),
+            ("2026-01-05", "-6000"),
+            ("2026-01-28", "1500"),
+            ("2026-02-20", "-5000"),
+            ("2026-03-15", "-7000"),
+            ("2026-04-02", "2000"),
+            ("2026-04-25", "-4500"),
+            ("2026-05-20", "-3000"),
+            ("2026-06-18", "800"),
+            ("2026-07-10", "-6000"),
+            ("2026-09-17", "45000"),
+        ]
+    )
+    status, reason, rate = verifier_module._classify_independent_mwr(shape)
+    assert (status, reason) == ("AVAILABLE", None)
+    assert rate is not None and rate > 0
+    assert verifier_module._xirr(shape) == rate
+
+    for rows, expected in (
+        (
+            [("2025-01-01", "-100"), ("2026-01-01", "230"), ("2027-01-01", "-132")],
+            "UNIQUENESS_NOT_PROVED",
+        ),
+        (
+            [
+                ("2025-01-01", "-100"),
+                ("2026-01-01", "350"),
+                ("2027-01-01", "-350"),
+                ("2028-01-01", "100"),
+            ],
+            "UNIQUENESS_NOT_PROVED",
+        ),
+        (
+            [("2025-01-01", "-100"), ("2026-01-01", "50"), ("2027-01-01", "-60")],
+            "NO_ROOT",
+        ),
+    ):
+        assert verifier_module._classify_independent_mwr(flows(rows))[0] == expected
+        assert verifier_module._xirr(flows(rows)) is None
+
+
 def test_c4c1_xirr_restores_global_decimal_context(verifier_module: Any) -> None:
     before = getcontext().copy()
     getcontext().prec = 17

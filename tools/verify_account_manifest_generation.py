@@ -968,6 +968,38 @@ def _parse_numeric_output(value: object) -> Decimal:
     return parsed
 
 
+def _independent_sign_changes(values: list[Decimal]) -> int:
+    changes = 0
+    previous = 0
+    for value in values:
+        sign = (value > 0) - (value < 0)
+        if sign and previous and sign != previous:
+            changes += 1
+        previous = sign or previous
+    return changes
+
+
+def _independent_root_bound(amounts: list[Decimal]) -> int:
+    """Bound the IRRs in (-1, inf): forward partial-sum sign changes bound the
+    roots with r > 0, reversed ones the roots with -1 < r < 0, and r = 0 is a
+    root exactly when the total is zero."""
+
+    def partial_sums(values: list[Decimal]) -> list[Decimal]:
+        running = Decimal(0)
+        sums: list[Decimal] = []
+        for value in values:
+            running += value
+            sums.append(running)
+        return sums
+
+    with localcontext(Context(prec=100, rounding=ROUND_HALF_EVEN)):
+        return (
+            _independent_sign_changes(partial_sums(amounts))
+            + _independent_sign_changes(partial_sums(amounts[::-1]))
+            + (1 if sum(amounts, Decimal(0)) == 0 else 0)
+        )
+
+
 def _xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
     """Compute a unique-root XIRR using an isolated Decimal context."""
 
@@ -986,9 +1018,11 @@ def _xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
             for cashflow_date, amount in sorted(by_date.items())
             if amount
         ]
-        signs = [amount > 0 for _, amount in ordered]
-        sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
-        if len(ordered) < 2 or sign_changes != 1:
+        if (
+            len(ordered) < 2
+            or _independent_root_bound([amount for _, amount in ordered]) != 1
+            or (ordered[0][1] > 0) == (ordered[-1][1] > 0)
+        ):
             return None
         start_date = ordered[0][0]
 
@@ -2262,7 +2296,10 @@ def _classify_independent_mwr(
         changes = sum(left != right for left, right in zip(signs, signs[1:]))
         if changes == 0:
             return "NO_ROOT", "NO_CHRONOLOGICAL_SIGN_CHANGE", None
-        if changes > 1:
+        bound = _independent_root_bound([amount for _, amount in ordered])
+        if bound == 0 or (bound == 1 and signs[0] == signs[-1]):
+            return "NO_ROOT", "NO_PARTIAL_SUM_SIGN_CHANGE", None
+        if bound > 1:
             return "UNIQUENESS_NOT_PROVED", "MULTIPLE_CHRONOLOGICAL_SIGN_CHANGES", None
         rate = _xirr(ordered)
         if rate is None:
