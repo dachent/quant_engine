@@ -1,7 +1,6 @@
 """Batch V16: coverage gaps, new checks for dates the validator never compared.
 
-C2   a labelled benchmark comparison whose ``observed_end`` is before the cutoff.
-C4   ``implementation_*_contract.as_of_date`` before the cutoff.
+C2/C4 (labelled windows and contracts: see test_r2_dates.py.)
 N56  ``custody_current_capital`` as_of (the systematic total and the systematic strategies).
 N54  (the evaluation clock: see test_r2_clock.py.)
 C5   the account live window (``account_live_observed_end``) restored after V2 dropped the
@@ -15,10 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from test_validate_generation import CUTOFF, Spec, _set, build, run
+from test_validate_generation import CUTOFF, Spec, build, run
 
 from acceptance.validate import checks
-from acceptance.validate.generation import load_generation
 
 STALE = "2026-07-17"
 SECTION = "dates.section_as_of_vs_cutoff"
@@ -31,37 +29,6 @@ def _only(findings: list[checks.Finding], check_id: str) -> list[checks.Finding]
 
 def _generation_findings(tmp_path: Path, spec: Spec, check_id: str):
     return _only(run(build(tmp_path, spec)), check_id)
-
-
-# ------------------------------------------------------------------------- C2, C4
-
-
-def test_c2_a_benchmark_window_that_ends_before_the_cutoff_blocks(
-    tmp_path: Path,
-) -> None:
-    path = ("strategy_attribution", "benchmark_comparisons", 0, "observed_end")
-    findings = _generation_findings(tmp_path, Spec(report=[_set(path, STALE)]), SECTION)
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("benchmark:alpha", checks.BLOCKER_AUTHORITY)
-    ]
-    assert findings[0].defect_ids == ("C2",)
-
-
-def test_c2_benchmark_windows_that_reach_the_cutoff_are_silent(tmp_path: Path) -> None:
-    assert _generation_findings(tmp_path, Spec(), SECTION) == []
-
-
-def test_c4_an_implementation_contract_dated_before_the_cutoff_blocks(
-    tmp_path: Path,
-) -> None:
-    path = ("implementation_reconciliation_contract", "as_of_date")
-    findings = _generation_findings(
-        tmp_path, Spec(report=[_set(path, "2026-08-03")]), SECTION
-    )
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("implementation_reconciliation_contract", checks.BLOCKER_AUTHORITY)
-    ]
-    assert findings[0].defect_ids == ("C4",)
 
 
 # ----------------------------------------------------------------------------- N56
@@ -162,19 +129,3 @@ def test_c5_retained_or_unavailable_live_windows_are_exempt(tmp_path: Path) -> N
 
 def test_c5_a_live_window_at_the_cutoff_is_silent(tmp_path: Path) -> None:
     assert _generation_findings(tmp_path, Spec(), SECTION) == []
-
-
-def test_c2_a_retained_reference_account_history_is_not_a_stale_window(
-    tmp_path: Path,
-) -> None:
-    base = ("strategy_attribution", "benchmark_comparisons", 0)
-    spec = Spec(
-        report=[
-            _set((*base, "observed_end"), "2025-11-24"),
-            _set(
-                (*base, "account_series_source"),
-                "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY",
-            ),
-        ]
-    )
-    assert _generation_findings(tmp_path, spec, SECTION) == []

@@ -5529,7 +5529,7 @@ def _c2_c4_date_findings(found):
     ]
 
 
-def _c2_c4_contract(key, as_of_date=CUTOFF):
+def _c2_c4_contract(key, as_of_date="2026-08-03"):
     identity_key = (
         "reconciliation_id"
         if key == "implementation_reconciliation_contract"
@@ -5557,10 +5557,6 @@ def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_pa
                 "version_compatibility_status": "PROVEN_COMPATIBLE",
                 "observed_start": "2025-10-01",
                 "observed_end": "2025-11-24",
-                # V16: a retained strategy's reference-only account history ends where
-                # the retained history ends; every other labelled window and the
-                # contracts must reach the cutoff.
-                "account_series_source": "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY",
             }
         )
         report["strategy_attribution"]["benchmark_assignments"] = []
@@ -5568,11 +5564,17 @@ def test_c2_c4_descriptive_historical_roles_allow_echo_without_assignment(tmp_pa
             "implementation_reconciliation_contract"
         )
         report["implementation_return_attribution_contract"] = _c2_c4_contract(
-            "implementation_return_attribution_contract", CUTOFF
+            "implementation_return_attribution_contract", "2026-08-09"
         )
 
-    found = run(build(tmp_path, Spec(report=[mutate])))
-    assert not _c2_c4_date_findings(found)
+    found = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    # R4: valid labelled roles that end before the cutoff keep their true end date and
+    # are NOT_READY (never a blocker, never silent); the historical dates are restored.
+    assert {(f.entity, f.klass, f.observed["as_of"]) for f in found} == {
+        ("benchmark:echotrade-growth-pivots", "NOT_READY", "2025-11-24"),
+        ("implementation_reconciliation_contract", "NOT_READY", "2026-08-03"),
+        ("implementation_return_attribution_contract", "NOT_READY", "2026-08-09"),
+    }
 
 
 def test_c2_c4_descriptive_absent_optional_contracts_remain_absent(tmp_path):
@@ -5608,8 +5610,13 @@ def test_c2_c4_descriptive_unavailable_null_comparisons_remain_valid(tmp_path):
             "implementation_return_attribution_contract"
         )
 
-    found = run(build(tmp_path, Spec(report=[mutate])))
-    assert not _c2_c4_date_findings(found)
+    found = _c2_c4_date_findings(run(build(tmp_path, Spec(report=[mutate]))))
+    # The unavailable null comparisons are valid and silent; only the historical
+    # contracts (dated before the cutoff) report their true date, as NOT_READY (R4).
+    assert {(f.entity, f.klass) for f in found} == {
+        ("implementation_reconciliation_contract", "NOT_READY"),
+        ("implementation_return_attribution_contract", "NOT_READY"),
+    }
 
 
 def test_c2_c4_descriptive_unavailable_missing_null_field_blocks(tmp_path):

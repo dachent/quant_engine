@@ -35,7 +35,27 @@ def _findings(tmp_path: Path, mutator: Any) -> list[checks.Finding]:
 
 
 def test_v9_a_retained_reference_series_needs_no_live_series(tmp_path: Path) -> None:
-    assert _findings(tmp_path, _comparison("alpha-old", RETAINED)) == []
+    """``gamma`` is retained in the crosswalk fixture (an excluded product epoch)."""
+
+    assert _findings(tmp_path, _comparison("gamma", RETAINED)) == []
+
+
+def test_v9_a_label_the_crosswalk_does_not_confirm_grants_nothing(
+    tmp_path: Path,
+) -> None:
+    """An unknown strategy and an active one cannot label themselves retained."""
+
+    unknown = _findings(tmp_path / "unknown", _comparison("alpha-old", RETAINED))
+    assert [(f.entity, f.klass) for f in unknown] == [("alpha-old", checks.NOT_READY)]
+
+    def no_live_rows(report: dict[str, Any]) -> None:
+        _comparison("alpha", RETAINED, shown="0.5")(report)
+        report["strategy_attribution"]["benchmark_comparisons"][-1]["metrics"].update(
+            {"observed_start": "2020-01-02", "observed_end": "2020-02-03"}
+        )
+
+    active = _findings(tmp_path / "active", no_live_rows)
+    assert [(f.entity, f.klass) for f in active] == [("alpha", checks.NOT_READY)]
 
 
 def test_v9_the_same_comparison_without_the_label_is_still_not_ready(

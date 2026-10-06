@@ -4021,6 +4021,22 @@ def check_epoch_hpr_receipts(ctx: Context) -> Iterator[Finding]:
 RETAINED_ACCOUNT_SOURCE = "RETAINED_REFERENCE_ONLY_ACCOUNT_HISTORY"
 
 
+def strategy_confirmed_retained(ctx: Context, strategy_id: str) -> bool:
+    """Whether the authoritative crosswalk shows this strategy as not active.
+
+    A comparison's own ``account_series_source`` label never establishes that: the
+    strategy has to be absent from the active universe and present among the
+    crosswalk's excluded strategies (retained or ended product epochs).
+    """
+
+    reference = universe(ctx)
+    return (
+        reference is not None
+        and strategy_id in reference.excluded_strategies
+        and strategy_id not in reference.active_strategies
+    )
+
+
 def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
     """B3: the account return inside a benchmark comparison equals the live series."""
 
@@ -4045,9 +4061,14 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
         pointer = f"$.strategy_attribution.benchmark_comparisons[{position}].metrics"
         if shown is None:
             continue
-        if count == 0 and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE:
+        if (
+            count == 0
+            and row.get("account_series_source") == RETAINED_ACCOUNT_SOURCE
+            and strategy_confirmed_retained(ctx, strategy)
+        ):
             # A retained strategy's comparison discloses a reference-only account
-            # series (ruling S1 of N8): it has no live series by design.
+            # series (ruling S1 of N8): it has no live series by design. The label
+            # alone grants nothing: the crosswalk has to show the strategy as retained.
             continue
         if count == 0:
             yield _finding(
@@ -5733,31 +5754,32 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
         if day is None or day == cutoff:
             continue
         after = day > cutoff
-        if (
-            role is not None
-            and not after
-            and role[0] == "c2_descriptive"
-            and isinstance(role[1], Mapping)
-            and role[1].get("account_series_source") == RETAINED_ACCOUNT_SOURCE
-        ):
-            # A retained strategy's reference-only account history ends where the
-            # retained history ends, by design (ruling S1 of N8).
-            continue
         if role is not None and not after:
-            # A labelled descriptive window or historical contract is not exempt from
-            # the cutoff: nothing here (no provider lag, no source clock) explains an
-            # end before it, so the stale date is reported (V16, C2 and C4).
+            if (
+                role[0] == "c2_descriptive"
+                and isinstance(role[1], Mapping)
+                and role[1].get("account_series_source") == RETAINED_ACCOUNT_SOURCE
+                and strategy_confirmed_retained(ctx, str(role[1].get("strategy_id")))
+            ):
+                # A retained strategy's reference-only account history ends where the
+                # retained history ends, by design (ruling S1 of N8); the crosswalk
+                # lifecycle confirms the strategy is retained.
+                continue
+            # A role that passed the validation above and ends before the cutoff keeps
+            # its true end date and is NOT_READY (descriptive benchmark windows, the
+            # recipe-pinned historical contracts); an invalid role, a missing label or
+            # a date after the cutoff never reaches this branch as NOT_READY.
             yield _finding(
                 "dates.section_as_of_vs_cutoff",
-                BLOCKER_AUTHORITY,
+                NOT_READY,
                 entity,
                 {"as_of": value, "status": status},
                 cutoff,
                 file,
                 path,
                 defects,
-                "labelled section ends before the declared cutoff and no source "
-                "clock explains it",
+                "labelled section ends before the declared cutoff (its true end date "
+                "is published, not presented as current)",
             )
             continue
         bound = (
@@ -8024,28 +8046,57 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
     ``live_boundary_observed_end`` is a pinned identity window and is not compared (V2);
     this is the window the account live return is computed over. A strategy that is not
     active (retained or excluded) or whose live status is not available makes no claim.
+    An active, available strategy must publish a canonical end: a missing, null or
+    malformed one is a blocker. An end before the cutoff is a blocker unless the report's
+    ``value_basis_bounds`` explains it (FXB-1) and the oracle confirms that bound
+    (``verified_value_basis_bound``), when it is NOT_READY with the bound message.
     """
 
     for position, row in enumerate(rows(ctx.report, "strategy_summary")):
-        end = to_date(row.get("account_live_observed_end"))
-        if end is None or end == ctx.cutoff:
-            continue
         lifecycle = row.get("lifecycle_status")
         if isinstance(lifecycle, str) and lifecycle.upper() != "ACTIVE":
             continue
         status = row.get("account_live_status")
         if status is not None and not is_available(status):
             continue
+        strategy = str(row.get("strategy_id"))
+        raw = row.get("account_live_observed_end")
+        entity = f"account_live:{strategy}"
+        pointer = f"$.strategy_summary[{position}].account_live_observed_end"
+        end = _canonical_iso_day(raw)
+        if end is None:
+            yield _finding(
+                "dates.section_as_of_vs_cutoff",
+                BLOCKER_AUTHORITY,
+                entity,
+                {"as_of": raw, "status": status},
+                ctx.cutoff,
+                REPORT,
+                pointer,
+                ("C5",),
+                "an active strategy with an available live status does not publish a "
+                "canonical account live window end",
+            )
+            continue
+        if end == ctx.cutoff:
+            continue
+        bound = (
+            verified_value_basis_bound(ctx, "strategy_summary", strategy, end)
+            if end < ctx.cutoff
+            else None
+        )
         yield _finding(
             "dates.section_as_of_vs_cutoff",
-            BLOCKER_AUTHORITY,
-            f"account_live:{row.get('strategy_id')}",
-            {"as_of": row.get("account_live_observed_end"), "status": status},
+            NOT_READY if bound is not None else BLOCKER_AUTHORITY,
+            entity,
+            {"as_of": raw, "status": status},
             ctx.cutoff,
             REPORT,
-            f"$.strategy_summary[{position}].account_live_observed_end",
+            pointer,
             ("C5",),
-            "section is dated after the declared cutoff"
+            _bound_message(bound, "account live window")
+            if bound is not None
+            else "section is dated after the declared cutoff"
             if end > ctx.cutoff
             else "account live window is presented as current but ends before the cutoff",
         )
