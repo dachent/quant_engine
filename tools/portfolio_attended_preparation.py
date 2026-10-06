@@ -880,6 +880,27 @@ def _validated_inputs(
             raise AttendedPreparationError(
                 "retained attribution differs from expected staged baseline"
             ) from exc
+    if (
+        isinstance(retained_generations, Mapping)
+        and isinstance(retained_generations.get("baseline"), Mapping)
+        and isinstance(retained_generations.get("attribution"), Mapping)
+    ):
+        import check_retained_authority_pins as authority_pins
+
+        try:
+            authority_pins.check_ledger_pin_matrix(
+                Path(str(config["provider_ledger_generation_root"])).resolve(),
+                retained={
+                    "baseline": Path(
+                        str(retained_generations["baseline"].get("root"))
+                    ).resolve(),
+                    "attribution": Path(
+                        str(retained_generations["attribution"].get("root"))
+                    ).resolve(),
+                },
+            )
+        except authority_pins.LedgerPinMismatch as exc:
+            raise AttendedPreparationError(str(exc)) from exc
     _validate_product_contract_currency(config)
     _validate_hwm_authority_inputs(config)
     # Capital consumes this replay specification transitively. Verify the exact

@@ -5964,6 +5964,36 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _attended_pin_matrix(
+    run_ledger_root: Path,
+    *,
+    allocation_root: Path | None = None,
+    dependence_ledger_root: Path | None = None,
+    baseline_root: Path | None = None,
+    attribution_root: Path | None = None,
+) -> list[dict[str, str]]:
+    """Refuse a retained identity that binds a different provider ledger than the run."""
+
+    import check_retained_authority_pins as authority_pins
+
+    retained = {
+        role: path
+        for role, path in (
+            ("allocation", allocation_root),
+            ("baseline", baseline_root),
+            ("attribution", attribution_root),
+            ("dependence", dependence_ledger_root),
+        )
+        if path is not None
+    }
+    try:
+        return authority_pins.check_ledger_pin_matrix(
+            run_ledger_root, retained=retained
+        )
+    except authority_pins.LedgerPinMismatch as exc:
+        raise MaterializationError(str(exc)) from exc
+
+
 def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
     """Bind schema-1 initial selection before a release-builder child may run."""
 
@@ -6115,11 +6145,26 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
     provider_definition = recipe.get("provider_ledger_generation")
     if not isinstance(provider_definition, dict):
         raise MaterializationError("attended provider generation is absent")
+    run_ledger_root = _absolute(
+        provider_definition.get("path"), "attended provider generation"
+    )
+    # Cheap identity joins first: a retained input pinned to another ledger refuses here
+    # in seconds, not after the provider admission replay or a stage.
+    _attended_pin_matrix(
+        run_ledger_root,
+        allocation_root=allocation_root,
+        dependence_ledger_root=(
+            _absolute(
+                selected["provider_ledger_generation_root"],
+                "attended selected dependence ledger root",
+            )
+            if "provider_ledger_generation_root" in selected
+            else None
+        ),
+    )
     source_phase = validate_source_phase(
         requested_as_of=requested_as_of,
-        provider_ledger_generation_root=_absolute(
-            provider_definition.get("path"), "attended provider generation"
-        ),
+        provider_ledger_generation_root=run_ledger_root,
         financial_input_contract_path=financial_input_contract,
     )
     try:
