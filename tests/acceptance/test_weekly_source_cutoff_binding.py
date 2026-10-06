@@ -98,7 +98,9 @@ def test_weekly_source_hash_must_match_manifest_snapshot_hash(tmp_path: Path) ->
     assert any(finding.klass == checks.BLOCKER_AUTHORITY for finding in findings)
 
 
-def test_weekly_available_requires_manifest_bound_source_artifact(tmp_path: Path) -> None:
+def test_weekly_available_requires_manifest_bound_source_artifact(
+    tmp_path: Path,
+) -> None:
     weekly = {
         "status": "AVAILABLE",
         "as_of_date": "2026-09-20",
@@ -119,7 +121,9 @@ def test_weekly_available_requires_manifest_bound_source_artifact(tmp_path: Path
     assert any(finding.klass == checks.BLOCKER_AUTHORITY for finding in findings)
 
 
-def test_unavailable_weekly_source_cannot_hide_a_bound_source_artifact(tmp_path: Path) -> None:
+def test_unavailable_weekly_source_cannot_hide_a_bound_source_artifact(
+    tmp_path: Path,
+) -> None:
     weekly = {
         "status": "UNAVAILABLE_NOT_CONFIGURED",
         "as_of_date": "2026-09-20",

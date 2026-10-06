@@ -9,7 +9,9 @@ from types import SimpleNamespace
 from acceptance.validate import checks
 
 
-def test_weekly_current_week_requires_source_through_date_to_equal_cutoff(tmp_path: Path) -> None:
+def test_weekly_current_week_requires_source_through_date_to_equal_cutoff(
+    tmp_path: Path,
+) -> None:
     source = {"as_of_date": "2026-09-17"}
     raw = json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
     artifact_id = "input/portfolio-weekly-returns.json"

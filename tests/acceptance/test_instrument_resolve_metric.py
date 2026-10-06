@@ -27,7 +27,11 @@ def _custody(report: dict[str, Any]) -> None:
                     {
                         "account_id": "RETAINED1",
                         "as_of_date": "2026-07-17",
-                        "value": {"currency": "USD", "status": "AVAILABLE", "value": "0.19"},
+                        "value": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "0.19",
+                        },
                     }
                 ],
                 "derived_cash": [
@@ -62,12 +66,16 @@ def _expected_findings(tmp_path: Path, rows: list[dict]) -> list[checks.Finding]
 
 
 def test_v6_strategy_weight_resolves_from_the_published_views(tmp_path: Path) -> None:
-    row = _row("weight.strategy.cutoff", "alpha", W_ALPHA, "ratio", tolerance="0.00000001")
+    row = _row(
+        "weight.strategy.cutoff", "alpha", W_ALPHA, "ratio", tolerance="0.00000001"
+    )
     assert _expected_findings(tmp_path, [row]) == []
 
 
 def test_v6_a_wrong_strategy_weight_is_still_a_regression(tmp_path: Path) -> None:
-    row = _row("weight.strategy.cutoff", "alpha", "0.5", "ratio", tolerance="0.00000001")
+    row = _row(
+        "weight.strategy.cutoff", "alpha", "0.5", "ratio", tolerance="0.00000001"
+    )
     findings = _expected_findings(tmp_path, [row])
     assert [(f.check_id, f.klass) for f in findings] == [
         ("expected.weight.strategy.cutoff", checks.BLOCKER_REGRESSION),
@@ -81,7 +89,9 @@ def test_v6_strategy_cash_resolves_from_the_derived_cash_lines(tmp_path: Path) -
 
 
 def test_v6_a_wrong_strategy_cash_is_still_a_regression(tmp_path: Path) -> None:
-    row = _row("capital.strategy_cash.cutoff", "beta", "100.00", "USD", tolerance="0.01")
+    row = _row(
+        "capital.strategy_cash.cutoff", "beta", "100.00", "USD", tolerance="0.01"
+    )
     findings = _expected_findings(tmp_path, [row])
     assert [(f.check_id, f.klass) for f in findings] == [
         ("expected.capital.strategy_cash.cutoff", checks.BLOCKER_REGRESSION)
@@ -89,20 +99,26 @@ def test_v6_a_wrong_strategy_cash_is_still_a_regression(tmp_path: Path) -> None:
 
 
 def test_v6_a_strategy_without_a_cash_line_stays_not_ready(tmp_path: Path) -> None:
-    row = _row("capital.strategy_cash.cutoff", "alpha", "10.00", "USD", tolerance="0.01")
+    row = _row(
+        "capital.strategy_cash.cutoff", "alpha", "10.00", "USD", tolerance="0.01"
+    )
     findings = _expected_findings(tmp_path, [row])
     assert [(f.check_id, f.klass) for f in findings] == [
         ("expected.capital.strategy_cash.cutoff", checks.NOT_READY)
     ]
 
 
-def test_v6_a_retained_account_resolves_from_the_custody_members(tmp_path: Path) -> None:
+def test_v6_a_retained_account_resolves_from_the_custody_members(
+    tmp_path: Path,
+) -> None:
     row = _row("capital.account.cutoff", "RETAINED1", "0.19", "USD", tolerance="0.01")
     row["as_of"] = "2026-07-17"
     assert _expected_findings(tmp_path, [row]) == []
 
 
-def test_v6_a_wrong_retained_account_value_is_still_a_regression(tmp_path: Path) -> None:
+def test_v6_a_wrong_retained_account_value_is_still_a_regression(
+    tmp_path: Path,
+) -> None:
     row = _row("capital.account.cutoff", "RETAINED1", "5.00", "USD", tolerance="0.01")
     row["as_of"] = "2026-07-17"
     findings = _expected_findings(tmp_path, [row])

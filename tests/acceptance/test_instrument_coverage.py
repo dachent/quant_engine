@@ -42,9 +42,7 @@ def test_c2_a_benchmark_window_that_ends_before_the_cutoff_blocks(
     tmp_path: Path,
 ) -> None:
     path = ("strategy_attribution", "benchmark_comparisons", 0, "observed_end")
-    findings = _generation_findings(
-        tmp_path, Spec(report=[_set(path, STALE)]), SECTION
-    )
+    findings = _generation_findings(tmp_path, Spec(report=[_set(path, STALE)]), SECTION)
     assert [(f.entity, f.klass) for f in findings] == [
         ("benchmark:alpha", checks.BLOCKER_AUTHORITY)
     ]

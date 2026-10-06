@@ -46,7 +46,9 @@ def _map_rows(ledger: dict[str, Any], account: str, status: str | None) -> None:
 
 def _derive_a(tmp_path: Path, status: str | None, only: str = "acct-ib"):
     _synthetic_root(tmp_path)
-    ledger = json.loads(tmp_path.joinpath(*LAYOUT[derive.LEDGER].split("/")).read_bytes())
+    ledger = json.loads(
+        tmp_path.joinpath(*LAYOUT[derive.LEDGER].split("/")).read_bytes()
+    )
     for row in ledger["nav_observations"]:
         row["mapping_status"] = "MAPPED"
     if status != "MAPPED":

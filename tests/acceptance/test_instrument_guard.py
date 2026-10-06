@@ -57,6 +57,8 @@ def test_v8_a_plain_eager_dereference_is_still_eager() -> None:
 
 
 def test_v8_the_keyed_branch_does_not_excuse_a_later_eager_dereference() -> None:
-    js = SHELL.replace("function init()", "const n = data.rows.length;\nfunction init()")
+    js = SHELL.replace(
+        "function init()", "const n = data.rows.length;\nfunction init()"
+    )
     findings = payload_dereferences_before_guard(js, GLOBALS)
     assert [f.line for f in findings] == [8]

@@ -6068,6 +6068,8 @@ def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
             ("C6",),
             "the current week must match the verified source cutoff and visibility (#417)",
         )
+
+
 # ------------------------------------------------------------- completeness (E*)
 
 
@@ -6757,9 +6759,7 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     )
     cells = (
         min(int(window.group(1)), len(weeks)) * len(series)
-        if window is not None
-        and isinstance(weeks, list)
-        and isinstance(series, list)
+        if window is not None and isinstance(weeks, list) and isinstance(series, list)
         else payload_cells
     )
     if large or duplicates:
@@ -7996,6 +7996,7 @@ def check_corrections(ctx: Context) -> Iterator[Finding]:
 
 Check = Callable[[Context], Iterable[Finding]]
 
+
 def check_account_live_window(ctx: Context) -> Iterator[Finding]:
     """C5: an active strategy's account live window reaches the cutoff.
 
@@ -8042,7 +8043,11 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     systematic = node(custody, "systematic")
     if isinstance(systematic, Mapping):
         candidates.append(
-            ("current_capital:systematic", "$.custody_current_capital.systematic", systematic)
+            (
+                "current_capital:systematic",
+                "$.custody_current_capital.systematic",
+                systematic,
+            )
         )
     for position, row in enumerate(rows(custody, "strategies")):
         if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":

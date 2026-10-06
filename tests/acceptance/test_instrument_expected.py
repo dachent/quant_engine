@@ -110,9 +110,7 @@ def test_an_unlabelled_account_in_the_coverage_view_is_still_reported(
         Spec(report=[_coverage_row("R9"), _reserve_components(["R1"])]),
     )
     findings = _only(_generation_findings(gen_dir), INACTIVE)
-    assert [(f.klass, f.observed) for f in findings] == [
-        (checks.WARNING, {"R9": 1})
-    ]
+    assert [(f.klass, f.observed) for f in findings] == [(checks.WARNING, {"R9": 1})]
 
 
 def test_a_retired_account_is_still_a_blocker_unless_it_is_a_labelled_reserve(

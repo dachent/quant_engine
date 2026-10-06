@@ -48,7 +48,9 @@ def _findings(tmp_path: Path, as_of: str, keys: list[str], plan: bool = True):
     gen_dir = build(tmp_path, Spec(report=[_lens_end(as_of, keys)]))
     root = _policy_fixture(gen_dir.parent / "test-authority")
     if plan:
-        target = root / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
+        target = (
+            root / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(json.dumps(PLAN).encode())
     return [f for f in run(gen_dir, repo_root=root) if f.check_id == SECTION]

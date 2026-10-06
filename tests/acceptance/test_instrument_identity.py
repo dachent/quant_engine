@@ -61,9 +61,7 @@ def _drop_stage_pointer(gen_dir: Path) -> None:
 
 def _edit_release_target(**changes: Any):
     def edit(gen_dir: Path) -> None:
-        path = (
-            _release_dir(gen_dir) / "releases" / "rel-7q-pinned" / "release.json"
-        )
+        path = _release_dir(gen_dir) / "releases" / "rel-7q-pinned" / "release.json"
         document = json.loads(path.read_bytes())
         document["targets"][0].update(changes)
         document["targets"][0] = {
@@ -196,7 +194,9 @@ def test_v4_a_target_manifest_digest_that_differs_blocks(tmp_path: Path) -> None
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
     assert findings[0].expected == {
         "proposed_generation_id": GEN,
-        "proposed_manifest_sha256": hashlib.sha256((gen_dir / "generation.json").read_bytes()).hexdigest(),
+        "proposed_manifest_sha256": hashlib.sha256(
+            (gen_dir / "generation.json").read_bytes()
+        ).hexdigest(),
     }
 
 

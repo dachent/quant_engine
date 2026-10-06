@@ -84,9 +84,9 @@ def test_v5_a_strategy_capital_that_is_neither_still_blocks(tmp_path: Path) -> N
     assert [(f.check_id, f.entity) for f in findings] == [
         ("capital.strategy_vs_cutoff_accounts", "beta")
     ]
-    assert Decimal(str(findings[0].expected["sum_of_account_values_at_cutoff"])) == Decimal(
-        BETA_WITH_CASH
-    )
+    assert Decimal(
+        str(findings[0].expected["sum_of_account_values_at_cutoff"])
+    ) == Decimal(BETA_WITH_CASH)
 
 
 def test_v5_a_reconciliation_total_that_ties_to_nothing_still_blocks(

@@ -314,7 +314,9 @@ def _keyed_lookup_guards(masked: str, position: int, escaped_name: str) -> bool:
         rf"({_PATH_SEGMENT}(?:\s*\??\.\s*{_PATH_SEGMENT})*)\s*\]\s*\?\s*$",
         masked[:position],
     )
-    return condition is not None and re.findall(_PATH_SEGMENT, condition.group(1)) == read
+    return (
+        condition is not None and re.findall(_PATH_SEGMENT, condition.group(1)) == read
+    )
 
 
 def payload_dereferences_before_guard(
