@@ -12761,6 +12761,31 @@ def _replace_exact(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_NON_AVAILABLE_FACT_STATUSES: Final = frozenset({"FAILED", "PARTIAL", "UNAVAILABLE"})
+
+
+def _coverage_boundary(fact_status: object) -> str:
+    """Seal the payload's own non-available facts into the manifest boundary.
+
+    A publishable manifest must be COMPLETE_WITHIN_DECLARED_BOUNDARY with no
+    known_gaps, so the gaps the payload declares are named in the boundary text.
+    """
+
+    if not isinstance(fact_status, Mapping):
+        raise ControlPanelValidationError("panel fact_status must be an object")
+    declared = ", ".join(
+        f"{key}={value}"
+        for key, value in sorted(fact_status.items())
+        if value in _NON_AVAILABLE_FACT_STATUSES
+    )
+    return (
+        "accepted portfolio, factor/alpha, dynamic replication, dependence, "
+        "weekly-return, governed-HWM, governed invested-capital when supplied, "
+        "and candidate driver-map evidence rendered read-only with explicit gaps; "
+        f"declared non-available facts: {declared or 'none'}"
+    )
+
+
 def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
     """Atomically update the stable local entry point after pointer publication."""
     if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
@@ -13308,11 +13333,7 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary=(
-                "accepted portfolio, factor/alpha, dynamic replication, dependence, "
-                "weekly-return, governed-HWM, governed invested-capital when supplied, "
-                "and candidate driver-map evidence rendered read-only with explicit gaps"
-            ),
+            boundary=_coverage_boundary(data["fact_status"]),
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",

@@ -4802,6 +4802,69 @@ def test_hybrid_gate_reports_registry_status_instead_of_relabeling_history() -> 
     assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
 
 
+def test_manifest_boundary_names_every_non_available_fact(tmp_path: Path) -> None:
+    """N6: gaps are sealed in the boundary; the claim stays publishable."""
+
+    fact_status = {
+        "assignments": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        "costs": "PARTIAL",
+        "flows": "PARTIAL",
+        "fx": "FAILED",
+        "nav": "UNAVAILABLE",
+        "positions": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+    boundary = panel._coverage_boundary(fact_status)
+
+    assert boundary.endswith(
+        "; declared non-available facts: costs=PARTIAL, flows=PARTIAL, fx=FAILED, "
+        "nav=UNAVAILABLE"
+    )
+    assert "assignments=" not in boundary and "positions=" not in boundary
+    assert boundary.startswith("accepted portfolio, factor/alpha")
+    assert panel._coverage_boundary(
+        {"assignments": "COMPLETE_WITHIN_DECLARED_BOUNDARY"}
+    ).endswith("; declared non-available facts: none")
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._coverage_boundary(None)
+
+    # The claim with gaps in its boundary still passes the publish gates:
+    # COMPLETE status and empty known_gaps (publication.py, release.py and
+    # pipeline.py all test exactly that predicate).
+    claim = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary=boundary,
+        fact_types=("portfolio control panel",),
+        observed_start=date(2026, 7, 30),
+        observed_end=date(2026, 7, 30),
+    )
+    assert claim.known_gaps == ()
+    root = tmp_path / "panel"
+    content = b"{}"
+    source = tmp_path / "x.json"
+    source.write_bytes(content)
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-panel", "1.0.0"),
+        coverage=claim,
+        artifacts=(
+            SourceArtifact.from_path(
+                source,
+                artifact_id="panel/x.json",
+                as_of_date=date(2026, 7, 30),
+                schema_name="synthetic",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "x.json").write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+    sealed = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    assert sealed.coverage.boundary == boundary
+    assert read_current(root).generation_id == manifest.generation_id
+
+
 def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:
     """Hybrid history is versioned by the backtest twin, not the live path."""
 
