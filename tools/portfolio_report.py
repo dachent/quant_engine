@@ -3912,6 +3912,34 @@ def _current_product_fact_rows(
     return accepted
 
 
+def _strategy_attribution_section(
+    attribution_catalog: Mapping[str, Any],
+    attribution_ref: Mapping[str, str],
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None,
+) -> dict[str, Any]:
+    """Project every attribution list through the same current-product filter."""
+
+    def current(key: str) -> list[dict[str, Any]]:
+        optional = key == "benchmark_comparisons"
+        rows = (
+            attribution_catalog.get(key, []) if optional else attribution_catalog[key]
+        )
+        return _current_product_fact_rows(
+            rows,
+            strategy_product_controls,
+            None,
+            f"strategy_attribution.{key}",
+        )
+
+    return {
+        "benchmark_assignments": current("benchmark_assignments"),
+        "benchmark_comparisons": current("benchmark_comparisons"),
+        "comparisons": current("comparisons"),
+        "costs": current("costs"),
+        "generation_id": attribution_ref["generation_id"],
+    }
+
+
 def _strategy_provider_evidence(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
@@ -7594,30 +7622,9 @@ def build_report_data(
     if current_product_catalog.get("hwm_inputs") is not None:
         report["hwm_inputs"] = current_product_catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
-        report["strategy_attribution"] = {
-            "benchmark_assignments": _current_product_fact_rows(
-                attribution_catalog["benchmark_assignments"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.benchmark_assignments",
-            ),
-            "benchmark_comparisons": attribution_catalog.get(
-                "benchmark_comparisons", []
-            ),
-            "comparisons": _current_product_fact_rows(
-                attribution_catalog["comparisons"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.comparisons",
-            ),
-            "costs": _current_product_fact_rows(
-                attribution_catalog["costs"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.costs",
-            ),
-            "generation_id": attribution_ref["generation_id"],
-        }
+        report["strategy_attribution"] = _strategy_attribution_section(
+            attribution_catalog, attribution_ref, strategy_product_controls
+        )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(
             value_basis_bounds,
