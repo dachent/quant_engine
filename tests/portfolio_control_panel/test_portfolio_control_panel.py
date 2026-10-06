@@ -6146,7 +6146,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -12663,7 +12663,7 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
 
 
 def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
-    for version in (1, 2):
+    for version in (1, 2, 3):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"published-{version}"
@@ -12682,7 +12682,7 @@ def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
         assert candidate_value["report_schema_version"] == version
         assert candidate_identity["sha256"] == identity["sha256"]
         assert candidate_path == payload
-    for version in (3, True, "2"):
+    for version in (4, True, "2"):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"rejected-{version!s}"

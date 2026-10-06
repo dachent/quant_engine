@@ -44,7 +44,7 @@
     "replay"
   ],
   "properties": {
-    "baseline_schema_version": {"const": 1},
+    "baseline_schema_version": {"enum": [1, 2]},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "provenance": {
@@ -343,6 +343,10 @@
   },
   "allOf": [
     {
+      "if": {"properties": {"baseline_schema_version": {"const": 2}}, "required": ["baseline_schema_version"]},
+      "then": {"properties": {"current_capital": {"$ref": "#/$defs/current_capital_v2"}}}
+    },
+    {
       "if": {"required": ["hwm_inputs"]},
       "then": {"required": ["hwm_acceptance_record"]}
     },
@@ -396,6 +400,32 @@
           "minLength": 1
         }
       }
+    },
+    "custody_cash_v2": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_cash"},
+        {"required": ["last_event_date", "coverage_end"]}
+      ]
+    },
+    "current_strategy_v2": {
+      "allOf": [
+        {"$ref": "#/$defs/current_strategy"},
+        {
+          "properties": {
+            "derived_cash": {"items": {"$ref": "#/$defs/custody_cash_v2"}}
+          }
+        }
+      ]
+    },
+    "current_capital_v2": {
+      "allOf": [
+        {"$ref": "#/$defs/current_capital"},
+        {
+          "properties": {
+            "strategies": {"items": {"$ref": "#/$defs/current_strategy_v2"}}
+          }
+        }
+      ]
     },
     "custody_cash_event": {
       "type": "object",
@@ -517,6 +547,14 @@
           "minLength": 1
         },
         "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "last_event_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "coverage_end": {
           "type": "string",
           "format": "date"
         },

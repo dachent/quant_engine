@@ -90,6 +90,9 @@ from portfolio_invested_capital import (
 
 
 REPORT_SCHEMA_VERSION: Final = 2
+# A report that carries custody cash dated by its admission coverage (baseline
+# schema 2) is version 3: each cash line names its last event and coverage end.
+CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION: Final = 3
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
@@ -624,7 +627,7 @@ def _baseline(
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("baseline catalog is missing or linked")
     catalog = _load_json(catalog_path, "baseline catalog")
-    if catalog.get("baseline_schema_version") != 1:
+    if catalog.get("baseline_schema_version") not in {1, 2}:
         raise ReportValidationError("baseline schema version is unsupported")
     if catalog.get("policy_version") != POLICY_VERSION:
         raise ReportValidationError("baseline performance policy differs")
@@ -646,7 +649,7 @@ def _baseline(
         sha256,
         size_bytes,
         "portfolio-baseline-catalog",
-        "1",
+        str(catalog.get("baseline_schema_version")),
     ):
         raise ReportValidationError("baseline artifact identity differs")
     return (
@@ -2717,7 +2720,9 @@ def _verify_custody_current_capital(
         raise ReportValidationError("custody raw selected ledger differs")
     try:
         cash = _derived_custody_cash(
-            raw, _date(block["valuation_date"], "custody cutoff")
+            raw,
+            _date(block["valuation_date"], "custody cutoff"),
+            legacy=catalog.get("baseline_schema_version") == 1,
         )
     except (RuntimeError, ValueError, KeyError) as exc:
         raise ReportValidationError(f"custody raw recompute failed: {exc}") from exc
@@ -7402,7 +7407,10 @@ def build_report_data(
             {
                 "artifact": "baseline-catalog",
                 "as_of_date": catalog.get("as_of_date"),
-                "schema": "portfolio-baseline-catalog/1",
+                "schema": (
+                    "portfolio-baseline-catalog/"
+                    f"{catalog.get('baseline_schema_version')}"
+                ),
                 "sha256": baseline_ref["catalog_sha256"],
             },
             *[
@@ -7533,6 +7541,8 @@ def build_report_data(
     report["hwm_summary"] = hwm_summary
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
+        if catalog.get("baseline_schema_version") == 2:
+            report["report_schema_version"] = CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
     if decomposition_lenses is not None:
@@ -8774,7 +8784,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2}
+        or report.get("report_schema_version") not in {1, 2, 3}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
@@ -11033,7 +11043,7 @@ def _validate_current_epoch_crosswalk(
         or not isinstance(selected["generation_id"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected["generation_id"])
         or selected["schema_name"] != "portfolio-baseline-catalog"
-        or selected["schema_version"] != "1"
+        or selected["schema_version"] not in {"1", "2"}
         or not isinstance(selected["sha256"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected["sha256"])
         or isinstance(selected["size_bytes"], bool)
@@ -11062,7 +11072,7 @@ def _validate_current_epoch_crosswalk(
             ),
             "generation_id": baseline_ref["generation_id"],
             "schema_name": "portfolio-baseline-catalog",
-            "schema_version": "1",
+            "schema_version": str(baseline_catalog.get("baseline_schema_version")),
             "sha256": baseline_ref["catalog_sha256"],
             "size_bytes": baseline_catalog_path.stat().st_size,
         }
@@ -12580,7 +12590,11 @@ def publish_report(
             baseline_catalog_path,
             "input/portfolio-baseline.json",
             "portfolio-baseline-catalog",
-            "1",
+            str(
+                json.loads(baseline_catalog_path.read_bytes()).get(
+                    "baseline_schema_version"
+                )
+            ),
         ),
         (
             candidate_dir / REPORT_DATA_NAME,

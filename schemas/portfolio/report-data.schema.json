@@ -32,7 +32,7 @@
     "hwm_summary"
   ],
   "properties": {
-    "report_schema_version": {"enum": [1, 2]},
+    "report_schema_version": {"enum": [1, 2, 3]},
     "as_of_date": {"type": "string", "format": "date"},
     "calculation_cutoff_date": {"type": "string", "format": "date"},
     "custody_current_capital": {
@@ -1057,6 +1057,14 @@
           "type": "string",
           "format": "date"
         },
+        "last_event_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "coverage_end": {
+          "type": "string",
+          "format": "date"
+        },
         "basis": {
           "const": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
         },
@@ -1074,6 +1082,32 @@
           }
         }
       }
+    },
+    "custody_handoff_custody_cash_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_custody_cash"},
+        {"required": ["last_event_date", "coverage_end"]}
+      ]
+    },
+    "custody_handoff_current_strategy_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_current_strategy"},
+        {
+          "properties": {
+            "derived_cash": {"items": {"$ref": "#/$defs/custody_handoff_custody_cash_v3"}}
+          }
+        }
+      ]
+    },
+    "custody_handoff_current_capital_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_current_capital"},
+        {
+          "properties": {
+            "strategies": {"items": {"$ref": "#/$defs/custody_handoff_current_strategy_v3"}}
+          }
+        }
+      ]
     },
     "custody_handoff_custody_cash_event": {
       "type": "object",
@@ -1624,7 +1658,7 @@
       "then": {"required": ["calculation_cutoff_date"]}
     },
     {
-      "if": {"properties": {"report_schema_version": {"const": 2}}, "required": ["report_schema_version"]},
+      "if": {"properties": {"report_schema_version": {"enum": [2, 3]}}, "required": ["report_schema_version"]},
       "then": {
         "properties": {
           "portfolio_summary": {
@@ -1637,6 +1671,14 @@
               }
             }
           }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"const": 3}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
         }
       }
     }

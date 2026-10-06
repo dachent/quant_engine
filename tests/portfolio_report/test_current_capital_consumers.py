@@ -1624,3 +1624,125 @@ def test_cr2_custody_structural_complete_candidate_retains_native_history_gate(
         "ACTUAL_PANEL_NATIVE_GATE: report candidate requires a strategy history contract"
     )
     print("ACTUAL_REPORT_CANDIDATE:", candidate)
+
+
+def _cash_lines(catalog):
+    return [
+        line
+        for row in catalog["current_capital"]["strategies"]
+        for line in row.get("derived_cash", [])
+    ]
+
+
+def test_n56_native_custody_baseline_is_schema_two_with_proven_through_cash(
+    cr2_custody_native_world,
+):
+    """N56: each cash line is dated min(cutoff, coverage end) and names its last event."""
+    _root, _admitted, _recipe, _template, _output, catalog, _clock = (
+        cr2_custody_native_world
+    )
+
+    assert catalog["baseline_schema_version"] == 2
+    lines = _cash_lines(catalog)
+    assert lines
+    for line in lines:
+        assert line["last_event_date"] == max(
+            event["event_date"] for event in line["events"]
+        )
+        assert line["as_of_date"] == min(
+            catalog["current_capital"]["valuation_date"], line["coverage_end"]
+        )
+        assert line["as_of_date"] >= line["last_event_date"]
+
+
+def test_n56_report_with_custody_cash_is_version_three_and_schema_valid(
+    cr2_custody_structural_complete_world,
+):
+    from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+
+    _root, admitted, _recipe, _template, output, catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    assert catalog["baseline_schema_version"] == 2
+
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+
+    assert report["report_schema_version"] == 3
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(report)
+    for field in ("last_event_date", "coverage_end"):
+        stripped = deepcopy(report)
+        for row in stripped["custody_current_capital"]["strategies"]:
+            for line in row.get("derived_cash", []):
+                line.pop(field, None)
+        with pytest.raises(ValidationError):
+            validator.validate(stripped)
+        # The same shape is the version-2 report, which does not require the field.
+        stripped["report_schema_version"] = 2
+        assert not [
+            error
+            for error in validator.iter_errors(stripped)
+            if "custody_current_capital" in [str(item) for item in error.absolute_path]
+        ]
+
+
+def test_n56_panel_schema_requires_the_cash_fields_only_from_version_23():
+    from jsonschema import Draft202012Validator, ValidationError
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert schema["properties"]["panel_schema_version"]["enum"] == [21, 22, 23]
+    for definition in (
+        "custody_handoff_custody_cash",
+        "custody_handoff_custody_cash_v3",
+    ):
+        assert definition in schema["$defs"]
+    cash = {
+        "account_id": "a",
+        "provider_id": "quantbase",
+        "as_of_date": "2026-09-17",
+        "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
+        "status": "AVAILABLE",
+        "current_value": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        "events": [
+            {
+                "event_date": "2026-09-16",
+                "record_id": "r",
+                "event_sha256": "a" * 64,
+                "native_currency": "USD",
+                "native_value": "1",
+                "event_time_fx": None,
+                "signed_usd": "1",
+            }
+        ],
+    }
+
+    def check(definition, value):
+        Draft202012Validator(
+            {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                "$ref": f"#/$defs/{definition}",
+            }
+        ).validate(value)
+
+    check("custody_handoff_custody_cash", cash)
+    with pytest.raises(ValidationError):
+        check("custody_handoff_custody_cash_v3", cash)
+    check(
+        "custody_handoff_custody_cash_v3",
+        {**cash, "last_event_date": "2026-09-16", "coverage_end": "2026-09-18"},
+    )

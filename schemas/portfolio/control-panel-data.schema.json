@@ -46,7 +46,7 @@
   ],
   "properties": {
     "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital"},
-    "panel_schema_version": { "enum": [21, 22] },
+    "panel_schema_version": { "enum": [21, 22, 23] },
     "account_manifest": {
       "anyOf": [
         { "$ref": "#/$defs/account_manifest_v7" },
@@ -683,6 +683,14 @@
   },
   "allOf": [
     {
+      "if": {"properties": {"panel_schema_version": {"const": 23}}, "required": ["panel_schema_version"]},
+      "then": {
+        "properties": {
+          "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
+        }
+      }
+    },
+    {
       "if": {
         "properties": {
           "weekly_returns": {
@@ -887,7 +895,7 @@
       }
     },
     {
-      "if": {"properties": {"panel_schema_version": {"const": 22}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [22, 23]}}, "required": ["panel_schema_version"]},
       "then": {
         "properties": {
           "dependence_analysis": {"required": ["weight_basis", "weight_authority"]},
@@ -922,7 +930,7 @@
     {
       "if": {
         "properties": {
-          "panel_schema_version": {"const": 22},
+          "panel_schema_version": {"enum": [22, 23]},
           "invested_capital": {"type": "object"}
         },
         "required": ["panel_schema_version", "invested_capital"]
@@ -1643,6 +1651,14 @@
           "type": "string",
           "format": "date"
         },
+        "last_event_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "coverage_end": {
+          "type": "string",
+          "format": "date"
+        },
         "basis": {
           "const": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS"
         },
@@ -1660,6 +1676,32 @@
           }
         }
       }
+    },
+    "custody_handoff_custody_cash_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_custody_cash"},
+        {"required": ["last_event_date", "coverage_end"]}
+      ]
+    },
+    "custody_handoff_current_strategy_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_current_strategy"},
+        {
+          "properties": {
+            "derived_cash": {"items": {"$ref": "#/$defs/custody_handoff_custody_cash_v3"}}
+          }
+        }
+      ]
+    },
+    "custody_handoff_current_capital_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/custody_handoff_current_capital"},
+        {
+          "properties": {
+            "strategies": {"items": {"$ref": "#/$defs/custody_handoff_current_strategy_v3"}}
+          }
+        }
+      ]
     },
     "custody_handoff_custody_cash_event": {
       "type": "object",

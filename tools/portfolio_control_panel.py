@@ -89,6 +89,9 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 
 
 PANEL_SCHEMA_VERSION: Final = 22
+# A panel built from a version-3 report (custody cash dated by its admission coverage)
+# is version 23; every other panel stays 22.
+CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 23
 BUILDER_VERSION: Final = "2.12.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
@@ -1064,7 +1067,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2}:
+    ) not in {1, 2, 3}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1146,7 +1149,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2}:
+    ) not in {1, 2, 3}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -1428,7 +1431,7 @@ def _baseline_catalog_snapshot_for_report(
         raise ControlPanelValidationError(
             "baseline catalog is not readable JSON"
         ) from exc
-    if catalog.get("baseline_schema_version") != 1:
+    if catalog.get("baseline_schema_version") not in {1, 2}:
         raise ControlPanelValidationError("baseline schema version is unsupported")
     return catalog, {
         "catalog": (catalog_path, catalog_sha256),
@@ -2652,7 +2655,7 @@ def _current_epoch_crosswalk_included_tuples(
     if (
         selected_baseline.get("artifact_id") != "normalized/portfolio-baseline.json"
         or selected_baseline.get("schema_name") != "portfolio-baseline-catalog"
-        or selected_baseline.get("schema_version") != "1"
+        or selected_baseline.get("schema_version") not in {"1", "2"}
         or not isinstance(selected_baseline.get("generation_id"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected_baseline["generation_id"])
         or not isinstance(selected_baseline.get("sha256"), str)
@@ -9618,7 +9621,11 @@ def _panel_data(
             ),
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
-        "panel_schema_version": PANEL_SCHEMA_VERSION,
+        "panel_schema_version": (
+            CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
+            if report.get("report_schema_version") == 3
+            else PANEL_SCHEMA_VERSION
+        ),
         "performance": normalized_performance,
         "positions": normalized_positions,
         "provenance": provenance,
@@ -11257,7 +11264,7 @@ def _candidate_record(
             for name, content in sorted(files.items())
         },
         "panel_id": panel_id,
-        "panel_schema_version": PANEL_SCHEMA_VERSION,
+        "panel_schema_version": data["panel_schema_version"],
         "portfolio_as_of": data["meta"]["portfolio_as_of"],
         "correlation_generation_id": data["meta"]["correlation_generation_id"],
         "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
@@ -13041,7 +13048,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2}:
+    ) or retained_report_schema_version not in {1, 2, 3}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )
