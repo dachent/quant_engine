@@ -312,6 +312,13 @@ const exactPct = (value) => {
   const fixed = exactFixed(value, 2, -2);
   return fixed === "—" ? fixed : `${fixed}%`;
 };
+// The account manifest table renders in the Risk view; the preceding checks leave a different
+// view active, so route there before reading #account-manifest-*. The control is absent only
+// from the minimal single-table fixtures the harness tests use; the table reads below still
+// time out if the real app fails to render the manifest, so no assertion is weakened.
+if (await page.locator('[data-nav="risk"]').count()) {
+  await page.locator('[data-nav="risk"]').click();
+}
 const epochManifest = externalManifest ?? dashboardData.account_manifest;
 const epochDom = await page.locator("#account-manifest-table").evaluate((table) => ({
   caption: table.querySelector("caption")?.textContent?.trim() ?? null,

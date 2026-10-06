@@ -152,6 +152,10 @@ const captures = [
   { name: "direct-file", view: "", viewport: { width: 1280, height: 800 } },
 ];
 
+// A full-scope panel (large payload) loads and renders slower than Playwright's 30 s default;
+// the FV-5 run needed this budget. It only lengthens waits, no assertion depends on it.
+const QA_PAGE_TIMEOUT_MS = 300000;
+
 async function visualLint(page) {
   return page.evaluate(() => {
     function selectorFor(element) {
@@ -234,13 +238,14 @@ try {
     const folder = path.join(output, capture.name);
     await mkdir(folder, { recursive: true });
     const page = await browser.newPage({ viewport: capture.viewport });
+    page.setDefaultTimeout(QA_PAGE_TIMEOUT_MS);
     const consoleEvents = [];
     const requestFailures = [];
     page.on("console", (message) => consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }));
     page.on("pageerror", (error) => consoleEvents.push({ type: "pageerror", text: error.message, location: {} }));
     page.on("requestfailed", (request) => requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
     const target = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
-    await page.goto(target, { waitUntil: "load", timeout: 30000 });
+    await page.goto(target, { waitUntil: "load", timeout: QA_PAGE_TIMEOUT_MS });
     await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
     const sourceClockDisplay = sourceClockEvidence(
       dashboardData.meta?.source_clock,
@@ -287,23 +292,27 @@ try {
     // payload assertion cannot catch that, which is why this one reads the DOM: the
     // producer's own output must reach a reader, and an absent measure must be shown as
     // not evaluated rather than as zero.
-    const leverageRows = Array.isArray(dashboardData.leverage_disclosures)
-      ? dashboardData.leverage_disclosures
-      : [];
-    const leverageStatus = (await page.locator("#leverage-status").textContent())?.trim() ?? "";
-    const leverageCoverageRows = await page.locator("#leverage-coverage-table tbody tr").count();
-    const leverageObservationKpi = (await page.locator("#leverage-kpis").textContent())?.trim() ?? "";
-    if (!leverageRows.length) {
-      if (leverageStatus !== "Not evaluated") {
-        throw new Error("absent leverage disclosures must render as not evaluated, never as zero");
-      }
-    } else {
-      const declaredClasses = new Set(leverageRows.map((row) => row.data_class));
-      const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
-      if (leverageCoverageRows < declaredClasses.size
-        || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
-        || (unavailable.length > 0 && leverageStatus !== "Observed only")) {
-        throw new Error("rendered leverage disclosures diverge from the bound panel payload");
+    // The leverage surface lives in the Capital view only; every other capture renders a
+    // different view where #leverage-status does not exist, so the DOM read is scoped to it.
+    if (capture.view === "capital") {
+      const leverageRows = Array.isArray(dashboardData.leverage_disclosures)
+        ? dashboardData.leverage_disclosures
+        : [];
+      const leverageStatus = (await page.locator("#leverage-status").textContent())?.trim() ?? "";
+      const leverageCoverageRows = await page.locator("#leverage-coverage-table tbody tr").count();
+      const leverageObservationKpi = (await page.locator("#leverage-kpis").textContent())?.trim() ?? "";
+      if (!leverageRows.length) {
+        if (leverageStatus !== "Not evaluated") {
+          throw new Error("absent leverage disclosures must render as not evaluated, never as zero");
+        }
+      } else {
+        const declaredClasses = new Set(leverageRows.map((row) => row.data_class));
+        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+        if (leverageCoverageRows < declaredClasses.size
+          || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
+          || (unavailable.length > 0 && leverageStatus !== "Observed only")) {
+          throw new Error("rendered leverage disclosures diverge from the bound panel payload");
+        }
       }
     }
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
