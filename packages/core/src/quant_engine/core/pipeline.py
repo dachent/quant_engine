@@ -4035,7 +4035,14 @@ def _verify_freshness_provider_ledger(
     spec: PipelineSpec,
     value: object,
     evaluation_date: date,
-) -> None:
+) -> date | None:
+    """Verify the bound ledger identity and return the catalog's own cutoff.
+
+    The identity's ``as_of_date`` is the generation manifest date, which is provenance
+    and can follow the cutoff.  The financial cutoff is the date inside the
+    hash-verified catalog; ``None`` when the catalog states none.
+    """
+
     ledger = _object(value, "freshness provider ledger")
     _strict(
         ledger,
@@ -4108,6 +4115,9 @@ def _verify_freshness_provider_ledger(
         raise PipelineValidationError(
             "freshness provider ledger identity differs from the release"
         )
+    catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    cutoff = catalog.get("as_of_date") if isinstance(catalog, dict) else None
+    return date.fromisoformat(cutoff) if isinstance(cutoff, str) else None
 
 
 def _verify_freshness_gate(
@@ -4156,10 +4166,21 @@ def _verify_freshness_gate(
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
             )
+        if schema_version == 4 and "provider_ledger" not in payload:
+            raise PipelineValidationError(
+                "freshness gate requires the provider ledger it was judged against"
+            )
         if "provider_ledger" in payload:
-            _verify_freshness_provider_ledger(
+            catalog_cutoff = _verify_freshness_provider_ledger(
                 spec, payload.get("provider_ledger"), executed_on
             )
+            # Version 4 re-assesses at its own date, so that date must be the release's
+            # financial cutoff or a back-dated payload is merely self-consistent.
+            if schema_version == 4 and assessed_on != catalog_cutoff:
+                raise PipelineValidationError(
+                    "freshness gate data date differs from the bound "
+                    "provider-ledger cutoff"
+                )
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
             policies = {parsed.policy_id: parsed}

@@ -165,11 +165,7 @@ def _assessment(
     # the cutoff (an interval starting after it, an undated start, or a lane summarised
     # by its first and last row only) proves nothing at the cutoff and is unavailable.
     if observed_end is not None and observed_end > as_of:
-        if (
-            declared_interval
-            and observed_start is not None
-            and observed_start <= as_of
-        ):
+        if declared_interval and observed_start is not None and observed_start <= as_of:
             observed_end = as_of
         else:
             observed_end = None
@@ -204,6 +200,12 @@ def build_health(
     # there so that a source last accepted on the cutoff is current as of it; the date
     # the run executes is a separate clock and is carried as ``evaluated_on``.
     as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
+    # The identity date is the generation manifest date, which is the cutoff or a later
+    # provenance date.  A catalog dated after it cannot have come from this generation.
+    if as_of > date.fromisoformat(str(ledger_identity["as_of_date"])):
+        raise PortfolioFreshnessError(
+            "provider ledger catalog cutoff follows its manifest date"
+        )
     evaluated_on = evaluation_date or as_of
     if evaluated_on < as_of:
         raise PortfolioFreshnessError(

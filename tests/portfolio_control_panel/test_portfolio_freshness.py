@@ -39,6 +39,7 @@ def _provider_ledger(
     ledger_as_of: str = "2026-07-31",
     ibkr_end: str = "2026-07-31",
     ibkr_start: str = "2026-07-31",
+    manifest_as_of: str | None = None,
     extra_strategy_evidence: list[dict[str, object]] | None = None,
 ) -> str:
     catalog = {
@@ -147,20 +148,20 @@ def _provider_ledger(
     source = root.parent / "provider-ledger.json"
     source.write_bytes(canonical_json_bytes(catalog))
     manifest = GenerationManifest.build(
-        as_of_date=date.fromisoformat(ledger_as_of),
+        as_of_date=date.fromisoformat(manifest_as_of or ledger_as_of),
         adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic provider ledger",
             fact_types=("strategy_evidence",),
             observed_start=date(2026, 7, 17),
-            observed_end=date.fromisoformat(ledger_as_of),
+            observed_end=date.fromisoformat(manifest_as_of or ledger_as_of),
         ),
         artifacts=(
             SourceArtifact.from_path(
                 source,
                 artifact_id="normalized/provider-ledger.json",
-                as_of_date=date.fromisoformat(ledger_as_of),
+                as_of_date=date.fromisoformat(manifest_as_of or ledger_as_of),
                 schema_name="provider-ledger-catalog",
                 schema_version="1",
             ),
@@ -576,6 +577,101 @@ def test_the_freshness_schema_governs_what_the_producer_emits(tmp_path: Path) ->
     broken = {key: value for key, value in result.items() if key != "evaluated_on"}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.Draft202012Validator(schema).validate(broken)
+
+
+def test_a_manifest_dated_after_the_cutoff_is_provenance_and_is_accepted(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root, manifest_as_of="2026-08-02")
+
+    result = freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+    assert result["as_of_date"] == "2026-07-31"
+    assert result["provider_ledger"]["as_of_date"] == "2026-08-02"  # type: ignore[index]
+
+
+def test_a_catalog_cutoff_after_its_manifest_date_is_refused(tmp_path: Path) -> None:
+    """The identity date is max(cutoff, provenance); a catalog later than it is forged."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root, ledger_as_of="2026-08-02", manifest_as_of="2026-07-31"
+    )
+
+    with pytest.raises(freshness.PortfolioFreshnessError, match="follows its manifest"):
+        freshness.build_health(root, generation_id, date(2026, 10, 4))
+
+
+def test_an_unavailable_capture_reaches_the_panel_as_a_blocking_escalation(
+    tmp_path: Path,
+) -> None:
+    """Seam: the producer's UNAVAILABLE row survives the panel's recomputation."""
+
+    import portfolio_control_panel as panel
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root, ibkr_start="2026-08-02", ibkr_end="2026-08-02"
+    )
+    health = tmp_path / "freshness-health.json"
+    freshness.write_health(root, generation_id, health, date(2026, 10, 4))
+
+    rows = panel._freshness_health(health, "2026-07-31")
+
+    row = next(
+        item for item in rows if item["item"] == "ibkr:ibkr:PROVIDER_CAPTURE:balances"
+    )
+    assert row["status"] == "UNAVAILABLE"
+    assert row["blocks_current_consumers"] is True
+    assert row["escalation_required"] is True
+
+
+def test_an_unavailable_strategy_lane_blocks_the_hwm_perimeter(
+    tmp_path: Path,
+) -> None:
+    """Seam: a lane whose rows run past the cutoff is not accepted by the HWM policy."""
+
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(
+        root,
+        extra_strategy_evidence=[
+            {
+                "account": {"observed_end": "2026-08-05", "provider_id": "ibkr"},
+                "provider_id": "ibkr",
+                "strategy_id": "future-rows",
+            }
+        ],
+    )
+    health = freshness.build_health(root, generation_id, date(2026, 10, 4))
+    strategies = [
+        {
+            "current_value_usd": "100",
+            "nav_evidence_layer": "ACCOUNT_LIVE",
+            "nav_observed_end": "2026-07-30",
+            "nav_status": "AVAILABLE",
+            "strategy_id": "future-rows",
+            "strategy_name": "Future Rows",
+            "systematic_weight": "1",
+        }
+    ]
+    policy = {
+        "accepted_daily_nav_evidence": ["ACCOUNT_LIVE"],
+        "accepted_provider_live_strategy_ids": [],
+        "excluded_strategy_ids": [],
+        "policy_id": "PORT-HWM-3",
+    }
+
+    rows, summary = governed_hwm_coverage(
+        strategies,
+        policy,
+        health["assessments"],  # type: ignore[arg-type]
+        require_freshness=True,
+        calculation_boundary="2026-07-30",
+    )
+
+    assert rows[0]["hwm_freshness_status"] == "BLOCKED"
+    assert summary["status"] != "AVAILABLE_GOVERNED_HWM_PERIMETER"
 
 
 def test_freshness_refuses_an_evaluation_before_the_data_cutoff(
