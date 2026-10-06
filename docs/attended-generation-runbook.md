@@ -35,7 +35,18 @@ instructions, or deletion/recovery commands into a current run.
    runner's post-stage comparison to pass; never infer one identity from the
    other or relax either check. Also validate any oracle/report/panel identity
    joins required by the issue's acceptance receipt.
-6. Pre-run the exact required test selectors with `--collect-only`. For browser
+   The preflight ladder refuses, in seconds and before any stage, a retained
+   allocation, baseline, attribution or dependence selection that binds another
+   provider ledger than the run (`check_retained_authority_pins.py --ledger-root L
+   --retained ROLE=PATH` runs the same matrix by hand), and an output or cache root
+   under which a generated path would reach 260 characters.
+6. Settle the QA hold before `--execute`. The `panel` stage needs browser QA
+   evidence that only exists after `panel-candidate`. The plan prints a `qa` block
+   with the stage and the required `--qa-dir`; `--execute` refuses unless the
+   invocation gives `--qa-dir <directory>` or declares `--qa-hold` (build through
+   `panel-candidate`, stop at `panel`, run browser QA, then `--execute --resume
+   --qa-dir <directory>`).
+7. Pre-run the exact required test selectors with `--collect-only`. For browser
    tests, verify the pinned Playwright module and browser executable first; for
    Windows temp files, verify `TEMP` and `TMP` point to existing short paths.
    Run producer, consumer, validator, CLI, and required browser suites. Record

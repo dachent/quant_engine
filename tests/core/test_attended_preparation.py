@@ -216,7 +216,8 @@ def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> lis
         str(tmp_path / "native-inputs.json"),
     ]
     if execute:
-        argv.append("--execute")
+        # The run stages no QA evidence; --qa-hold is the declared plan for that.
+        argv.extend(["--qa-hold", "--execute"])
     if resume:
         argv.append("--resume")
     return argv

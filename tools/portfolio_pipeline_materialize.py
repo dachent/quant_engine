@@ -5691,15 +5691,55 @@ def _attended_completed_stages(
     return completed
 
 
+ATTENDED_QA_STAGE: Final = "panel"
+ATTENDED_QA_INSTRUCTIONS: Final = (
+    "stage 'panel' consumes browser QA evidence produced from the panel-candidate "
+    "output, which no earlier stage produces. Supply it with --qa-dir <directory> if "
+    "it already exists; otherwise declare --qa-hold: the run builds every stage "
+    "through panel-candidate and stops at panel, then run the browser QA against the "
+    "panel-candidate output and continue with --execute --resume --qa-dir <directory>."
+)
+
+
+def _attended_qa_plan(
+    required_stages: Sequence[str], qa_dir: Path | None
+) -> dict[str, Any] | None:
+    """What the plan needs for its QA stage, stated before anything runs."""
+
+    if ATTENDED_QA_STAGE not in required_stages:
+        return None
+    return {
+        "stage": ATTENDED_QA_STAGE,
+        "required_flag": "--qa-dir",
+        "hold_flag": "--qa-hold",
+        "supplied": qa_dir is not None,
+        "instructions": ATTENDED_QA_INSTRUCTIONS,
+    }
+
+
+def _attended_require_qa_plan(
+    required_stages: Sequence[str], *, qa_dir: Path | None, qa_hold: bool
+) -> None:
+    """Refuse to start a run whose plan reaches panel with no QA and no declared hold."""
+
+    if ATTENDED_QA_STAGE in required_stages and qa_dir is None and not qa_hold:
+        raise MaterializationError(
+            "attended plan includes the panel stage but neither --qa-dir nor "
+            f"--qa-hold was given: {ATTENDED_QA_INSTRUCTIONS}"
+        )
+
+
 def _attended_view(
     output_root: Path,
     required_stages: Sequence[str],
     request_identity: Mapping[str, Any],
     verified_completed_stages: Sequence[str] | None = None,
+    qa_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Render selection facts without claiming later proof-bound material exists."""
 
     return {
+        "qa": _attended_qa_plan(required_stages, qa_dir),
         "planned_stages": list(required_stages),
         "post_proof_pipeline_spec": None,
         "request_identity": _canonical_clone(request_identity),
@@ -6855,7 +6895,8 @@ def _attended_stage_command(
         qa_dir = cast(Path | None, preflight["qa_dir"])
         if qa_dir is None:
             raise MaterializationError(
-                "attended panel requires produced browser QA evidence"
+                "attended panel requires produced browser QA evidence: "
+                f"{ATTENDED_QA_INSTRUCTIONS}"
             )
         command.extend(("--qa-dir", str(qa_dir)))
     return command
@@ -7224,6 +7265,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.resume and not args.execute:
                 raise MaterializationError("attended --resume requires --execute")
             if args.execute:
+                _attended_require_qa_plan(
+                    ATTENDED_STAGES, qa_dir=args.qa_dir, qa_hold=args.qa_hold
+                )
+            if args.execute:
                 storage = _attended_storage(args)
             if args.preparation_spec is not None:
                 if args.evaluated_on is None:
@@ -7287,6 +7332,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(args.output_root).resolve(),
                     preflight["required_stages"],
                     preflight["request_identity"],
+                    qa_dir=preflight["qa_dir"],
                 )
         elif args.command == "acquire":
             result = acquire(args.recipe, args.output_dir)

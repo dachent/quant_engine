@@ -5325,7 +5325,8 @@ def _attended_argv(
         str(preflight["source_run"]),
     ]
     if execute:
-        argv.append("--execute")
+        # These runs stage no QA evidence; the hold is the declared plan for that.
+        argv.extend(["--qa-hold", "--execute"])
     if resume:
         argv.append("--resume")
     return argv

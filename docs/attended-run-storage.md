@@ -115,5 +115,18 @@ Windows is a launcher; the PID recorded is the interpreter it starts.
 ## A supported invocation
 
 ```powershell
-python tools/portfolio_pipeline_materialize.py attended --repo-root C:\Dev\scratch\quant_engine\cp\main --python C:\Dev\scratch\quant_engine\cp\main\.venv\Scripts\python.exe --workspace-root C:\Dev\scratch\quant_engine\runs\r1\workspace --output-root C:\Dev\scratch\quant_engine\runs\r1\out --retained-cache-base C:\Dev\scratch\quant_engine\cache\retained --retained-cache-root C:\Dev\scratch\quant_engine\runs\r1\cache --requested-as-of 2026-09-17 --evaluated-on 2026-09-23 --preparation-spec C:\Dev\scratch\quant_engine\runs\r1\runner-input-config.json --execute
+python tools/portfolio_pipeline_materialize.py attended --repo-root C:\Dev\scratch\quant_engine\cp\main --python C:\Dev\scratch\quant_engine\cp\main\.venv\Scripts\python.exe --workspace-root C:\Dev\scratch\quant_engine\runs\r1\workspace --output-root C:\Dev\scratch\quant_engine\runs\r1\out --retained-cache-base C:\Dev\scratch\quant_engine\cache\retained --retained-cache-root C:\Dev\scratch\quant_engine\runs\r1\cache --requested-as-of 2026-09-17 --evaluated-on 2026-09-23 --preparation-spec C:\Dev\scratch\quant_engine\runs\r1\runner-input-config.json --qa-hold --execute
 ```
+
+The plan includes the `panel` stage, which consumes browser QA evidence produced from
+the `panel-candidate` output; no earlier stage produces it. `--execute` therefore
+refuses to start unless the invocation says how that evidence arrives:
+
+- `--qa-dir <directory>` when the evidence already exists, or
+- `--qa-hold` to declare a hold: the run builds every stage through `panel-candidate`
+  and stops at `panel` (the run is recorded `FAILED` with the QA instruction as its
+  reason); run the browser QA against the `panel-candidate` output, then continue the
+  same root with `--execute --resume --qa-dir <directory>`.
+
+A plan-only invocation (no `--execute`) prints a `qa` block naming the stage, the
+required flag, whether `--qa-dir` was supplied, and these instructions.
