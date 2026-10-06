@@ -6937,7 +6937,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
             lines = row.get("derived_cash")
             if row.get("strategy_id") != entity or not isinstance(lines, list):
                 continue
-            total = Decimal(0)
+            cash_total = Decimal(0)
             counted = 0
             for line in lines:
                 value = node(line, "current_value")
@@ -6947,13 +6947,13 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                     else None
                 )
                 if amount is not None:
-                    total += amount
+                    cash_total += amount
                     counted += 1
             if counted:
                 out.append(
                     Observed(
                         "report:custody_current_capital.strategies.derived_cash",
-                        total,
+                        cash_total,
                         None,
                         None,
                         row.get("as_of_date"),
@@ -8058,21 +8058,21 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                     row,
                 )
             )
-    for entity, pointer, row in candidates:
-        value = node(row, "current_value")
-        available = row.get("status") if "status" in row else None
+    for entity, pointer, entry in candidates:
+        value = node(entry, "current_value")
+        available = entry.get("status") if "status" in entry else None
         if available is not None and not is_available(available):
             continue
         if isinstance(value, Mapping) and not is_available(value.get("status")):
             continue
-        day = to_date(row.get("as_of_date"))
+        day = to_date(entry.get("as_of_date"))
         if day is None or day == ctx.cutoff:
             continue
         yield _finding(
             "capital.as_of_cutoff",
             BLOCKER_AUTHORITY,
             entity,
-            row.get("as_of_date"),
+            entry.get("as_of_date"),
             ctx.cutoff,
             REPORT,
             f"{pointer}.as_of_date",

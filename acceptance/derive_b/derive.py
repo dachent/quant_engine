@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, cast
 
 
 getcontext().prec = 50
@@ -585,7 +585,7 @@ def accounts_without_admitted_mapping(ledger: dict[str, object]) -> set[str]:
     """
 
     statuses: dict[str, set[str]] = defaultdict(set)
-    for row in ledger["nav_observations"]:
+    for row in cast(list[dict[str, object]], ledger["nav_observations"]):
         statuses[str(row["account_id"])].add(str(row.get("mapping_status")))
     return {account for account, found in statuses.items() if found == {"UNMAPPED"}}
 
