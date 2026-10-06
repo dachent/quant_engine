@@ -12933,7 +12933,7 @@ def test_panel_schema22_publication_records_input_report_version(
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_and22(
+def test_renderer_accepts_panel_schema21_22_and23(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -12953,7 +12953,7 @@ def test_renderer_accepts_panel_schema21_and22(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23):
+    for version in (21, 22, 23, 24):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -12981,7 +12981,7 @@ def test_renderer_accepts_panel_schema21_and22(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23]) {
+          for (const version of [21, 22, 23, 24]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -13019,12 +13019,12 @@ def test_renderer_accepts_panel_schema21_and22(
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23]
-    for item in evidence[:2]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24]
+    for item in evidence[:3]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[2]
+    unsupported = evidence[3]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])
