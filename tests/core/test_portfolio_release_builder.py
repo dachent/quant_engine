@@ -6305,6 +6305,18 @@ def test_base_factors_ending_on_the_spec_date_are_unchanged() -> None:
     assert derived == spec
 
 
+def test_base_factors_of_a_spec_without_a_date_are_unchanged() -> None:
+    """The decomposition producer refuses a spec with no date; nothing is projected."""
+
+    spec = _base_spec(_BASE_FACTORS)
+    del spec["as_of_date"]
+
+    derived, projected = builder._project_base_factors(spec, _BASE_FACTORS)
+
+    assert projected == _BASE_FACTORS
+    assert derived == spec
+
+
 def test_current_base_analytics_reads_factors_projected_to_the_spec_date(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

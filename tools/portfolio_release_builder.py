@@ -4841,7 +4841,11 @@ def _project_base_factors(
     that already end on or before the date are returned unchanged.
     """
 
-    as_of = _text(base_spec.get("as_of_date"), "base specification as_of_date")
+    as_of = base_spec.get("as_of_date")
+    if not isinstance(as_of, str) or not as_of.strip():
+        # The decomposition producer owns the shape of its specification and refuses a
+        # spec with no date; there is no boundary here to project the factors onto.
+        return dict(base_spec), factor_bytes
     lines = factor_bytes.decode("utf-8").splitlines(keepends=True)
     if not lines:
         raise VerticalBuildError("base factor file is empty")
