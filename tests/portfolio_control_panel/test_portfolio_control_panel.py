@@ -47,8 +47,13 @@ if SPEC is None or SPEC.loader is None:
 panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
+# A private copy under its own name: registering it as
+# ``portfolio_pipeline_materialize`` would replace the canonical module for every
+# suite collected later, while suites collected earlier (tests/core) keep the
+# original, so the autouse fixtures that patch the canonical module would miss
+# the instance those suites actually call.
 MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
-    "portfolio_pipeline_materialize",
+    "portfolio_pipeline_materialize_for_panel_suite",
     REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py",
 )
 if MATERIALIZER_SPEC is None or MATERIALIZER_SPEC.loader is None:
