@@ -4849,6 +4849,19 @@ _ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
 _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
 
 
+# Every outcome ``classify_xirr`` can return for a member's own stream.  A member in any
+# of them completed admission and carries its full cash flows; only its own root failed.
+_MWR_CLASSIFIER_OUTCOME_STATUSES = frozenset(
+    {
+        "AVAILABLE",
+        "INDETERMINATE",
+        "NO_ROOT",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "UNIQUENESS_NOT_PROVED",
+    }
+)
+
+
 def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """One MWR per strategy over its funded epochs' pooled investor cash flows.
 
@@ -4856,8 +4869,12 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     own cash flows (opening, interior legs, terminal value) are netted by date
     and classified by the one XIRR classifier, the pooling both oracles use.  An
     epoch the manifest did not fund (an assignment-only predecessor) carries no
-    capital and stays out.  A funded epoch without an available MWR leaves the
-    strategy without a number, with a named reason, never a partial pool.
+    capital and stays out.  A funded epoch pools when it carries cash flows and
+    a classifier outcome status: whether a root is unique is a property of the
+    stream being solved, so a member's own non-unique rate says nothing about
+    the pooled stream.  A funded epoch whose cash flows are unavailable (blocked
+    or unavailable) leaves the strategy without a number, with a named reason,
+    never a partial pool.  The member receipt coverage status gates nothing.
     """
 
     unavailable: dict[str, Any] = {
@@ -4877,11 +4894,11 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     pooled: dict[date, Decimal] = defaultdict(Decimal)
     for item in funded:
         flows = item.get("mwr_cashflows")
-        if item.get("mwr_status") != "AVAILABLE" or not flows:
+        if item.get("mwr_status") not in _MWR_CLASSIFIER_OUTCOME_STATUSES or not flows:
             return {
                 **unavailable,
                 "mwr_status": "UNAVAILABLE_MEMBER_MWR_NOT_AVAILABLE",
-                "mwr_reason": "MEMBER_MWR_NOT_AVAILABLE",
+                "mwr_reason": "MEMBER_CASHFLOWS_NOT_AVAILABLE",
             }
         for flow in _objects(flows, "mwr_cashflows"):
             pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
