@@ -50,6 +50,20 @@ def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
     assert "Net capital = Capital in − Withdrawn." in APP_JS
 
 
+def test_the_attended_qa_asserts_the_rendered_capital_legend_sentences() -> None:
+    """The legend is read from the DOM, so both definitions must be asserted there."""
+
+    assert "epochLegend.includes(\"Capital in = explicit opening capital" in QA_JS
+    assert "epochLegend.includes(\"Net capital = Capital in − Withdrawn.\")" in QA_JS
+    # The same sentences the renderer writes, so QA and app.js cannot drift apart.
+    for sentence in (
+        "Capital in = explicit opening capital + deposits + internal-in after start.",
+        "Net capital = Capital in − Withdrawn.",
+    ):
+        assert sentence in APP_JS
+        assert sentence in QA_JS
+
+
 def test_the_performance_table_marks_an_unproven_flow_path() -> None:
     assert "row.mwr_flow_path_status" in APP_JS
     assert "flow path unproven" in APP_JS

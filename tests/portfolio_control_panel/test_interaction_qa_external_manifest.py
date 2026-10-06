@@ -218,7 +218,7 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
         )
         + "</tr></thead><tbody>"
         + "".join(rows)
-        + '</tbody></table><span id="account-manifest-authority">Independent exact rebuild</span><div id="account-manifest-legend">Calculations through 2026-08-13. Artifact/provider capture date: 2026-08-16.</div><ul id="account-manifest-disclosure-list"></ul></main></body></html>'
+        + '</tbody></table><span id="account-manifest-authority">Independent exact rebuild</span><div id="account-manifest-legend">Calculations through 2026-08-13. Artifact/provider capture date: 2026-08-16. Capital in = explicit opening capital + deposits + internal-in after start. Net capital = Capital in − Withdrawn.</div><ul id="account-manifest-disclosure-list"></ul></main></body></html>'
     )
     (candidate / "index.html").write_text(html, encoding="utf-8")
     external = tmp_path / "epoch-manifest.json"

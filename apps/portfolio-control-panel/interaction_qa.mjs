@@ -405,7 +405,9 @@ const manifestCutoffDisplayMatch = !epochManifest || !Array.isArray(epochManifes
       && isCalendarDate(providerCaptureDate)
       && expectedCalculationCutoff <= providerCaptureDate
       && epochLegend?.includes(`Calculations through ${manifestCutoff}.`)
-      && epochLegend.includes(`Artifact/provider capture date: ${providerCaptureDate}.`));
+      && epochLegend.includes(`Artifact/provider capture date: ${providerCaptureDate}.`)
+      && epochLegend.includes("Capital in = explicit opening capital + deposits + internal-in after start.")
+      && epochLegend.includes("Net capital = Capital in − Withdrawn."));
 const calculationFactsAfterAcceptedCutoff = calculationDateFacts(epochManifest)
   .filter((fact) => !isCalendarDate(fact.value) || fact.value > expectedCalculationCutoff);
 checks.push(check(
