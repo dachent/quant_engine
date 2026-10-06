@@ -914,8 +914,7 @@ def _validate_strategy_attribution_expected_baseline_binding(
         ),
     }
     if len(expected["catalog_sha256"]) != 64 or any(
-        character not in "0123456789abcdef"
-        for character in expected["catalog_sha256"]
+        character not in "0123456789abcdef" for character in expected["catalog_sha256"]
     ):
         raise VerticalBuildError(
             "expected staged baseline catalog_sha256 is not canonical"

@@ -44,11 +44,13 @@ def _weekly(status: str) -> dict[str, object]:
     }
 
 
-def test_schema_2_rejects_null_week_dates_for_available_data_but_allows_unavailable() -> None:
+def test_schema_2_rejects_null_week_dates_for_available_data_but_allows_unavailable() -> (
+    None
+):
     schema = json.loads(
-        (REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
     )
     weekly_schema = {
         **schema["properties"]["weekly_returns"],

@@ -48,7 +48,13 @@ def test_stress_breach_callout_requires_finite_values_above_governed_limit(
     payload_path = tmp_path / "synthetic-panel.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
     completed = subprocess.run(
-        [str(shutil.which("node")), str(HARNESS), str(APP), str(payload_path), "renderRisk"],
+        [
+            str(shutil.which("node")),
+            str(HARNESS),
+            str(APP),
+            str(payload_path),
+            "renderRisk",
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",

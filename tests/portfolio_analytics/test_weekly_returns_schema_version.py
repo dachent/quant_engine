@@ -11,9 +11,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 def test_weekly_returns_schema_version_is_bumped_for_visible_partial_week() -> None:
     schema = json.loads(
-        (REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
     )
     weekly_returns = schema["properties"]["weekly_returns"]
 

@@ -48,7 +48,8 @@ panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
 MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
-    "portfolio_pipeline_materialize", REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py"
+    "portfolio_pipeline_materialize",
+    REPOSITORY_ROOT / "tools" / "portfolio_pipeline_materialize.py",
 )
 if MATERIALIZER_SPEC is None or MATERIALIZER_SPEC.loader is None:
     raise RuntimeError("unable to load attended pipeline reader")

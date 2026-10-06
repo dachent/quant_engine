@@ -9,25 +9,27 @@ import portfolio_control_panel as panel
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_weekly_ui_defaults_to_source_partial_week_and_labels_data_through_date() -> None:
+def test_weekly_ui_defaults_to_source_partial_week_and_labels_data_through_date() -> (
+    None
+):
     source = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
         encoding="utf-8"
     )
 
-    assert "let includeCurrentWeek = weekly?.current_week?.default_visible === true;" in source, (
-        "current week should follow the source-selected visibility default"
-    )
-    assert "currentWeek.data_through_date" in source, (
-        "data-through date is absent"
-    )
     assert (
-        'currentWeek.is_partial === true' in source
-        and "PARTIAL" in source
-    ), "partial state needs a visible label"
+        "let includeCurrentWeek = weekly?.current_week?.default_visible === true;"
+        in source
+    ), "current week should follow the source-selected visibility default"
+    assert "currentWeek.data_through_date" in source, "data-through date is absent"
+    assert "currentWeek.is_partial === true" in source and "PARTIAL" in source, (
+        "partial state needs a visible label"
+    )
     assert '$("#weekly-current-toggle").checked = includeCurrentWeek;' in source, (
         "visible week default and toggle state must agree"
     )
-    assert "const currentWeekVisible = weeks.includes(currentWeek.week_start);" in source
+    assert (
+        "const currentWeekVisible = weeks.includes(currentWeek.week_start);" in source
+    )
     assert '"Weekly partial disclosure follows the visible current-week column"' in (
         REPOSITORY_ROOT / "apps/portfolio-control-panel/interaction_qa.mjs"
     ).read_text(encoding="utf-8")
@@ -132,9 +134,7 @@ def test_panel_validator_rejects_week_data_through_date_outside_source_cutoff() 
     weekly = _weekly_payload("2026-09-17", True)
     weekly["current_week"]["data_through_date"] = "2026-09-16"
 
-    with pytest.raises(
-        panel.ControlPanelValidationError, match="source cutoff"
-    ):
+    with pytest.raises(panel.ControlPanelValidationError, match="source cutoff"):
         panel._weekly_return_analysis(
             weekly,
             {"generation_id": "a" * 64, "sha256": "b" * 64},
