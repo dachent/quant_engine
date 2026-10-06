@@ -91,7 +91,7 @@ def test_basic_preflight_refuses_a_deep_root_and_admits_a_short_one(
     with pytest.raises(materializer.MaterializationError, match="Windows limit"):
         materializer._attended_basic_preflight(_preflight_args(deep, repo))
     assert time.monotonic() - started < REFUSAL_SECONDS
-    scratch = Path("C:\Dev\scratch\quant_engine")
+    scratch = Path(r"C:\Dev\scratch\quant_engine")
     if not scratch.is_dir():
         pytest.skip("no short scratch root on this machine")
     short = Path(tempfile.mkdtemp(prefix="pb", dir=scratch))
