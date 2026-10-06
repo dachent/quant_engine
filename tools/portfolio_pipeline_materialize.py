@@ -5936,37 +5936,159 @@ def _attended_stage_financial_inputs(
 
 WINDOWS_PATH_LIMIT: Final = 260
 _GENERATION_ID_LENGTH: Final = 64
-# The longest artifact names each stage's generations are known to hold. The ledger
-# stage carries captured provider responses; every analytics, baseline and report root
-# carries a target-series source id; the panel carries governance inputs. The values come
-# from the artifact ids the producers write (provider_ledger, portfolio_target_series,
-# portfolio_control_panel), not from a guess about the run.
-_LEDGER_ARTIFACT: Final = (
-    "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
-)
-_SOURCE_ARTIFACT: Final = "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
-_PANEL_ARTIFACT: Final = "inputs/governance/current-strategy-decomposition-plan.json"
-_CACHE_ARTIFACT: Final = _LEDGER_ARTIFACT
+_GENERATION: Final = "0" * _GENERATION_ID_LENGTH
+# The deepest paths below each root are the ones the producers actually write, measured
+# from the real attended runs (output trees under C:\Dev\q, 2026-10-04): at most 183
+# characters below the output root and 102 below the retained cache root. Nothing here is
+# a path a producer does not write; in particular the output tree holds no captured
+# provider response (the ledger stage's longest file is admit-or-declare-receipt.json).
+_DECOMPOSITION_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+_DECOMPOSITION_VARIANTS: Final = ("", "STATIC", "DYNAMIC_FLS")
+_STATIC_SNAPSHOT_ACCOUNT: Final = "account-" + "0" * 16
+_STATIC_SNAPSHOT_WINDOW: Final = "2026-01-02-2026-09-17.json"
+_PREPARATION_PROVENANCE_NAME: Final = "05-base-proxies-adjusted.json.manifest.json"
+_CACHE_HASH_FILE: Final = f"{_GENERATION}.json"
 
 
-def _generated_tail(stage_root: Path, artifact: str) -> str:
-    parts = [*stage_root.parts, "generations", "0" * _GENERATION_ID_LENGTH]
-    return "\\".join([*parts, *artifact.split("/")])
+def _backslash(*parts: str) -> str:
+    return "\\".join(part for part in parts if part)
 
 
-def generated_tails() -> list[tuple[str, str]]:
-    """Every deepest known generated path below the output root, as (label, tail)."""
+def _registry_strategy_ids() -> list[str]:
+    try:
+        registry = json.loads(CURRENT_STRATEGY_REGISTRY.read_bytes())
+        return [
+            str(row["strategy_id"])
+            for row in registry["strategies"]
+            if isinstance(row, dict)
+        ]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
-    tails = []
+
+def generated_tails(qa_dir: Path | None = None) -> list[tuple[str, str]]:
+    """Every deepest generated path below the output root, as (label, tail)."""
+
+    generation = _backslash
+    tails: list[tuple[str, str]] = []
+    lens_names = sorted(
+        {
+            root.name
+            for root in PRODUCTION_STAGE_ROOTS.values()
+            if "decomposition-lenses" in root.parts
+        }
+    )
+    for mode in _DECOMPOSITION_MODES:
+        for variant in _DECOMPOSITION_VARIANTS:
+            for lens in lens_names:
+                tails.append(
+                    (
+                        f"{mode} {variant or 'default'} {lens}",
+                        generation(
+                            "stages",
+                            "analytics",
+                            "decomposition-lenses",
+                            mode,
+                            variant,
+                            lens,
+                            "generations",
+                            _GENERATION,
+                            "decomposition.json",
+                        ),
+                    )
+                )
     for key, stage_root in PRODUCTION_STAGE_ROOTS.items():
-        artifact = (
-            _LEDGER_ARTIFACT
-            if key == "provider-ledger"
-            else _PANEL_ARTIFACT
-            if key == "portfolio-panel"
-            else _SOURCE_ARTIFACT
+        artifact = {
+            "provider-ledger": "admit-or-declare-receipt.json",
+            "portfolio-baseline": "portfolio-baseline.json",
+            "portfolio-report": "input\\account-strategy-current-epoch-crosswalk.json",
+            "weekly-returns": "weekly-returns.json",
+        }.get(key, "decomposition.json")
+        tails.append(
+            (
+                key,
+                generation(*stage_root.parts, "generations", _GENERATION, artifact),
+            )
         )
-        tails.append((key, _generated_tail(stage_root, artifact)))
+    tails.append(
+        (
+            "report candidate",
+            generation(
+                "stages",
+                "report",
+                "candidates",
+                _GENERATION,
+                "account-strategy-current-epoch-crosswalk.json",
+            ),
+        )
+    )
+    # Static-snapshot receipts are keyed by the registry's strategy ids.
+    for strategy in _registry_strategy_ids() or ["strategy"]:
+        tails.append(
+            (
+                f"epoch receipt {strategy}",
+                generation(
+                    "stages",
+                    "epoch",
+                    "generations",
+                    _GENERATION,
+                    "receipt",
+                    "static-snapshot",
+                    _STATIC_SNAPSHOT_ACCOUNT,
+                    strategy,
+                    _STATIC_SNAPSHOT_WINDOW,
+                ),
+            )
+        )
+    for mode in ("live_only", "live_plus_backtest"):
+        tails.append(
+            (
+                f"preparation plan {mode}",
+                generation(
+                    "preparation",
+                    "plans",
+                    mode,
+                    _GENERATION,
+                    "inputs",
+                    "base",
+                    "provenance",
+                    _PREPARATION_PROVENANCE_NAME,
+                ),
+            )
+        )
+    tails.append(
+        (
+            "panel qa",
+            _backslash(
+                "stages",
+                "panel",
+                "generations",
+                _GENERATION,
+                "qa",
+                "desktop-attribution",
+                "request-failures.json",
+            ),
+        )
+    )
+    if qa_dir is not None and qa_dir.is_dir():
+        # The panel stage stages the supplied QA evidence under its generation, so its
+        # file names are data: measure them rather than assume a bound.
+        for found in qa_dir.rglob("*"):
+            if found.is_file():
+                relative = found.relative_to(qa_dir)
+                tails.append(
+                    (
+                        f"panel qa file {relative}",
+                        generation(
+                            "stages",
+                            "panel",
+                            "generations",
+                            _GENERATION,
+                            "qa",
+                            *relative.parts,
+                        ),
+                    )
+                )
     return tails
 
 
@@ -5975,20 +6097,30 @@ def longest_generated_tail() -> tuple[str, str]:
 
 
 def _cache_tails() -> list[tuple[str, str]]:
-    generation = "0" * _GENERATION_ID_LENGTH
-    artifact = _CACHE_ARTIFACT.replace("/", "\\")
-    kind = PRODUCTION_STAGE_ROOTS["hybrid-us-industry"].name
+    """The retained cache layouts of portfolio_decomposition and portfolio_correlation."""
+
     return [
-        ("candidates", "\\".join(("candidates", generation, artifact))),
         (
             "training evidence",
-            "\\".join((".decomposition-training-evidence", f"{generation}.json")),
+            _backslash(".decomposition-training-evidence", _CACHE_HASH_FILE),
         ),
-        ("generation", "\\".join((kind, "generations", generation, artifact))),
+        ("training", _backslash(".decomposition-training", _CACHE_HASH_FILE)),
+        ("decomposition index", _backslash(".decomposition-index", _CACHE_HASH_FILE)),
+        ("correlation index", _backslash(".correlation-index", _CACHE_HASH_FILE)),
+        (
+            "candidate",
+            _backslash("candidates", _GENERATION, "decomposition.json"),
+        ),
+        (
+            "candidate staging",
+            _backslash("candidates", ".stage-" + "x" * 8, "decomposition.json"),
+        ),
     ]
 
 
-def _attended_path_budget(output_root: Path, retained_cache_root: Path) -> None:
+def _attended_path_budget(
+    output_root: Path, retained_cache_root: Path, *, qa_dir: Path | None = None
+) -> None:
     """Refuse roots under which a generated path would reach the Windows limit.
 
     A run that crosses it fails hours in, inside a child, at whichever artifact is
@@ -5997,7 +6129,7 @@ def _attended_path_budget(output_root: Path, retained_cache_root: Path) -> None:
     """
 
     for label, root, tails in (
-        ("output", output_root, generated_tails()),
+        ("output", output_root, generated_tails(qa_dir)),
         ("retained cache", retained_cache_root, _cache_tails()),
     ):
         base = len(str(root))
@@ -6065,7 +6197,12 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
         raise MaterializationError("attended workspace dataPortfolio is unavailable")
     _attended_disjoint(output_root, portfolio_root, "output and portfolio")
     _attended_disjoint(output_root, retained_cache_root, "output and retained cache")
-    _attended_path_budget(output_root, retained_cache_root)
+    qa_argument = getattr(args, "qa_dir", None)
+    _attended_path_budget(
+        output_root,
+        retained_cache_root,
+        qa_dir=Path(qa_argument).resolve() if qa_argument is not None else None,
+    )
     try:
         requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
     except ValueError as exc:
@@ -6111,7 +6248,7 @@ def _attended_oracle_ledger_identity(document: Path) -> dict[str, Any]:
             if not isinstance(raw, str):
                 continue
             parts = raw.replace("\\", "/").split("/")
-            if parts[-1] != ORACLE_LEDGER_BASENAME or len(parts) < 2:
+            if parts[-1] != ORACLE_LEDGER_BASENAME:
                 continue
             sha256 = entry.get("sha256")
             if not isinstance(sha256, str) or len(sha256) != 64:
@@ -6128,7 +6265,9 @@ def _attended_oracle_ledger_identity(document: Path) -> dict[str, Any]:
     if len(ledgers) != 1:
         raise MaterializationError("oracle document names more than one ledger input")
     raw, sha256 = next(iter(ledgers.items()))
-    folder = raw.replace("\\", "/").split("/")[-2]
+    segments = raw.replace("\\", "/").split("/")
+    # A root-relative "provider-ledger.json" has no folder: accept it on sha alone.
+    folder = segments[-2] if len(segments) > 1 else ""
     is_generation = re.fullmatch(r"[0-9a-f]{64}", folder) is not None
     return {
         "generation_id": folder if is_generation else None,
@@ -7387,9 +7526,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.resume and not args.execute:
                 raise MaterializationError("attended --resume requires --execute")
             if args.execute:
+                # The hold concerns the stages this run will still execute: a resume
+                # whose panel stage is already complete needs no declaration.
+                completed_stages: list[str] = []
+                if args.resume:
+                    try:
+                        completed_stages = _attended_completed_stages(
+                            Path(args.output_root).resolve(), ATTENDED_STAGES
+                        )
+                    except MaterializationError:
+                        # An unreadable receipt is reported with its own message when
+                        # the run resumes; here every stage still counts as remaining.
+                        completed_stages = []
                 _attended_require_qa_plan(
-                    ATTENDED_STAGES, qa_dir=args.qa_dir, qa_hold=args.qa_hold
+                    [
+                        stage
+                        for stage in ATTENDED_STAGES
+                        if stage not in completed_stages
+                    ],
+                    qa_dir=args.qa_dir,
+                    qa_hold=args.qa_hold,
                 )
+            oracle_join: dict[str, Any] | None = None
             if args.execute:
                 storage = _attended_storage(args)
             if args.preparation_spec is not None:
@@ -7409,8 +7567,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                         requested_as_of=args.requested_as_of,
                         evaluated_on=args.evaluated_on,
                     )
+                    result = {
+                        **result,
+                        "qa": _attended_qa_plan(ATTENDED_STAGES, args.qa_dir),
+                    }
+                    plan_join = _attended_oracle_ledger_join(
+                        result.get("source_phase") or {},
+                        args.oracle_manifest,
+                        declares_acceptance=args.declares_acceptance,
+                    )
+                    if plan_join is not None:
+                        result["oracle_ledger_join"] = plan_join
                     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                     return 0
+                if args.oracle_manifest is not None or args.declares_acceptance:
+                    # Join against the already validated source phase BEFORE any
+                    # preparation stage can create output.
+                    planned = preparation.plan_attended_inputs(
+                        preparation_spec_path=args.preparation_spec,
+                        requested_as_of=args.requested_as_of,
+                        evaluated_on=args.evaluated_on,
+                    )
+                    oracle_join = _attended_oracle_ledger_join(
+                        planned.get("source_phase") or {},
+                        args.oracle_manifest,
+                        declares_acceptance=args.declares_acceptance,
+                    )
                 storage = storage or _attended_storage(args)
                 storage.admit(resume=args.resume)
                 prepared = preparation.prepare_attended_inputs(
@@ -7439,11 +7621,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
-            oracle_join = _attended_oracle_ledger_join(
-                preflight.get("source_phase") or {},
-                args.oracle_manifest,
-                declares_acceptance=args.declares_acceptance,
-            )
+            if oracle_join is None:
+                oracle_join = _attended_oracle_ledger_join(
+                    preflight.get("source_phase") or {},
+                    args.oracle_manifest,
+                    declares_acceptance=args.declares_acceptance,
+                )
             if args.execute:
                 storage = storage or _attended_storage(args)
                 if args.preparation_spec is None:

@@ -139,7 +139,7 @@ FROZEN_SHA = "ba5232ac" + "0" * 56
 REAL_PHASE = {
     "provider_ledger_generation_id": RUN_GENERATION,
     "provider_ledger_catalog": {
-        "path": "C:\Dev\q\out\generations\\" + RUN_GENERATION + "\provider-ledger.json",
+        "path": "C:/Dev/q/out/generations/" + RUN_GENERATION + "/provider-ledger.json",
         "sha256": RUN_SHA,
         "size_bytes": 1,
     },
