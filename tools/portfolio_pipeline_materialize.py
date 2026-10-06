@@ -7604,7 +7604,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "attended --execute with --declares-acceptance requires "
                     "--oracle-manifest (the acceptance inputs manifest)"
                 )
-            if args.execute:
+
+            def qa_gate() -> None:
                 # The hold concerns the stages this run will still execute: a resume
                 # whose panel stage is already complete needs no declaration.
                 completed_stages: list[str] = []
@@ -7626,6 +7627,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     qa_dir=args.qa_dir,
                     qa_hold=args.qa_hold,
                 )
+
+            # A resume reads stage receipts to know what remains, so its gate waits
+            # for the location and environment admission; a cold run reads nothing.
+            if args.execute and not args.resume:
+                qa_gate()
             oracle_join: dict[str, Any] | None = None
             if args.execute:
                 storage = _attended_storage(args)
@@ -7638,6 +7644,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # so retain the attended command's normal environment admission
                 # ahead of either branch.
                 _attended_basic_preflight(args)
+                if args.execute and args.resume:
+                    qa_gate()
                 import portfolio_attended_preparation as preparation
 
                 if not args.execute:
@@ -7700,12 +7708,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
-            if oracle_join is None:
-                oracle_join = _attended_oracle_ledger_join(
-                    preflight.get("source_phase") or {},
-                    args.oracle_manifest,
-                    declares_acceptance=args.declares_acceptance,
-                )
+            if args.execute and args.resume and args.preparation_spec is None:
+                qa_gate()
+            # Join against the FINAL admitted source phase, the ledger the run will
+            # actually consume, even when a planned phase already matched: the planned
+            # join is only the cheap pre-admission refusal.
+            oracle_join = _attended_oracle_ledger_join(
+                preflight.get("source_phase") or {},
+                args.oracle_manifest,
+                declares_acceptance=args.declares_acceptance,
+            )
             if args.execute:
                 storage = storage or _attended_storage(args)
                 if args.preparation_spec is None:
