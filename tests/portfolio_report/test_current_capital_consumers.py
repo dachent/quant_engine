@@ -1947,9 +1947,15 @@ def test_n56_coverage_disclosure_never_explains_a_date_the_line_does_not_prove(
     )
     line = robuxio["derived_cash"][0]
     day = line["as_of_date"]
-    # The label is older than the coverage that would prove it: not honest, not disclosed.
+    # The label reaches the cutoff although the coverage that proves it ends earlier is
+    # not a bound at all; a label older than its own coverage end is not honest, so it
+    # is not disclosed as one either.
     line["coverage_end"] = cutoff
     assert reporter._capital_coverage_bounds(custody, cutoff) is None
+    line["coverage_end"] = day
+    line["as_of_date"] = "2026-01-01"
+    assert reporter._capital_coverage_bounds(custody, cutoff) is None
+    line["as_of_date"] = day
     # A row dated by something other than its cash line is not disclosed as a bound.
     line["coverage_end"] = day
     robuxio["as_of_date"] = "2026-01-01"
