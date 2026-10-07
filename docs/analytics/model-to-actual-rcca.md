@@ -19,8 +19,10 @@ the same window carried two account returns: GrizzlyBulls +0.035% against
 `1.4.0` and `1.3.0`) carries an `account_leg` per strategy: the governed series
 compounded over the window the figure declares, with its basis, window, governed
 date count, compared observations and the `ordered-date-return/1` digest of the
-ledger rows. A builder refuses a figure that is not that series within 1e-8, and
-the report refuses a contract whose leg is not the governed series. The model
+ledger rows. A builder refuses a figure that is not that series within 1e-8. The report never
+publishes such a figure: a row whose contract pins a different provider ledger is
+replaced by a closed `NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE` object (repair
+N66-R), and every other difference is refused. The model
 legs are labelled: the reconciliation compares the account with the signal-state
 by adjusted-close proxy (`model_basis`
 `SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY`), the causal bridge with the

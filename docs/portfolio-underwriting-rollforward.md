@@ -255,9 +255,10 @@ Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
 uses no P123 API and emits no raw account or provider identifiers. Both commands
 must read the same provider-ledger generation the report is built from: the
-contracts carry that series as their `account_leg`, and the report refuses a
-contract whose account return is not the governed account-live series. Rebuild
-both whenever the provider ledger generation changes.
+contracts carry that series as their `account_leg`, and the report never
+publishes an account return that is not the governed account-live series (see
+"Stale implementation contracts" below). Rebuild both whenever the provider
+ledger generation changes.
 
 ```powershell
 & $enginePython tools\portfolio_implementation_reconciliation.py `
@@ -369,6 +370,39 @@ reconstructs missing historical provenance or accepts a mutable pointer.
   --recipe (Join-Path $cycleRoot 'vertical-recipe.json') `
   --output-root $proofRoot
 ```
+
+### Stale implementation contracts (repair N66-R)
+
+The implementation layer is advisory (`PORT-UNDERWRITE-1`,
+`readiness_gate_effect` NONE), so a contract built from an older provider-ledger
+vintage degrades per row instead of stopping the report. The report reads each
+row of both contracts against the governed account-live series over the window
+the row declares (tolerance 1e-8):
+
+- within tolerance: the row is published unchanged;
+- different, the window has governed dates, and the contract pins a unique
+  provider ledger that is not the governed one (`normalized/provider-ledger.json`
+  in the reconciliation, `provider-ledger` in the attribution): the row is
+  replaced by a closed object with status
+  `NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE`: the governed return and basis, both
+  ledger digests, a reason, and the contract's own figure under
+  `SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN` for audit only. It carries no
+  model return, gap, risk statistic or waterfall. The strategy status becomes
+  `NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE`, or
+  `PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY` /
+  `PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY` when only one contract is stale,
+  and each contract reference lists `stale_strategy_ids`;
+- anything else is refused: the same ledger with a different figure, a missing,
+  duplicated or malformed ledger pin, no governed date in the window, or a failed
+  leg or structural check.
+
+`acceptance/validate` raises one `NOT_READY` finding (N66-R) per stale row and a
+`BLOCKER_INVARIANT` when any published row fails an independent recompute from the
+report's own `strategy_returns`. A P123 comparison built before the provider-return
+exclusion took effect carries the contract's as-of date and the policy's effective
+start (`provider_return_policy`, `pre_policy_strategy_ids` on the contract
+reference). The way out is the rebuild of both contracts at schema version 2 from
+the governed provider ledger, whole, at the release as-of date.
 
 ## 3. Verify the expanded analysis before browser work
 

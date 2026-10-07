@@ -78,8 +78,10 @@ without preserving stale calculations or hard-coded operator conclusions.
   that each displayed waterfall closes to the exact model/account endpoint.
   Both artifacts bind their account return to the governed account-live series
   (`account_leg`, basis `BASELINE_ACCOUNT_LIVE`) and name the model basis of
-  every comparison; the report refuses a contract whose account return is not
-  that series, so one window carries one account return.
+  every comparison. The report never publishes an account return that is not
+  that series, so one window carries one account return: a row built from
+  another provider-ledger vintage is a NOT_READY object that shows the governed
+  return and its reason, and carries no model return, gap or waterfall.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
