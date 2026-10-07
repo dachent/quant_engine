@@ -53,8 +53,8 @@ def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
 def test_the_attended_qa_asserts_the_rendered_capital_legend_sentences() -> None:
     """The legend is read from the DOM, so both definitions must be asserted there."""
 
-    assert "epochLegend.includes(\"Capital in = explicit opening capital" in QA_JS
-    assert "epochLegend.includes(\"Net capital = Capital in − Withdrawn.\")" in QA_JS
+    assert 'epochLegend.includes("Capital in = explicit opening capital' in QA_JS
+    assert 'epochLegend.includes("Net capital = Capital in − Withdrawn.")' in QA_JS
     # The same sentences the renderer writes, so QA and app.js cannot drift apart.
     for sentence in (
         "Capital in = explicit opening capital + deposits + internal-in after start.",

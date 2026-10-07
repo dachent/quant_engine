@@ -106,8 +106,6 @@ def test_the_producers_account_roles_reach_both_tables(
 
 
 @pytest.mark.parametrize("selector", ["#leverage-table", "#fact-coverage-matrix-table"])
-def test_a_product_account_carries_no_role_note(
-    tmp_path: Path, selector: str
-) -> None:
+def test_a_product_account_carries_no_role_note(tmp_path: Path, selector: str) -> None:
     table = _render(tmp_path)[selector]
     assert "data-account-role" not in _row_html(table, "prod-1")
