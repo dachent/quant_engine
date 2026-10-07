@@ -23,7 +23,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import math
@@ -59,6 +59,12 @@ BLOCKERS = frozenset({BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION})
 
 USD_TOLERANCE = Decimal("0.01")
 RETURN_TOLERANCE = Decimal("1e-8")
+# The custody producer adds money events exactly, at 100 significant digits
+# (``tools/portfolio_baseline._EXACT_PRECISION``); a check that compares a sum with a
+# producer value by equality must add at the same precision, not at the ambient 28. The
+# acceptance layer does not import product code, so the literal is pinned to the
+# producer's by ``tests/acceptance/test_n56_capital_labels.py``.
+EXACT_PRECISION = 100
 # C1 section 5-5: the published label of an epoch TWR that splices hash-bound HPR
 # gap spans, and the only span length the epoch HPR receipt admits.
 EPOCH_RETURN_LABEL = "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
@@ -211,6 +217,14 @@ class Context:
 
 
 # ------------------------------------------------------------------------ helpers
+
+
+def exact_sum(values: Iterable[Decimal]) -> Decimal:
+    """Add money at the producer's exact precision, whatever the ambient context is."""
+
+    with localcontext() as context:
+        context.prec = EXACT_PRECISION
+        return sum(values, Decimal(0))
 
 
 def to_decimal(value: Any) -> Decimal | None:
@@ -8888,8 +8902,7 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                         amount is not None
                         and signed
                         and None not in signed
-                        and sum((s for s in signed if s is not None), Decimal(0))
-                        != amount
+                        and exact_sum(s for s in signed if s is not None) != amount
                     ):
                         honest = False
                         emit(

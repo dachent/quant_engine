@@ -10,6 +10,7 @@ it; otherwise it is a blocker and never passes silently.
 from __future__ import annotations
 
 import copy
+import decimal
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -426,3 +427,70 @@ def test_retained_rows_and_unavailable_lines_stay_out(tmp_path: Path) -> None:
     unavailable["status"] = "UNAVAILABLE"
     findings = _findings(tmp_path / "unavailable", _custody(cash=unavailable))
     assert not [f for f in findings if ":cash:" in f.entity]
+
+
+LONG_FIRST = "1.1234567890123456789012345678901234"
+LONG_SUM = "4.1234567890123456789012345678901234"
+
+
+def _long_cash(value: str) -> dict[str, Any]:
+    """A fully covered line whose exact event sum has 35 significant digits."""
+
+    cash = _cash(as_of=EARLY, coverage_end=EARLY)
+    cash["events"] = [
+        {"event_date": "2025-12-01", "signed_usd": LONG_FIRST},
+        {"event_date": EARLY, "signed_usd": "3"},
+    ]
+    cash["current_value"]["value"] = value
+    return cash
+
+
+def test_rule_2_a_high_precision_balance_that_is_the_exact_sum_does_not_block(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3 4.1: the producer adds custody events at precision 100, so the
+    validator must too; at the ambient 28 digits a valid balance was refused."""
+
+    cash = _long_cash(LONG_SUM)
+
+    findings = _cash_findings(_findings(tmp_path, _early_world(cash)))
+
+    assert not [f for f in findings if "sum of its events" in f.message]
+    assert checks.BLOCKER_INVARIANT not in {f.klass for f in findings}
+
+
+def test_rule_2_the_exact_sum_is_exact_not_a_tolerance(tmp_path: Path) -> None:
+    """Mutation control: a value one unit in the 34th decimal off is still refused."""
+
+    cash = _long_cash("4.1234567890123456789012345678901235")
+
+    findings = _cash_findings(_findings(tmp_path, _early_world(cash)))
+
+    assert any("sum of its events" in f.message for f in findings)
+
+
+def test_rule_2_the_exact_sum_ignores_the_ambient_decimal_context(
+    tmp_path: Path,
+) -> None:
+    with decimal.localcontext(decimal.Context(prec=5)):
+        findings = _cash_findings(
+            _findings(tmp_path, _early_world(_long_cash(LONG_SUM)))
+        )
+
+    assert not [f for f in findings if "sum of its events" in f.message]
+
+
+def test_the_validator_precision_is_the_producers_exact_precision() -> None:
+    """The acceptance layer cannot import the producer, so a test pins the literal."""
+
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "portfolio_baseline_for_precision", root / "tools" / "portfolio_baseline.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert checks.EXACT_PRECISION == module._EXACT_PRECISION
