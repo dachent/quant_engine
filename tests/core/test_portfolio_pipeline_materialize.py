@@ -6674,10 +6674,12 @@ def test_admission_policy_artifact_resolves_a_non_canonical_selected_input(tmp_p
         materializer._admission_policy_artifact([row])
 
 
-# Astra rg4 class sweep: the materializer's financial identity compares sums with figures
-# the baseline adds exactly.  Thirty significant digits once the fractions are added; the
-# default 28-digit context drops them, and which terms it drops depends on row order.
+# The retained baseline's audit snapshot is sealed: its replay, and the materializer's
+# identity check against it, add the allocation table the way the audit did (the default
+# 28-digit context).  Adding it exactly gives a different figure for a wide table and the
+# retained generation would no longer verify.
 _WIDE_ALLOCATION = "10000000000000000000000000000"
+_HISTORICAL_SUM = Decimal("10000000000000000000000000000")
 
 
 def _allocation_rows(values: list[str]) -> list[dict[str, Any]]:
@@ -6698,23 +6700,21 @@ def _allocation_rows(values: list[str]) -> list[dict[str, Any]]:
         ["0.4", "0.4", _WIDE_ALLOCATION],
     ],
 )
-def test_snapshot_allocation_sum_is_exact_in_either_row_order(
+def test_snapshot_sums_keep_the_historical_arithmetic_in_either_row_order(
     values: list[str],
 ) -> None:
-    systematic = Decimal("10000000000000000000000000000.8")
     reserve = Decimal("0.4")
 
     allocation_sum, weight_sum, total = materializer._financial_snapshot_sums(
-        _allocation_rows(values), systematic, reserve
+        _allocation_rows(values), _HISTORICAL_SUM, reserve
     )
 
-    assert allocation_sum == systematic
-    assert total == Decimal("10000000000000000000000000001.2")
-    assert weight_sum == Decimal("0.3333333333333333333333333333333333")
+    assert allocation_sum == _HISTORICAL_SUM
+    assert total == _HISTORICAL_SUM
+    assert weight_sum == Decimal("0.3333333333333333333333333333")
 
 
 def test_snapshot_sums_do_not_depend_on_the_callers_precision() -> None:
-    systematic = Decimal("10000000000000000000000000000.8")
     results = []
     for precision in (28, 50):
         with localcontext() as context:
@@ -6722,7 +6722,7 @@ def test_snapshot_sums_do_not_depend_on_the_callers_precision() -> None:
             results.append(
                 materializer._financial_snapshot_sums(
                     _allocation_rows([_WIDE_ALLOCATION, "0.4", "0.4"]),
-                    systematic,
+                    _HISTORICAL_SUM,
                     Decimal("0.4"),
                 )
             )

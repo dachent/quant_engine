@@ -12,17 +12,29 @@ from __future__ import annotations
 import csv
 from datetime import date
 from decimal import Decimal, localcontext
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any
 
 import portfolio_baseline as baseline
 
+_MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_pipeline_materialize_for_snapshot_identity",
+    Path(__file__).resolve().parents[2] / "tools" / "portfolio_pipeline_materialize.py",
+)
+assert _MATERIALIZER_SPEC is not None and _MATERIALIZER_SPEC.loader is not None
+materializer = importlib.util.module_from_spec(_MATERIALIZER_SPEC)
+_MATERIALIZER_SPEC.loader.exec_module(materializer)
+
 # Thirty significant digits once the two fractions are added: the ambient context
 # rounds the sum to 28 and drops them, in either order.
 WIDE = "10000000000000000000000000000"
 VALUES = [WIDE, "0.4", "0.4", "0", "0", "0", "0", "0", "0"]
 EXACT_TOTAL = Decimal("10000000000000000000000000000.8")
+# The sealed audit reports the same table summed in the default 28-digit context, which
+# drops the fractions; replaying a retained generation must reproduce that figure.
+HISTORICAL_TOTAL = Decimal("10000000000000000000000000000")
 
 
 def _write_csv(path: Path, source_key: str, rows: list[dict[str, str]]) -> None:
@@ -96,29 +108,56 @@ def _allocation_totals(tmp_path: Path, values: list[str]) -> tuple[Decimal, Deci
     return systematic_total, nav_covered
 
 
-def test_allocation_total_is_exact_in_either_row_order(tmp_path: Path) -> None:
+def test_sealed_snapshot_allocation_total_keeps_the_historical_arithmetic(
+    tmp_path: Path,
+) -> None:
+    """The audit snapshot is sealed: its totals are added as they always were.
+
+    The 2026-08-16 audit reported its systematic total as the default 28-digit sum of
+    the allocation table, and every retained baseline generation replays against that
+    figure.  Adding the table exactly gives a different 29-digit number and makes the
+    sealed snapshot refuse to replay.
+    """
+
+    assert HISTORICAL_TOTAL != EXACT_TOTAL
     forward, _ = _allocation_totals(tmp_path / "forward", VALUES)
     reverse, _ = _allocation_totals(tmp_path / "reverse", list(reversed(VALUES)))
 
-    assert forward == EXACT_TOTAL
-    assert reverse == EXACT_TOTAL
+    assert forward == HISTORICAL_TOTAL
+    assert reverse == HISTORICAL_TOTAL
 
 
-def test_nav_covered_numerator_is_exact_in_either_row_order(tmp_path: Path) -> None:
+def test_sealed_snapshot_nav_covered_numerator_keeps_the_historical_arithmetic(
+    tmp_path: Path,
+) -> None:
     _, forward = _allocation_totals(tmp_path / "forward", VALUES)
     # The first three rows carry a daily series: WIDE, 0.4 and 0.4.
-    assert forward == EXACT_TOTAL
+    assert forward == HISTORICAL_TOTAL
     _, reverse = _allocation_totals(
         tmp_path / "reverse", [*VALUES[:3][::-1], *VALUES[3:]]
     )
-    assert reverse == EXACT_TOTAL
+    assert reverse == HISTORICAL_TOTAL
+
+
+def test_sealed_snapshot_totals_do_not_depend_on_the_callers_precision(
+    tmp_path: Path,
+) -> None:
+    totals = []
+    for precision in (28, 60):
+        with localcontext() as context:
+            context.prec = precision
+            totals.append(_allocation_totals(tmp_path / f"p{precision}", VALUES))
+
+    assert totals == [(HISTORICAL_TOTAL, HISTORICAL_TOTAL)] * 2
 
 
 def _replay_inputs(
     tmp_path: Path, total_liquid: str
 ) -> tuple[dict[str, Any], dict[str, Path]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    # The sealed audit's own summary: the 28-digit sum of its allocation table.
     (tmp_path / "summary.json").write_text(
-        '{"systematic_total": 10000000000000000000000000000.8, "reserve_total": 0.4}',
+        '{"systematic_total": 10000000000000000000000000000, "reserve_total": 0.4}',
         encoding="utf-8",
     )
     (tmp_path / "evidence.json").write_text(
@@ -137,7 +176,7 @@ def _replay_inputs(
         "nav_coverage": {"tolerance": "0.0001", "value": "1"},
         "portfolio_action": "HOLD",
         "reserve_total_usd": {"tolerance": "0", "value": "0.4"},
-        "systematic_total_usd": {"tolerance": "0", "value": str(EXACT_TOTAL)},
+        "systematic_total_usd": {"tolerance": "0", "value": str(HISTORICAL_TOTAL)},
         "total_liquid_usd": {"tolerance": "0", "value": total_liquid},
     }
     paths = {
@@ -149,26 +188,87 @@ def _replay_inputs(
     return spec, paths
 
 
-def test_audit_replay_total_liquid_is_added_exactly(tmp_path: Path) -> None:
-    spec, paths = _replay_inputs(tmp_path, "10000000000000000000000000001.2")
+def test_sealed_audit_replay_reproduces_the_historical_total_liquid(
+    tmp_path: Path,
+) -> None:
+    spec, paths = _replay_inputs(tmp_path, "10000000000000000000000000000")
 
-    replay, _reserve = baseline._replay(spec, paths, EXACT_TOTAL, EXACT_TOTAL)
+    replay, _reserve = baseline._replay(spec, paths, HISTORICAL_TOTAL, HISTORICAL_TOTAL)
 
-    assert replay["total_liquid_usd"] == "10000000000000000000000000001.2"
-    assert replay["systematic_total_usd"] == str(EXACT_TOTAL)
+    assert replay["total_liquid_usd"] == "10000000000000000000000000000"
+    assert replay["systematic_total_usd"] == "10000000000000000000000000000"
 
 
-def test_audit_replay_does_not_depend_on_the_callers_precision(tmp_path: Path) -> None:
-    spec, paths = _replay_inputs(tmp_path, "10000000000000000000000000001.2")
+def test_sealed_audit_replay_does_not_depend_on_the_callers_precision(
+    tmp_path: Path,
+) -> None:
+    spec, paths = _replay_inputs(tmp_path, "10000000000000000000000000000")
 
     rendered = []
     for precision in (28, 60):
         with localcontext() as context:
             context.prec = precision
-            replay, _ = baseline._replay(spec, paths, EXACT_TOTAL, EXACT_TOTAL)
+            replay, _ = baseline._replay(
+                spec, paths, HISTORICAL_TOTAL, HISTORICAL_TOTAL
+            )
         rendered.append(replay["total_liquid_usd"])
 
-    assert rendered == ["10000000000000000000000000001.2"] * 2
+    assert rendered == ["10000000000000000000000000000"] * 2
+
+
+def test_sealed_snapshot_replays_end_to_end_through_the_real_producer(
+    tmp_path: Path,
+) -> None:
+    """Producer to replay: the allocation table the baseline writes reconciles.
+
+    The table is built by the real ``_allocations_and_coverage`` from component
+    rows whose 28-digit and 100-digit sums differ, then replayed against the
+    audit's reported total.  An exactly-added table would not equal that figure.
+    """
+
+    _a, _c, _k, systematic_total, nav_covered = baseline._allocations_and_coverage(
+        _paths(tmp_path / "table", VALUES),
+        ALIASES,
+        date(2026, 7, 25),
+        date(2026, 7, 30),
+    )
+    spec, paths = _replay_inputs(tmp_path / "audit", "10000000000000000000000000000")
+
+    replay, _reserve = baseline._replay(spec, paths, systematic_total, nav_covered)
+
+    assert replay["status"] == "PASS"
+    assert replay["systematic_total_usd"] == "10000000000000000000000000000"
+    assert replay["total_liquid_usd"] == "10000000000000000000000000000"
+
+
+def test_retained_snapshot_identity_verifies_against_the_baseline_replay(
+    tmp_path: Path,
+) -> None:
+    """Producer to consumer: what the baseline replays, the materializer verifies.
+
+    The baseline writes the allocation table and its replay through the real
+    ``_allocations_and_coverage`` and ``_replay``; the materializer then compares
+    its own sums over that table with the replayed totals.  Both sides must add the
+    sealed snapshot the same, historical, way.
+    """
+
+    allocations, _c, _k, systematic_total, nav_covered = (
+        baseline._allocations_and_coverage(
+            _paths(tmp_path / "table", VALUES),
+            ALIASES,
+            date(2026, 7, 25),
+            date(2026, 7, 30),
+        )
+    )
+    spec, paths = _replay_inputs(tmp_path / "audit", "10000000000000000000000000000")
+    replay, reserve = baseline._replay(spec, paths, systematic_total, nav_covered)
+
+    allocation_sum, _weights, total = materializer._financial_snapshot_sums(
+        allocations, Decimal(replay["systematic_total_usd"]), reserve
+    )
+
+    assert allocation_sum == Decimal(replay["systematic_total_usd"])
+    assert total == Decimal(replay["total_liquid_usd"])
 
 
 def test_alpaca_fill_amount_is_the_exact_product_of_quantity_and_price(

@@ -12,7 +12,7 @@ import argparse
 from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import json
@@ -2095,10 +2095,11 @@ def _allocations_and_coverage(
                 "strategy_id": strategy_id,
             }
         )
-    # Exact, in the order-free sense: these totals are compared for equality with the
-    # audit's reported total and with the materializer's own sum.
-    systematic_total = _exact_sum(item[0] for item in by_strategy.values())
-    nav_covered = _exact_sum(nav_covered_values)
+    # The audit snapshot is sealed: these totals are compared with the audit's reported
+    # total and with the materializer's own sum, so they are added as the audit added
+    # them (see ``_snapshot_sum``), never exactly.
+    systematic_total = _snapshot_sum(item[0] for item in by_strategy.values())
+    nav_covered = _snapshot_sum(nav_covered_values)
     return (
         sorted(allocations, key=lambda item: str(item["strategy_id"])),
         sorted(coverage, key=lambda item: str(item["strategy_id"])),
@@ -2247,7 +2248,7 @@ def _replay(
             "allocation total does not reconcile to audit systematic total"
         )
     nav_ratio = nav_covered / systematic_total
-    total = _exact_sum([systematic_total, reserve])
+    total = _snapshot_sum([systematic_total, reserve])
 
     actuals: dict[str, Decimal | str] = {
         "correlation_one_stress": stress,
@@ -2328,6 +2329,28 @@ def _capital_amount(value: Decimal | None) -> dict[str, Any]:
     if value is None:
         return {"currency": "USD", "status": "UNAVAILABLE", "value": None}
     return {"currency": "USD", "status": "AVAILABLE", "value": decimal_text(value)}
+
+
+# The audit snapshot (the 2026-08-16 audit) is a sealed, retained artifact: its totals
+# were fixed by summing the allocation table in the default 28-digit context, and every
+# retained baseline generation replays and verifies against those figures.  A sum that is
+# replayed against, or compared with, sealed bytes keeps that arithmetic.  Exact money
+# arithmetic (``_exact_sum``) belongs to current capital, whose outputs are not compared
+# with a previously sealed generation.
+_SNAPSHOT_PRECISION: Final = 28
+
+
+def _snapshot_sum(values: Iterable[Decimal]) -> Decimal:
+    """Add as the sealed audit snapshot did: sequentially at 28 digits, half-even.
+
+    The context is pinned, so the sum no longer follows the caller's precision, and for
+    the default context it is the historical ``sum(values, Decimal(0))`` exactly.
+    """
+
+    with localcontext() as context:
+        context.prec = _SNAPSHOT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return sum(values, Decimal(0))
 
 
 def _exact_sum(values: Iterable[Decimal]) -> Decimal:

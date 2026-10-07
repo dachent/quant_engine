@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 import hashlib
 import importlib.util
 import json
@@ -3752,14 +3752,27 @@ def _semantic_gate_payload(
     }
 
 
+# The audit snapshot is sealed (see ``portfolio_baseline._snapshot_sum``): the baseline
+# replays it, and this check compares with that replay, adding sequentially at 28 digits.
+_SNAPSHOT_PRECISION: Final = 28
+
+
+def _snapshot_sum(values: Sequence[Decimal]) -> Decimal:
+    with localcontext() as context:
+        context.prec = _SNAPSHOT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return sum(values, Decimal(0))
+
+
 def _financial_snapshot_sums(
     allocations: Sequence[object], systematic: Decimal, reserve: Decimal
 ) -> tuple[Decimal, Decimal, Decimal]:
     """The audit snapshot's allocation sum, weight sum and systematic plus reserve.
 
-    All three are added exactly: the first and the last are compared for equality
-    with figures the baseline adds exactly, and the default 28-digit context rounds a
-    wide sum differently depending on the order of its terms.
+    The snapshot is a sealed, retained artifact: its sums are compared for equality
+    with the figures the baseline replayed from it, so they keep the historical
+    arithmetic (28 digits, in row order) and never the exact arithmetic that current
+    capital uses.
     """
 
     values = [
@@ -3775,9 +3788,9 @@ def _financial_snapshot_sums(
         if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
     ]
     return (
-        _capital_sum(values),
-        _capital_sum(weights),
-        _capital_sum([systematic, reserve]),
+        _snapshot_sum(values),
+        _snapshot_sum(weights),
+        _snapshot_sum([systematic, reserve]),
     )
 
 
