@@ -6036,3 +6036,63 @@ def test_n65_the_recorded_column_is_not_judged_at_older_versions(
         report["report_schema_version"] = 3
 
     assert _snapshot_findings(tmp_path, older) == []
+
+def _counts_context(panel: dict[str, Any]) -> checks.Context:
+    context = checks.Context(
+        gen=None,  # type: ignore[arg-type]
+        cutoff=checks.date(2026, 9, 17),
+        cutoff_source="test",
+    )
+    context.gen = type("G", (), {"panel": panel})()  # type: ignore[assignment]
+    return context
+
+
+def _classified_positions_panel(positions_count: int) -> dict[str, Any]:
+    classes = (
+        ["CURRENT_AT_CUTOFF"] * 3
+        + ["HISTORICAL"] * 2
+        + ["LATEST_BEFORE_CUTOFF"]
+        + ["AFTER_CUTOFF"]
+    )
+    return {
+        "counts": {"positions": positions_count},
+        "positions": [{"position_class": item} for item in classes],
+        "position_snapshots": {
+            "current_at_cutoff_rows": 3,
+            "latest_before_cutoff_rows": 1,
+            "historical_rows": 2,
+            "after_cutoff_rows": 1,
+            "unavailable_rows": 0,
+        },
+    }
+
+
+def test_n62_the_positions_count_is_the_rows_current_at_the_cutoff() -> None:
+    panel = _classified_positions_panel(3)
+
+    assert list(checks.check_counts(_counts_context(panel))) == []
+
+
+def test_n62_a_count_of_every_accepted_row_is_not_the_current_holdings() -> None:
+    findings = list(
+        checks.check_counts(_counts_context(_classified_positions_panel(7)))
+    )
+
+    assert [(item.check_id, item.klass, item.entity) for item in findings] == [
+        ("preservation.counts", checks.BLOCKER_INVARIANT, "positions")
+    ]
+
+
+def test_n62_a_snapshot_count_that_differs_from_its_rows_is_a_finding() -> None:
+    panel = _classified_positions_panel(3)
+    panel["position_snapshots"]["historical_rows"] = 5
+
+    findings = list(checks.check_counts(_counts_context(panel)))
+
+    assert [item.entity for item in findings] == ["position_snapshots.historical_rows"]
+
+
+def test_n62_a_panel_without_position_classes_still_counts_every_row() -> None:
+    panel = {"counts": {"positions": 2}, "positions": [{}, {}]}
+
+    assert list(checks.check_counts(_counts_context(panel))) == []

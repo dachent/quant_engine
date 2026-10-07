@@ -2553,6 +2553,9 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
         return
     checks = rows(ctx.panel, "reconciliation_checks")
     performance = rows(ctx.panel, "performance")
+    positions = rows(ctx.panel, "positions")
+    by_class = Counter(str(row.get("position_class")) for row in positions)
+    classified = any("position_class" in row for row in positions)
     derived: dict[str, tuple[int, tuple[str, ...]]] = {
         "reconciliation_checks": (len(checks), ()),
         "reconciliation_passed": (
@@ -2570,7 +2573,12 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
         ),
         "accounts": (len(rows(ctx.panel, "account_summary")), ()),
         "strategies": (len(rows(ctx.panel, "strategies")), ("D9",)),
-        "positions": (len(rows(ctx.panel, "positions")), ()),
+        # The count is the current holdings: a classified panel counts the rows at the
+        # cutoff, not the accepted history beside them (N62).
+        "positions": (
+            by_class["CURRENT_AT_CUTOFF"] if classified else len(positions),
+            (),
+        ),
     }
     for key, (value, defects) in derived.items():
         if key in counts and counts[key] != value:
@@ -2585,6 +2593,28 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
                 defects,
                 "displayed count differs from the rows it counts",
             )
+    snapshots = node(ctx.panel, "position_snapshots")
+    if isinstance(snapshots, Mapping):
+        snapshot_counts = {
+            "current_at_cutoff_rows": by_class["CURRENT_AT_CUTOFF"],
+            "latest_before_cutoff_rows": by_class["LATEST_BEFORE_CUTOFF"],
+            "historical_rows": by_class["HISTORICAL"],
+            "after_cutoff_rows": by_class["AFTER_CUTOFF"],
+            "unavailable_rows": by_class["UNAVAILABLE"],
+        }
+        for key, value in snapshot_counts.items():
+            if snapshots.get(key) != value:
+                yield _finding(
+                    "preservation.counts",
+                    BLOCKER_INVARIANT,
+                    f"position_snapshots.{key}",
+                    snapshots.get(key),
+                    value,
+                    PANEL,
+                    f"$.position_snapshots.{key}",
+                    (),
+                    "displayed position snapshot count differs from the rows it counts",
+                )
 
 
 # ------------------------------------------------------------------ capital checks
