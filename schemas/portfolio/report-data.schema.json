@@ -193,7 +193,13 @@
     "flow_reconciliation": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "coverage_data_quality": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "fact_coverage_matrix": {"type": "array", "items": {"type": "object"}},
+    "fact_coverage_matrix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {"account_role": {"$ref": "#/$defs/account_role"}}
+      }
+    },
     "hwm_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -369,14 +375,104 @@
       "required": ["benchmark_assignments", "comparisons", "costs", "generation_id"],
       "properties": {
         "benchmark_assignments": {"type": "array", "minItems": 7, "maxItems": 7},
+        "benchmark_comparisons": {"type": "array", "maxItems": 7},
         "comparisons": {"type": "array", "minItems": 7, "maxItems": 7},
         "costs": {"type": "array", "minItems": 7, "maxItems": 7},
         "generation_id": {"$ref": "#/$defs/sha256"}
       }
     },
-    "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}}
+    "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}},
+    "value_basis_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "rule",
+        "calculation_cutoff_date",
+        "common_complete_date",
+        "strategies",
+        "bounded_sections"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "rule": {"const": "FXB-1"},
+        "calculation_cutoff_date": {"type": "string", "format": "date"},
+        "common_complete_date": {"type": "string", "format": "date"},
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "effective_end",
+              "bound_kind",
+              "provider_ids",
+              "account_ids",
+              "fx_source_id",
+              "fx_generation_id",
+              "fx_observed_end",
+              "unconverted_native_observations"
+            ],
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "effective_end": {"type": "string", "format": "date"},
+              "bound_kind": {"type": "string", "minLength": 1},
+              "provider_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "account_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+              "fx_source_id": {"type": "string", "minLength": 1},
+              "fx_generation_id": {"type": "string", "minLength": 1},
+              "fx_observed_end": {"type": "string", "format": "date"},
+              "unconverted_native_observations": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["count", "first_date", "last_date"],
+                "properties": {
+                  "count": {"type": "integer", "minimum": 0},
+                  "first_date": {"type": "string", "format": "date"},
+                  "last_date": {"type": "string", "format": "date"}
+                }
+              }
+            }
+          }
+        },
+        "bounded_sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["section", "entity", "field", "date", "bounded_by"],
+            "properties": {
+              "section": {
+                "enum": [
+                  "account_summary",
+                  "current_capital",
+                  "decomposition_lenses",
+                  "dependence_analysis",
+                  "hwm_governed_proof",
+                  "strategy_history_contract",
+                  "strategy_summary",
+                  "twr_mwr"
+                ]
+              },
+              "entity": {"type": "string", "minLength": 1},
+              "field": {"type": "string", "minLength": 1},
+              "date": {"type": "string", "format": "date"},
+              "bounded_by": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    }
   },
   "$defs": {
+    "account_role": {"type": ["string", "null"]},
     "custody_handoff_current_capital": {
       "type": "object",
       "additionalProperties": false,
@@ -1213,6 +1309,7 @@
       "required": ["account_id", "amount", "classification", "coverage_reason", "coverage_status", "data_class", "included_in_nav", "measurement_basis", "native_source_record_id", "provider_id", "reason", "security_id", "source_amount", "source_catalog_generation_id", "source_catalog_sha256", "source_record_ids", "strategy_id"],
       "properties": {
         "account_id": {"type": ["string", "null"]},
+        "account_role": {"$ref": "#/$defs/account_role"},
         "amount": {"$ref": "#/$defs/leverage_amount"},
         "classification": {"type": "string", "minLength": 1},
         "coverage_reason": {"type": "string", "minLength": 1},

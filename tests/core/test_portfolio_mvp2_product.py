@@ -16,6 +16,8 @@ import sys
 import types
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 import portfolio_financial_mvp_contract as financial
 import portfolio_financial_outcomes as outcomes
@@ -250,6 +252,17 @@ PATCH_INVENTORY: dict[tuple[str, str], tuple[int | tuple[int, int], str]] = {
 # - validate_financial_outcomes(..., allow_synthetic=True) accepts the
 #   DEVELOPMENT plan-bundle profile and the SYNTHETIC capital authority and
 #   skips the applicability-readiness gate for this synthetic world.
+# Sections and fields the real report builder emits that report-data.schema.json has
+# never described; each predates this branch (g4-schema-preexisting.md).
+UNSCHEMAED_SECTIONS_BEFORE_THIS_BRANCH = {
+    "decomposition_lenses",
+    "hwm_governed_proof",
+    "invested_capital",
+}
+UNSCHEMAED_FIELDS_BEFORE_THIS_BRANCH = [
+    "dependence_analysis: Additional properties are not allowed "
+    "('complete_through' was unexpected)"
+]
 CONTRACT_SCHEMA = (
     fixture.REPOSITORY_ROOT
     / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -832,6 +845,33 @@ def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
     consumers = consumer_fixture.build_consumers_vertical(
         root / "u", monkeypatch, decomposition, selected, capital, hwm, dependence
     )
+    # The report the real producers built from this one source set carries every
+    # attended section.  The closed report-data schema admits all of it except the
+    # gaps recorded in UNSCHEMAED_BEFORE_THIS_BRANCH, which the producers have emitted
+    # since before this branch and the schema has never described.  They are pinned
+    # exactly: describing one makes this assertion fail until its entry is removed.
+    attended_report = json.loads(
+        (consumers["report_candidate"] / "portfolio-report-data.json").read_bytes()
+    )
+    schemas_root = Path(__file__).resolve().parents[2] / "schemas" / "portfolio"
+    report_schema = json.loads((schemas_root / "report-data.schema.json").read_bytes())
+    baseline_schema = json.loads(
+        (schemas_root / "baseline-catalog.schema.json").read_bytes()
+    )
+    registry = Registry().with_resource(
+        baseline_schema["$id"], Resource.from_contents(baseline_schema)
+    )
+    undescribed = set(attended_report) - set(report_schema["properties"])
+    assert undescribed == UNSCHEMAED_SECTIONS_BEFORE_THIS_BRANCH
+    described = {
+        key: value for key, value in attended_report.items() if key not in undescribed
+    }
+    assert [
+        f"{'/'.join(str(part) for part in error.absolute_path)}: {error.message}"
+        for error in Draft202012Validator(
+            report_schema, format_checker=FormatChecker(), registry=registry
+        ).iter_errors(described)
+    ] == UNSCHEMAED_FIELDS_BEFORE_THIS_BRANCH
     spec = assemble_product_spec(
         root / "p",
         monkeypatch,
