@@ -6228,9 +6228,15 @@ def _freshness_assessments(
     if schema_version == 4:
         # Version 4 is dated at the data cutoff and carries the execution date.
         expected.add("evaluated_on")
-    accepted = {frozenset(expected)}
-    if schema_version in {3, 4}:
-        accepted.add(frozenset(expected | {"provider_ledger"}))
+    with_ledger = frozenset(expected | {"provider_ledger"})
+    if schema_version == 4:
+        # Version 4 is bound to the ledger it was judged against: the identity is
+        # required, not optional, as in the formal schema and the pipeline gate.
+        accepted = {with_ledger}
+    elif schema_version == 3:
+        accepted = {frozenset(expected), with_ledger}
+    else:
+        accepted = {frozenset(expected)}
     if schema_version not in {2, 3, 4} or frozenset(payload) not in accepted:
         raise ReportValidationError("freshness health contract differs")
     as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")

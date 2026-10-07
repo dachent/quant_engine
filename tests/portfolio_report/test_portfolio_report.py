@@ -7898,3 +7898,43 @@ def test_freshness_assessments_schema_four_requires_the_run_date_key(
         reporter.ReportValidationError, match="freshness health contract differs"
     ):
         reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_four_requires_the_provider_ledger_identity(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: a schema-4 bundle with the identity deleted skipped every source check.
+
+    The formal schema and the pipeline gate require ``provider_ledger`` at version 4; the
+    reader accepted the key set without it, so deleting the identity bypassed the report's
+    source binding.
+    """
+
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    payload = _schema_four_freshness_payload(
+        identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+    )
+    del payload["provider_ledger"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="freshness health contract differs"
+    ):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_three_still_accepts_an_absent_identity(
+    tmp_path: Path,
+) -> None:
+    payload = _bound_freshness_payload({})
+    del payload["provider_ledger"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    assessments, as_of, _sha256 = reporter._freshness_assessments(
+        freshness, date(2026, 8, 7)
+    )
+
+    assert assessments == [{"evaluated_on": "2026-08-07"}]
+    assert as_of == date(2026, 8, 7)

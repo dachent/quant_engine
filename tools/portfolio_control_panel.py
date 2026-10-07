@@ -781,9 +781,15 @@ def _freshness_health(
     if schema_version == 4:
         # Version 4 is dated at the data cutoff and carries the execution date.
         expected_bundle_keys.add("evaluated_on")
-    accepted_bundle_keys = {frozenset(expected_bundle_keys)}
-    if schema_version in {3, 4}:
-        accepted_bundle_keys.add(frozenset(expected_bundle_keys | {"provider_ledger"}))
+    with_ledger = frozenset(expected_bundle_keys | {"provider_ledger"})
+    if schema_version == 4:
+        # Version 4 is bound to the ledger it was judged against: the identity is
+        # required, not optional, as in the formal schema and the pipeline gate.
+        accepted_bundle_keys = {with_ledger}
+    elif schema_version == 3:
+        accepted_bundle_keys = {frozenset(expected_bundle_keys), with_ledger}
+    else:
+        accepted_bundle_keys = {frozenset(expected_bundle_keys)}
     if frozenset(payload) not in accepted_bundle_keys:
         raise ControlPanelValidationError("freshness health keys differ")
     if schema_version not in {2, 3, 4}:

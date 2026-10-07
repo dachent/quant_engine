@@ -5457,6 +5457,57 @@ def test_schema_v4_freshness_requires_the_execution_date_key(tmp_path: Path) -> 
         panel._freshness_health(health, "2026-08-03")
 
 
+def test_schema_v4_freshness_requires_the_provider_ledger_identity(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: the panel accepted a schema-4 bundle with the identity deleted."""
+
+    good = tmp_path / "freshness-v4-good.json"
+    _write_json(
+        good,
+        _schema_v4_health(
+            tmp_path,
+            as_of="2026-08-03",
+            evaluated_on="2026-10-04",
+            ledger_as_of="2026-08-03",
+        ),
+    )
+    assert panel._freshness_health(good, "2026-08-03")
+
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-10-04",
+        ledger_as_of="2026-08-03",
+    )
+    del payload["provider_ledger"]
+    bad = tmp_path / "freshness-v4-no-ledger.json"
+    _write_json(bad, payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="freshness health keys differ"
+    ):
+        panel._freshness_health(bad, "2026-08-03")
+
+
+def test_schema_v3_freshness_still_accepts_an_absent_provider_ledger(
+    tmp_path: Path,
+) -> None:
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-08-03",
+        ledger_as_of="2026-08-03",
+    )
+    payload["assessment_schema_version"] = 3
+    del payload["evaluated_on"]
+    del payload["provider_ledger"]
+    health = tmp_path / "freshness-v3-no-ledger.json"
+    _write_json(health, payload)
+
+    assert panel._freshness_health(health, "2026-08-03")
+
+
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
     with pytest.raises(
         panel.ControlPanelValidationError, match="freshness health is mandatory"
@@ -5810,6 +5861,15 @@ def test_publication_manifest_is_dated_at_the_data_cutoff_not_the_execution_date
             "assessment_schema_version": 4,
             "evaluated_on": "2026-08-04",
             "policies": [policy],
+            # Schema 4 names the ledger it was judged against.
+            "provider_ledger": {
+                "as_of_date": "2026-07-30",
+                "catalog_sha256": "a" * 64,
+                "catalog_size_bytes": 100,
+                "generation_id": "b" * 64,
+                "manifest_sha256": "c" * 64,
+                "manifest_size_bytes": 200,
+            },
         }
     )
     for assessment in freshness["assessments"]:
@@ -12853,7 +12913,9 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
     )
 
 
-def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
+def test_report_readers_accept_versions_one_and_two(
+    tmp_path: Path,
+) -> None:
     for version in (1, 2, 3):
         value = _report()
         value["report_schema_version"] = version
