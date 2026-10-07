@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
@@ -13825,3 +13825,304 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     assert evidence["allocationRows"][1]["dateText"] == hostile_date, evidence
     assert evidence["positionDateTexts"][0] == position_attack, evidence
     assert evidence["pageErrors"] == [], evidence
+
+
+# QC1-P: the panel producer follows the governed predicates, not the first row.
+
+_QC1P_STRATEGIES = (
+    # (id, name, history observations, history status)
+    ("p123-eu", "EU [P123]", 4208, "ACCEPTED_FOR_ECONOMIC_INFERENCE"),
+    (
+        "robuxio-crypto",
+        "Robuxio Crypto (High Sharpe High Vol)",
+        2165,
+        "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+    ),
+    ("volatis-strategy", "Volatis Strategy", 0, "UNAVAILABLE_NO_ACCEPTED_HISTORY"),
+    (
+        "grizzlybears-vtma",
+        "GrizzlyBears VTMA",
+        4038,
+        "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+    ),
+)
+_QC1P_SOURCES = ("us-economic", "europe-economic")
+# Which (strategy, source) pairs the real analytics fit, and the backtest
+# observations that fit consumed in the hybrid mode.
+_QC1P_FITS = {
+    ("EU [P123]", "europe-economic"): 4208,
+    ("Volatis Strategy", "us-economic"): 0,
+    ("GrizzlyBears VTMA", "us-economic"): 4038,
+}
+
+
+def _qc1p_strategy_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy_id": strategy_id,
+            "strategy_name": name,
+            "history_observations": observations,
+            "history_compatibility_status": status,
+            "live_plus_backtest_status": (
+                "ELIGIBLE_ACCEPTED_HISTORY"
+                if status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                else "BLOCKED_NO_ACCEPTED_HISTORY"
+            ),
+            "benchmark_id": "benchmark:developed-ex-us-iefa",
+            "account_live_observed_start": "2025-09-15",
+        }
+        for strategy_id, name, observations, status in _QC1P_STRATEGIES
+    ]
+
+
+def _qc1p_lens_row(name: str, source_key: str, mode: str) -> dict[str, Any]:
+    """A decomposition series row in the shape the real lens producer emits."""
+
+    if (name, source_key) not in _QC1P_FITS:
+        return {
+            "alpha": None,
+            "coverage": None,
+            "model_quality": {
+                "decision_status": "UNAVAILABLE",
+                "holdout_predicted_r_squared": None,
+            },
+            "selection_status": "NOT_APPLICABLE_METHOD_SCOPE",
+            "series_id": name,
+            "source_key": source_key,
+            "status": "UNAVAILABLE",
+            "unavailable_reasons": ["NOT_APPLICABLE_METHOD_SCOPE"],
+        }
+    used = _QC1P_FITS[(name, source_key)] if mode == "LIVE_PLUS_BACKTEST" else 0
+    return {
+        "alpha": {"net_annualized": "0.32"},
+        "coverage": {"aligned_observations": 4388 if used else 181},
+        "model_quality": {
+            "decision_status": "PM_VALID",
+            "holdout_predicted_r_squared": "0.15",
+        },
+        "selection_status": "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL",
+        "series_composition": {"backtest_observations_used": used},
+        "series_id": name,
+        "source_key": source_key,
+        "status": "AVAILABLE",
+        "unavailable_reasons": None,
+    }
+
+
+def _qc1p_lenses() -> dict[str, Any]:
+    """Both source keys list every strategy, us-economic rows first (real order)."""
+
+    modes: dict[str, list[dict[str, Any]]] = {}
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        rows = [
+            _qc1p_lens_row(name, source_key, mode)
+            for source_key in _QC1P_SOURCES
+            for _id, name, _obs, _status in _QC1P_STRATEGIES
+        ]
+        modes[mode] = [
+            {
+                "lens_id": "ECONOMIC_FACTOR",
+                "default_source_key": "us-economic",
+                "available_source_keys": list(_QC1P_SOURCES),
+                "series": rows,
+            }
+        ]
+    return {
+        "default_evidence_mode": "LIVE_ONLY",
+        "default_lens": "ECONOMIC_FACTOR",
+        "modes": modes,
+    }
+
+
+def _qc1p_weekly(live_benchmark_return: float) -> dict[str, Any]:
+    """Weekly rows in the real feed shape: 90 pre-live weeks, then 10 live weeks."""
+
+    first = date(2024, 1, 1).toordinal()
+    week_text = [
+        date.fromordinal(first + 7 * index).isoformat() for index in range(100)
+    ]
+    meta = [1, week_text[0], week_text[-1], "COMPLETE_WITHIN_ACCEPTED_CALENDAR"]
+    benchmark = {
+        week: (
+            (-0.02 if index % 3 == 0 else 0.01) if index < 90 else live_benchmark_return
+        )
+        for index, week in enumerate(week_text)
+    }
+    live = {week: 0.005 for week in week_text[90:]}
+    hybrid = {week: 0.004 for week in week_text}
+    series: list[dict[str, Any]] = [
+        {
+            "series_id": "market:IEFA",
+            "values": benchmark,
+            "observation_meta": {week: meta for week in week_text},
+        }
+    ]
+    for _id, name, _obs, _status in _QC1P_STRATEGIES:
+        series.append(
+            {
+                "series_id": f"strategy:{name}",
+                "values_by_mode": {"LIVE_ONLY": live, "LIVE_PLUS_BACKTEST": hybrid},
+                "observation_meta_by_mode": {
+                    "LIVE_ONLY": {week: meta for week in live},
+                    "LIVE_PLUS_BACKTEST": {week: meta for week in week_text},
+                },
+            }
+        )
+    return {"series": series, "live_start": week_text[90]}
+
+
+def _qc1p_underwriting(
+    lenses: Mapping[str, Any] | None = None,
+    live_benchmark_return: float = -0.03,
+) -> dict[str, Any]:
+    weekly = _qc1p_weekly(live_benchmark_return)
+    strategies = _qc1p_strategy_rows()
+    for row in strategies:
+        row["account_live_observed_start"] = weekly["live_start"]
+    result, _policy_hash = panel._strategy_underwriting(
+        strategies,
+        lenses or _qc1p_lenses(),
+        {
+            "economic_driver_cluster_budget": {"clusters": []},
+            "correlation_one": {"components": [], "loss": "0.2"},
+        },
+        {"series": weekly["series"]},
+        "2026-09-17",
+    )
+    return result
+
+
+def _qc1p_rows_by_name(underwriting: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["strategy_name"]: row for row in underwriting["rows"]}
+
+
+def test_membership_is_the_h2_predicate_and_the_lens_row_is_the_strategys_own() -> None:
+    """N61 (A12): EU matched 4208 and Robuxio 2165, Volatis stays 0 and blocked.
+
+    The first ECONOMIC_FACTOR row for EU is the us-economic row, which is
+    UNAVAILABLE and carries no composition; the strategy's own europe-economic row
+    consumed 4208 backtest observations.  Robuxio has no fit in either lens.
+    """
+
+    underwriting = _qc1p_underwriting()
+    rows = _qc1p_rows_by_name(underwriting)
+    available = "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+    blocked = "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+
+    assert {
+        name: (
+            row["long_history"]["status"],
+            row["long_history"]["matched_backtest_observations"],
+        )
+        for name, row in rows.items()
+    } == {
+        "EU [P123]": (available, 4208),
+        "Robuxio Crypto (High Sharpe High Vol)": (available, 2165),
+        "Volatis Strategy": (blocked, 0),
+        "GrizzlyBears VTMA": (available, 4038),
+    }
+    assert underwriting["counts"]["version_matched_long_history"] == 3
+    eu_backtest = rows["EU [P123]"]["evidence_layers"]["backtest"]
+    assert eu_backtest["matched_observations"] == 4208
+    for name in ("EU [P123]", "Robuxio Crypto (High Sharpe High Vol)"):
+        assert (
+            "NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+            not in rows[name]["advisory_disposition"]["reasons"]
+        )
+    assert (
+        "NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+        in rows["Volatis Strategy"]["advisory_disposition"]["reasons"]
+    )
+
+
+def test_lens_statistics_come_from_the_strategys_available_row_with_its_source() -> (
+    None
+):
+    rows = _qc1p_rows_by_name(_qc1p_underwriting())
+    eu = rows["EU [P123]"]["long_history"]
+    robuxio = rows["Robuxio Crypto (High Sharpe High Vol)"]["long_history"]
+    grizzly = rows["GrizzlyBears VTMA"]["long_history"]
+
+    assert eu["hybrid_aligned_observations"] == 4388
+    assert eu["live_aligned_observations"] == 181
+    assert eu["lens_statistics_source"] == {
+        "lens_id": "ECONOMIC_FACTOR",
+        "live_source_key": "europe-economic",
+        "hybrid_source_key": "europe-economic",
+    }
+    assert grizzly["lens_statistics_source"]["hybrid_source_key"] == "us-economic"
+    # No row in any source fits Robuxio: the statistic is absent with its own
+    # reason, and it never changes membership.
+    assert robuxio["hybrid_aligned_observations"] is None
+    assert robuxio["lens_statistics_source"] == {
+        "lens_id": "ECONOMIC_FACTOR",
+        "live_source_key": None,
+        "hybrid_source_key": None,
+    }
+    assert robuxio["membership_rule"] == (
+        "H2_ACCEPTED_HISTORY_AND_ELIGIBLE_LIVE_PLUS_BACKTEST"
+    )
+
+
+def test_a_diagnostic_row_in_the_second_source_is_the_lens_row() -> None:
+    lenses = _qc1p_lenses()
+    for lens in lenses["modes"]["LIVE_PLUS_BACKTEST"]:
+        for row in lens["series"]:
+            if (
+                row["series_id"] == "EU [P123]"
+                and row["source_key"] == "europe-economic"
+            ):
+                row["status"] = "DIAGNOSTIC_ONLY"
+    row = _qc1p_rows_by_name(_qc1p_underwriting(lenses))["EU [P123]"]
+
+    assert row["long_history"]["lens_statistics_source"]["hybrid_source_key"] == (
+        "europe-economic"
+    )
+    assert row["long_history"]["matched_backtest_observations"] == 4208
+
+
+def test_eu_regime_prehistory_reads_the_weekly_hybrid_series_once_matched() -> None:
+    """The regime prehistory gate follows membership, not a lens row."""
+
+    eu = _qc1p_rows_by_name(_qc1p_underwriting())["EU [P123]"]
+    regimes = {row["regime_id"]: row for row in eu["regime_conformance"]["regimes"]}
+
+    assert regimes["BENCHMARK_NEGATIVE"]["matched_prehistory_observations"] == 30
+    assert regimes["BENCHMARK_NEGATIVE"]["empirical_p05"] is not None
+    assert eu["regime_conformance"]["status"] == (
+        "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+    )
+
+
+def test_a_regime_without_a_live_event_is_named_for_the_missing_event() -> None:
+    """N70 (A14): p05/p95 are published, so the range is not the missing piece."""
+
+    underwriting = _qc1p_underwriting(live_benchmark_return=0.02)
+    grizzly = _qc1p_rows_by_name(underwriting)["GrizzlyBears VTMA"]
+    negative = next(
+        row
+        for row in grizzly["regime_conformance"]["regimes"]
+        if row["regime_id"] == "BENCHMARK_NEGATIVE"
+    )
+
+    assert negative["latest_week"] is None
+    assert negative["empirical_p05"] is not None
+    assert negative["empirical_p95"] is not None
+    assert negative["latest_event_range_status"] == "UNAVAILABLE_NO_LIVE_REGIME_EVENT"
+
+
+def test_a_live_event_without_a_prehistory_range_keeps_the_range_reason() -> None:
+    """The range reason survives where a live event exists and the range does not."""
+
+    volatis = _qc1p_rows_by_name(_qc1p_underwriting())["Volatis Strategy"]
+    negative = next(
+        row
+        for row in volatis["regime_conformance"]["regimes"]
+        if row["regime_id"] == "BENCHMARK_NEGATIVE"
+    )
+
+    assert negative["latest_week"] is not None
+    assert negative["empirical_p05"] is None
+    assert negative["latest_event_range_status"] == (
+        "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
+    )

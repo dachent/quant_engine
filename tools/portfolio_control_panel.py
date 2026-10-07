@@ -7395,6 +7395,15 @@ def _factor_row_for_strategy(
     strategy_name: str,
     lens_id: str = "ECONOMIC_FACTOR",
 ) -> dict[str, Any] | None:
+    """The strategy's own usable fit in this lens, never the first row by position.
+
+    Every source key of a lens lists every strategy, and a strategy outside a
+    source's method scope has an UNAVAILABLE placeholder there.  The row is the
+    strategy's AVAILABLE row, else its DIAGNOSTIC row, preferring the lens's
+    default source when more than one source fits.  A strategy no source fits has
+    no row: its statistics are absent, and the series rows keep their reasons.
+    """
+
     modes = _object(decomposition_lenses.get("modes"), "decomposition lens modes")
     lenses_value = modes.get(evidence_mode)
     if lenses_value is None:
@@ -7403,14 +7412,73 @@ def _factor_row_for_strategy(
     lens = next((row for row in lenses if row.get("lens_id") == lens_id), None)
     if lens is None:
         return None
-    return next(
-        (
-            row
-            for row in _objects(lens.get("series"), f"{lens_id} series")
-            if row.get("series_id") == strategy_name
-        ),
-        None,
-    )
+    rows = [
+        row
+        for row in _objects(lens.get("series"), f"{lens_id} series")
+        if row.get("series_id") == strategy_name
+    ]
+    default_source_key = lens.get("default_source_key")
+    for status_prefix in ("AVAILABLE", "DIAGNOSTIC"):
+        usable = [
+            row for row in rows if str(row.get("status", "")).startswith(status_prefix)
+        ]
+        preferred = next(
+            (row for row in usable if row.get("source_key") == default_source_key),
+            None,
+        )
+        if preferred is not None:
+            return preferred
+        if usable:
+            return usable[0]
+    return None
+
+
+LONG_HISTORY_MEMBERSHIP_RULE: Final = (
+    "H2_ACCEPTED_HISTORY_AND_ELIGIBLE_LIVE_PLUS_BACKTEST"
+)
+
+
+def _version_matched_history_observations(
+    strategy: Mapping[str, Any], hybrid_factor: Mapping[str, Any] | None
+) -> int | None:
+    """Matched backtest observations under the H2 hybrid-gate predicate.
+
+    A strategy is a member when its accepted history is admitted for economic
+    inference and the report marks live plus backtest eligible; the count is the
+    strategy's own `history_observations`.  Whether a decomposition lens could fit
+    that history is a separate statistic and never sets membership.  Returns None
+    for a strategy that is not a member.  A report without the history contract
+    (`history_compatibility_status` absent) keeps the older evidence: the
+    backtest observations its hybrid lens fit consumed.
+    """
+
+    strategy_name = _text(strategy.get("strategy_name"), "history strategy_name")
+    status = strategy.get("history_compatibility_status")
+    if status is None:
+        composition = (
+            _object(
+                hybrid_factor.get("series_composition", {}),
+                f"hybrid factor composition {strategy_name}",
+            )
+            if hybrid_factor is not None
+            else {}
+        )
+        used = int(
+            _finite_float(
+                composition.get("backtest_observations_used", 0),
+                f"matched backtest observations {strategy_name}",
+            )
+        )
+        return used if used > 0 else None
+    if (
+        status != "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+        or strategy.get("live_plus_backtest_status") != "ELIGIBLE_ACCEPTED_HISTORY"
+    ):
+        return None
+    observations = strategy.get("history_observations")
+    if observations is None:
+        return 0
+    return int(_finite_float(observations, f"history observations {strategy_name}"))
 
 
 def _model_account_gap_underwriting(
@@ -7803,6 +7871,8 @@ def _regime_underwriting(
                             else "OUTSIDE_EMPIRICAL_PREHISTORY_90_PERCENT_RANGE_SINGLE_EVENT"
                         )
                         if latest is not None and empirical_range is not None
+                        else "UNAVAILABLE_NO_LIVE_REGIME_EVENT"
+                        if latest is None
                         else "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
                     ),
                 }
@@ -7952,23 +8022,11 @@ def _strategy_underwriting(
         hybrid_factor = _factor_row_for_strategy(
             decomposition_lenses, "LIVE_PLUS_BACKTEST", strategy_name
         )
-        hybrid_composition = (
-            _object(
-                hybrid_factor.get("series_composition", {}),
-                f"hybrid factor composition {strategy_name}",
-            )
-            if hybrid_factor is not None
-            else {}
-        )
-        matched_backtest_observations = int(
-            _finite_float(
-                hybrid_composition.get("backtest_observations_used", 0),
-                f"matched backtest observations {strategy_name}",
-            )
-        )
+        history_members = _version_matched_history_observations(strategy, hybrid_factor)
+        matched_backtest_observations = history_members or 0
         long_history_status = (
             "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
-            if matched_backtest_observations > 0
+            if history_members is not None
             else "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
         )
         lens_evidence: list[dict[str, Any]] = []
@@ -8245,6 +8303,20 @@ def _strategy_underwriting(
                 "long_history": {
                     "status": long_history_status,
                     "matched_backtest_observations": matched_backtest_observations,
+                    "membership_rule": LONG_HISTORY_MEMBERSHIP_RULE,
+                    "lens_statistics_source": {
+                        "lens_id": "ECONOMIC_FACTOR",
+                        "live_source_key": (
+                            live_factor.get("source_key")
+                            if live_factor is not None
+                            else None
+                        ),
+                        "hybrid_source_key": (
+                            hybrid_factor.get("source_key")
+                            if hybrid_factor is not None
+                            else None
+                        ),
+                    },
                     "live_aligned_observations": factor_value(
                         live_factor, "coverage", "aligned_observations"
                     ),
