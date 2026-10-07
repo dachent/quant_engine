@@ -14554,3 +14554,36 @@ def test_a_rejected_lineage_suppresses_the_version_four_cost_rate_fields() -> No
             "annual_external_cost_rate_pre_tax"
         ):
             assert suppressed[field] is None, field
+
+
+def test_membership_needs_both_halves_of_the_h2_predicate() -> None:
+    base = {
+        "strategy_name": "EU [P123]",
+        "history_observations": 4208,
+        "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+        "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+    }
+
+    def observations(row: dict[str, Any], hybrid: dict[str, Any] | None = None):
+        return panel._version_matched_history_observations(row, hybrid)
+
+    assert observations(base) == 4208
+    assert observations({**base, "live_plus_backtest_status": "BLOCKED_X"}) is None
+    assert (
+        observations({**base, "history_compatibility_status": "UNAVAILABLE_X"}) is None
+    )
+    # An accepted member with no counted observations is still a member.
+    assert observations({**base, "history_observations": None}) == 0
+    # A report without the history contract keeps the older lens evidence.
+    legacy = {"strategy_name": "Legacy"}
+    fit = {"series_composition": {"backtest_observations_used": 12}}
+    assert observations(legacy, fit) == 12
+    assert observations(legacy, None) is None
+
+
+def test_the_report_version_selects_the_panel_version() -> None:
+    assert panel._panel_schema_version_for(1) == 24
+    assert panel._panel_schema_version_for(2) == 24
+    assert panel._panel_schema_version_for(3) == 25
+    assert panel._panel_schema_version_for(4) == 25
+    assert panel._panel_schema_version_for(True) == 24

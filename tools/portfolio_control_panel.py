@@ -8520,6 +8520,14 @@ _POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
 _POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
 
 
+def _panel_schema_version_for(report_schema_version: object) -> int:
+    """The panel version a report version selects: custody coverage reports are 25."""
+
+    if report_schema_version in {3, 4}:
+        return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
+    return PANEL_SCHEMA_VERSION
+
+
 def _classify_positions(
     rows: Sequence[Mapping[str, Any]], cutoff_date: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -9919,10 +9927,8 @@ def _panel_data(
             ),
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
-        "panel_schema_version": (
-            CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
-            if report.get("report_schema_version") in {3, 4}
-            else PANEL_SCHEMA_VERSION
+        "panel_schema_version": _panel_schema_version_for(
+            report.get("report_schema_version")
         ),
         "performance": normalized_performance,
         "position_snapshots": position_snapshots,
