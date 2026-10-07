@@ -1376,3 +1376,243 @@ def test_ai_policy_unavailable_comparison_preserves_actual_reconciliation(
         == "PASS_ALL_ACCEPTED_EXECUTIONS_JOINED_TO_RAW_DETAIL"
     )
     assert result["trade_reconciliation_by_book"]["PRIMARY_AI_FACTOR"]
+
+
+def _series_sha(rows: list[dict[str, str]]) -> str:
+    """The ordered-date-return/1 digest, written out independently of the builder."""
+
+    return hashlib.sha256(
+        (
+            json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_relative_metrics_output_shape_is_the_sealed_v1_shape() -> None:
+    # Sealed contracts were published with exactly these keys and this arithmetic;
+    # the account-leg binding must not change either.
+    result = reconciliation.relative_metrics(
+        {date(2026, 1, 2): 0.01, date(2026, 1, 5): -0.02},
+        {date(2026, 1, 2): 0.005, date(2026, 1, 5): -0.01},
+        accepted_as_of=date(2026, 1, 6),
+    )
+
+    assert set(result) == {
+        "account_cumulative_return",
+        "account_minus_model_cumulative",
+        "annualized_tracking_error",
+        "beta_to_model",
+        "daily_return_correlation",
+        "down_capture",
+        "information_ratio",
+        "model_cumulative_return",
+        "observations",
+        "observed_end",
+        "observed_start",
+        "relative_drawdown",
+        "status",
+        "up_capture",
+    }
+    assert result["status"] == "TESTED_EXACT_COMMON_DATES"
+
+
+def test_contract_schema_is_version_two_with_the_governed_account_leg() -> None:
+    assert reconciliation.SCHEMA_VERSION == 2
+    assert reconciliation.ACCOUNT_LEG_BASIS == "BASELINE_ACCOUNT_LIVE"
+
+
+def test_grizzly_account_leg_is_the_governed_series_over_the_compared_window(
+    tmp_path: Path,
+) -> None:
+    result = _grizzly_result(
+        tmp_path,
+        post_price="999",
+        post_return="0.75",
+        accepted_as_of=ACCEPTED_AS_OF,
+    )
+
+    metrics = result["return_reconciliation"]
+    assert result["account_leg"] == {
+        "basis": "BASELINE_ACCOUNT_LIVE",
+        "compared_observations": metrics["observations"],
+        "cumulative_return": metrics["account_cumulative_return"],
+        "series_schema": "ordered-date-return/1",
+        "series_sha256": _series_sha(
+            [
+                {"date": "2026-01-05", "return": "0.008"},
+                {"date": "2026-01-06", "return": "0.009"},
+            ]
+        ),
+        "window_end": metrics["observed_end"],
+        "window_observations": 2,
+        "window_start": metrics["observed_start"],
+    }
+    assert result["account_leg"]["cumulative_return"] == pytest.approx(
+        1.008 * 1.009 - 1
+    )
+    assert metrics["account_basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert metrics["model_basis"] == "SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY"
+
+
+def test_tt_account_leg_is_the_governed_series_over_the_compared_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _tt_result(
+        tmp_path,
+        monkeypatch,
+        post_return="0.75",
+        post_level="999",
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    metrics = result["return_reconciliation"]
+    leg = result["account_leg"]
+    assert leg["basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert leg["series_sha256"] == _series_sha(
+        [
+            {"date": "2026-03-31", "return": "0.008"},
+            {"date": "2026-04-01", "return": "-0.018"},
+            {"date": "2026-04-02", "return": "0.025"},
+        ]
+    )
+    assert (leg["window_start"], leg["window_end"]) == (
+        metrics["observed_start"],
+        metrics["observed_end"],
+    )
+    assert leg["window_observations"] == 3
+    assert leg["compared_observations"] == metrics["observations"] == 3
+    assert leg["cumulative_return"] == pytest.approx(
+        1.008 * 0.982 * 1.025 - 1, abs=1e-12
+    )
+    assert leg["cumulative_return"] == metrics["account_cumulative_return"]
+    assert metrics["account_basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert metrics["model_basis"] == "TT_SOURCE_MANIFEST_MODEL_RETURNS"
+
+
+def test_ai_account_leg_is_the_governed_series_over_the_compared_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _ai_result(
+        tmp_path,
+        monkeypatch,
+        post_return="0.75",
+        post_price="999",
+        accepted_as_of=ACCEPTED_AS_OF,
+    )
+
+    metrics = result["return_reconciliation"]
+    leg = result["account_leg"]
+    assert leg["series_sha256"] == _series_sha(
+        [
+            {"date": "2026-01-05", "return": "0.008"},
+            {"date": "2026-01-20", "return": "-0.01"},
+        ]
+    )
+    assert leg["cumulative_return"] == metrics["account_cumulative_return"]
+    assert leg["window_observations"] == 2
+    assert leg["compared_observations"] == metrics["observations"] == 2
+    assert metrics["account_basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert metrics["model_basis"] == "PROVIDER_LIVE_MODEL_RETURNS"
+
+
+def test_ai_policy_unavailable_row_keeps_its_closed_shape_and_binds_the_actual_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _ai_result(
+        tmp_path,
+        monkeypatch,
+        post_return="0.99",
+        post_price="9000",
+        accepted_as_of=ACCEPTED_AS_OF,
+        provider_return_policy={"authority_issue": 303, "admitted_item_count": 0},
+    )
+
+    # The report validates this comparison object by exact key set.
+    assert set(result["return_reconciliation"]) == {
+        "status",
+        "observations",
+        "model_cumulative_return",
+        "account_minus_model_cumulative",
+        "policy_evidence",
+    }
+    actual = result["account_live_return_summary"]
+    leg = result["account_leg"]
+    assert leg["cumulative_return"] == actual["cumulative_return"]
+    assert (leg["window_start"], leg["window_end"]) == (
+        actual["observed_start"],
+        actual["observed_end"],
+    )
+    assert leg["window_observations"] == actual["observations"]
+    assert leg["compared_observations"] == actual["observations"]
+
+
+def _governed_rows(*returns: tuple[str, str]) -> list[dict[str, str]]:
+    return [
+        {
+            "date": observed,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": value,
+            "strategy_id": "grizzlybears-vtma",
+        }
+        for observed, value in returns
+    ]
+
+
+def test_account_leg_refuses_a_figure_that_misses_a_governed_date_in_its_window() -> (
+    None
+):
+    # The governed account series has a date the model lacks (2026-01-06).  It is
+    # inside the declared window, so the compared figure must include it.
+    rows = _governed_rows(
+        ("2026-01-05", "0.01"), ("2026-01-06", "0.02"), ("2026-01-07", "0.03")
+    )
+    row = {
+        "return_reconciliation": {
+            "account_cumulative_return": 1.01 * 1.03 - 1,
+            "observed_end": "2026-01-07",
+            "observed_start": "2026-01-05",
+            "observations": 2,
+        },
+        "strategy_id": "grizzlybears-vtma",
+    }
+
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="account return differs from the governed account-live series",
+    ):
+        reconciliation.with_account_leg(
+            row,
+            rows,
+            strategy_id="grizzlybears-vtma",
+            accepted_as_of=date(2026, 1, 31),
+        )
+
+
+def test_account_leg_ignores_dates_after_the_accepted_boundary() -> None:
+    rows = _governed_rows(
+        ("2026-01-05", "0.01"), ("2026-01-06", "0.02"), ("2026-03-01", "0.50")
+    )
+    row = {
+        "return_reconciliation": {
+            "account_cumulative_return": 1.01 * 1.02 - 1,
+            "observed_end": "2026-01-06",
+            "observed_start": "2026-01-05",
+            "observations": 2,
+        },
+        "strategy_id": "grizzlybears-vtma",
+    }
+
+    bound = reconciliation.with_account_leg(
+        row,
+        rows,
+        strategy_id="grizzlybears-vtma",
+        accepted_as_of=date(2026, 1, 31),
+    )
+
+    assert bound["account_leg"]["series_sha256"] == _series_sha(
+        [
+            {"date": "2026-01-05", "return": "0.01"},
+            {"date": "2026-01-06", "return": "0.02"},
+        ]
+    )
