@@ -27,6 +27,7 @@ from test_validate_alignment import (
 from test_validate_generation import CUTOFF, Spec, build
 
 from acceptance.validate import checks
+from acceptance.validate.generation import load_generation
 
 CHECK = "capital.as_of_cutoff"
 DAY = "2026-09-16"
@@ -51,8 +52,36 @@ def _disclosure(custody: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
-def _expected(value: str = "109", as_of: str | None = CUTOFF) -> list[dict[str, Any]]:
-    return [_strategy_cutoff("alpha", as_of=as_of, value=value)]
+COVERAGE_ROW = "alpha|synthetic|acct-a1"
+
+
+def _coverage_row(
+    end: str | None = DAY, entity: str = COVERAGE_ROW, as_of: str = CUTOFF
+) -> dict[str, Any]:
+    """The oracle's ``date.strategy_cash.coverage_end`` row (ruling C1)."""
+
+    return {
+        "metric_id": "date.strategy_cash.coverage_end",
+        "entity": entity,
+        "expected": end,
+        "value": end,
+        "as_of": as_of,
+        "unit": "date",
+    }
+
+
+def _expected(
+    value: str = "109",
+    as_of: str | None = CUTOFF,
+    coverage: str | None = DAY,
+) -> list[dict[str, Any]]:
+    """The oracle rows: the strategy cutoff row, and the coverage end of the cash line
+    unless ``coverage`` is ``None`` (the oracle as published before the C1 row)."""
+
+    rows = [_strategy_cutoff("alpha", as_of=as_of, value=value)]
+    if coverage is not None:
+        rows.append(_coverage_row(coverage))
+    return rows
 
 
 def _findings(
@@ -62,9 +91,10 @@ def _findings(
     block: dict[str, Any] | None,
     expected: list[dict[str, Any]] | None,
     check: str = CHECK,
+    version: int = 3,
 ) -> list[checks.Finding]:
     def mutate(report: dict[str, Any]) -> None:
-        report["report_schema_version"] = 3
+        report["report_schema_version"] = version
         report["custody_current_capital"] = copy.deepcopy(custody)
         if block is not None:
             report["capital_coverage_bounds"] = copy.deepcopy(block)
@@ -123,11 +153,30 @@ def test_disclosure_without_an_oracle_never_downgrades(tmp_path: Path) -> None:
     assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
 
 
-def test_an_oracle_that_dates_the_strategy_before_the_label_does_not_confirm(
+def test_an_oracle_that_dates_the_coverage_before_the_label_does_not_confirm(
     tmp_path: Path,
 ) -> None:
-    """The label may err old, never new: an oracle date older than the label is not
-    a confirmation of it."""
+    """The label may err old, never new: a coverage end the oracle states older than
+    the label is not a confirmation of it."""
+
+    custody = _custody_block()
+
+    findings = _findings(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=_expected(coverage="2026-09-10"),
+    )
+
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+
+
+def test_the_strategy_cutoff_date_is_not_the_anchor_of_the_coverage_date(
+    tmp_path: Path,
+) -> None:
+    """The oracle's capital.strategy.cutoff date is the cutoff by construction and says
+    nothing about how far a cash admission reaches: with the coverage row confirming the
+    label, the strategy row's own date no longer decides."""
 
     custody = _custody_block()
 
@@ -138,7 +187,7 @@ def test_an_oracle_that_dates_the_strategy_before_the_label_does_not_confirm(
         expected=_expected(as_of="2026-09-10"),
     )
 
-    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+    assert _view(findings) == _expect(checks.NOT_READY)
 
 
 def test_a_disclosure_that_disagrees_with_the_report_line_does_not_downgrade(
@@ -342,3 +391,336 @@ def test_a_systematic_member_dated_before_the_oracle_still_blocks(
     findings = _account_findings(tmp_path, "SYSTEMATIC")
 
     assert [f.klass for f in findings] == [checks.BLOCKER_REGRESSION]
+
+
+# ------------------------------------------------ round 6: the oracle anchors the date
+#
+# The coverage downgrade used to check the report against itself: the oracle's
+# capital.strategy.cutoff is dated at the cutoff by construction, so it confirmed any
+# earlier claimed coverage end.  The oracle now states the proven-through date of each
+# custody cash line (date.strategy_cash.coverage_end), the validator compares the
+# report's coverage end with it in both directions, and the downgrade needs it.
+
+COVERAGE_END = "expected.capital.strategy_cash.coverage_end"
+BOUND = "capital.coverage_bound"
+MEMBER = "current_capital:alpha:member:acct-a1"
+
+
+def _world(
+    tmp_path: Path,
+    custody: dict[str, Any],
+    *,
+    block: dict[str, Any] | None,
+    expected: list[dict[str, Any]] | None,
+    version: int = 3,
+) -> dict[str, list[tuple[str, str]]]:
+    """Every finding of the validator for this world, as (entity, class) by check id."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["report_schema_version"] = version
+        report["custody_current_capital"] = copy.deepcopy(custody)
+        if block is not None:
+            report["capital_coverage_bounds"] = copy.deepcopy(block)
+
+    gen_dir = build(tmp_path, Spec(report=[mutate]))
+    out: dict[str, list[tuple[str, str]]] = {}
+    for finding in _run(gen_dir, expected):
+        out.setdefault(finding.check_id, []).append((finding.entity, finding.klass))
+    return {key: sorted(value) for key, value in out.items()}
+
+
+def test_the_honest_world_has_no_coverage_end_or_disclosure_finding(
+    tmp_path: Path,
+) -> None:
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=[*_expected(), _cash_expectation()],
+    )
+
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.NOT_READY))
+    assert COVERAGE_END not in seen
+    assert BOUND not in seen
+    assert seen[STRATEGY_CASH] == [("alpha|2026-09-17", checks.NOT_READY)]
+
+
+def test_a_coverage_end_the_oracle_dates_earlier_is_not_believed(
+    tmp_path: Path,
+) -> None:
+    """Astra's replay: the report claims coverage through the 16th and the producer's own
+    block says so; the oracle proves it only through the 10th.  The old oracle clause
+    (capital.strategy.cutoff dated on or after the label) confirmed the claim."""
+
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=[*_expected(coverage="2026-09-10"), _cash_expectation()],
+    )
+
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+    assert seen[COVERAGE_END] == [
+        ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
+    ]
+    assert seen[STRATEGY_CASH] == [("alpha|2026-09-17", checks.BLOCKER_REGRESSION)]
+    assert {klass for _, klass in seen[BOUND]} == {checks.BLOCKER_INVARIANT}
+
+
+def test_a_coverage_end_at_or_after_the_cutoff_is_checked_too(tmp_path: Path) -> None:
+    """The seat's repro: coverage forged to the 18th with every label at the cutoff
+    yielded no finding at all, because the label recompute read the coverage end from
+    the report itself.  The oracle row says the 16th."""
+
+    custody = _custody_block(anchors_end="2026-09-18")
+    honest = _custody_block()
+
+    for name, block in (("without", None), ("with", _disclosure(honest))):
+        seen = _world(
+            tmp_path / name,
+            custody,
+            block=block,
+            expected=_expected(coverage="2026-09-16"),
+        )
+
+        assert seen[COVERAGE_END] == [
+            ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
+        ], name
+
+
+def test_a_cutoff_coverage_end_the_oracle_confirms_is_silent(tmp_path: Path) -> None:
+    custody = _custody_block(anchors_end="2026-09-18")
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=None,
+        expected=_expected(coverage="2026-09-18"),
+    )
+
+    assert COVERAGE_END not in seen
+    assert CHECK not in seen
+
+
+def test_an_oracle_with_no_coverage_end_row_confirms_nothing(tmp_path: Path) -> None:
+    """The oracle as published before the row existed: the label claims a proof the
+    independent instrument does not give."""
+
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=_expected(coverage=None),
+    )
+
+    assert seen[COVERAGE_END] == [("alpha|synthetic|acct-a1", checks.BLOCKER_AUTHORITY)]
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+
+
+def test_a_not_derivable_coverage_end_confirms_nothing(tmp_path: Path) -> None:
+    custody = _custody_block()
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["report_schema_version"] = 3
+        report["custody_current_capital"] = copy.deepcopy(custody)
+        report["capital_coverage_bounds"] = _disclosure(custody)
+
+    gen_dir = build(tmp_path, Spec(report=[mutate]))
+    context = checks.Context(
+        gen=load_generation(gen_dir),
+        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
+        cutoff_source="test",
+        expected=_expected(coverage=None),
+        expected_not_derivable=[
+            {
+                "metric_id": "date.strategy_cash.coverage_end",
+                "entity": COVERAGE_ROW,
+                "reason": "the two derivations disagree",
+            }
+        ],
+    )
+    found = {
+        (f.check_id, f.klass)
+        for f in checks.check_capital_coverage_end(context)
+        if f.check_id == COVERAGE_END
+    }
+
+    assert found == {(COVERAGE_END, checks.BLOCKER_AUTHORITY)}
+
+
+def test_an_oracle_row_for_another_provider_is_a_regression(tmp_path: Path) -> None:
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=[
+            *_expected(coverage=None),
+            _coverage_row(entity="alpha|ibkr|acct-a1"),
+        ],
+    )
+
+    assert seen[COVERAGE_END] == [
+        ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
+    ]
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+
+
+def test_two_oracle_rows_that_disagree_confirm_nothing(tmp_path: Path) -> None:
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=[*_expected(), _coverage_row("2026-09-10")],
+    )
+
+    assert seen[COVERAGE_END] == [("alpha|synthetic|acct-a1", checks.BLOCKER_AUTHORITY)]
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+
+
+def test_a_nav_member_is_never_dated_by_the_cash_coverage(tmp_path: Path) -> None:
+    """C4: the member shares the cash line's account, and its NAV observation date at
+    the cash coverage end is explained by no coverage admission.  The member, its row
+    and the Systematic total stay blockers; the cash line itself is still NOT_READY."""
+
+    custody = _custody_block()
+    custody["strategies"][0]["members"][0]["as_of_date"] = DAY
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=_expected(),
+    )
+
+    assert dict(seen[CHECK]) == {
+        MEMBER: checks.BLOCKER_AUTHORITY,
+        LINE: checks.NOT_READY,
+        "current_capital:alpha": checks.BLOCKER_AUTHORITY,
+        "current_capital:systematic": checks.BLOCKER_AUTHORITY,
+    }
+
+
+def test_a_row_and_total_need_every_cash_line_at_that_date_verified(
+    tmp_path: Path,
+) -> None:
+    """A second cash line at the same date that the oracle does not attest keeps the
+    row and the Systematic total blockers, though the first line is NOT_READY."""
+
+    custody = _custody_block()
+    second = copy.deepcopy(custody["strategies"][0]["derived_cash"][0])
+    second["account_id"] = "acct-a2"
+    custody["strategies"][0]["derived_cash"].append(second)
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=_expected(),
+    )
+
+    assert dict(seen[CHECK]) == {
+        LINE: checks.NOT_READY,
+        "current_capital:alpha:cash:acct-a2": checks.BLOCKER_AUTHORITY,
+        "current_capital:alpha": checks.BLOCKER_AUTHORITY,
+        "current_capital:systematic": checks.BLOCKER_AUTHORITY,
+    }
+    assert ("alpha|synthetic|acct-a2", checks.BLOCKER_AUTHORITY) in seen[COVERAGE_END]
+
+
+def _disclosure_variant(name: str) -> dict[str, Any]:
+    custody = _custody_block()
+    block = _disclosure(custody)
+    line, entry = block["lines"][0], block["bounded_sections"][0]
+    if name == "provider_id":
+        line["provider_id"] = "ibkr"
+    elif name == "last_event_date":
+        line["last_event_date"] = "2020-01-01"
+    elif name == "rule":
+        block["rule"] = "N56-COVERAGE-X"
+    elif name == "schema_version":
+        block["schema_version"] = 2
+    elif name == "schema_version_bool":
+        block["schema_version"] = True
+    elif name == "field":
+        for item in block["bounded_sections"]:
+            item["field"] = "current_value"
+    elif name == "block_key":
+        block["note"] = "x"
+    elif name == "line_key":
+        line["note"] = "x"
+    elif name == "section_key":
+        entry["note"] = "x"
+    elif name == "duplicate_line":
+        block["lines"].append(copy.deepcopy(line))
+    elif name == "duplicate_section":
+        block["bounded_sections"].append(copy.deepcopy(entry))
+    else:
+        raise AssertionError(name)
+    return block
+
+
+def test_a_false_disclosure_field_voids_every_downgrade(tmp_path: Path) -> None:
+    """Astra's four attacks, and the closed-object and uniqueness clauses (C3): any
+    field the block states that the report and the oracle do not bear out is a
+    BLOCKER_INVARIANT, and no date is downgraded anywhere in the report."""
+
+    custody = _custody_block()
+    for name in (
+        "provider_id",
+        "last_event_date",
+        "rule",
+        "schema_version",
+        "schema_version_bool",
+        "field",
+        "block_key",
+        "line_key",
+        "section_key",
+        "duplicate_line",
+        "duplicate_section",
+    ):
+        seen = _world(
+            tmp_path / name,
+            custody,
+            block=_disclosure_variant(name),
+            expected=[*_expected(), _cash_expectation()],
+        )
+
+        assert checks.BLOCKER_INVARIANT in {k for _, k in seen[BOUND]}, name
+        assert checks.NOT_READY not in {k for _, k in seen[CHECK]}, name
+        assert dict(seen[CHECK]) == {
+            entity: checks.BLOCKER_AUTHORITY for entity in ENTITIES
+        }, name
+        assert seen[STRATEGY_CASH] == [
+            ("alpha|2026-09-17", checks.BLOCKER_REGRESSION)
+        ], name
+
+
+def test_a_block_at_a_report_schema_other_than_3_downgrades_nothing(
+    tmp_path: Path,
+) -> None:
+    """C4/G2: the block exists only at report schema version 3; the schema rejects it
+    elsewhere and the validator does not believe it."""
+
+    custody = _custody_block()
+
+    for version in (1, 2):
+        seen = _world(
+            tmp_path / str(version),
+            custody,
+            block=_disclosure(custody),
+            expected=_expected(),
+            version=version,
+        )
+
+        assert checks.NOT_READY not in {k for _, k in seen.get(CHECK, [])}, version
+        assert checks.BLOCKER_INVARIANT in {k for _, k in seen[BOUND]}, version
