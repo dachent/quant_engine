@@ -26,6 +26,17 @@ without preserving stale calculations or hard-coded operator conclusions.
   its own `history_observations`. A decomposition lens never sets membership:
   the lens statistics come from the strategy's AVAILABLE or DIAGNOSTIC row and
   name their source key (`long_history.lens_statistics_source`).
+- An implementation contract row built from a different provider ledger than the governed
+  one reaches the panel as the report's closed NOT_READY object (N66-R). The
+  underwriting implementation layer then reports its comparison as not ready
+  (`comparison_status`), whichever contract kind is stale, and a detail with no
+  return reconciliation is not ready, never a legacy comparison. The detail holds
+  each object under `stale_reconciliation` or `stale_return_attribution`, and
+  `contracts` gives the contract dates, the stale and pre-policy flags and the
+  provider return policy. The panel shows the governed account return with its basis and window; the contract's own
+  superseded figure stays beside its basis label and is never read as a return. The
+  verifier validates the closed object and accounts for the three strategies as
+  causal, policy-unavailable or stale.
 - The governed PORT-HWM-4 number appears as `advisory.hwm_candidate`, labelled
   as pending owner acceptance with the E2 reason. The numeric HWM status stays
   not accepted and `hwm_summary` is unchanged.
