@@ -3983,15 +3983,26 @@ def test_matrixport_without_any_capture_ends_every_type_at_its_last_event() -> N
 def test_matrixport_flows_need_both_wallet_endpoints() -> None:
     derivation = load_derivation_module()
     only_deposits = [_cov_row("/mapi/v1/wallet/deposits")]
+    # The allocation is later than the flow event, so the flow boundary decides the
+    # line: a deposits-only claim must not stand in for the missing withdrawals list.
     ended = derivation.custody_coverage_end(
         "robuxio-crypto",
-        {"owner": [date(2025, 12, 5)], "allocation": [date(2025, 12, 5)]},
+        {"owner": [date(2025, 12, 5)], "allocation": [date(2026, 9, 17)]},
         {},
         None,
         only_deposits,
         [_request("/mapi/v1/wallet/deposits", currency="USDT")],
     )
     assert ended == date(2025, 12, 5)
+    both = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        {"owner": [date(2025, 12, 5)], "allocation": [date(2026, 9, 17)]},
+        {},
+        None,
+        _wallet_rows(),
+        _wallet_requests(),
+    )
+    assert both == date(2026, 9, 17)
 
 
 def _quantbase_ledger(generation_id: str, day: str) -> dict[str, object]:
