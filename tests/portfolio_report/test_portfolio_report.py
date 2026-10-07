@@ -2507,7 +2507,11 @@ def _staged_selector_fixture(
 
     history_path = tmp_path / "history" / "dependence-source.json"
     history_path.parent.mkdir()
-    history_path.write_bytes(canonical_json_bytes({"synthetic": True}))
+    # The dependence source declares its schema version, which publish_report now seals;
+    # a bare synthetic object was never the shape of the real artifact.
+    history_path.write_bytes(
+        canonical_json_bytes({"synthetic": True, "schema_version": 1})
+    )
     monkeypatch.setattr(
         reporter,
         "_history_contract",
