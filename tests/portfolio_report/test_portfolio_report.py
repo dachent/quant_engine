@@ -1031,6 +1031,50 @@ def test_a_gap_no_provider_declared_stays_unscoped() -> None:
     )
 
 
+def _provider_row(provider_id: str, day: str) -> dict[str, Any]:
+    return {
+        "coverage": {
+            "known_gaps": [LEGACY_SCHWAB_BALANCE_GAP],
+            "out_of_boundary": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        "generation_as_of_date": day,
+        "provider_id": provider_id,
+        "qualification": "STAGED_COMPLETE",
+    }
+
+
+def test_each_provider_declaring_one_clause_is_scoped_at_its_own_generation_date() -> (
+    None
+):
+    """E9: two providers that declare the same text get one clause each; the older
+    provider's snapshot is never dated at the newer provider's generation."""
+
+    catalog = _fact_and_provider_coverage([LEGACY_SCHWAB_BALANCE_GAP])
+    catalog["provider_coverage"] = [
+        _provider_row("schwab", "2026-09-18"),
+        _provider_row("ibkr", "2026-09-10"),
+    ]
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        f"ibkr (as of 2026-09-10): {LEGACY_SCHWAB_BALANCE_GAP}; "
+        f"schwab (as of 2026-09-18): {LEGACY_SCHWAB_BALANCE_GAP}"
+    )
+
+
+def test_a_provider_listed_in_two_coverage_rows_is_refused() -> None:
+    """E9: last-seen-wins would silently pick one of two generations for a provider."""
+
+    catalog = _fact_and_provider_coverage([LEGACY_SCHWAB_BALANCE_GAP])
+    catalog["provider_coverage"] = [
+        _provider_row("schwab", "2026-09-18"),
+        _provider_row("schwab", "2026-09-10"),
+    ]
+
+    with pytest.raises(reporter.ReportValidationError, match="schwab"):
+        reporter._coverage(catalog)
+
+
 def test_positions_preserve_history_and_mark_latest_snapshot_per_account() -> None:
     catalog = {
         "positions": [

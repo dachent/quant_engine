@@ -5912,21 +5912,31 @@ def _allocations(
 def _scoped_known_gap(
     gap: object, provider_coverage: Sequence[Mapping[str, Any]]
 ) -> str:
-    """A known gap that only providers declared, scoped to them and their generation.
+    """A known gap that only providers declared, scoped to each of them and its generation.
 
     The baseline pools every provider's declared gaps into one sorted list, so a clause
     such as a snapshot's "current account balances remain unavailable" loses the provider
     it describes and reads as a portfolio-wide claim in the gate note (E9).  A clause that
-    appears in the declared gaps of one or more providers is published as
-    ``<providers> (as of <latest generation date>): <clause>``; a clause no provider
-    declared is the baseline's own statement and stays as it is.
+    appears in the declared gaps of one or more providers is published as one
+    ``<provider> (as of <that provider's generation date>): <clause>`` per declaring
+    provider, in provider order and joined with ``"; "``, so no provider's snapshot is
+    dated at another's generation; a clause no provider declared is the baseline's own
+    statement and stays as it is.  A provider listed in two coverage rows has no single
+    generation, so the report refuses it rather than keeping the last one seen.
     """
 
     text = str(gap)
+    seen: set[str] = set()
     owners: dict[str, str] = {}
     for item in provider_coverage:
-        coverage = item.get("coverage")
         provider_id = item.get("provider_id")
+        if isinstance(provider_id, str):
+            if provider_id in seen:
+                raise ReportValidationError(
+                    f"provider_coverage lists provider {provider_id} more than once"
+                )
+            seen.add(provider_id)
+        coverage = item.get("coverage")
         day = item.get("generation_as_of_date")
         if (
             isinstance(coverage, Mapping)
@@ -5937,7 +5947,10 @@ def _scoped_known_gap(
             owners[provider_id] = day
     if not owners:
         return text
-    return f"{'/'.join(sorted(owners))} (as of {max(owners.values())}): {text}"
+    return "; ".join(
+        f"{provider_id} (as of {owners[provider_id]}): {text}"
+        for provider_id in sorted(owners)
+    )
 
 
 def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
