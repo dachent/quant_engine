@@ -214,11 +214,11 @@ TYPED_VERSIONS = {
     # xlsx-win emits no version field for these (NOMINAL labels)
     "xlsx-win-validation": "1",
     "xlsx-win-validation-contract": "1",
-    # producer constants, checked in test_the_typed_versions_are_what_producers_write
+    # producer constants, checked in test_the_typed_versions_are_what_producers_write.
+    # The two implementation contracts are not here: the retained contract is schema 1
+    # and a rebuilt one is schema 2, so the publisher reads the version from the artifact.
     "portfolio-invested-capital-result": "1",
     "portfolio-invested-capital-input-generation": "1",
-    "portfolio-implementation-reconciliation": "1",
-    "portfolio-implementation-return-attribution": "1",
     "portfolio-hwm-policy": "2",
     # no producer version field exists (NOMINAL labels)
     "epoch-manifest-source": "1",
@@ -287,14 +287,10 @@ def test_the_typed_versions_are_what_producers_write() -> None:
         )
     )
 
-    assert (
-        str(reconciliation.SCHEMA_VERSION)
-        == TYPED_VERSIONS["portfolio-implementation-reconciliation"]
-    )
-    assert (
-        str(attribution.SCHEMA_VERSION)
-        == TYPED_VERSIONS["portfolio-implementation-return-attribution"]
-    )
+    # Neither implementation contract version is typed into the publisher, so the
+    # producers' current version is only what a rebuilt contract declares.
+    assert str(reconciliation.SCHEMA_VERSION) == "2"
+    assert str(attribution.SCHEMA_VERSION) == "2"
     assert str(policy["schema_version"]) == TYPED_VERSIONS["portfolio-hwm-policy"]
     assert reporter.HWM_POLICY.name == "portfolio-hwm-policy-v3.json"
 
@@ -326,3 +322,35 @@ def test_the_producers_that_the_report_seals_write_a_declared_version() -> None:
     spec.loader.exec_module(module)
 
     assert module.CATALOG_SCHEMA_VERSION == 2
+
+
+@pytest.mark.parametrize("version", (1, 2))
+def test_the_implementation_contract_schema_is_read_from_the_contract_reference(
+    version: int,
+) -> None:
+    """A retained version-1 contract and a rebuilt version-2 one are each sealed as themselves."""
+
+    reference = {"schema_version": version}
+
+    assert (
+        reporter._implementation_artifact_schema(
+            "portfolio-implementation-reconciliation", reference
+        )
+        == f"portfolio-implementation-reconciliation/{version}"
+    )
+    assert (
+        reporter._implementation_artifact_schema(
+            "portfolio-implementation-return-attribution", reference
+        )
+        == f"portfolio-implementation-return-attribution/{version}"
+    )
+
+
+@pytest.mark.parametrize("bad", (True, "2", None))
+def test_an_implementation_contract_reference_without_an_integer_version_is_refused(
+    bad: object,
+) -> None:
+    with pytest.raises(reporter.ReportValidationError, match="schema version"):
+        reporter._implementation_artifact_schema(
+            "portfolio-implementation-reconciliation", {"schema_version": bad}
+        )

@@ -7086,6 +7086,16 @@ def _declared_schema_version(payload: Mapping[str, Any], field: str, label: str)
     return str(version)
 
 
+def _implementation_artifact_schema(name: str, reference: Mapping[str, Any]) -> str:
+    """The provenance schema of an implementation contract: its own declared version.
+
+    A retained contract is schema 1 and a rebuilt one is schema 2, so the version is
+    the reference's (read from the contract), never a literal.
+    """
+
+    return f"{name}/{_declared_schema_version(reference, 'schema_version', name)}"
+
+
 def _freshness_artifact_version(path: Path) -> str:
     return _declared_schema_version(
         _load_json(path, "freshness health"),
@@ -8781,7 +8791,10 @@ def build_report_data(
                         "as_of_date": implementation_return_attribution_ref[
                             "as_of_date"
                         ],
-                        "schema": "portfolio-implementation-return-attribution/1",
+                        "schema": _implementation_artifact_schema(
+                            "portfolio-implementation-return-attribution",
+                            implementation_return_attribution_ref,
+                        ),
                         "sha256": implementation_return_attribution_ref["sha256"],
                     }
                 ]
@@ -8793,7 +8806,10 @@ def build_report_data(
                     {
                         "artifact": "strategy-implementation-reconciliation",
                         "as_of_date": implementation_contract_ref["as_of_date"],
-                        "schema": "portfolio-implementation-reconciliation/1",
+                        "schema": _implementation_artifact_schema(
+                            "portfolio-implementation-reconciliation",
+                            implementation_contract_ref,
+                        ),
                         "sha256": implementation_contract_ref["sha256"],
                     }
                 ]
@@ -14057,7 +14073,13 @@ def publish_report(
                 snapshot_implementation_path,
                 "input/strategy-implementation-reconciliation.json",
                 "portfolio-implementation-reconciliation",
-                "1",
+                _declared_schema_version(
+                    _load_json(
+                        snapshot_implementation_path, "implementation reconciliation"
+                    ),
+                    "schema_version",
+                    "implementation reconciliation contract",
+                ),
             )
         )
     if snapshot_return_attribution_path is not None:
@@ -14066,7 +14088,14 @@ def publish_report(
                 snapshot_return_attribution_path,
                 "input/strategy-implementation-return-attribution.json",
                 "portfolio-implementation-return-attribution",
-                "1",
+                _declared_schema_version(
+                    _load_json(
+                        snapshot_return_attribution_path,
+                        "implementation return attribution",
+                    ),
+                    "schema_version",
+                    "implementation return attribution contract",
+                ),
             )
         )
     if snapshot_freshness_path is not None:
