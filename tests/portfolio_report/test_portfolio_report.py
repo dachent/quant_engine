@@ -3601,6 +3601,15 @@ def test_real_history_to_report_binds_the_live_path_registry_row(
     assert first["version_disposition"] == "REFERENCE_ONLY"
     assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
     assert first["backtest_status"] == "EVIDENCED"
+    # The reason names what the producer emitted: the model identity, the pinned
+    # live-path ref, the live start and the compatibility basis.
+    for fragment in (
+        live_version,
+        GRIZZLY_LIVE_REF,
+        "2026-01-01",
+        "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE",
+    ):
+        assert fragment in first["version_compatibility_reason"], fragment
     # The strategies the history does not admit stay live-only and unresolved.
     second = rows["strategy-2"]
     assert second["version_compatibility_status"] == "UNRESOLVED"

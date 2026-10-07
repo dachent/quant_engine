@@ -976,3 +976,122 @@ def test_the_admission_map_covers_every_canonical_fact() -> None:
         "fx": [],
         "costs": [9],
     }
+
+
+# --- the schema-4 bundle the producer writes, read by every consumer ---------------
+#
+# Each consumer's own tests write the bundle by hand, so a producer that stopped
+# emitting ``provider_ledger`` or ``evaluated_on``, or emitted them malformed, left
+# every consumer test green.  These write the bundle with ``write_health`` over a real
+# provider-ledger generation and hand the file to each reader.
+
+RUN_DATE = date(2026, 10, 4)
+CUTOFF = "2026-07-31"
+
+
+def _written_bundle(tmp_path: Path) -> tuple[Path, Path, str]:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+    path = tmp_path / "freshness-health.json"
+    freshness.write_health(root, generation_id, path, RUN_DATE)
+    return path, root, generation_id
+
+
+def _ledger_selection(root: Path, generation_id: str) -> dict[str, object]:
+    import hashlib
+
+    generation = root / "generations" / generation_id
+
+    def identity(path: Path) -> dict[str, object]:
+        content = path.read_bytes()
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+
+    manifest = json.loads((generation / "generation.json").read_bytes())
+    return {
+        "as_of_date": manifest["as_of_date"],
+        "catalog": identity(generation / "provider-ledger.json"),
+        "generation_id": generation_id,
+        "manifest": identity(generation / "generation.json"),
+    }
+
+
+def test_the_producers_bundle_is_schema_four_with_both_clocks_and_its_ledger(
+    tmp_path: Path,
+) -> None:
+    path, _root, generation_id = _written_bundle(tmp_path)
+
+    bundle = json.loads(path.read_bytes())
+
+    assert bundle["assessment_schema_version"] == 4
+    assert bundle["as_of_date"] == CUTOFF
+    assert bundle["evaluated_on"] == RUN_DATE.isoformat()
+    assert set(bundle["provider_ledger"]) == {
+        "as_of_date",
+        "catalog_sha256",
+        "catalog_size_bytes",
+        "generation_id",
+        "manifest_sha256",
+        "manifest_size_bytes",
+    }
+    assert bundle["provider_ledger"]["generation_id"] == generation_id
+
+
+def test_the_panel_reads_the_producers_schema_four_bundle(tmp_path: Path) -> None:
+    import portfolio_control_panel as panel
+
+    path, _root, _generation_id = _written_bundle(tmp_path)
+
+    rows = panel._freshness_health(path, CUTOFF)
+
+    assert rows
+    assert {row["evaluated_on"] for row in rows} == {CUTOFF}
+
+
+def test_the_report_reads_the_producers_schema_four_bundle(tmp_path: Path) -> None:
+    import portfolio_report as reporter
+
+    path, root, _generation_id = _written_bundle(tmp_path)
+
+    assessments, as_of, _sha256 = reporter._freshness_assessments(
+        path, date.fromisoformat(CUTOFF), root
+    )
+
+    assert as_of == date.fromisoformat(CUTOFF)
+    assert assessments
+
+
+def test_the_control_recompute_reads_the_producers_schema_four_bundle(
+    tmp_path: Path,
+) -> None:
+    import portfolio_control_recompute as recompute
+
+    path, root, generation_id = _written_bundle(tmp_path)
+
+    validated, _identity = recompute._validate_freshness(
+        path, RUN_DATE, _ledger_selection(root, generation_id)
+    )
+
+    assert validated["evaluated_on"] == RUN_DATE.isoformat()
+
+
+def test_the_acceptance_check_passes_the_producers_schema_four_bundle(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from acceptance.validate import checks
+
+    path, _root, _generation_id = _written_bundle(tmp_path)
+    ctx = SimpleNamespace(
+        cutoff=date.fromisoformat(CUTOFF),
+        gen=SimpleNamespace(freshness=json.loads(path.read_bytes())),
+        panel={},
+        report={},
+        _cache={"universe": None},
+    )
+
+    assert list(checks.check_freshness(ctx)) == []  # type: ignore[arg-type]

@@ -1511,3 +1511,69 @@ def test_schema_four_freshness_gate_refuses_a_malformed_catalog_cutoff(
         execute_pipeline(_parse(raw), evaluation_date=AS_OF)
     assert type(raised.value) is PipelineValidationError
     assert read_current(target).generation_id == previous.generation_id
+
+
+def _gate_from_the_freshness_producer(
+    tmp_path: Path, run_date: date
+) -> tuple[dict[str, object], GenerationManifest, Path, Path, Path]:
+    """A release spec whose freshness gate is written by ``write_health``.
+
+    The provider ledger is a real accepted generation read by the producer, so the
+    gate's cutoff, execution date and ledger identity are all emitted, not authored.
+    """
+
+    import runpy
+
+    namespace = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[1]
+            / "portfolio_control_panel"
+            / "test_portfolio_freshness.py"
+        )
+    )
+    root = tmp_path / "freshness-provider-ledger"
+    generation_id = namespace["_provider_ledger"](root)
+    gate = tmp_path / "freshness-health.json"
+    namespace["freshness"].write_health(root, generation_id, gate, run_date)
+    raw, previous, _, target = _spec_dict(tmp_path)
+    inventory = inventory_generation(root / "generations" / generation_id)
+    raw["roots"]["provider-ledger"] = str(root)  # type: ignore[index]
+    raw["nodes"].append(  # type: ignore[attr-defined]
+        {
+            "depends_on": [],
+            "files": inventory["files"],
+            "generation_id": generation_id,
+            "kind": "GENERATION",
+            "manifest_sha256": inventory["manifest_sha256"],
+            "node_id": "provider-ledger",
+            "release_target": True,
+            "root_id": "provider-ledger",
+            "source_dir": None,
+        }
+    )
+    raw["gates"].append(  # type: ignore[attr-defined]
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+    return raw, previous, target, gate, root
+
+
+def test_the_gate_the_freshness_producer_writes_passes_the_pipeline_gate(
+    tmp_path: Path,
+) -> None:
+    run_date = date(2026, 10, 4)
+    raw, _previous, _target, gate, _root = _gate_from_the_freshness_producer(
+        tmp_path, run_date
+    )
+    bundle = json.loads(gate.read_bytes())
+    assert bundle["assessment_schema_version"] == 4
+    assert bundle["as_of_date"] != bundle["evaluated_on"]
+
+    prepared = execute_pipeline(_parse(raw), evaluation_date=run_date)
+
+    assert prepared["release_state"] == "PREPARED"
+    with pytest.raises(PipelineValidationError, match="operational date"):
+        execute_pipeline(_parse(raw), evaluation_date=date(2026, 10, 5))

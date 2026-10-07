@@ -45,7 +45,12 @@ def _payload(coverage: str) -> dict[str, Any]:
     }
 
 
-def _rows(flows_status: str | None, coverage: str = "COMPLETE") -> list[dict[str, Any]]:
+def _rows(
+    flows_status: str | None,
+    coverage: str = "COMPLETE",
+    *,
+    matrix: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     details = {
         EPOCH: {
             "account_label": "Zero legs",
@@ -75,7 +80,9 @@ def _rows(flows_status: str | None, coverage: str = "COMPLETE") -> list[dict[str
         "nav_observations": [],
         "strategy_returns": [],
     }
-    if flows_status is not None:
+    if matrix is not None:
+        catalog["fact_coverage_matrix"] = matrix
+    elif flows_status is not None:
         catalog["fact_coverage_matrix"] = [
             {
                 "account_id": EPOCH[0],
@@ -138,3 +145,57 @@ def test_report_schema_keeps_the_receipt_enum_and_adds_the_flow_path_field() -> 
         "NO_ACCEPTED_FACT_PATH",
         "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF",
     }
+
+
+def test_the_baselines_own_flow_coverage_row_drives_the_report_disclosure() -> None:
+    """Real producer: the matrix row comes from ``_coverage_evidence``, not a literal.
+
+    An account with an effective-dated flow admission but no reported flow events
+    gets the status the report must disclose beside a COMPLETE receipt.
+    """
+
+    from datetime import date
+
+    import portfolio_baseline as baseline
+
+    account_id = EPOCH[0]
+    matrix = baseline._coverage_evidence(
+        [{"account_id": account_id, "provider": "SYNTHETIC", "role": "INVESTMENT"}],
+        [],
+        [
+            {
+                "account_id": account_id,
+                "disposition": "AUTHORITATIVE",
+                "effective_end": "2026-01-10",
+                "effective_start": "2026-01-01",
+                "fact_type": "flows",
+            }
+        ],
+        [
+            {
+                "coverage": {
+                    "boundary": "synthetic",
+                    "observed_end": "2026-01-10",
+                    "observed_start": "2026-01-01",
+                    "status": "PARTIAL",
+                },
+                "provider_id": "SYNTHETIC",
+            }
+        ],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 1, 10),
+    )[0]
+    flows_row = next(
+        row
+        for row in matrix
+        if row["account_id"] == account_id and row["fact_type"] == "flows"
+    )
+    assert flows_row["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+
+    row = _rows(None, matrix=matrix)[0]
+
+    assert row["mwr_coverage_status"] == "COMPLETE"
+    assert row["mwr_flow_path_status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"

@@ -524,3 +524,94 @@ def test_cycle_rejects_replayed_freshness_date_before_recomputation_validation(
             CURRENT,
             PREVIOUS,
         )
+
+
+def test_cycle_accepts_the_freshness_bundle_the_producer_writes(
+    tmp_path: Path,
+) -> None:
+    """The bundle comes from ``write_health`` over a real ledger, not from a dict here."""
+
+    import runpy
+
+    namespace = runpy.run_path(
+        str(
+            REPOSITORY_ROOT
+            / "tests"
+            / "portfolio_control_panel"
+            / "test_portfolio_freshness.py"
+        )
+    )
+    ledger_root = tmp_path / "producer-ledger"
+    ledger_generation = namespace["_provider_ledger"](
+        ledger_root, ledger_as_of=PREVIOUS.isoformat()
+    )
+    written = tmp_path / "written-freshness.json"
+    namespace["freshness"].write_health(
+        ledger_root, ledger_generation, written, CURRENT
+    )
+    payload = json.loads(written.read_bytes())
+    assert payload["assessment_schema_version"] == 4
+    assert payload["as_of_date"] == PREVIOUS.isoformat()
+    assert payload["evaluated_on"] == CURRENT.isoformat()
+
+    correlation_root = tmp_path / "correlation-producer"
+    correlation_generation = _publish(
+        correlation_root,
+        "correlation.json",
+        {
+            "dependence": {
+                "correlation_one": {
+                    "components": [
+                        {
+                            "allocation_weight": "0.4",
+                            "conservative_loss_fraction": "0.25",
+                            "loss_contribution": "0.1",
+                        },
+                        {
+                            "adverse_loss_fraction": "0.5",
+                            "allocation_weight": "0.4",
+                            "loss_contribution": "0.2",
+                        },
+                    ],
+                    "loss": "0.3",
+                }
+            }
+        },
+        "correlation-producer",
+    )
+    report_root = tmp_path / "report-producer"
+    report_generation = _publish(
+        report_root,
+        "portfolio-report-data.json",
+        {"portfolio_summary": [{"metric": "Correlation-one stress", "value": "0.3"}]},
+        "report-producer",
+    )
+    candidate, freshness = _candidate(
+        tmp_path / "panel-producer",
+        correlation_generation,
+        report_generation,
+        payload,
+        freshness_evaluated_on=PREVIOUS,
+    )
+    recomputation = recompute.build_receipt(
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+        CURRENT,
+    )
+    recomputation_path = tmp_path / "producer-control-recomputation.json"
+    _write(recomputation_path, recomputation)
+
+    receipt = cycle.build_receipt(
+        ledger_root,
+        ledger_generation,
+        freshness,
+        recomputation_path,
+        CURRENT,
+        PREVIOUS,
+    )
+
+    assert receipt["evaluation_date"] == CURRENT.isoformat()

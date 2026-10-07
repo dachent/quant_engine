@@ -817,3 +817,43 @@ def test_weekly_rejects_duplicate_dates_and_total_loss_or_worse() -> None:
     for invalid in ("-1", "-1.01"):
         with pytest.raises(weekly.WeeklyReturnError, match="greater than -1"):
             weekly._decimal(invalid, "synthetic return")
+
+
+def test_weekly_compounding_error_is_bounded_well_below_the_consumers_resolution() -> (
+    None
+):
+    """Class sweep (Astra rg4): the weekly return is compounded at the ambient 28 digits.
+
+    Inputs are daily returns with 34 significant digits.  Seven daily factors round at
+    most seven times at 0.5e-27 relative, so the published weekly value is within
+    4e-27 of the exact compounded return.  Every consumer reads it as a float64
+    (resolution 1.1e-16, see ``portfolio_control_panel._weekly_values``), which is
+    eleven orders wider, and the value is a return, not money: it is never compared
+    for equality or summed.  The bound is pinned here so a change that widens it, for
+    example a coarser context, fails.
+    """
+
+    from datetime import timedelta
+    from decimal import localcontext
+
+    returns = [
+        Decimal("0.0123456789012345678901234567890123"),
+        Decimal("-0.0098765432109876543210987654321098"),
+        Decimal("0.0045678901234567890123456789012345"),
+        Decimal("0.0011111111111111111111111111111111"),
+        Decimal("-0.0077777777777777777777777777777777"),
+        Decimal("0.0033333333333333333333333333333333"),
+        Decimal("0.0022222222222222222222222222222222"),
+    ]
+    days = [date(2026, 7, 6) + timedelta(days=offset) for offset in range(7)]
+
+    published = weekly._weekly_values(list(zip(days, returns, strict=True)))
+
+    with localcontext() as context:
+        context.prec = 100
+        exact = Decimal(1)
+        for value in returns:
+            exact *= 1 + value
+        exact -= 1
+    assert len(published) == 1
+    assert abs(Decimal(next(iter(published.values()))) - exact) < Decimal("4e-27")
