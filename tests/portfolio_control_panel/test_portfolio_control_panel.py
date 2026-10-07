@@ -14532,3 +14532,25 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     condition = conditions[0]
     assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25]
     assert condition["then"]["properties"]["advisory"]["required"] == ["hwm_candidate"]
+
+
+def test_a_rejected_lineage_suppresses_the_version_four_cost_rate_fields() -> None:
+    row = {
+        "strategy_id": ACTIVE_STRATEGY_IDS[0],
+        "strategy_name": STRATEGY_NAMES[0],
+        "annual_external_cost_rate_pre_tax": "0.07",
+        "cost_rate_status": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE",
+        "cost_rate_reason": None,
+        "cost_rate_denominator_usd": "51233.9",
+        "cost_rate_denominator_as_of_date": "2026-09-17",
+        "cost_rate_denominator_basis": "CURRENT_CUTOFF",
+        "cost_schedule_as_of_date": "2026-07-25",
+    }
+
+    (suppressed,) = panel._suppress_unmatched_strategy_performance([row])
+
+    for field in row:
+        if field.startswith(("cost_rate_", "cost_schedule_")) or field == (
+            "annual_external_cost_rate_pre_tax"
+        ):
+            assert suppressed[field] is None, field
