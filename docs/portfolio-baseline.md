@@ -108,3 +108,48 @@ publish leaves the prior pointer unchanged.
 GitHub may receive only sanitized counts, generation/catalog hashes, replay
 status, code/PR commits, and check results. Do not paste private paths, account
 aliases, symbols, transactions, financial records, or source contents.
+
+## Sealed arithmetic and its manual real-data check
+
+The dated audit snapshot (the replay block, the allocation table's systematic total, the
+covered-NAV numerator and total liquid) and the report's member return path and drawdown
+text are sealed in retained generations. Arithmetic that is replayed against, or compared
+with, those bytes keeps the historical arithmetic: sequential 28-digit half-even sums
+(`_snapshot_sum` here and in `portfolio_pipeline_materialize`), and a 28-digit
+sub-period return and drawdown negation in `portfolio_report`. Exact arithmetic
+(`_exact_sum`, `_exact_total`, the capital builders) belongs to current money, whose
+outputs no sealed generation compares with. A new exact variant of a sealed figure needs a
+new version with the historical path retained, never a change to what replays.
+
+The unit tests build a snapshot whose 28-digit and 100-digit sums differ through the real
+producer. They cannot stand in for real retained inputs, so after any change to these
+sums run this check by hand on a copy of the retained inputs (never the originals, and
+never commit real data):
+
+1. Copy the retained input directory and the retained baseline spec to a scratch location
+   and point the spec's local roots at the copy.
+2. Build the catalog in memory from the spec and compare its hashes with the retained
+   baseline stage result:
+
+   ```powershell
+   uv run --frozen --no-sync python - <<'PY'
+   import hashlib, pathlib, sys
+   sys.path.insert(0, "tools")
+   import portfolio_baseline as b
+   catalog, manifest, data = b.build_catalog(pathlib.Path("<copied-baseline-spec.json>"))
+   print(manifest.generation_id, hashlib.sha256(data).hexdigest(), catalog["replay"])
+   PY
+   ```
+
+   The generation id and catalog sha256 must equal the retained generation's. Reference
+   (smoke7, evaluation cutoff 2026-09-17): generation
+   `31350770101b8c19ca8a3db18ff12cbf74a4620f894349702d685416ad584740`, catalog
+   `a96d94395b7a7ac293c2f242ddf86dcb48200cd2a8edc4a05fbcf6554b87a699`, replay systematic
+   total `446546.0893751776827506151026`.
+3. Run the materializer's financial identity sums over the retained
+   `portfolio-baseline.json` (`_financial_snapshot_sums(allocations, systematic,
+   reserve)` against the replay's `systematic_total_usd` and `total_liquid_usd`); both
+   comparisons must hold.
+4. Rebuild the report's member trace paths and strategy drawdowns from the retained
+   account-strategy manifest and baseline catalog and confirm the series hashes and
+   drawdown text appear in the retained report data.
