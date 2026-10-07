@@ -3112,6 +3112,113 @@ def test_a_lens_entry_needs_no_account_of_its_strategies(tmp_path: Path) -> None
     assert result["account"] == BLOCKERS
 
 
+# ------------------------------------------------ R9-FXB-ENTRY: the declared residual
+#
+# rulings-round9-fx-entry-binding.md: a hand-forged value_basis_bounds block can relabel
+# one account or lens row (BLOCKER_AUTHORITY to NOT_READY).  The tests below pin today's
+# behaviour so closing the limit (backlog W32) is a deliberate change.
+
+
+def test_r9_residual_account_owned_only_by_the_block_is_downgraded(
+    tmp_path: Path,
+) -> None:
+    """DECLARED RESIDUAL R9-FXB-ENTRY: current outcome pinned; this test fails when the limit is closed -- update it, the docstring in checks.py and the residual register together.
+
+    Nothing outside the block ties A1 to alpha: the forged-ownership shape.
+    """
+
+    block = _bounds_block(
+        [_bound_strategy("alpha", account_ids=("A1",))], [ACCOUNT_ENTRY]
+    )
+    result = _l6c_run(tmp_path, block, [_strategy_cutoff("alpha")])
+    assert result["account"] == NOT_READY_ONLY
+    assert result["bound"] == []
+
+
+def test_r9_residual_lens_bound_by_an_unrelated_strategy_is_downgraded(
+    tmp_path: Path,
+) -> None:
+    """DECLARED RESIDUAL R9-FXB-ENTRY: current outcome pinned; this test fails when the limit is closed -- update it, the docstring in checks.py and the residual register together."""
+
+    block = _bounds_block(
+        [
+            _bound_strategy("alpha", account_ids=()),
+            _bound_strategy("gamma", account_ids=()),
+        ],
+        [
+            _bound_entry(
+                "decomposition_lenses",
+                "ECONOMIC_FACTOR:LIVE_ONLY",
+                "as_of_date",
+                ("gamma",),
+            )
+        ],
+    )
+    result = _l6c_run(
+        tmp_path, block, [_strategy_cutoff("alpha"), _strategy_cutoff("gamma")]
+    )
+    assert result["lens"] == NOT_READY_ONLY
+    assert result["bound"] == []
+
+
+def test_r9_residual_ghost_strategy_entry_does_not_void_the_block(
+    tmp_path: Path,
+) -> None:
+    """DECLARED RESIDUAL R9-FXB-ENTRY: current outcome pinned; this test fails when the limit is closed -- update it, the docstring in checks.py and the residual register together."""
+
+    block = _bounds_block(
+        [_bound_strategy("alpha"), _bound_strategy("ghost", account_ids=())],
+        [
+            ACCOUNT_ENTRY,
+            _bound_entry(
+                "strategy_summary", "ghost", "account_live_observed_end", ("ghost",)
+            ),
+        ],
+    )
+    result = _l6c_run(
+        tmp_path, block, [_strategy_cutoff("alpha"), _strategy_cutoff("ghost")]
+    )
+    assert result["bound"] == []
+    assert result["account"] == NOT_READY_ONLY
+
+
+def test_r9_residual_is_dormant_when_no_oracle_strategy_ends_before_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """The load-bearing control (ruling E2): with v12-shaped oracle dates, every
+    strategy is dated at the cutoff, so no forged block downgrades anything and the block
+    is itself a blocker.  This must keep passing after the limit is closed."""
+
+    oracle = [
+        _strategy_cutoff("alpha", as_of=CUTOFF),
+        _strategy_cutoff("gamma", as_of=CUTOFF),
+    ]
+    account_block = _bounds_block(
+        [_bound_strategy("alpha", account_ids=("A1",))], [ACCOUNT_ENTRY]
+    )
+    lens_block = _bounds_block(
+        [
+            _bound_strategy("alpha", account_ids=()),
+            _bound_strategy("gamma", account_ids=()),
+        ],
+        [
+            _bound_entry(
+                "decomposition_lenses",
+                "ECONOMIC_FACTOR:LIVE_ONLY",
+                "as_of_date",
+                ("gamma",),
+            )
+        ],
+    )
+    for name, block in (("account", account_block), ("lens", lens_block)):
+        result = _l6c_run(tmp_path / name, block, oracle)
+        assert result["account"] == BLOCKERS, name
+        assert result["lens"] == BLOCKERS, name
+        assert any(klass == checks.BLOCKER_AUTHORITY for klass, _ in result["bound"]), (
+            name
+        )
+
+
 # --------------------------------------------- L6c seam: the real producer's block
 #
 # AGENTS.md A1.3: a consumer suite that mocks the producer does not satisfy the

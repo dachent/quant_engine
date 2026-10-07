@@ -3036,6 +3036,9 @@ def _entry_binding_problem(ctx: Context, entry: BoundedSection) -> str | None:
     SYSTEMATIC strategies the report carries, a strategy row names the one strategy it is
     bounded by, and ``strategy:account`` names a member or cash line of that strategy.  A
     ``strategy_summary`` entry names the one strategy that bounds it.
+
+    ``account_summary`` and ``decomposition_lenses`` entries are not bound here: declared
+    residual R9-FXB-ENTRY, see ``verified_value_basis_bound``.
     """
 
     if entry.section == "strategy_summary":
@@ -3090,7 +3093,21 @@ def verified_value_basis_bound(
     account the bound says nothing about, and a real freshness blocker would be
     relabelled. A ``decomposition_lenses`` entry is exempt: its entity is
     ``{lens_id}:{evidence_mode}``, not an account id, and only the oracle check above
-    ties it to its strategies. ``None`` means the finding is unchanged.
+    ties it to its strategies.
+
+    DECLARED RESIDUAL R9-FXB-ENTRY (decision seat, rulings-round9-fx-entry-binding.md):
+    the block is not bound to which report entity its strategies reach for
+    ``account_summary`` (only to the block's own ``account_ids``) or
+    ``decomposition_lenses`` (only to the oracle date), and a ``strategy_summary`` or other
+    entry naming an entity the report does not carry is inert but does not void the block.
+    Only a hand-forged block reaches this; the producer derives entries and ``account_ids``
+    from the report rows and the ledger NAV mapping.  Closing it needs an oracle
+    account-to-strategy and lens-to-member map (backlog W32).  Pinned by
+    tests/acceptance/test_validate_alignment.py ``test_r9_residual_*``; those tests fail
+    when the limit is closed, and the residual register entry is removed in the same
+    change.
+
+    ``None`` means the finding is unchanged.
     """
 
     disclosure = value_basis_disclosure(ctx)
