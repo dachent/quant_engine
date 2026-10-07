@@ -277,6 +277,10 @@ class Ledger:
     # The pinned ledger's AUTHORITATIVE ACCOUNT_LIVE admission windows: the only
     # admissions that attest a custody cash line.
     admissions: tuple[Admission, ...] = ()
+    # Per provider, the date of the provider generation the ledger states (its
+    # ``provider_generations[*].generation_as_of_date``): the latest day an admission of
+    # that provider can have observed.  A provider that states none has no entry.
+    generation_dates: Mapping[str, dt.date] = field(default_factory=dict)
 
 
 def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
@@ -380,6 +384,11 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         str(item.get("provider_id")): str(item.get("generation_id"))
         for item in document.get("provider_generations", [])
     }
+    generation_dates: dict[str, dt.date] = {}
+    for item in document.get("provider_generations", []):
+        generation_day = iso_date(item.get("generation_as_of_date"))
+        if generation_day is not None:
+            generation_dates[str(item.get("provider_id"))] = generation_day
     admissions: list[Admission] = []
     for row in document.get("admissions", []):
         if (
@@ -413,6 +422,7 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         generations=generations,
         nav_mapping={account: tuple(found) for account, found in mapping.items()},
         admissions=tuple(admissions),
+        generation_dates=generation_dates,
     )
 
 

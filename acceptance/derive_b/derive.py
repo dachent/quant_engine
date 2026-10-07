@@ -1392,6 +1392,13 @@ MATRIXPORT_TRADE_RECORD_PATH = "/strategy/api/v2/user/trade_record"
 PLAIN_LIST_PARAMS = frozenset({"currency", "limit", "offset"})
 WINDOW_START_KEYS = frozenset({"start_time"})
 WINDOW_END_KEYS = frozenset({"end_time"})
+# Every parameter this derivation reads is a time bound, paging, or a scope.  A scope
+# parameter narrows WHAT a request returns (here the wallet currency), so only requests
+# of one scope can be chained: an interval one currency did not observe is not filled by
+# another currency's window (MX-1 (c): every request for the endpoint is judged, and a
+# request over a different filter is a different list).
+PAGING_PARAMS = frozenset({"limit", "offset"})
+SCOPE_PARAMS = PLAIN_LIST_PARAMS - PAGING_PARAMS
 CUSTODY_CAPTURE_PROVIDERS = {
     "volatis-strategy": "quantbase",
     "robuxio-crypto": "matrixport",
@@ -1407,6 +1414,28 @@ def coverage_entity(strategy_id: str, members: set[str]) -> str:
 
 def utc_day_of_ms(milliseconds: int) -> date:
     return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).date()
+
+
+def request_scope(request: dict[str, object]) -> tuple[tuple[str, str], ...] | None:
+    """The filters a list request narrows its result by, or None when unreadable.
+
+    Two requests chain only when their scopes are equal.  The key is every
+    parameter that is neither a time bound nor paging, with its value, sorted.
+    """
+    raw = request.get("safe_params")
+    try:
+        params = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(params, dict):
+        return None
+    return tuple(
+        sorted(
+            (str(key), json.dumps(value, sort_keys=True))
+            for key, value in params.items()
+            if key in SCOPE_PARAMS
+        )
+    )
 
 
 def request_time_window(request: dict[str, object]) -> tuple[int, int] | None | str:
@@ -1467,7 +1496,18 @@ def list_endpoint_coverage_end(
         or row.get("terminal_reason") not in NATURAL_LIST_TERMINALS
     ):
         return None
-    windows: list[tuple[int, int]] = []
+    # The response instant of the coverage row bounds every observation of the
+    # endpoint: a capture cannot have observed a moment after it was made, whatever
+    # time a request asked for.  It is an upper bound only, never a data date.
+    captured = row.get("updated_at_utc") or ""
+    try:
+        moment = datetime.fromisoformat(captured.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+        return None
+    capture_ms = int(moment.timestamp() * 1000)
+    windows_by_scope: dict[tuple[tuple[str, str], ...], list[tuple[int, int]]] = {}
     unwindowed = 0
     for line in request_lines:
         if not line.strip():
@@ -1476,25 +1516,27 @@ def list_endpoint_coverage_end(
         if not isinstance(request, dict) or request.get("endpoint") != path:
             continue
         window = request_time_window(request)
-        if window == "unbounded":
+        scope = request_scope(request)
+        if window == "unbounded" or scope is None:
             return None
         if window is None:
             unwindowed += 1
         else:
             assert isinstance(window, tuple)
-            windows.append(window)
-    if unwindowed and windows:
+            start, end = window
+            # A window that began after the response observed nothing; one that
+            # ends after it observed only up to the response.
+            if start <= capture_ms:
+                windows_by_scope.setdefault(scope, []).append(
+                    (start, min(end, capture_ms))
+                )
+            else:
+                windows_by_scope.setdefault(scope, [])
+    if unwindowed and windows_by_scope:
         return None
     if unwindowed:
-        captured = row.get("updated_at_utc") or ""
-        try:
-            moment = datetime.fromisoformat(captured.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
-            return None
         return moment.date()
-    if not windows:
+    if not windows_by_scope:
         return None
     first_ms = (
         0
@@ -1509,16 +1551,21 @@ def list_endpoint_coverage_end(
             * 1000
         )
     )
-    segments: list[list[int]] = []
-    for start, end in sorted(windows):
-        if segments and start <= segments[-1][1] + 1:
-            segments[-1][1] = max(segments[-1][1], end)
-        else:
-            segments.append([start, end])
-    for start, end in segments:
-        if start <= first_ms <= end:
-            return utc_day_of_ms(end)
-    return None
+    # Each scope is chained on its own, and the endpoint is proven only through the
+    # smallest end of them: every scope the capture asked has to reach the first event.
+    ends: list[int] = []
+    for windows in windows_by_scope.values():
+        segments: list[list[int]] = []
+        for start, end in sorted(windows):
+            if segments and start <= segments[-1][1] + 1:
+                segments[-1][1] = max(segments[-1][1], end)
+            else:
+                segments.append([start, end])
+        reached = [end for start, end in segments if start <= first_ms <= end]
+        if not reached:
+            return None
+        ends.append(reached[0])
+    return utc_day_of_ms(min(ends))
 
 
 def quantbase_capture_end(ledger: dict[str, object], selection: object) -> date | None:

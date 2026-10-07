@@ -4358,6 +4358,28 @@ def test_v3_coverage_end_stops_at_a_hole_between_flow_windows(tmp_path: Path) ->
     assert _coverage_value(document, MP_ENTITY) == "2026-01-04"
 
 
+def test_v3_coverage_end_is_bounded_by_the_ledger_generation_date(
+    tmp_path: Path,
+) -> None:
+    """K5: the Quantbase windows run to 01-12 but the ledger states the provider
+    generation at 01-11, so no admission can have observed 01-12.  The bound shortens a
+    future end and never extends a short one: Matrixport states no generation here and
+    keeps its admitted windows."""
+
+    ledger = _ledger_v3()
+    ledger["provider_generations"] = [
+        {
+            "provider_id": "quantbase",
+            "generation_id": "q" * 64,
+            "generation_as_of_date": "2026-01-11",
+        }
+    ]
+    document = _run_v3(tmp_path, _manifest_tree_v3(tmp_path, ledger_document=ledger))
+
+    assert _coverage_value(document, QB_ENTITY) == "2026-01-11"
+    assert _coverage_value(document, MP_ENTITY) == "2026-01-02"
+
+
 def test_v3_coverage_end_joins_windows_that_touch(tmp_path: Path) -> None:
     # [01-02, 01-04] and [01-05, 01-12] are adjacent days: one segment to 01-12.
     document = _coverage_run(

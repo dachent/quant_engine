@@ -3576,12 +3576,19 @@ def _custody_coverage_end(
     provider_id: str,
     account_id: str,
     facts: CustodyFacts,
+    generation_end: dt.date | None = None,
 ) -> dt.date | str:
     """The unclamped coverage end of one custody cash line, or why there is none.
 
     Owner flows and sleeve allocations are attested by different admissions
     (ledger fact types ``flows`` and ``capital_anchors``): each end is computed on
     its own and the line is proven only through the smaller one.
+
+    ``generation_end`` is the date of the provider generation the ledger states.  An
+    admission cannot have observed a day after the generation that admitted it, so a
+    window ending later is bounded by it (never extended to it): a future end in the
+    ledger is not coverage.  Without a stated generation date the windows are read as
+    admitted, and derivation b, which reads the raw captures, is the independent check.
     """
 
     ends: list[dt.date] = []
@@ -3590,11 +3597,16 @@ def _custody_coverage_end(
         ("capital_anchors", facts.first_allocation),
     ):
         windows = [
-            (item.start, item.end)
+            (
+                item.start,
+                item.end if generation_end is None else min(item.end, generation_end),
+            )
             for item in admissions
             if item.provider_id == provider_id
             and item.account_id == account_id
             and item.fact_type == fact_type
+            # A window that begins after the generation observed nothing at all.
+            and (generation_end is None or item.start <= generation_end)
         ]
         end = _contiguous_segment_end(windows, earliest, fact_type)
         if isinstance(end, str):
@@ -4613,6 +4625,11 @@ def _derive_strategies_and_portfolio_v3(
                     V3_CUSTODY_PROVIDERS[strategy_id].lower(),
                     holders[0],
                     facts,
+                    ledger.generation_dates.get(
+                        V3_CUSTODY_PROVIDERS[strategy_id].lower()
+                    )
+                    if ledger is not None
+                    else None,
                 )
                 if isinstance(coverage, str):
                     output.missing(COVERAGE_METRIC, coverage_entity, None, coverage)
