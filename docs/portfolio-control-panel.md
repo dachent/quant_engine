@@ -13,6 +13,22 @@ without preserving stale calculations or hard-coded operator conclusions.
   HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
+- Current holdings are the accepted position rows that the report marks as the
+  latest snapshot of their account and that are dated at the calculation
+  cutoff. `counts.positions` counts only those rows. `position_snapshots`
+  counts the rest by name (latest snapshot before the cutoff, historical
+  snapshots, rows dated after the cutoff, unavailable rows) with the history
+  date range, and every position row carries its `position_class`. The
+  verifier recomputes the split from the report rows. Panel schema 24 (25 for a
+  version-3 report) carries these fields; 21 to 23 remain readable.
+- Version-matched long history for a strategy is the hybrid-gate predicate
+  (accepted history for economic inference, live plus backtest eligible) and
+  its own `history_observations`. A decomposition lens never sets membership:
+  the lens statistics come from the strategy's AVAILABLE or DIAGNOSTIC row and
+  name their source key (`long_history.lens_statistics_source`).
+- The governed PORT-HWM-4 number appears as `advisory.hwm_candidate`, labelled
+  as pending owner acceptance with the E2 reason. The numeric HWM status stays
+  not accepted and `hwm_summary` is unchanged.
 - The numerical HWM composite (the `hwm_inputs` envelope) is reconciled
   against the governed baseline generation, never against the report's
   carried copies: the panel requires the baseline root (`--baseline-root`),
