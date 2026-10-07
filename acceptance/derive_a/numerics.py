@@ -188,8 +188,10 @@ def investor_cash_flows(members: Sequence[Member]) -> list[tuple[dt.date, Decima
 
     flows: list[tuple[dt.date, Decimal]] = []
     for member in members:
-        flows.append((member.open_date, -member.values[member.open_date]))
-        flows.extend((day, -amount) for day, amount, _ in member.flows)
+        # copy_negate, not unary minus: minus rounds a wide amount to the caller's
+        # context, and this oracle's arithmetic is independent of that context.
+        flows.append((member.open_date, member.values[member.open_date].copy_negate()))
+        flows.extend((day, amount.copy_negate()) for day, amount, _ in member.flows)
         flows.append((member.close_date, member.values[member.close_date]))
     return flows
 
@@ -240,7 +242,9 @@ def irr_root_bound(amounts: Sequence[Decimal]) -> int:
 
     forward = sign_changes(_partial_sums(amounts))
     backward = sign_changes(_partial_sums(list(reversed(amounts))))
-    total_is_zero = 1 if sum(amounts, ZERO) == ZERO else 0
+    with localcontext() as context:
+        context.prec = PRECISION
+        total_is_zero = 1 if sum(amounts, ZERO) == ZERO else 0
     return forward + backward + total_is_zero
 
 

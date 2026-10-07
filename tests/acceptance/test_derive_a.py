@@ -4196,3 +4196,55 @@ def test_v3_native_matrixport_missing_selected_fx_fails_closed(
     assert ("capital.strategy_cash.cutoff", "robuxio-crypto") not in metrics
     # The fund-only path (USDT product NAV) is unaffected.
     assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "99.00"
+
+
+# ------------------------------------------------- oracle arithmetic at any caller precision
+
+_WIDE_OPEN = "100000000000.0000000000000000001"  # 31 significant digits
+
+
+def _at_precision(precision: int, call: Any) -> Any:
+    from decimal import localcontext
+
+    with localcontext() as context:
+        context.prec = precision
+        return call()
+
+
+def test_root_bound_total_is_exact_whatever_precision_the_caller_runs_at() -> None:
+    """Astra rg4 class sweep: the oracle is the independent arithmetic, so a caller's
+    context must not change which outcome it proves.
+
+    The two amounts sum to 1E-19, not zero.  Added in a 28-digit context the 1E-19 is
+    rounded away, the bound counts a root at rate zero that does not exist, and a
+    stream whose uniqueness is provable is refused.
+    """
+
+    amounts = [D(_WIDE_OPEN), D("-100000000000")]
+
+    bounds = {
+        precision: _at_precision(precision, lambda: numerics.irr_root_bound(amounts))
+        for precision in (28, 60)
+    }
+
+    assert bounds == {28: 1, 60: 1}
+    assert numerics.irr_root_bound(list(reversed(amounts))) == 1
+
+
+def test_investor_cash_flows_keep_every_digit_of_a_wide_amount() -> None:
+    wide = "123456789012345678901234567890.123456789012345678"
+    segment = member(
+        "a",
+        {"2026-01-01": wide, "2026-12-31": "5"},
+        "2026-01-01",
+        "2026-12-31",
+        flows=(("2026-06-30", wide, "EOD"),),
+    )
+
+    flows = _at_precision(28, lambda: numerics.investor_cash_flows([segment]))
+
+    assert [amount for _day, amount in flows] == [
+        D(wide).copy_negate(),
+        D(wide).copy_negate(),
+        D("5"),
+    ]
