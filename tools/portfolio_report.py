@@ -2434,11 +2434,17 @@ def _latest_nav(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     return latest
 
 
+# Precision at which money, cash flows and capital are added: wide enough that no sum
+# of native (up to 40-digit) amounts rounds.  It equals the baseline's exact
+# precision (``portfolio_baseline._EXACT_PRECISION``).
+_EXACT_PRECISION = 100
+
+
 def _exact_total(values: Sequence[Decimal]) -> Decimal:
     """Add money exactly: the default 28-digit context would round long sums."""
 
     with localcontext() as context:
-        context.prec = 100
+        context.prec = _EXACT_PRECISION
         return sum(values, Decimal(0))
 
 
@@ -4925,10 +4931,16 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "mwr_status": "UNAVAILABLE_MEMBER_MWR_NOT_AVAILABLE",
                 "mwr_reason": "MEMBER_CASHFLOWS_NOT_AVAILABLE",
             }
-        for flow in _objects(flows, "mwr_cashflows"):
-            pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
-                flow.get("amount"), "mwr cashflow amount"
-            )
+        # Member flows are native, up to 40 significant digits.  Added in the ambient
+        # 28-digit context two opposite legs leave a rounding residual that survives
+        # or not with the member order, so a date that nets to zero would stay in the
+        # pool.  The pool is added exactly, as every other published sum is.
+        with localcontext() as context:
+            context.prec = _EXACT_PRECISION
+            for flow in _objects(flows, "mwr_cashflows"):
+                pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
+                    flow.get("amount"), "mwr cashflow amount"
+                )
     # The classifier solves only the dates whose pooled flows do not net to zero, so
     # the published window is that stream's, not the raw pooled dates'.
     ordered = [(day, amount) for day, amount in sorted(pooled.items()) if amount]
