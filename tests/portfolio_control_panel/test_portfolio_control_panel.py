@@ -14406,3 +14406,90 @@ def test_the_built_panel_publishes_the_candidate_and_leaves_the_status_alone(
         data["hwm_summary"]["hwm_numerical_status"]
         == (data["advisory"]["hwm_numerical_status"])
     )
+
+
+# QC1-P N72: the semantic check reads the lens the panel renders.
+
+
+def test_the_rendered_default_lens_is_the_default_lens_and_source_not_the_alias() -> (
+    None
+):
+    lens_id, source_key, rows = panel._rendered_default_lens_rows(_qc1p_lenses())
+
+    assert (lens_id, source_key) == ("ECONOMIC_FACTOR", "us-economic")
+    assert {row["source_key"] for row in rows} == {"us-economic"}
+    assert [row["series_id"] for row in rows] == [
+        name for _id, name, _obs, _status in _QC1P_STRATEGIES
+    ]
+    assert [row["status"] for row in rows] == [
+        "UNAVAILABLE",
+        "UNAVAILABLE",
+        "AVAILABLE",
+        "AVAILABLE",
+    ]
+
+
+def test_the_factor_check_names_the_lens_and_source_it_validated(
+    inputs: dict[str, Path],
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    result = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        Path(built["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    lenses = data["decomposition_lenses"]
+    check = next(
+        row
+        for row in result["checks"]
+        if row["check"] == "Accepted factor and alpha evidence is exact"
+    )
+
+    assert check["status"] == "PASS"
+    assert check["evidence"]["lens_id"] == lenses["default_lens"]
+    assert check["evidence"]["evidence_mode"] == lenses["default_evidence_mode"]
+    assert "source_key" in check["evidence"]
+    assert (
+        check["evidence"]["available"]
+        + check["evidence"]["diagnostic_only"]
+        + check["evidence"]["unavailable"]
+        == 7
+    )
+
+
+def test_a_lens_listing_every_strategy_under_every_source_is_source_qualified() -> None:
+    rows = _qc1p_lenses()["modes"]["LIVE_ONLY"][0]["series"]
+
+    assert panel._lens_is_source_qualified(rows) is True
+
+
+def test_a_combined_legacy_lens_is_not_source_qualified() -> None:
+    rows = [
+        {"series_id": "A", "source_key": "us-economic"},
+        {"series_id": "B"},
+        {"series_id": "C", "source_key": "europe-economic"},
+    ]
+
+    assert panel._lens_is_source_qualified(rows) is False
+
+
+def test_a_row_without_a_source_key_is_rendered_under_the_default_source() -> None:
+    lenses = _qc1p_lenses()
+    placeholder = {"series_id": "Placeholder", "status": "UNAVAILABLE"}
+    lenses["modes"]["LIVE_ONLY"][0]["series"].append(placeholder)
+
+    _lens_id, _source_key, rows = panel._rendered_default_lens_rows(lenses)
+
+    assert placeholder in rows
+    assert {row.get("source_key") for row in rows} == {"us-economic", None}

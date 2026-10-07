@@ -8416,6 +8416,65 @@ def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
     return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
 
 
+def _default_lens(lenses: Mapping[str, Any]) -> dict[str, Any]:
+    """The default evidence mode's default lens, as the panel opens on it."""
+
+    mode = _text(lenses.get("default_evidence_mode"), "default evidence mode")
+    lens_id = _text(lenses.get("default_lens"), "default lens")
+    modes = _object(lenses.get("modes"), "decomposition lens modes")
+    lens = next(
+        (
+            row
+            for row in _objects(modes.get(mode), f"decomposition lenses {mode}")
+            if row.get("lens_id") == lens_id
+        ),
+        None,
+    )
+    if lens is None:
+        raise ControlPanelValidationError(
+            f"default decomposition lens is absent from its mode: {lens_id}"
+        )
+    return lens
+
+
+def _rendered_default_lens_rows(
+    lenses: Mapping[str, Any],
+) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """The lens, source and series rows the panel shows by default.
+
+    The default lens narrowed to its default source the way the renderer filters it:
+    a row with no source key is shown under every source.
+    """
+
+    lens = _default_lens(lenses)
+    lens_id = _text(lens.get("lens_id"), "default lens id")
+    source_key = lens.get("default_source_key")
+    if source_key is not None:
+        source_key = _text(source_key, "default source key")
+    rows = [
+        row
+        for row in _objects(lens.get("series"), f"{lens_id} series")
+        if source_key is None
+        or not row.get("source_key")
+        or row.get("source_key") == source_key
+    ]
+    return lens_id, source_key, rows
+
+
+def _lens_is_source_qualified(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every source of the lens lists the same strategies (current plan)."""
+
+    by_source: dict[str, set[str]] = {}
+    for row in rows:
+        source_key = row.get("source_key")
+        if not source_key:
+            return False
+        by_source.setdefault(str(source_key), set()).add(str(row.get("series_id")))
+    return (
+        len(by_source) > 0 and len({frozenset(ids) for ids in by_source.values()}) == 1
+    )
+
+
 HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
 
 
@@ -12518,15 +12577,52 @@ def verify_candidate(
         )
     )
     factor_rows = _objects(data["factor_analysis"].get("series"), "factor.series")
+    # The panel renders the default lens and its default source, not the top-level
+    # `factor_analysis` alias (the dynamic-style lens), so that is what the check
+    # validates: the rendered rows, their counts and their reconciliation.
+    rendered_lens_id, rendered_source_key, rendered_rows = _rendered_default_lens_rows(
+        lens_payload
+    )
+    rendered_counts = Counter(
+        "available"
+        if row.get("status") == "AVAILABLE"
+        else "diagnostic_only"
+        if str(row.get("status", "")).startswith("DIAGNOSTIC")
+        else "unavailable"
+        for row in rendered_rows
+    )
+    rendered_ids = {
+        _text(row.get("series_id"), "rendered factor series_id")
+        for row in rendered_rows
+    }
+    # A source-qualified lens (the current plan) lists every strategy under every
+    # source, so the rendered source must cover the exact perimeter.  A combined
+    # legacy lens spreads the strategies over its sources, so the rendered rows are a
+    # subset there and the lens-wide perimeter check above covers the rest.
+    rendered_perimeter_exact = (
+        rendered_ids == required_analysis_series
+        if _lens_is_source_qualified(
+            _objects(_default_lens(lens_payload).get("series"), "default lens series")
+        )
+        else bool(rendered_rows) and rendered_ids <= required_analysis_series
+    )
+    default_lens = _default_lens(lens_payload)
+    # The lens carries its own counts over every source it lists, so they only bind
+    # the rendered rows when the lens is not narrowed to one source.
+    rendered_counts_agree = rendered_source_key is not None or (
+        default_lens.get("available_count"),
+        default_lens.get("diagnostic_count"),
+        default_lens.get("unavailable_count"),
+    ) == (
+        rendered_counts["available"],
+        rendered_counts["diagnostic_only"],
+        rendered_counts["unavailable"],
+    )
     checks.append(
         _check(
             "Accepted factor and alpha evidence is exact",
-            data["factor_analysis"]["available_count"]
-            + data["factor_analysis"]["diagnostic_count"]
-            + data["factor_analysis"]["unavailable_count"]
-            == len(required_analysis_series)
-            and {_text(row.get("series_id"), "factor series_id") for row in factor_rows}
-            == required_analysis_series
+            rendered_counts_agree
+            and rendered_perimeter_exact
             and all(
                 row.get("contribution_summary") is None
                 or _finite_float(
@@ -12536,13 +12632,22 @@ def verify_candidate(
                     "maximum_reconciliation_error",
                 )
                 <= 1e-9
-                for row in factor_rows
-            ),
+                for row in rendered_rows
+            )
+            and data["factor_analysis"]["available_count"]
+            + data["factor_analysis"]["diagnostic_count"]
+            + data["factor_analysis"]["unavailable_count"]
+            == len(required_analysis_series)
+            and {_text(row.get("series_id"), "factor series_id") for row in factor_rows}
+            == required_analysis_series,
             {
-                "available": data["factor_analysis"]["available_count"],
-                "diagnostic_only": data["factor_analysis"]["diagnostic_count"],
+                "available": rendered_counts["available"],
+                "diagnostic_only": rendered_counts["diagnostic_only"],
+                "evidence_mode": lens_payload.get("default_evidence_mode"),
                 "generation": data["meta"]["decomposition_generation_id"],
-                "unavailable": data["factor_analysis"]["unavailable_count"],
+                "lens_id": rendered_lens_id,
+                "source_key": rendered_source_key,
+                "unavailable": rendered_counts["unavailable"],
             },
         )
     )
