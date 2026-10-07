@@ -8326,6 +8326,17 @@ def _strategy_underwriting(
     )
 
 
+def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
+    """How many reconciliation checks passed: every status that starts with ``PASS``.
+
+    ``PASS_WITH_EXPLICIT_RECONCILIATION`` is a pass with its reconciliation stated; the
+    shell paints it as accepted and the coverage verification accepts it, so the counter
+    counts it too (B11).
+    """
+
+    return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
@@ -9240,7 +9251,7 @@ def _panel_data(
     position_count = sum(
         str(row.get("status", "")).startswith("AVAILABLE") for row in positions
     )
-    reconciliation_passed = sum(row.get("status") == "PASS" for row in reconciliations)
+    reconciliation_passed = _reconciliation_passed(reconciliations)
     source_contract = _object(source.get("contract"), "source.contract")
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
     baseline = _object(report.get("baseline"), "baseline")
