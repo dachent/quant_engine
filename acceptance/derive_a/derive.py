@@ -38,6 +38,7 @@ from .numerics import (
 from .sources import (
     INCLUDED,
     AccountFlows,
+    Admission,
     Assignment,
     Bill,
     Crosswalk,
@@ -263,6 +264,9 @@ V3_RESPONSE_SCHEMA = "github-issue-comment/REST"
 # cash derivation (strategy_id -> required provider of its single account).
 V3_CUSTODY_PROVIDERS = {"volatis-strategy": "QUANTBASE", "robuxio-crypto": "MATRIXPORT"}
 CASH_METRIC = "capital.strategy_cash.cutoff"
+# One row per custody cash line (entity <strategy>|<provider>|<account>): the
+# unclamped date through which every admission the line is derived from attests it.
+COVERAGE_METRIC = "date.strategy_cash.coverage_end"
 INVESTED_METRIC = "invested_capital.strategy.cutoff"
 WEIGHT_METRIC = "weight.strategy.cutoff"
 # Raw Quantbase activity rows: deposits/withdrawals are owner funding, fund
@@ -382,6 +386,16 @@ V3_CONVENTION_NOTES = (
     "affected invested-capital/cash/strategy-capital rows and the dependent "
     "systematic total and weight.strategy.cutoff rows NOT_DERIVABLE -- never a "
     "partial numeric total and never a zero stand-in.",
+    "R8 coverage end: date.strategy_cash.coverage_end (entity "
+    "<strategy>|<provider>|<account>) is, for each custody cash line, the end "
+    "of the contiguous provider-ledger admission segment that holds the "
+    "earliest event, taken separately for owner flows and for sleeve "
+    "allocations (capital anchors) over the AUTHORITATIVE ACCOUNT_LIVE "
+    "windows of that provider and account, windows whose start is at most one "
+    "day after the previous end joining one segment, and the smaller of the "
+    "two ends. It is unclamped (it may follow the cutoff). A missing window, "
+    "an earliest event outside every window, or a withheld cash line makes "
+    "the row NOT_DERIVABLE.",
     "v3 authority: the provider-capital policy must be an approved native "
     "decision (eight keys, APPROVED, owner authority) structurally equal to "
     "the selected contract's provider_custody_perimeter; custody strategies "
@@ -3389,6 +3403,11 @@ class CustodyFacts:
     last_event: dt.date | None
     inputs: tuple[str, ...]
     notes: tuple[str, ...]
+    # The earliest owner-funding event (the ledger's flows fact type) and the
+    # earliest sleeve allocation (its capital_anchors fact type) of this oracle's
+    # own event set, or None when the line has none of that type.
+    first_flow: dt.date | None = None
+    first_allocation: dt.date | None = None
 
 
 def _custody_facts(
@@ -3507,7 +3526,89 @@ def _custody_facts(
         last_event=max(by_day) if by_day else None,
         inputs=inputs,
         notes=notes,
+        first_flow=min(
+            (e.day for e in events if e.kind in ("deposit", "withdrawal")),
+            default=None,
+        ),
+        first_allocation=min(
+            (e.day for e in events if e.kind == "allocation"), default=None
+        ),
     )
+
+
+def _contiguous_segment_end(
+    windows: Sequence[tuple[dt.date, dt.date]],
+    earliest: dt.date | None,
+    fact_type: str,
+) -> dt.date | str:
+    """End of the merged window segment that holds the earliest event of one type.
+
+    Windows join when ``next.start <= previous.end + 1 day``: a day between two
+    disjoint windows is attested by nothing, so a later window's end is never
+    bridged to. A fact type with no event uses the earliest segment. Returns the
+    reason when the type has no window or its earliest event is in none.
+    """
+
+    if not windows:
+        return (
+            f"the pinned provider ledger has no AUTHORITATIVE ACCOUNT_LIVE "
+            f"{fact_type} admission window for this provider and account"
+        )
+    segments: list[list[dt.date]] = []
+    for start, end in sorted(windows):
+        if segments and start <= segments[-1][1] + dt.timedelta(days=1):
+            segments[-1][1] = max(segments[-1][1], end)
+        else:
+            segments.append([start, end])
+    if earliest is None:
+        return segments[0][1]
+    for start, end in segments:
+        if start <= earliest <= end:
+            return end
+    return (
+        f"the earliest {fact_type} event {_day(earliest)} lies inside no "
+        "AUTHORITATIVE ACCOUNT_LIVE admission window of the pinned provider ledger"
+    )
+
+
+def _custody_coverage_end(
+    admissions: Sequence[Admission],
+    provider_id: str,
+    account_id: str,
+    facts: CustodyFacts,
+) -> dt.date | str:
+    """The unclamped coverage end of one custody cash line, or why there is none.
+
+    Owner flows and sleeve allocations are attested by different admissions
+    (ledger fact types ``flows`` and ``capital_anchors``): each end is computed on
+    its own and the line is proven only through the smaller one.
+    """
+
+    ends: list[dt.date] = []
+    for fact_type, earliest in (
+        ("flows", facts.first_flow),
+        ("capital_anchors", facts.first_allocation),
+    ):
+        windows = [
+            (item.start, item.end)
+            for item in admissions
+            if item.provider_id == provider_id
+            and item.account_id == account_id
+            and item.fact_type == fact_type
+        ]
+        end = _contiguous_segment_end(windows, earliest, fact_type)
+        if isinstance(end, str):
+            return end
+        ends.append(end)
+    return min(ends)
+
+
+def _coverage_entity(strategy_id: str, holders: Sequence[str]) -> str:
+    """``<strategy>|<provider>|<account>``; the account is ``-`` when not exactly one."""
+
+    provider = V3_CUSTODY_PROVIDERS[strategy_id].lower()
+    account = holders[0] if len(holders) == 1 else "-"
+    return f"{strategy_id}|{provider}|{account}"
 
 
 def derive(
@@ -3658,6 +3759,7 @@ def _derive(
                 fx_v3,
                 authority.contract,
                 native,
+                ledger,
             )
         else:
             fx = _fx_source(files[FX_HISTORY], contract_bytes[MVP_CONTRACT])
@@ -3771,6 +3873,23 @@ def _fail_closed(
             if strategy_id in V3_CUSTODY_PROVIDERS:
                 output.missing(CASH_METRIC, strategy_id, None, reason)
                 output.missing(INVESTED_METRIC, strategy_id, None, reason)
+                output.missing(
+                    COVERAGE_METRIC,
+                    _coverage_entity(
+                        strategy_id,
+                        sorted(
+                            {
+                                row.account_id
+                                for row in crosswalk.rows
+                                if row.strategy_id == strategy_id
+                                and row.disposition == INCLUDED
+                                and row.effective_end is None
+                            }
+                        ),
+                    ),
+                    None,
+                    reason,
+                )
     for metric_id in PORTFOLIO_METRICS:
         output.missing(metric_id, "portfolio", None, reason)
     output.missing(
@@ -4330,6 +4449,7 @@ def _derive_strategies_and_portfolio_v3(
     fx: FxSourceV3,
     contract: Mapping[str, Any],
     native: MatrixportNative | None = None,
+    ledger: Ledger | None = None,
 ) -> None:
     """v3 strategy/portfolio rows: the v2 fund-NAV path plus the R8 custody cash.
 
@@ -4395,6 +4515,21 @@ def _derive_strategies_and_portfolio_v3(
             if strategy_id in V3_CUSTODY_PROVIDERS:
                 output.missing(CASH_METRIC, strategy_id, None, reason)
                 output.missing(INVESTED_METRIC, strategy_id, None, reason)
+                output.missing(
+                    COVERAGE_METRIC,
+                    _coverage_entity(
+                        strategy_id,
+                        sorted(
+                            {
+                                row.account_id
+                                for row, _ in unknown_current
+                                if row.strategy_id == strategy_id
+                            }
+                        ),
+                    ),
+                    None,
+                    reason,
+                )
             _strategy_returns(output, strategy_id, membership, sources, cutoff)
             continue
         holders = sorted(
@@ -4446,10 +4581,12 @@ def _derive_strategies_and_portfolio_v3(
                 set(facts.inputs if facts is not None else ())
                 | {CROSSWALK, MVP_CONTRACT, CAPITAL_POLICY}
             )
+            coverage_entity = _coverage_entity(strategy_id, holders)
             if custody_reason:
                 systematic_ok = False
                 output.missing(CASH_METRIC, strategy_id, None, custody_reason)
                 output.missing(INVESTED_METRIC, strategy_id, None, custody_reason)
+                output.missing(COVERAGE_METRIC, coverage_entity, None, custody_reason)
             elif facts is not None:
                 output.metric(
                     INVESTED_METRIC,
@@ -4471,6 +4608,31 @@ def _derive_strategies_and_portfolio_v3(
                     row_inputs,
                     facts.notes,
                 )
+                coverage = _custody_coverage_end(
+                    ledger.admissions if ledger is not None else (),
+                    V3_CUSTODY_PROVIDERS[strategy_id].lower(),
+                    holders[0],
+                    facts,
+                )
+                if isinstance(coverage, str):
+                    output.missing(COVERAGE_METRIC, coverage_entity, None, coverage)
+                else:
+                    output.metric(
+                        COVERAGE_METRIC,
+                        coverage_entity,
+                        None,
+                        cutoff,
+                        _day(coverage),
+                        "date",
+                        sorted({*row_inputs, LEDGER}),
+                        [
+                            "unclamped end of the contiguous AUTHORITATIVE "
+                            "ACCOUNT_LIVE admission segment holding the earliest "
+                            "owner-flow and allocation events, the smaller of the "
+                            "two; the cash line is proven through min(cutoff, "
+                            "this date)"
+                        ],
+                    )
         if missing or custody_reason:
             systematic_ok = False
             reasons = []
