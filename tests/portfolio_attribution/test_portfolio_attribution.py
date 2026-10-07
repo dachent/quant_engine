@@ -49,6 +49,7 @@ def _baseline(
     provider_admissions: list[dict[str, Any]] | None = None,
     strategy_version_refs: dict[str, str] | None = None,
     baseline_schema_version: int = 1,
+    cost_rows: dict[int, tuple[str | None, str]] | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
     version_refs = strategy_version_refs or {}
@@ -94,8 +95,20 @@ def _baseline(
         "baseline_schema_version": baseline_schema_version,
         "costs": [
             {
-                "annual_external_cost_usd": "7.18" if index == 1 else None,
-                "cost_status": "known" if index == 1 else "unknown",
+                "annual_external_cost_usd": (
+                    cost_rows[index][0]
+                    if cost_rows is not None and index in cost_rows
+                    else "7.18"
+                    if index == 1
+                    else None
+                ),
+                "cost_status": (
+                    cost_rows[index][1]
+                    if cost_rows is not None and index in cost_rows
+                    else "known"
+                    if index == 1
+                    else "unknown"
+                ),
                 "strategy_id": f"strategy-{index}",
             }
             for index in range(1, 10)
@@ -288,6 +301,45 @@ def test_exact_date_metrics_costs_and_legacy_baseline_are_explicit(
     benchmark = catalog["benchmark_comparisons"][0]
     assert benchmark["metrics"]["observations"] == 2
     assert benchmark["metrics"]["beta"] is not None
+
+
+def test_a_contract_cap_is_an_upper_bound_not_evidenced_fees(tmp_path: Path) -> None:
+    """N73 (K10): the Volatis 1% contract cap is an upper bound, never "Evidenced".
+
+    The status words are the real cost-economics ones: known_fixed and
+    known_gold_api are known costs; conservative_1pct_contract_cap is a cap.
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        cost_rows={
+            1: ("3590", "known_gold_api"),
+            2: ("798", "known_fixed"),
+            3: ("664.57", "conservative_1pct_contract_cap"),
+            4: (None, "unknown_model_subscription_cost"),
+            5: (None, "30pct_incentive_or_unknown_subscription"),
+        },
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    status = {row["strategy_id"]: row["fees_status"] for row in catalog["costs"]}
+    assert status["strategy-1"] == "EVIDENCED_PRE_TAX"
+    assert status["strategy-2"] == "EVIDENCED_PRE_TAX"
+    assert status["strategy-3"] == "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+    assert status["strategy-4"] == "UNAVAILABLE"
+    assert status["strategy-5"] == "UNAVAILABLE"
+
+
+def test_a_cost_amount_with_an_unrecognised_status_is_refused(tmp_path: Path) -> None:
+    baseline = _baseline(tmp_path, cost_rows={1: ("10", "mystery_status")})
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="cost status mystery_status"
+    ):
+        attribution.build_catalog(baseline, spec)
 
 
 def test_account_cumulative_return_includes_a_non_benchmark_date(

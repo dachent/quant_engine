@@ -1574,6 +1574,30 @@ def _capital_coverage_bounds(
     }
 
 
+FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
+FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+
+
+def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
+    """The fees label a cost row earns: a known cost is evidenced, a cap is a bound.
+
+    A cost amount exists for both a known cost (``known_fixed``, ``known_gold_api``)
+    and a contract cap (``conservative_1pct_contract_cap``); only the first is
+    evidence of a cost.  A cap is the most the contract allows, so it is labelled
+    as the upper bound it is.  ``None`` means an amount whose status names neither.
+    """
+
+    if annual_cost is None:
+        return FEES_STATUS_UNAVAILABLE
+    text = cost_status if isinstance(cost_status, str) else ""
+    if text.startswith("known"):
+        return FEES_STATUS_EVIDENCED
+    if text.endswith("contract_cap"):
+        return FEES_STATUS_UPPER_BOUND
+    return None
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
 ) -> list[dict[str, Any]]:

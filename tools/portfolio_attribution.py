@@ -38,6 +38,7 @@ from quant_engine.portfolio_ledger.value_basis_bounds import (
 )
 from portfolio_report import (
     ReportValidationError,
+    fees_status_for_cost,
     _account_live_return_series as _validated_account_live_return_series,
     _epoch_hpr_receipts as _validated_epoch_hpr_receipts,
 )
@@ -1046,6 +1047,14 @@ def build_catalog(
             if cost.get("annual_external_cost_usd") is None
             else _decimal(cost["annual_external_cost_usd"], "annual cost")
         )
+        fees_status = fees_status_for_cost(
+            cost.get("cost_status", "unknown"), annual_cost
+        )
+        if fees_status is None:
+            raise AttributionValidationError(
+                f"cost status {cost.get('cost_status')} is neither a known cost "
+                "nor a contract cap"
+            )
         accepted_costs.append(
             {
                 "after_tax_annual_cost_rate": None,
@@ -1058,9 +1067,7 @@ def build_catalog(
                 "annual_external_cost_usd": _decimal_text(annual_cost),
                 "cost_status": cost.get("cost_status", "unknown"),
                 "current_sleeve_value_usd": _decimal_text(current_value),
-                "fees_status": "EVIDENCED_PRE_TAX"
-                if annual_cost is not None
-                else "UNAVAILABLE",
+                "fees_status": fees_status,
                 "strategy_id": strategy_id,
             }
         )
