@@ -6037,6 +6037,7 @@ def test_n65_the_recorded_column_is_not_judged_at_older_versions(
 
     assert _snapshot_findings(tmp_path, older) == []
 
+
 def _counts_context(panel: dict[str, Any]) -> checks.Context:
     context = checks.Context(
         gen=None,  # type: ignore[arg-type]
