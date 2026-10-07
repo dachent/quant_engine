@@ -1,50 +1,62 @@
-"""Class sweep (Astra rg4): published return text is never rounded by the ambient context.
+"""Published report data keeps the arithmetic its retained generations were sealed with.
 
-The report publishes returns the engine computes at 34 significant digits.  A
-subtraction or negation executed outside that context rounds to the ambient 28
-digits, so the published text silently loses its last digits and the hashed series
-binds the rounded value.
+The report publishes a member's return path and each strategy's drawdowns.  A retained
+report generation binds those values: the member path's series text through a hash, the
+drawdowns as published text.  Rebuilding the same inputs must reproduce the same bytes,
+so the sub-period return (``factor - 1``) and the drawdown negation are computed in the
+28-digit context they always were, whatever precision the caller runs at.  Computing
+them wider would republish every retained generation with different digits and a
+different series hash (smoke7: the real member trace hashes and the real drawdowns).
 """
 
 from __future__ import annotations
 
 from decimal import Decimal, localcontext
+import hashlib
 
 import portfolio_report as reporter
 
 WIDE_FACTOR = "1.2345678901234567890123456789012345"
 WIDE_RETURN = "-0.1234567890123456789012345678901234"
+# What the retained generations published for these inputs: the 28-digit return.
+SEALED_PATH_RETURN = "0.2345678901234567890123456789"
+SEALED_DRAWDOWN = "-0.1234567890123456789012345679"
+SEALED_SERIES_SHA256 = (
+    "d825927397e6b3cb3c3642321c77d346ef57d0d690b4c3eb2a6de343d5a31c41"
+)
+
+LINK = {"start_date": "2026-01-01", "end_date": "2026-01-02", "factor": WIDE_FACTOR}
 
 
-def test_member_trace_path_keeps_every_digit_of_a_wide_link_factor() -> None:
-    path = reporter._member_own_trace_path(
-        [
-            {
-                "start_date": "2026-01-01",
-                "end_date": "2026-01-02",
-                "factor": WIDE_FACTOR,
-            }
-        ]
-    )
+def test_member_trace_path_publishes_the_sealed_28_digit_period_return() -> None:
+    path = reporter._member_own_trace_path([LINK])
 
     assert path is not None
-    # The return engine compounds at 34 significant digits (1.2345... rounds half
-    # even to 34 digits); the ambient 28 would have published ...456789.
+    assert path["return_path_cumulative_return"] == SEALED_PATH_RETURN
+    assert path["return_path_series_sha256"] == SEALED_SERIES_SHA256
+
+
+def test_member_trace_series_hash_binds_the_sealed_return_text() -> None:
+    path = reporter._member_own_trace_path([LINK])
+
+    assert path is not None
+    series = [{"date": "2026-01-02", "return": SEALED_PATH_RETURN}]
     assert (
-        path["return_path_cumulative_return"] == "0.234567890123456789012345678901234"
+        path["return_path_series_sha256"]
+        == hashlib.sha256(reporter._canonical_json_array_bytes(series)).hexdigest()
     )
 
 
-def test_member_trace_path_series_binds_the_exact_period_return() -> None:
-    link = {"start_date": "2026-01-01", "end_date": "2026-01-02", "factor": WIDE_FACTOR}
-    ambient = reporter._member_own_trace_path([link])
-    with localcontext() as context:
-        context.prec = 60
-        wide = reporter._member_own_trace_path([link])
+def test_member_trace_path_does_not_depend_on_the_callers_precision() -> None:
+    results = []
+    for precision in (28, 60):
+        with localcontext() as context:
+            context.prec = precision
+            results.append(reporter._member_own_trace_path([LINK]))
 
-    assert ambient is not None and wide is not None
-    assert ambient["return_path_series_sha256"] == wide["return_path_series_sha256"]
-    assert ambient == wide
+    assert results[0] == results[1]
+    assert results[0] is not None
+    assert results[0]["return_path_series_sha256"] == SEALED_SERIES_SHA256
 
 
 def _strategy_catalog(daily_return: str) -> dict[str, object]:
@@ -68,9 +80,36 @@ def _strategy_catalog(daily_return: str) -> dict[str, object]:
     }
 
 
-def test_published_drawdowns_keep_every_digit_the_engine_computed() -> None:
+def test_published_drawdowns_are_the_sealed_28_digit_negation() -> None:
     result = reporter._account_live_return_series(_strategy_catalog(WIDE_RETURN))
 
-    assert Decimal(result["strategy-1"]["maximum_drawdown"]) == Decimal(WIDE_RETURN)
-    assert result["strategy-1"]["maximum_drawdown"] == WIDE_RETURN
-    assert result["strategy-1"]["current_drawdown"] == WIDE_RETURN
+    assert Decimal(WIDE_RETURN) != Decimal(SEALED_DRAWDOWN)
+    assert result["strategy-1"]["maximum_drawdown"] == SEALED_DRAWDOWN
+    assert result["strategy-1"]["current_drawdown"] == SEALED_DRAWDOWN
+
+
+def test_published_drawdowns_do_not_depend_on_the_callers_precision() -> None:
+    results = []
+    for precision in (28, 60):
+        with localcontext() as context:
+            context.prec = precision
+            series = reporter._account_live_return_series(
+                _strategy_catalog(WIDE_RETURN)
+            )
+        results.append(
+            (
+                series["strategy-1"]["maximum_drawdown"],
+                series["strategy-1"]["current_drawdown"],
+            )
+        )
+
+    assert results == [(SEALED_DRAWDOWN, SEALED_DRAWDOWN)] * 2
+
+
+def test_a_zero_drawdown_publishes_unsigned_zero() -> None:
+    """``-Decimal('0')`` is ``0``; ``copy_negate`` would publish ``-0``."""
+
+    result = reporter._account_live_return_series(_strategy_catalog("0"))
+
+    assert result["strategy-1"]["maximum_drawdown"] == "0"
+    assert result["strategy-1"]["current_drawdown"] == "0"

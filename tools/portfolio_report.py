@@ -1688,6 +1688,23 @@ def _live_strategy_components(
     }
 
 
+# Retained report generations bind the member return path (through its series hash) and
+# the strategy drawdowns as published text, rounded to 28 digits.  A rebuild from the
+# same inputs must reproduce those bytes, so the two roundings keep that precision no
+# matter what context the caller runs in.  Money sums are different: they are exact
+# (``_exact_total``) because nothing sealed compares with them.
+_PUBLISHED_RETURN_PRECISION = 28
+
+
+def _published_negation(value: Decimal) -> Decimal:
+    """Negate a drawdown as retained generations did: rounded to 28 digits."""
+
+    with localcontext() as published:
+        published.prec = _PUBLISHED_RETURN_PRECISION
+        published.rounding = ROUND_HALF_EVEN
+        return -value
+
+
 def _member_own_trace_path(
     links: object,
 ) -> dict[str, Any] | None:
@@ -1716,11 +1733,13 @@ def _member_own_trace_path(
     daily: list[tuple[date, Decimal]] = []
     for link in trace_links:
         end_day = _date(link.get("end_date"), "trace link.end_date")
-        # The factor carries up to 34 digits; the subtraction is exact, not rounded to
-        # the ambient 28, because the series text and its hash bind this value.
-        with localcontext() as exact:
-            exact.prec = _EXACT_PRECISION
-            period_return = _decimal(link.get("factor"), "trace link.factor") - 1
+        # The series text and its hash bind this value, and retained report
+        # generations were sealed with the sub-period return rounded to 28 digits.
+        with localcontext() as published:
+            published.prec = _PUBLISHED_RETURN_PRECISION
+            published.rounding = ROUND_HALF_EVEN
+            factor = _decimal(link.get("factor"), "trace link.factor")
+            period_return = factor - Decimal(1)
         series.append(
             {"date": end_day.isoformat(), "return": decimal_text(period_return)}
         )
@@ -3598,12 +3617,12 @@ def _account_live_return_series(
                 else "DAILY_GEOMETRIC_TWR"
             ),
             "current_drawdown": (
-                decimal_text(current_drawdown.copy_negate())
+                decimal_text(_published_negation(current_drawdown))
                 if current_drawdown is not None
                 else None
             ),
             "maximum_drawdown": (
-                decimal_text(maximum_drawdown.copy_negate())
+                decimal_text(_published_negation(maximum_drawdown))
                 if maximum_drawdown is not None
                 else None
             ),
