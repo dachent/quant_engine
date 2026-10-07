@@ -109,6 +109,13 @@ _PATH_STAGES = {
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
+    # The implementation reconciliation and return-attribution builders write the
+    # two hash-bound contracts the report reads, and the report imports the
+    # reconciliation module for the P123 policy evidence.  A change to either
+    # changes the contract bytes the report is bound to, so the report (and the
+    # panel that renders it) must be re-run.
+    "tools/portfolio_implementation_reconciliation.py": ["report", "panel"],
+    "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
