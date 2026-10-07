@@ -5882,8 +5882,86 @@ def test_a_schema_four_freshness_bundle_not_dated_at_the_cutoff_is_refused(
         _schema_four_freshness(
             _set(("as_of_date",), "2026-09-23"),
             _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+            # the bundle's own ledger identity is coherent with its stated date, so
+            # only the cutoff binding is in question
+            _set(("provider_ledger", "as_of_date"), "2026-09-23"),
         ),
     )
 
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
     assert "not dated at the data cutoff" in findings[0].message
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "ledger-null",
+        "ledger-empty",
+        "ledger-string",
+        "ledger-list",
+        "ledger-missing-field",
+        "ledger-extra-field",
+        "ledger-short-hash",
+        "ledger-nonhex-hash",
+        "ledger-bool-size",
+        "ledger-zero-size",
+        "ledger-bad-date",
+        "ledger-date-before-cutoff",
+        "ledger-date-after-evaluation",
+        "evaluated-missing",
+        "evaluated-null",
+        "evaluated-malformed",
+        "evaluated-before-cutoff",
+    ],
+)
+def test_a_schema_four_freshness_bundle_with_a_malformed_value_is_refused(
+    tmp_path: Path, case: str
+) -> None:
+    """Astra rg4: the identity and the execution clock are validated by value."""
+
+    def mutate(freshness: dict[str, Any]) -> None:
+        ledger = freshness["provider_ledger"]
+        if case == "ledger-null":
+            freshness["provider_ledger"] = None
+        elif case == "ledger-empty":
+            freshness["provider_ledger"] = {}
+        elif case == "ledger-string":
+            freshness["provider_ledger"] = "a-ledger"
+        elif case == "ledger-list":
+            freshness["provider_ledger"] = [dict(_LEDGER_IDENTITY)]
+        elif case == "ledger-missing-field":
+            del ledger["manifest_sha256"]
+        elif case == "ledger-extra-field":
+            ledger["note"] = "x"
+        elif case == "ledger-short-hash":
+            ledger["catalog_sha256"] = "a" * 63
+        elif case == "ledger-nonhex-hash":
+            ledger["generation_id"] = "Z" * 64
+        elif case == "ledger-bool-size":
+            ledger["catalog_size_bytes"] = True
+        elif case == "ledger-zero-size":
+            ledger["manifest_size_bytes"] = 0
+        elif case == "ledger-bad-date":
+            ledger["as_of_date"] = "2026-09-23garbage"
+        elif case == "ledger-date-before-cutoff":
+            ledger["as_of_date"] = "2026-09-16"
+        elif case == "ledger-date-after-evaluation":
+            ledger["as_of_date"] = "2026-09-24"
+        elif case == "evaluated-missing":
+            del freshness["evaluated_on"]
+        elif case == "evaluated-null":
+            freshness["evaluated_on"] = None
+        elif case == "evaluated-malformed":
+            freshness["evaluated_on"] = "2026-09-23T00:00"
+        else:
+            freshness["evaluated_on"] = "2026-09-16"
+
+    findings = _schema_four_findings(
+        tmp_path,
+        _schema_four_freshness(
+            mutate,
+        ),
+    )
+
+    assert findings, case
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}, case

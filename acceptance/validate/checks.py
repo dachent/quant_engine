@@ -5328,6 +5328,54 @@ def _age(policy: Mapping[str, Any], last: date, cutoff: date) -> int:
     return max(0, (cutoff - last).days)
 
 
+_LEDGER_IDENTITY_FIELDS = frozenset(
+    {
+        "as_of_date",
+        "catalog_sha256",
+        "catalog_size_bytes",
+        "generation_id",
+        "manifest_sha256",
+        "manifest_size_bytes",
+    }
+)
+
+
+def _ledger_identity_problem(
+    ledger: Any, cutoff: date, executed: date | None
+) -> str | None:
+    """Name what makes a schema-4 provider-ledger identity unusable, else ``None``.
+
+    Mirrors the pipeline gate: exactly the six identity fields, 64-hex digests,
+    positive integer sizes, and a manifest date that follows the cutoff but not the
+    execution date.
+    """
+
+    if not isinstance(ledger, Mapping) or not ledger:
+        return "it is not a non-empty mapping"
+    if set(ledger) != _LEDGER_IDENTITY_FIELDS:
+        return "its fields differ from the identity fields"
+    for name in ("catalog_sha256", "generation_id", "manifest_sha256"):
+        value = ledger[name]
+        if not isinstance(value, str) or not _RELEASE_DIGEST.fullmatch(value):
+            return f"{name} is not a sha-256 digest"
+    for name in ("catalog_size_bytes", "manifest_size_bytes"):
+        size = ledger[name]
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            return f"{name} is not a positive integer"
+    raw = ledger["as_of_date"]
+    try:
+        manifest_day = date.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        manifest_day = None
+    if manifest_day is None or manifest_day.isoformat() != raw:
+        return "as_of_date is not a canonical date"
+    if manifest_day < cutoff:
+        return "its manifest date precedes the data cutoff"
+    if executed is not None and manifest_day > executed:
+        return "its manifest date follows the execution date"
+    return None
+
+
 def check_freshness(ctx: Context) -> Iterator[Finding]:
     """B12/D7: validate operating freshness separately from financial coverage."""
 
@@ -5376,7 +5424,18 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
     if node(ctx.gen.freshness, "assessment_schema_version") == 4:
         # Schema 4 is dated at the data cutoff and bound to the ledger it was judged
         # against; the formal schema and the pipeline gate require both.
-        if "provider_ledger" not in cast(Mapping[str, Any], ctx.gen.freshness):
+        fresh_map = cast(Mapping[str, Any], ctx.gen.freshness)
+        raw_executed = fresh_map.get("evaluated_on")
+        executed = canonical_day(raw_executed)
+        if executed is None or executed < evaluated:
+            yield authority(
+                "freshness-health",
+                raw_executed,
+                f"canonical execution date not before {evaluated.isoformat()}",
+                "$.evaluated_on",
+                "a schema-4 freshness bundle carries no valid execution date",
+            )
+        if "provider_ledger" not in fresh_map:
             yield authority(
                 "freshness-health",
                 None,
@@ -5384,6 +5443,18 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
                 "$.provider_ledger",
                 "a schema-4 freshness bundle carries no provider ledger identity",
             )
+        else:
+            ledger = fresh_map["provider_ledger"]
+            problem = _ledger_identity_problem(ledger, evaluated, executed)
+            if problem is not None:
+                yield authority(
+                    "freshness-health",
+                    ledger,
+                    "the provider ledger identity the bundle was judged against",
+                    "$.provider_ledger",
+                    f"a schema-4 freshness bundle carries an unusable provider ledger "
+                    f"identity: {problem}",
+                )
         if evaluated != cutoff:
             yield authority(
                 "freshness-health",
