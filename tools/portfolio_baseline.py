@@ -1389,10 +1389,11 @@ def _normalize_transactions(
             "security_id": security_id,
             "symbol": symbol,
         }
-        # Nine decimals of quantity times nine of price exceed the ambient 28
-        # digits; the published transaction amount is the exact product.
+        # The published transaction amount is part of the sealed catalog: a retained
+        # baseline was written with the product rounded to 28 digits.
         with localcontext() as context:
-            context.prec = _EXACT_PRECISION
+            context.prec = _SNAPSHOT_PRECISION
+            context.rounding = ROUND_HALF_EVEN
             signed_amount = (
                 quantity
                 * price
@@ -1549,7 +1550,7 @@ def _schwab_facts(
     mapped_position_count = sum(
         item.get("mapping_status") == MappingStatus.MAPPED.value for item in positions
     )
-    position_market_value = _exact_sum(
+    position_market_value = _snapshot_sum(
         _decimal(
             _object(item.get("market_value"), "position.market_value").get("value"),
             "position.market_value.value",

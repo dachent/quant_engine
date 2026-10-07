@@ -271,10 +271,14 @@ def test_retained_snapshot_identity_verifies_against_the_baseline_replay(
     assert total == Decimal(replay["total_liquid_usd"])
 
 
-def test_alpaca_fill_amount_is_the_exact_product_of_quantity_and_price(
+def test_alpaca_fill_amount_keeps_the_sealed_28_digit_product(
     tmp_path: Path,
 ) -> None:
-    """Crypto fills carry nine decimals each way: the product exceeds 28 digits."""
+    """A fill amount wider than 28 digits stays what retained catalogs hold.
+
+    The amount is part of the sealed catalog bytes, so a retained baseline written
+    with the product rounded to 28 digits must rebuild to the same bytes.
+    """
 
     path = tmp_path / "alpaca_events.csv"
     _write_csv(
@@ -301,16 +305,20 @@ def test_alpaca_fill_amount_is_the_exact_product_of_quantity_and_price(
         context.prec = 100
         exact = Decimal("1234.123456789012") * Decimal("67890.123456789012")
     assert len(exact.as_tuple().digits) > 28
+    with localcontext() as context:
+        context.prec = 28
+        historical = Decimal("1234.123456789012") * Decimal("67890.123456789012")
+    assert historical != exact
 
     transactions, _securities = baseline._normalize_transactions(
         path, {"alpaca": "account-alpaca"}, []
     )
 
     amounts = [Decimal(row["amount"]["value"]) for row in transactions]
-    assert amounts == [exact.copy_negate(), exact]
+    assert amounts == [historical.copy_negate(), historical]
 
 
-def test_schwab_position_market_value_total_is_exact_in_either_order() -> None:
+def test_schwab_position_market_value_total_keeps_the_sealed_28_digit_sum() -> None:
     def position(index: int, value: str) -> dict[str, Any]:
         return {
             "account_id": "account-schwab",
@@ -351,5 +359,5 @@ def test_schwab_position_market_value_total_is_exact_in_either_order() -> None:
         return str(reconciliation["market_value_usd"])
 
     values = [WIDE, "0.4", "0.4"]
-    assert facts(values) == str(EXACT_TOTAL)
-    assert facts(list(reversed(values))) == str(EXACT_TOTAL)
+    assert facts(values) == str(HISTORICAL_TOTAL)
+    assert facts(list(reversed(values))) == str(HISTORICAL_TOTAL)
