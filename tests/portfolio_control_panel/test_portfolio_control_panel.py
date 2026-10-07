@@ -12913,7 +12913,7 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
     )
 
 
-def test_report_readers_accept_versions_one_and_two(
+def test_report_readers_accept_versions_one_to_three_and_reject_four(
     tmp_path: Path,
 ) -> None:
     for version in (1, 2, 3):
