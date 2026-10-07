@@ -6466,6 +6466,29 @@ def _baseline_provider_ledger_identity(
     return by_schema
 
 
+def _declared_schema_version(payload: Mapping[str, Any], field: str, label: str) -> str:
+    """The schema version an artifact declares in ``field``, as it is sealed.
+
+    The publisher names every artifact it seals with the version the producer wrote into
+    it, never with a version typed into the publisher: ``portfolio_freshness`` moved to
+    schema 4 while the sealed name stayed at 3, and the attribution catalog and the
+    current-dependence source were sealed as version 1 while their producers write 2.
+    """
+
+    version = payload.get(field)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ReportValidationError(f"{label} schema version differs")
+    return str(version)
+
+
+def _freshness_artifact_version(path: Path) -> str:
+    return _declared_schema_version(
+        _load_json(path, "freshness health"),
+        "assessment_schema_version",
+        "freshness health",
+    )
+
+
 def _freshness_assessments(
     path: Path,
     portfolio_as_of: date,
@@ -13263,7 +13286,11 @@ def publish_report(
                 attribution_catalog_path,
                 "input/strategy-attribution.json",
                 "strategy-attribution",
-                "1",
+                _declared_schema_version(
+                    _attribution_catalog,
+                    "catalog_schema_version",
+                    "strategy attribution catalog",
+                ),
             )
         )
     if snapshot_correlation_root is not None:
@@ -13295,7 +13322,9 @@ def publish_report(
                 snapshot_history_path,
                 "input/strategy-history-compatibility-contract.json",
                 history_schema_name,
-                "1",
+                _declared_schema_version(
+                    history_payload, "schema_version", "strategy history contract"
+                ),
             )
         )
     if snapshot_implementation_path is not None:
@@ -13323,7 +13352,7 @@ def publish_report(
                     snapshot_freshness_path,
                     "input/freshness-health.json",
                     "freshness-assessment",
-                    "3",
+                    _freshness_artifact_version(snapshot_freshness_path),
                 ),
                 (
                     snapshot_hwm_policy,
