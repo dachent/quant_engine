@@ -333,6 +333,44 @@ def test_report_projects_only_accepted_exact_version_prehistory(
     assert reporter._accepted_pre_live_observations(history, "synthetic-v1") == 0
 
 
+@pytest.mark.parametrize(
+    ("live_starts", "backtest_end", "expected"),
+    [
+        (["2025-01-02"], "2024-12-31", "2025-01-02"),
+        (["2025-03-01", "2025-01-02"], "2024-12-31", "2025-01-02"),
+        # No admitted prehistory means no live start is carried.
+        (["2025-01-02"], "2025-01-02", None),
+        ([], "2024-12-31", None),
+    ],
+)
+def test_report_carries_the_account_live_start_of_admitted_prehistory(
+    live_starts: list[str], backtest_end: str, expected: str | None
+) -> None:
+    history = {
+        "segments": [
+            *(
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "mode_admission": "INCLUDE_SELECTED_LIVE",
+                    "observed_start": start,
+                    "strategy_version": "synthetic-v1",
+                }
+                for start in live_starts
+            ),
+            {
+                "evidence_layer": "BACKTEST",
+                "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                "observed_end": backtest_end,
+                "return_observations": 3,
+                "strategy_version": "synthetic-v1",
+            },
+        ]
+    }
+    assert reporter._accepted_pre_live_account_live_start(history, "synthetic-v1") == (
+        expected
+    )
+
+
 def test_report_history_requires_actual_packaged_coverage_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2964,8 +3002,17 @@ def _history_rows(
     }
 
 
-def _accepted_history_row(name: str, version: str = ADMITTED_VERSION_REF) -> dict:
+def _accepted_history_row(
+    name: str,
+    version: str = ADMITTED_VERSION_REF,
+    account_live_start: str | None = None,
+) -> dict:
     return {
+        **(
+            {"account_live_start": account_live_start}
+            if account_live_start is not None
+            else {}
+        ),
         "backtest_observations": 3912,
         "compatibility_basis": (
             "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
@@ -3067,17 +3114,262 @@ def test_version_registry_is_not_bound_over_a_different_catalog_version(
     first_version["gaps"] = []
     baseline_catalog_strategies = catalog["strategies"]
     baseline_catalog_strategies[0]["version_ref"] = "catalog-v1"
+    # Analytics already put the backtest into the sealed hybrid lenses, so a
+    # registry that neither binds nor is proven contradicts the accepted history
+    # and the report refuses instead of publishing a row with no honest label.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="accepted exact-version prehistory is not bound to the version registry",
+    ):
+        _report_with_history(
+            tmp_path,
+            monkeypatch,
+            catalog,
+            {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+        )
+
+
+GRIZZLY_VERSION = "grizzlybears-vtma-current-model:" + "3" * 64
+GRIZZLY_LIVE_REF = "accepted-live-path:" + "5" * 64
+GRIZZLY_DESIGN_GAP = "Vendor design and configuration are not admitted."
+GRIZZLY_LIVE_ONLY_GAP = (
+    "No compatible backtest prehistory is admitted; LIVE_ONLY remains mandatory."
+)
+
+
+def _real_shape_catalog(
+    *, live_start: str = "2026-01-01", compatibility: str = "UNRESOLVED"
+) -> dict[str, Any]:
+    """The registry shape the pinned baseline carries for real accepted strategies.
+
+    version_ref is the hash-pinned accepted-live-path identity of the live
+    window, the compatibility is the stale UNRESOLVED default and the
+    disposition is REFERENCE_ONLY. The history version is a model identity that
+    can never equal that ref.
+    """
+
+    catalog = _unresolved_version_catalog()
+    row = catalog["strategy_version_catalog"]["strategies"][0]
+    row["version_ref"] = GRIZZLY_LIVE_REF
+    row["compatibility_status"] = compatibility
+    row["compatibility_reason"] = "The live path is hash-bound; no backtest identity."
+    row["disposition"] = "REFERENCE_ONLY"
+    row["disposition_reason"] = "Vendor design/configuration not admitted."
+    row["gaps"] = [GRIZZLY_DESIGN_GAP, GRIZZLY_LIVE_ONLY_GAP]
+    row["live_boundary"] = {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "observed_end": "2026-01-03",
+        "observed_start": live_start,
+        "source_ids": ["synthetic-source"],
+        "status": "EVIDENCED",
+        "version_ref": GRIZZLY_LIVE_REF,
+    }
+    catalog["strategies"][0]["version_ref"] = GRIZZLY_LIVE_REF
+    return catalog
+
+
+def test_accepted_live_path_registry_ref_binds_to_the_history_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GrizzlyBears shape: ref in the live-path namespace, history a model id."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _real_shape_catalog(),
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+            )
+        },
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    # The hash-pinned live identity is never re-pinned.
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["history_version_ref"] == GRIZZLY_VERSION
+    # REFERENCE_ONLY (design not admitted) is still true and is not upgraded.
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert (
+        first["version_disposition_reason"]
+        == "Vendor design/configuration not admitted."
+    )
+    for fragment in (
+        GRIZZLY_VERSION,
+        GRIZZLY_LIVE_REF,
+        "2026-01-01",
+        "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE",
+    ):
+        assert fragment in first["version_compatibility_reason"]
+    assert first["version_gaps"] == [GRIZZLY_DESIGN_GAP]
+    assert first["backtest_status"] == "EVIDENCED"
+    assert first["backtest_version_ref"] == GRIZZLY_VERSION
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    # Control (Volatis shape): no accepted history stays blocked and unresolved.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+    assert second["backtest_status"] == "UNAVAILABLE"
+
+
+def test_report_to_panel_gate_admits_the_real_registry_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer rows drive the panel gate: eligible, bound to the history version."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _real_shape_catalog(),
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+            )
+        },
+    )
+    panel_spec = importlib.util.spec_from_file_location(
+        "portfolio_control_panel_for_report_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py",
+    )
+    assert panel_spec is not None and panel_spec.loader is not None
+    panel = importlib.util.module_from_spec(panel_spec)
+    sys.modules[panel_spec.name] = panel
+    try:
+        panel_spec.loader.exec_module(panel)
+        gate = panel._hybrid_mode_gate(
+            [rows[key] for key in sorted(rows) if key in {"strategy-1", "strategy-2"}]
+        )
+    finally:
+        sys.modules.pop(panel_spec.name, None)
+
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (item["strategy_id"], item["compatibility_status"], item["version_ref"])
+        for item in gate["eligible_strategies"]
+    ] == [("strategy-1", "PROVEN_COMPATIBLE", GRIZZLY_VERSION)]
+    assert [item["strategy_id"] for item in gate["blocked_strategies"]] == [
+        "strategy-2"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("catalog", "history_live_start", "label"),
+    [
+        # The registry's live window starts on another date than the history's.
+        (_real_shape_catalog(live_start="2026-01-02"), "2026-01-01", "UNRESOLVED"),
+        # The history carries no live start to compare.
+        (_real_shape_catalog(), None, "UNRESOLVED"),
+        # A catalog mismatch is never overridden.
+        (
+            _real_shape_catalog(compatibility="VERSION_MISMATCH"),
+            "2026-01-01",
+            "VERSION_MISMATCH",
+        ),
+    ],
+)
+def test_accepted_history_that_cannot_bind_the_registry_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog: dict[str, Any],
+    history_live_start: str | None,
+    label: str,
+) -> None:
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=(
+            "accepted exact-version prehistory is not bound to the version "
+            f"registry: strategy-1 \\({label}\\)"
+        ),
+    ):
+        _report_with_history(
+            tmp_path,
+            monkeypatch,
+            catalog,
+            {
+                "Synthetic Strategy 1": _accepted_history_row(
+                    "Synthetic Strategy 1", GRIZZLY_VERSION, history_live_start
+                )
+            },
+        )
+
+
+def test_live_path_ref_requires_an_evidenced_account_live_boundary_with_that_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for field, value in (
+        ("status", "UNAVAILABLE"),
+        ("evidence_layer", "PROVIDER_LIVE"),
+        ("version_ref", "accepted-live-path:" + "6" * 64),
+    ):
+        catalog = _real_shape_catalog()
+        catalog["strategy_version_catalog"]["strategies"][0]["live_boundary"][field] = (
+            value
+        )
+        with pytest.raises(
+            reporter.ReportValidationError, match="not bound to the version registry"
+        ):
+            _report_with_history(
+                tmp_path / field,
+                monkeypatch,
+                catalog,
+                {
+                    "Synthetic Strategy 1": _accepted_history_row(
+                        "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+                    )
+                },
+            )
+
+
+def test_proven_registry_row_is_not_rewritten_by_accepted_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI Factor shape: already PROVEN_COMPATIBLE with its own live-path ref."""
+
+    catalog = _real_shape_catalog(compatibility="PROVEN_COMPATIBLE")
     rows = _report_with_history(
         tmp_path,
         monkeypatch,
         catalog,
-        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-02"
+            )
+        },
     )
     first = rows["strategy-1"]
 
-    assert first["version_ref"] == "catalog-v1"
-    assert first["version_compatibility_status"] == "UNRESOLVED"
-    assert first["history_version_ref"] == ADMITTED_VERSION_REF
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_compatibility_reason"] == (
+        "The live path is hash-bound; no backtest identity."
+    )
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert first["version_gaps"] == [GRIZZLY_DESIGN_GAP, GRIZZLY_LIVE_ONLY_GAP]
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+
+
+def test_equal_registry_ref_binds_without_a_live_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _real_shape_catalog()
+    catalog["strategy_version_catalog"]["strategies"][0]["version_ref"] = (
+        GRIZZLY_VERSION
+    )
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        catalog,
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION
+            )
+        },
+    )
+
+    assert rows["strategy-1"]["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert rows["strategy-1"]["version_ref"] == GRIZZLY_VERSION
+    assert rows["strategy-1"]["version_disposition"] == "REFERENCE_ONLY"
 
 
 def test_transaction_without_amount_remains_explicitly_unavailable(

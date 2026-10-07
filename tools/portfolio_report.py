@@ -4232,10 +4232,14 @@ def _strategy_provider_evidence(
     return rows
 
 
-def _accepted_pre_live_observations(
+def _accepted_pre_live(
     history: Mapping[str, Any], strategy_version: str
-) -> int:
-    """Count admitted prehistory in an already authenticated coverage row."""
+) -> tuple[int, str | None]:
+    """Admitted prehistory count and the account-live start it precedes.
+
+    The start is the earliest ACCOUNT_LIVE segment of the same exact version;
+    it is None when no prehistory is admitted.
+    """
     segments = _objects(history.get("segments"), "history segments")
     live_starts = [
         segment["observed_start"]
@@ -4244,7 +4248,7 @@ def _accepted_pre_live_observations(
         and segment.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
         and segment.get("strategy_version") == strategy_version
     ]
-    return sum(
+    observations = sum(
         segment["return_observations"]
         for segment in segments
         if live_starts
@@ -4253,6 +4257,21 @@ def _accepted_pre_live_observations(
         and segment.get("strategy_version") == strategy_version
         and segment["observed_end"] < min(live_starts)
     )
+    return observations, (min(live_starts) if observations > 0 else None)
+
+
+def _accepted_pre_live_observations(
+    history: Mapping[str, Any], strategy_version: str
+) -> int:
+    """Count admitted prehistory in an already authenticated coverage row."""
+    return _accepted_pre_live(history, strategy_version)[0]
+
+
+def _accepted_pre_live_account_live_start(
+    history: Mapping[str, Any], strategy_version: str
+) -> str | None:
+    """Account-live start of the exact version whose prehistory is admitted."""
+    return _accepted_pre_live(history, strategy_version)[1]
 
 
 def _history_contract(
@@ -4323,12 +4342,13 @@ def _history_contract(
             if name not in current_by_name:
                 continue
             target = current_by_name[name]
-            observations = _accepted_pre_live_observations(
+            observations, account_live_start = _accepted_pre_live(
                 history, target["strategy_version"]
             )
             if observations > 0:
                 target.update(
                     {
+                        "account_live_start": account_live_start,
                         "backtest_observations": observations,
                         "compatibility_basis": (
                             "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
@@ -4847,6 +4867,11 @@ def _implementation_return_attribution_contract(
 
 _ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
 _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
+_ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"
+# The stale catalog gap that contradicts a bound exact-version prehistory.
+_NO_COMPATIBLE_BACKTEST_GAP = (
+    "No compatible backtest prehistory is admitted; LIVE_ONLY remains mandatory."
+)
 
 
 # Every outcome ``classify_xirr`` can return for a member's own stream.  A member in any
@@ -5189,6 +5214,7 @@ def _strategies(
             if implementation_return_attribution_contract is not None
             else {}
         )
+        version_gaps = list(version.get("gaps", strategy.get("gaps", [])))
         history_observations = history.get("backtest_observations")
         history_accepted = bool(
             history
@@ -5214,11 +5240,8 @@ def _strategies(
                     or history.get("history_status")
                 )
             )
-            live_plus_backtest_status = (
-                "ELIGIBLE_ACCEPTED_HISTORY"
-                if history_accepted
-                else "BLOCKED_NO_ACCEPTED_HISTORY"
-            )
+            # The routing decision follows the registry binding below.
+            live_plus_backtest_status = "BLOCKED_NO_ACCEPTED_HISTORY"
             live_plus_backtest_reason = (
                 "History is accepted for economic inference under "
                 f"{history_compatibility_reason}; live implementation reconciliation "
@@ -5256,23 +5279,62 @@ def _strategies(
                     admitted_version_ref, str
                 ):
                     backtest_slot_version_ref = admitted_version_ref
+            history_live_start = history.get("account_live_start")
+            # The registry's version_ref is the hash-pinned accepted-live-path
+            # identity of the live window while the history version is a model
+            # identity, so the two namespaces never compare equal. The registry
+            # binds to the history when it is empty (legacy), equals the history
+            # version, or names an evidenced ACCOUNT_LIVE window that carries
+            # this same ref and starts on the live start the history's
+            # prehistory precedes.
+            live_path_bound = (
+                isinstance(registry_version_ref, str)
+                and registry_version_ref.startswith(_ACCEPTED_LIVE_VERSION_PREFIX)
+                and live_boundary.get("status") == "EVIDENCED"
+                and live_boundary.get("evidence_layer") == "ACCOUNT_LIVE"
+                and live_boundary.get("version_ref") == registry_version_ref
+                and isinstance(history_live_start, str)
+                and live_boundary.get("observed_start") == history_live_start
+            )
             if (
                 isinstance(admitted_version_ref, str)
                 and admitted_version_ref not in {"", "UNRESOLVED"}
-                and registry_version_ref in {None, admitted_version_ref}
                 and compatibility_status == "UNRESOLVED"
-            ):
-                registry_version_ref = admitted_version_ref
-                registry_disposition = "EVIDENCED"
-                registry_disposition_reason = (
-                    "Bound to the hash-bound exact version named by the "
-                    f"authenticated history contract: {history_compatibility_reason}"
+                and (
+                    registry_version_ref in {None, admitted_version_ref}
+                    or live_path_bound
                 )
+            ):
+                if registry_version_ref is None:
+                    registry_version_ref = admitted_version_ref
+                if registry_disposition == "UNRESOLVED":
+                    registry_disposition = "EVIDENCED"
+                    registry_disposition_reason = (
+                        "Bound to the hash-bound exact version named by the "
+                        "authenticated history contract: "
+                        f"{history_compatibility_reason}"
+                    )
                 compatibility_status = "PROVEN_COMPATIBLE"
                 compatibility_reason = (
-                    "Authenticated history contract accepts this exact version: "
-                    f"{history_compatibility_reason}"
+                    "Authenticated history contract accepts this exact version "
+                    f"{admitted_version_ref}"
+                    + (
+                        f" for registry live path {registry_version_ref} starting "
+                        f"{history_live_start}"
+                        if live_path_bound
+                        else f" as registry version {registry_version_ref}"
+                    )
+                    + f": {history_compatibility_reason}"
                 )
+                version_gaps = [
+                    gap for gap in version_gaps if gap != _NO_COMPATIBLE_BACKTEST_GAP
+                ]
+            if compatibility_status != "PROVEN_COMPATIBLE":
+                raise ReportValidationError(
+                    "accepted exact-version prehistory is not bound to the version "
+                    f"registry: {strategy_id} ({compatibility_status})"
+                )
+            live_plus_backtest_status = "ELIGIBLE_ACCEPTED_HISTORY"
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -5446,7 +5508,7 @@ def _strategies(
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
-                "version_gaps": version.get("gaps", strategy.get("gaps", [])),
+                "version_gaps": version_gaps,
             }
         )
     return sorted(rows, key=lambda item: str(item["strategy_id"]))

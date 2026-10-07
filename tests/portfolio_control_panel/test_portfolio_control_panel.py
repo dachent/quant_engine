@@ -4385,6 +4385,149 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 7
 
 
+def _real_shape_partial_hybrid_report(
+    inputs: dict[str, Path], registry_status: str, *, second_eligible: bool = False
+) -> dict[str, Any]:
+    """Report rows in the real registry shape: live-path ref, history model id."""
+
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    report["strategy_summary"][0].update(
+        {
+            "backtest_version_ref": "synthetic-version:p123-ai-factor",
+            "history_compatibility_reason": "HASH_BOUND_EXACT_VERSION",
+            "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+            "history_version_ref": "synthetic-version:p123-ai-factor",
+            "live_plus_backtest_reason": "History is accepted for inference.",
+            "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+            "version_compatibility_reason": "Registry live path is bound.",
+            "version_compatibility_status": registry_status,
+            "version_disposition": "REFERENCE_ONLY",
+            "version_ref": "accepted-live-path:" + "5" * 64,
+        }
+    )
+    if second_eligible:
+        # A separately proven strategy keeps the hybrid mode published, so the
+        # per-strategy backtest checks run for the strategy under test, which
+        # moves to the second row.
+        first, second = report["strategy_summary"][:2]
+        second.update({key: first[key] for key in first if key.startswith(("hist",))})
+        second.update(
+            {
+                key: first[key]
+                for key in (
+                    "live_plus_backtest_reason",
+                    "live_plus_backtest_status",
+                    "version_compatibility_reason",
+                    "version_compatibility_status",
+                    "version_disposition",
+                    "version_ref",
+                )
+            }
+        )
+        first.update(
+            {
+                "history_compatibility_status": None,
+                "live_plus_backtest_reason": "Registry proves the version compatible.",
+                "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+                "version_compatibility_reason": "Synthetic compatibility is proven.",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "version_ref": "synthetic-version:strategy-0",
+            }
+        )
+    return report
+
+
+def _publish_real_shape_partial_hybrid(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    registry_status: str,
+    *,
+    second_eligible: bool = False,
+) -> Path:
+    report_root = tmp_path / "real-shape-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "real-shape-portfolio-report-data.json",
+        _with_hwm_summary(
+            _real_shape_partial_hybrid_report(
+                inputs, registry_status, second_eligible=second_eligible
+            ),
+            inputs["freshness"],
+            _panel_baseline_catalog(),
+        ),
+    )
+    correlation = _correlation_v2()
+    composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ]
+    for strategy_name in ACTIVE_STRATEGY_NAMES[2 if second_eligible else 1 :]:
+        row = composition[strategy_name]
+        row["backtest_observations_used"] = 0
+        row["observed_start"] = row["live_inception"]
+        row["status"] = "AVAILABLE_LIVE_ONLY_NO_COMPATIBLE_BACKTEST"
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-v2-real-shape",
+    )
+    return report_root
+
+
+def test_real_registry_shape_completes_the_panel_with_hybrid_eligibility(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Accepted history beside a bound live-path registry row is hybrid eligible."""
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "PROVEN_COMPATIBLE"
+    )
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = data["hybrid_mode_gate"]
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (row["strategy_name"], row["compatibility_status"], row["version_ref"])
+        for row in gate["eligible_strategies"]
+    ] == [(STRATEGY_NAMES[0], "PROVEN_COMPATIBLE", "synthetic-version:p123-ai-factor")]
+    assert len(gate["blocked_strategies"]) == 6
+    assert "LIVE_PLUS_BACKTEST" in data["dependence_modes"]
+
+
+def test_unbound_registry_beside_accepted_history_still_refuses_the_panel(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The panel stays the fail-closed backstop for the contradiction."""
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "UNRESOLVED", second_eligible=True
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="unresolved strategy uses backtest history in hybrid dependence",
+    ):
+        panel.build_candidate(
+            report_root,
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            weekly_returns_root=inputs["weekly"],
+        )
+
+
 def test_current_analytics_walks_a_long_finalized_generation(
     tmp_path: Path,
 ) -> None:
