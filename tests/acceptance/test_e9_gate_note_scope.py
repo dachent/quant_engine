@@ -231,3 +231,15 @@ def test_a_provider_declared_twice_exempts_nothing(tmp_path: Path) -> None:
     twice = [SCHWAB, _provider("schwab", "2026-09-10", LEGACY_GAP)]
 
     _blocked(tmp_path, "twice", note, providers=twice, text=note)
+
+
+def test_a_declared_clause_extended_by_a_sentence_is_blocked(tmp_path: Path) -> None:
+    """The declared text is a prefix of the clause; equality with a declared gap, not
+    containment of it, decides, so the appended portfolio claim is never exempt."""
+
+    note = (
+        f"schwab (as of 2026-09-18): {LEGACY_GAP}. "
+        "All portfolio account balances are unavailable"
+    )
+
+    _blocked(tmp_path, "extended", note, text=note)

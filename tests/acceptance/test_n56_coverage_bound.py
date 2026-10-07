@@ -168,7 +168,13 @@ def test_an_oracle_that_dates_the_coverage_before_the_label_does_not_confirm(
         expected=_expected(coverage="2026-09-10"),
     )
 
-    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+    # Nothing is downgraded.  The line's own label (the 16th) also fails the recompute
+    # against the oracle's coverage end (the 10th), an invariant on the line only.
+    assert {f.klass for f in findings} == {
+        checks.BLOCKER_AUTHORITY,
+        checks.BLOCKER_INVARIANT,
+    }
+    assert [f.entity for f in findings if f.klass == checks.BLOCKER_INVARIANT] == [LINE]
 
 
 def test_the_strategy_cutoff_date_is_not_the_anchor_of_the_coverage_date(
@@ -271,7 +277,9 @@ def test_a_dishonest_label_is_not_downgraded_even_if_disclosed(
 def test_a_full_coverage_line_needs_no_disclosure(tmp_path: Path) -> None:
     custody = _custody_block(anchors_end="2026-09-18")
 
-    findings = _findings(tmp_path, custody, block=None, expected=_expected())
+    findings = _findings(
+        tmp_path, custody, block=None, expected=_expected(coverage="2026-09-18")
+    )
 
     assert findings == []
 
@@ -463,7 +471,12 @@ def test_a_coverage_end_the_oracle_dates_earlier_is_not_believed(
         expected=[*_expected(coverage="2026-09-10"), _cash_expectation()],
     )
 
-    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+    # The label recompute reads the oracle's coverage end, so the line's own label (the
+    # 16th) is also an invariant breach against the oracle's 10th.
+    assert set(seen[CHECK]) == {
+        *_expect(checks.BLOCKER_AUTHORITY),
+        (LINE, checks.BLOCKER_INVARIANT),
+    }
     assert seen[COVERAGE_END] == [
         ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
     ]
@@ -490,6 +503,9 @@ def test_a_coverage_end_at_or_after_the_cutoff_is_checked_too(tmp_path: Path) ->
         assert seen[COVERAGE_END] == [
             ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
         ], name
+        # The label recompute does not read the coverage end from the report: the
+        # line is dated at the cutoff while the oracle proves it only to the 16th.
+        assert (LINE, checks.BLOCKER_INVARIANT) in seen[CHECK], name
 
 
 def test_a_cutoff_coverage_end_the_oracle_confirms_is_silent(tmp_path: Path) -> None:

@@ -9799,14 +9799,16 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                             "amounts",
                         )
                     # The oracle, not the report, says how far the admissions prove the
-                    # line: a coverage end it does not confirm leaves the labels
-                    # unrecomputable (check_capital_coverage_end states the finding).
+                    # line: its coverage end is the anchor of the label whenever it
+                    # states one, and the report's own claim only when it states none
+                    # (check_capital_coverage_end reports that case).
+                    anchor, anchored = coverage_end, False
                     oracle = _oracle_coverage_ends(ctx)
                     if oracle is not None:
                         kind, oracle_day = _line_oracle_end(oracle, strategy, line)
-                        if kind == "row" and oracle_day != coverage_end:
-                            honest = False
-                    proven = min(ctx.cutoff, coverage_end)
+                        if kind == "row" and oracle_day is not None:
+                            anchor, anchored = oracle_day, True
+                    proven = min(ctx.cutoff, anchor)
                     if _canonical_iso_day(line.get("as_of_date")) != proven:
                         honest = False
                         emit(
@@ -9815,7 +9817,11 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                             line.get("as_of_date"),
                             proven.isoformat(),
                             f"{line_pointer}.as_of_date",
-                            "the cash line's as_of_date is not min(cutoff, coverage_end)",
+                            "the cash line's as_of_date is not min(cutoff, the coverage "
+                            "end the oracle states)"
+                            if anchored
+                            else "the cash line's as_of_date is not min(cutoff, "
+                            "coverage_end)",
                         )
             day, marked = judge_date(
                 entity,
