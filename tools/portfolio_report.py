@@ -4910,23 +4910,93 @@ def _governed_window_return(
     return (float(wealth - 1) if count else None), count
 
 
+_STALE_IMPLEMENTATION_STATUS: Final = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+_STALE_IMPLEMENTATION_BASIS: Final = "SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"
+_STALE_REPAIR_REF: Final = "N66-R"
+
+
+def _contract_provider_ledger_pin(
+    payload: Mapping[str, Any], key: str, value: str
+) -> str | None:
+    """The provider-ledger digest a contract pins, or None unless it is unique."""
+
+    pins = [
+        item
+        for item in payload.get("source_artifacts") or []
+        if isinstance(item, Mapping) and item.get(key) == value
+    ]
+    if len(pins) != 1:
+        return None
+    digest = pins[0].get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest
+
+
+def _stale_implementation_row(
+    context: Mapping[str, str],
+    strategy_id: str,
+    *,
+    start: str,
+    end: str,
+    governed_figure: float,
+    governed_count: int,
+    figure: float,
+) -> dict[str, Any]:
+    contract_ledger = context["contract_ledger_sha256"]
+    governed_ledger = context["governed_ledger_sha256"]
+    return {
+        "status": _STALE_IMPLEMENTATION_STATUS,
+        "strategy_id": strategy_id,
+        "contract_kind": context["contract_kind"],
+        "contract_id": context["contract_id"],
+        "contract_sha256": context["contract_sha256"],
+        "contract_as_of_date": context["contract_as_of_date"],
+        "window_start": start,
+        "window_end": end,
+        "governed_account_return": governed_figure,
+        "governed_account_basis": _ACCOUNT_LEG_BASIS,
+        "governed_observations": governed_count,
+        "contract_provider_ledger_sha256": contract_ledger,
+        "governed_provider_ledger_sha256": governed_ledger,
+        "superseded_contract_account_return": figure,
+        "superseded_contract_account_basis": _STALE_IMPLEMENTATION_BASIS,
+        "reason": (
+            f"Implementation {context['contract_kind_text']} contract "
+            f"{context['contract_id'][:12]} (as of {context['contract_as_of_date']}) "
+            f"was built from provider ledger {contract_ledger[:12]}; the governed "
+            f"ledger is {governed_ledger[:12]}. Its account return over "
+            f"{start}..{end} differs from the governed account-live series by "
+            f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
+            "risk statistic or causal waterfall is published from it."
+        ),
+        "repair_ref": _STALE_REPAIR_REF,
+    }
+
+
 def _verify_implementation_account_legs(
     rows: Mapping[str, Mapping[str, Any]],
     governed_account_returns: Mapping[str, Mapping[str, str]] | None,
     *,
     schema_version: int,
     published: Callable[[Mapping[str, Any]], tuple[float, str, str]],
-) -> None:
-    """Refuse a contract whose account leg is not the governed account-live series.
+    stale_context: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Bind each row's account return to the governed account-live series.
 
     A version-2 contract carries its leg and must equal the governed series over
     the leg's window.  A sealed version-1 contract carries none, so its published
-    account return is read over its declared window.  Either way a figure that
-    differs by more than 1e-8 is a second account return for one window.
+    account return is read over its declared window.  A figure that differs by
+    more than 1e-8 is a second account return for one window and is never
+    published.  When the contract pins a different provider ledger than the
+    governed one, the difference is explained: the row is returned as a closed
+    NOT_READY object (N66-R) instead of being refused.  Any other difference,
+    and every structural failure, raises.
     """
 
+    stale: dict[str, dict[str, Any]] = {}
     if governed_account_returns is None:
-        return
+        return stale
     for strategy_id, row in rows.items():
         figure, start, end = published(row)
         governed = governed_account_returns.get(strategy_id, {})
@@ -4936,55 +5006,111 @@ def _verify_implementation_account_legs(
         )
         governed_figure, governed_count = _governed_window_return(governed, start, end)
         if schema_version == 1:
-            if governed_figure is None or (
-                abs(governed_figure - figure) > _ACCOUNT_LEG_GOVERNED_TOLERANCE
+            explained = governed_figure is not None and (
+                abs(governed_figure - figure) <= _ACCOUNT_LEG_GOVERNED_TOLERANCE
+            )
+        else:
+            leg = row.get("account_leg")
+            if not isinstance(leg, Mapping):
+                raise ReportValidationError(
+                    f"implementation account leg is absent: {strategy_id}"
+                )
+            if (
+                set(leg)
+                != {
+                    "basis",
+                    "compared_observations",
+                    "cumulative_return",
+                    "series_schema",
+                    "series_sha256",
+                    "window_end",
+                    "window_observations",
+                    "window_start",
+                }
+                or leg.get("basis") != _ACCOUNT_LEG_BASIS
+                or leg.get("series_schema") != _ACCOUNT_LEG_SERIES_SCHEMA
+                or re.fullmatch(r"[0-9a-f]{64}", str(leg.get("series_sha256"))) is None
+                or leg.get("window_start") != start
+                or leg.get("window_end") != end
+                or type(leg.get("compared_observations")) is not int
+                or type(leg.get("window_observations")) is not int
             ):
-                raise differs
+                raise ReportValidationError(
+                    "implementation account leg differs from its contract: "
+                    f"{strategy_id}"
+                )
+            leg_figure = _finite_number(
+                leg.get("cumulative_return"), "account leg return"
+            )
+            if abs(leg_figure - figure) > _ACCOUNT_LEG_PUBLISHED_TOLERANCE:
+                raise ReportValidationError(
+                    "implementation published account return differs from its leg: "
+                    f"{strategy_id}"
+                )
+            # ``series_sha256`` names the bytes of the ledger vintage the contract
+            # was built from.  It is identity for audit; the values are the gate, so
+            # a byte-different vintage with equal values (a float-repr ledger and a
+            # decimal one) is not a second account return.
+            explained = (
+                governed_figure is not None
+                and abs(governed_figure - leg_figure) <= _ACCOUNT_LEG_GOVERNED_TOLERANCE
+                and leg["window_observations"] == governed_count
+            )
+        if explained:
             continue
-        leg = row.get("account_leg")
-        if not isinstance(leg, Mapping):
-            raise ReportValidationError(
-                f"implementation account leg is absent: {strategy_id}"
-            )
-        if (
-            set(leg)
-            != {
-                "basis",
-                "compared_observations",
-                "cumulative_return",
-                "series_schema",
-                "series_sha256",
-                "window_end",
-                "window_observations",
-                "window_start",
-            }
-            or leg.get("basis") != _ACCOUNT_LEG_BASIS
-            or leg.get("series_schema") != _ACCOUNT_LEG_SERIES_SCHEMA
-            or re.fullmatch(r"[0-9a-f]{64}", str(leg.get("series_sha256"))) is None
-            or leg.get("window_start") != start
-            or leg.get("window_end") != end
-            or type(leg.get("compared_observations")) is not int
-            or type(leg.get("window_observations")) is not int
-        ):
-            raise ReportValidationError(
-                f"implementation account leg differs from its contract: {strategy_id}"
-            )
-        leg_figure = _finite_number(leg.get("cumulative_return"), "account leg return")
-        if abs(leg_figure - figure) > _ACCOUNT_LEG_PUBLISHED_TOLERANCE:
-            raise ReportValidationError(
-                "implementation published account return differs from its leg: "
-                f"{strategy_id}"
-            )
+        contract_ledger = (
+            None if stale_context is None else stale_context["contract_ledger_sha256"]
+        )
         if (
             governed_figure is None
-            or abs(governed_figure - leg_figure) > _ACCOUNT_LEG_GOVERNED_TOLERANCE
-            or leg["window_observations"] != governed_count
+            or stale_context is None
+            or not contract_ledger
+            or contract_ledger == stale_context["governed_ledger_sha256"]
         ):
             raise differs
-        # ``series_sha256`` names the bytes of the ledger vintage the contract was
-        # built from.  It is identity for audit; the values above are the gate, so a
-        # byte-different vintage with equal values (a float-repr ledger and a
-        # decimal one) is not a second account return.
+        stale[strategy_id] = _stale_implementation_row(
+            stale_context,
+            strategy_id,
+            start=start,
+            end=end,
+            governed_figure=governed_figure,
+            governed_count=governed_count,
+            figure=figure,
+        )
+    return stale
+
+
+def _implementation_reference_extras(
+    rows: Mapping[str, Mapping[str, Any]],
+    stale: Mapping[str, Any],
+    *,
+    contract_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None,
+    model_comparison_status: Callable[[Mapping[str, Any]], object],
+) -> dict[str, Any]:
+    """The stale ids and the pre-policy label every implementation reference carries."""
+
+    effective_start = (
+        None
+        if provider_return_policy is None
+        else str(provider_return_policy["effective_start"])
+    )
+    pre_policy = sorted(
+        strategy_id
+        for strategy_id, row in rows.items()
+        if strategy_id == "p123-ai-factor"
+        and strategy_id not in stale
+        and effective_start is not None
+        and contract_as_of.isoformat() < effective_start
+        and model_comparison_status(row) != "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    )
+    return {
+        "pre_policy_strategy_ids": pre_policy,
+        "provider_return_policy": (
+            None if provider_return_policy is None else dict(provider_return_policy)
+        ),
+        "stale_strategy_ids": sorted(stale),
+    }
 
 
 def _reconciliation_published_account_return(
@@ -5022,6 +5148,8 @@ def _implementation_reconciliation_contract(
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
     governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
+    governed_provider_ledger_sha256: str | None = None,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation reconciliation contract")
     if (
@@ -5120,23 +5248,51 @@ def _implementation_reconciliation_contract(
         raise ReportValidationError(
             "implementation reconciliation strategy boundary differs"
         )
-    _verify_implementation_account_legs(
+    sha256, size = hash_file(path)
+    contract_id = _text(
+        payload.get("reconciliation_id"),
+        "implementation reconciliation identity",
+    )
+    contract_ledger = _contract_provider_ledger_pin(
+        payload, "artifact_id", "normalized/provider-ledger.json"
+    )
+    stale = _verify_implementation_account_legs(
         by_id,
         governed_account_returns,
         schema_version=payload["schema_version"],
         published=_reconciliation_published_account_return,
+        stale_context=(
+            None
+            if governed_provider_ledger_sha256 is None or contract_ledger is None
+            else {
+                "contract_kind": "RECONCILIATION",
+                "contract_kind_text": "reconciliation",
+                "contract_id": contract_id,
+                "contract_sha256": sha256,
+                "contract_as_of_date": contract_as_of.isoformat(),
+                "contract_ledger_sha256": contract_ledger,
+                "governed_ledger_sha256": governed_provider_ledger_sha256,
+            }
+        ),
     )
-    sha256, size = hash_file(path)
+    extras = _implementation_reference_extras(
+        by_id,
+        stale,
+        contract_as_of=contract_as_of,
+        provider_return_policy=provider_return_policy,
+        model_comparison_status=lambda row: _object(
+            row.get("return_reconciliation"), "implementation comparison"
+        ).get("status"),
+    )
+    by_id.update(stale)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
-        "reconciliation_id": _text(
-            payload.get("reconciliation_id"),
-            "implementation reconciliation identity",
-        ),
+        "reconciliation_id": contract_id,
         "schema_version": payload["schema_version"],
         "sha256": sha256,
         "size_bytes": size,
         "strategy_count": len(by_id),
+        **extras,
     }
 
 
@@ -5146,6 +5302,8 @@ def _implementation_return_attribution_contract(
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
     governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
+    governed_provider_ledger_sha256: str | None = None,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation return attribution contract")
     if (
@@ -5289,23 +5447,51 @@ def _implementation_return_attribution_contract(
         raise ReportValidationError(
             "implementation return attribution strategy boundary differs"
         )
-    _verify_implementation_account_legs(
+    sha256, size = hash_file(path)
+    contract_id = _text(
+        payload.get("attribution_id"),
+        "implementation return attribution identity",
+    )
+    contract_ledger = _contract_provider_ledger_pin(
+        payload, "source_id", "provider-ledger"
+    )
+    stale = _verify_implementation_account_legs(
         by_id,
         governed_account_returns,
         schema_version=payload["schema_version"],
         published=_attribution_published_account_return,
+        stale_context=(
+            None
+            if governed_provider_ledger_sha256 is None or contract_ledger is None
+            else {
+                "contract_kind": "RETURN_ATTRIBUTION",
+                "contract_kind_text": "return attribution",
+                "contract_id": contract_id,
+                "contract_sha256": sha256,
+                "contract_as_of_date": contract_as_of.isoformat(),
+                "contract_ledger_sha256": contract_ledger,
+                "governed_ledger_sha256": governed_provider_ledger_sha256,
+            }
+        ),
     )
-    sha256, size = hash_file(path)
+    extras = _implementation_reference_extras(
+        by_id,
+        stale,
+        contract_as_of=contract_as_of,
+        provider_return_policy=provider_return_policy,
+        model_comparison_status=lambda row: _object(
+            row.get("bridge"), "implementation bridge"
+        ).get("status"),
+    )
+    by_id.update(stale)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
-        "attribution_id": _text(
-            payload.get("attribution_id"),
-            "implementation return attribution identity",
-        ),
+        "attribution_id": contract_id,
         "schema_version": payload["schema_version"],
         "sha256": sha256,
         "size_bytes": size,
         "strategy_count": len(by_id),
+        **extras,
     }
 
 
@@ -5393,6 +5579,39 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mwr_terminal_date": ordered[-1][0].isoformat() if ordered else None,
         "mwr_xirr": None if rate is None else decimal_text(cast(Decimal, rate)),
     }
+
+
+def _is_stale_implementation(row: Mapping[str, Any]) -> bool:
+    return str(row.get("status", "")).startswith("NOT_READY_STALE")
+
+
+def _implementation_status(
+    history_status: object,
+    implementation: Mapping[str, Any],
+    return_attribution: Mapping[str, Any],
+) -> object:
+    """The strategy's implementation status; a stale contract is never "verified"."""
+
+    reconciliation_stale = _is_stale_implementation(implementation)
+    attribution_stale = _is_stale_implementation(return_attribution)
+    if reconciliation_stale or attribution_stale:
+        if reconciliation_stale and (attribution_stale or not return_attribution):
+            return _STALE_IMPLEMENTATION_STATUS
+        if reconciliation_stale:
+            return "PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY"
+        if implementation:
+            return "PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY"
+        return _STALE_IMPLEMENTATION_STATUS
+    if not implementation:
+        return history_status
+    if (
+        return_attribution.get("bridge", {}).get("status")
+        == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    ):
+        return "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    if return_attribution:
+        return "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+    return "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
 
 
 def _strategies(
@@ -5926,17 +6145,10 @@ def _strategies(
                 "history_observed_start": history.get("backtest_observed_start"),
                 "history_observed_end": history.get("backtest_observed_end"),
                 "implementation_lineage": history.get("implementation_lineage"),
-                "implementation_reconciliation_status": history.get(
-                    "implementation_reconciliation_status"
-                )
-                if not implementation
-                else (
-                    "UNAVAILABLE_POLICY_NOT_ADMITTED"
-                    if implementation_return_attribution.get("bridge", {}).get("status")
-                    == "UNAVAILABLE_POLICY_NOT_ADMITTED"
-                    else "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
-                    if implementation_return_attribution
-                    else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
+                "implementation_reconciliation_status": _implementation_status(
+                    history.get("implementation_reconciliation_status"),
+                    implementation,
+                    implementation_return_attribution,
                 ),
                 "implementation_reconciliation": implementation or None,
                 "implementation_return_attribution": (
@@ -7689,6 +7901,62 @@ def _current_epoch_detail(
     }
 
 
+def _governed_provider_ledger_sha256(catalog: Mapping[str, Any]) -> str | None:
+    """The governed provider-ledger digest, or None when the catalog does not name one."""
+
+    try:
+        return _baseline_provider_ledger_identity(catalog)["provider-ledger-catalog"]
+    except ReportValidationError:
+        return None
+
+
+def _provider_return_policy_window(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+) -> dict[str, str] | None:
+    """The selected admission receipt's P123 provider-return exclusion window start.
+
+    It dates the label of a P123 comparison built before the exclusion took effect.
+    A receipt that cannot be read gives no label; it never fails the report.
+    """
+
+    try:
+        identity = _baseline_provider_ledger_identity(catalog)
+        root = provider_ledger_root or baseline_root.parent / "provider-ledger"
+        candidates = [
+            path.parent
+            for path in (root / "generations").glob("*/generation.json")
+            if not path.is_symlink()
+            and hash_file(path)[0] == identity["generation-manifest"]
+        ]
+        if len(candidates) != 1:
+            return None
+        receipt = json.loads(
+            (candidates[0] / "admit-or-declare-receipt.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        rows = [
+            row
+            for row in receipt["dispositions"]
+            if isinstance(row, dict)
+            and row.get("provider_id") == "portfolio123"
+            and row.get("item_kind") == "PRODUCT_DATA_CLASS"
+            and row.get("data_class") == "PROVIDER_LIVE_RETURN"
+        ]
+        if len(rows) != 1:
+            return None
+        return {
+            "effective_start": date.fromisoformat(
+                str(rows[0]["policy_effective_start"])
+            ).isoformat(),
+            "policy_id": _text(rows[0]["policy_id"], "provider return policy id"),
+        }
+    except (OSError, ValueError, KeyError, TypeError, ReportValidationError):
+        return None
+
+
 def _implementation_contracts(
     catalog: Mapping[str, Any],
     baseline_root: Path,
@@ -7706,6 +7974,10 @@ def _implementation_contracts(
     implementation_contract: dict[str, dict[str, Any]] | None = None
     implementation_contract_ref: dict[str, Any] | None = None
     implementation_policy_evidence = None
+    governed_ledger = _governed_provider_ledger_sha256(catalog)
+    return_policy = _provider_return_policy_window(
+        catalog, baseline_root, provider_ledger_root
+    )
     for appendix_path, comparison_key in (
         (implementation_reconciliation_path, "return_reconciliation"),
         (implementation_return_attribution_path, "bridge"),
@@ -7734,6 +8006,8 @@ def _implementation_contracts(
                 ),
                 expected_policy_evidence=implementation_policy_evidence,
                 governed_account_returns=_governed_account_returns(catalog),
+                governed_provider_ledger_sha256=governed_ledger,
+                provider_return_policy=return_policy,
             )
         )
     implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
@@ -7747,6 +8021,8 @@ def _implementation_contracts(
             portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
             expected_policy_evidence=implementation_policy_evidence,
             governed_account_returns=_governed_account_returns(catalog),
+            governed_provider_ledger_sha256=governed_ledger,
+            provider_return_policy=return_policy,
         )
     return (
         implementation_contract,
