@@ -1601,8 +1601,94 @@ def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None
     return None
 
 
+COST_RATE_AVAILABLE: Final = "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
+COST_RATE_NOT_DATED_AT_CUTOFF: Final = "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF"
+COST_RATE_NO_SLEEVE_VALUE: Final = "NOT_READY_SLEEVE_VALUE_UNAVAILABLE"
+COST_RATE_NO_AMOUNT: Final = "UNAVAILABLE_NO_COST_AMOUNT"
+# The same 34 digits the baseline publishes a current weight with.
+_COST_RATE_PRECISION: Final = 34
+
+
+def _uses_cutoff_basis(catalog: Mapping[str, Any]) -> bool:
+    """A report built from a schema-2 baseline with a custody handoff is version 4."""
+
+    return (
+        catalog.get("baseline_schema_version") == 2
+        and _current_capital(catalog).get("custody_authority") is not None
+    )
+
+
+def _cost_schedule_as_of_date(catalog: Mapping[str, Any]) -> str | None:
+    """The date the baseline's own source artifact gives the cost-economics schedule."""
+
+    for artifact in _objects(catalog.get("source_artifacts", []), "source_artifacts"):
+        if artifact.get("source_key") == "cost-economics":
+            day = artifact.get("as_of_date")
+            return day if isinstance(day, str) else None
+    return None
+
+
+def _cutoff_cost_rate(
+    strategy: Mapping[str, Any],
+    cost: Mapping[str, Any],
+    basis: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The annual cost over the strategy's sleeve value at the calculation cutoff.
+
+    The attribution catalog divides by the value of the dated allocation snapshot
+    (2026-08-16), a size the strategy no longer has, and labels the quotient a
+    rate of the current sleeve.  The cost schedule keeps its own date; the
+    denominator is the strategy's current-capital value, and only when that value
+    is dated at the cutoff.  A value dated earlier (a sleeve whose accounts have
+    no NAV at the cutoff) leaves the rate NOT_READY with the reason, never an
+    older value stood in for the cutoff.
+    """
+
+    cutoff = _text(basis.get("calculation_cutoff_date"), "cost rate cutoff")
+    amount_text = cost.get("annual_external_cost_usd")
+    value_text = strategy.get("current_value_usd")
+    value_date = strategy.get("capital_as_of_date")
+    result: dict[str, Any] = {
+        "annual_external_cost_rate_pre_tax": None,
+        "cost_rate_denominator_as_of_date": value_date,
+        "cost_rate_denominator_basis": WEIGHT_BASIS_CURRENT,
+        "cost_rate_denominator_usd": value_text,
+        "cost_rate_reason": None,
+        "cost_rate_status": COST_RATE_NO_AMOUNT,
+        "cost_schedule_as_of_date": basis.get("cost_schedule_as_of_date"),
+        "fees_status": fees_status_for_cost(cost.get("cost_status"), amount_text),
+    }
+    if amount_text is None:
+        result["cost_rate_reason"] = "no annual cost amount is evidenced"
+        return result
+    if value_text is None or strategy.get("capital_status") != "AVAILABLE":
+        result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
+        result["cost_rate_reason"] = "the strategy has no sleeve value at the cutoff"
+        return result
+    if value_date != cutoff:
+        result["cost_rate_status"] = COST_RATE_NOT_DATED_AT_CUTOFF
+        result["cost_rate_reason"] = (
+            f"the sleeve value is dated {value_date}, not the {cutoff} cutoff"
+        )
+        return result
+    value = _decimal(value_text, "cost rate denominator")
+    if value <= 0:
+        result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
+        result["cost_rate_reason"] = "the sleeve value at the cutoff is not positive"
+        return result
+    with localcontext() as context:
+        context.prec = _COST_RATE_PRECISION
+        rate = _decimal(amount_text, "annual cost") / value
+    result["annual_external_cost_rate_pre_tax"] = decimal_text(rate)
+    result["cost_rate_status"] = COST_RATE_AVAILABLE
+    return result
+
+
 def _merge_attribution(
-    strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
+    strategies: Sequence[Mapping[str, Any]],
+    attribution: Mapping[str, Any],
+    *,
+    cost_rate_at_cutoff: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     benchmarks = {
         str(item.get("strategy_id")): item
@@ -1762,6 +1848,11 @@ def _merge_attribution(
                 "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
+                **(
+                    {}
+                    if cost_rate_at_cutoff is None
+                    else _cutoff_cost_rate(item, cost, cost_rate_at_cutoff)
+                ),
             }
         )
     return result
@@ -4213,8 +4304,16 @@ def _strategy_attribution_section(
     attribution_catalog: Mapping[str, Any],
     attribution_ref: Mapping[str, str],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None,
+    *,
+    cutoff_cost_rate: bool = False,
 ) -> dict[str, Any]:
-    """Project every attribution list through the same current-product filter."""
+    """Project every attribution list through the same current-product filter.
+
+    With ``cutoff_cost_rate`` the cost rows lose the producer's snapshot-sized rate
+    and value (the strategy rows carry the one rate, over the cutoff sleeve value)
+    and take the fees label the cost status earns, so no retained catalog's older
+    label or rate is published beside the report's own.
+    """
 
     def current(key: str) -> list[dict[str, Any]]:
         optional = key == "benchmark_comparisons"
@@ -4228,11 +4327,30 @@ def _strategy_attribution_section(
             f"strategy_attribution.{key}",
         )
 
+    costs = current("costs")
+    if cutoff_cost_rate:
+        costs = [
+            {
+                **{
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "annual_external_cost_rate_pre_tax",
+                        "current_sleeve_value_usd",
+                    }
+                },
+                "fees_status": fees_status_for_cost(
+                    row.get("cost_status"), row.get("annual_external_cost_usd")
+                ),
+            }
+            for row in costs
+        ]
     return {
         "benchmark_assignments": current("benchmark_assignments"),
         "benchmark_comparisons": current("benchmark_comparisons"),
         "comparisons": current("comparisons"),
-        "costs": current("costs"),
+        "costs": costs,
         "generation_id": attribution_ref["generation_id"],
     }
 
@@ -7619,7 +7737,22 @@ def build_report_data(
             baseline_ref,
             attribution_generation_id=attribution_generation_id,
         )
-        strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
+        cutoff_basis = _uses_cutoff_basis(catalog)
+        strategy_summary = _merge_attribution(
+            strategy_summary,
+            attribution_catalog,
+            cost_rate_at_cutoff=(
+                {
+                    "calculation_cutoff_date": (
+                        calculation_cutoff_date
+                        or _current_capital(catalog).get("valuation_date")
+                    ),
+                    "cost_schedule_as_of_date": _cost_schedule_as_of_date(catalog),
+                }
+                if cutoff_basis
+                else None
+            ),
+        )
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
@@ -8172,7 +8305,11 @@ def build_report_data(
         report["hwm_inputs"] = current_product_catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
         report["strategy_attribution"] = _strategy_attribution_section(
-            attribution_catalog, attribution_ref, strategy_product_controls
+            attribution_catalog,
+            attribution_ref,
+            strategy_product_controls,
+            cutoff_cost_rate=report["report_schema_version"]
+            == CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
         )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(

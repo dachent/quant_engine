@@ -64,6 +64,25 @@ retained report of an older version still validates and no sealed generation is 
   calculation cutoff, and the dated allocation snapshot publishes self-consistent weights.
   Everything in version 3 is unchanged. Version 4 is emitted wherever version 3 was.
 
+## Cost rate at the cutoff
+
+From report schema 4 a strategy's `annual_external_cost_rate_pre_tax` is its annual external
+cost over its sleeve value at the calculation cutoff, and only then. The attribution catalog
+divides by the value in the dated allocation snapshot (2026-08-16), a size the strategy no
+longer has, so the report ignores that quotient and the cost mirror under
+`strategy_attribution.costs` no longer carries it or `current_sleeve_value_usd`.
+
+- The denominator is `current_value_usd` of the strategy row (basis `CURRENT_CUTOFF`),
+  published as `cost_rate_denominator_usd` with its date `cost_rate_denominator_as_of_date`.
+- A value dated before the cutoff (a sleeve whose accounts have no NAV at the cutoff) leaves
+  the rate null and `cost_rate_status` `NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF`, with the
+  reason naming both dates. No cost amount is `UNAVAILABLE_NO_COST_AMOUNT`.
+- The amount keeps the date of its schedule, `cost_schedule_as_of_date`, taken from the
+  baseline's `cost-economics` source artifact.
+- `fees_status` follows `cost_status`: a `known_*` cost is `EVIDENCED_PRE_TAX`, a
+  `*_contract_cap` is `UPPER_BOUND_CONTRACT_CAP_PRE_TAX` (a ceiling the contract allows, not
+  an observed cost), no amount is `UNAVAILABLE`. A rate over a cap is an upper bound too.
+
 ## Build and verify
 
 From the repository root, with the private roots supplied explicitly:

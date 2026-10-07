@@ -1844,6 +1844,48 @@
     {
       "if": {"properties": {"report_schema_version": {"enum": [1, 2]}}, "required": ["report_schema_version"]},
       "then": {"not": {"required": ["capital_coverage_bounds"]}}
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"const": 4}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "strategy_summary": {
+            "items": {
+              "properties": {
+                "cost_rate_denominator_basis": {"const": "CURRENT_CUTOFF"},
+                "cost_rate_status": {"enum": ["AVAILABLE_AT_CUTOFF_SLEEVE_VALUE", "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF", "NOT_READY_SLEEVE_VALUE_UNAVAILABLE", "UNAVAILABLE_NO_COST_AMOUNT"]},
+                "fees_status": {"enum": ["EVIDENCED_PRE_TAX", "UPPER_BOUND_CONTRACT_CAP_PRE_TAX", "UNAVAILABLE"]}
+              },
+              "allOf": [
+                {
+                  "if": {"required": ["cost_rate_status"]},
+                  "then": {"required": ["annual_external_cost_rate_pre_tax", "cost_rate_denominator_as_of_date", "cost_rate_denominator_basis", "cost_rate_denominator_usd", "cost_rate_reason", "cost_schedule_as_of_date", "fees_status"]}
+                },
+                {
+                  "if": {"properties": {"cost_rate_status": {"const": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"}}, "required": ["cost_rate_status"]},
+                  "then": {"properties": {"annual_external_cost_rate_pre_tax": {"$ref": "#/$defs/decimal"}}}
+                },
+                {
+                  "if": {"properties": {"cost_rate_status": {"enum": ["NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF", "NOT_READY_SLEEVE_VALUE_UNAVAILABLE", "UNAVAILABLE_NO_COST_AMOUNT"]}}, "required": ["cost_rate_status"]},
+                  "then": {"properties": {"annual_external_cost_rate_pre_tax": {"type": "null"}, "cost_rate_reason": {"type": "string", "minLength": 1}}}
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"enum": [1, 2, 3]}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "strategy_summary": {
+            "items": {
+              "not": {"anyOf": [{"required": ["cost_rate_status"]}, {"required": ["cost_rate_denominator_usd"]}, {"required": ["cost_schedule_as_of_date"]}]}
+            }
+          }
+        }
+      }
     }
   ]
 }
