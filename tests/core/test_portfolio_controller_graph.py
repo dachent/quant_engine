@@ -584,6 +584,26 @@ def test_baseline_spec_schema_is_a_declared_baseline_generation_contract() -> No
     ]
 
 
+def test_freshness_assessment_schema_is_a_declared_freshness_contract() -> None:
+    """A change to the schema-4 freshness output contract reaches the stages it feeds."""
+
+    schema = "schemas/core/freshness-assessment.schema.json"
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    freshness = next(
+        flow
+        for flow in graph["artifact_flows"]
+        if flow["id"] == "provider-ledger-freshness-health"
+    )
+
+    assert schema in freshness["source_paths"]
+    assert schema in freshness["contracts"]
+    assert schema in graph["source_files"]
+    assert affected_stages(graph, [schema]) == affected_stages(
+        graph, ["tools/portfolio_freshness.py"]
+    )
+    assert affected_stages(graph, [schema]) != []
+
+
 def test_graph_records_integrated_preparation_declaration() -> None:
     """The graph projects the executable bindings that checkpoint identity uses."""
 

@@ -378,8 +378,17 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
     },
     {
         "id": "provider-ledger-freshness-health",
-        "source_paths": (_RELEASE, _FRESHNESS, _REPORT, _PANEL),
-        "contracts": ("schemas/portfolio/provider-ledger.schema.json",),
+        "source_paths": (
+            _RELEASE,
+            _FRESHNESS,
+            _REPORT,
+            _PANEL,
+            "schemas/core/freshness-assessment.schema.json",
+        ),
+        "contracts": (
+            "schemas/core/freshness-assessment.schema.json",
+            "schemas/portfolio/provider-ledger.schema.json",
+        ),
         "producer": (_FRESHNESS, "build_health"),
         "artifacts": ("freshness-health.json",),
         "consumers": (

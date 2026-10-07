@@ -62,10 +62,10 @@ capital, attribution, decomposition, report and panel artifacts remain separate
 records. The ledger freshness flow binds `build_ledger`'s literal
 `portfolio_freshness.py` command, `write_health`/`build_health`, its
 `freshness-health.json` output, and the report/panel freshness consumers. Its
-provider-ledger input contract is bound; the existing core freshness schema is
-not listed as the output contract because it declares schema version 2 while
-the native producer and consumers use version 4 (dated at the data cutoff,
-with `evaluated_on` for the run date). Report and panel candidates
+provider-ledger input contract and the core freshness-assessment output schema
+(`schemas/core/freshness-assessment.schema.json`, which declares schema version 4,
+dated at the data cutoff, with `evaluated_on` for the run date) are both bound,
+so a change to either reaches the ledger stage and everything downstream. Report and panel candidates
 are distinct producer records, and `publish_catalog`,
 `publish_report`, and `publish_panel` are writers rather than relabelled
 validators. The actual delivery change range is resolved through these records,
