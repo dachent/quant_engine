@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 import time as time_module
-from typing import Any, Collection, Final, Mapping, Sequence, cast
+from typing import Any, Callable, Collection, Final, Mapping, Sequence, cast
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -4868,15 +4868,164 @@ def _validate_policy_unavailable_comparison(
         )
 
 
+_IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS: Final = (1, 2)
+_ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
+_ACCOUNT_LEG_SERIES_SCHEMA: Final = "ordered-date-return/1"
+# The figure published beside a leg is the leg itself; the tolerance only absorbs
+# float round trips.  The leg against the governed series is the ruling's 1e-8.
+_ACCOUNT_LEG_PUBLISHED_TOLERANCE: Final = 1e-12
+_ACCOUNT_LEG_GOVERNED_TOLERANCE: Final = 1e-8
+
+
+def _governed_account_returns(catalog: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """The governed account-live series per strategy: date to canonical decimal text.
+
+    BASELINE_ACCOUNT_LIVE is the one account leg of a strategy window (B2); an
+    implementation contract's account return is bound to it.
+    """
+
+    series: dict[str, dict[str, str]] = {}
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "strategy return.strategy_id")
+        observed = _date(row.get("date"), "strategy return.date").isoformat()
+        series.setdefault(strategy_id, {})[observed] = decimal_text(
+            _decimal(row.get("return"), "strategy return.return")
+        )
+    return series
+
+
+def _governed_window_return(
+    governed: Mapping[str, str], start: str, end: str
+) -> tuple[float | None, int]:
+    wealth = Decimal(1)
+    count = 0
+    with localcontext() as context:
+        context.prec = 34
+        for observed in sorted(governed):
+            if start <= observed <= end:
+                wealth *= 1 + Decimal(governed[observed])
+                count += 1
+    return (float(wealth - 1) if count else None), count
+
+
+def _verify_implementation_account_legs(
+    rows: Mapping[str, Mapping[str, Any]],
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None,
+    *,
+    schema_version: int,
+    published: Callable[[Mapping[str, Any]], tuple[float, str, str]],
+) -> None:
+    """Refuse a contract whose account leg is not the governed account-live series.
+
+    A version-2 contract carries its leg and must equal the governed series over
+    the leg's window.  A sealed version-1 contract carries none, so its published
+    account return is read over its declared window.  Either way a figure that
+    differs by more than 1e-8 is a second account return for one window.
+    """
+
+    if governed_account_returns is None:
+        return
+    for strategy_id, row in rows.items():
+        figure, start, end = published(row)
+        governed = governed_account_returns.get(strategy_id, {})
+        differs = ReportValidationError(
+            "implementation account leg differs from the governed account-live "
+            f"series: {strategy_id} {start}..{end}"
+        )
+        governed_figure, governed_count = _governed_window_return(governed, start, end)
+        if schema_version == 1:
+            if governed_figure is None or (
+                abs(governed_figure - figure) > _ACCOUNT_LEG_GOVERNED_TOLERANCE
+            ):
+                raise differs
+            continue
+        leg = row.get("account_leg")
+        if not isinstance(leg, Mapping):
+            raise ReportValidationError(
+                f"implementation account leg is absent: {strategy_id}"
+            )
+        if (
+            set(leg)
+            != {
+                "basis",
+                "compared_observations",
+                "cumulative_return",
+                "series_schema",
+                "series_sha256",
+                "window_end",
+                "window_observations",
+                "window_start",
+            }
+            or leg.get("basis") != _ACCOUNT_LEG_BASIS
+            or leg.get("series_schema") != _ACCOUNT_LEG_SERIES_SCHEMA
+            or re.fullmatch(r"[0-9a-f]{64}", str(leg.get("series_sha256"))) is None
+            or leg.get("window_start") != start
+            or leg.get("window_end") != end
+            or type(leg.get("compared_observations")) is not int
+            or type(leg.get("window_observations")) is not int
+        ):
+            raise ReportValidationError(
+                f"implementation account leg differs from its contract: {strategy_id}"
+            )
+        leg_figure = _finite_number(leg.get("cumulative_return"), "account leg return")
+        if abs(leg_figure - figure) > _ACCOUNT_LEG_PUBLISHED_TOLERANCE:
+            raise ReportValidationError(
+                "implementation published account return differs from its leg: "
+                f"{strategy_id}"
+            )
+        if (
+            governed_figure is None
+            or abs(governed_figure - leg_figure) > _ACCOUNT_LEG_GOVERNED_TOLERANCE
+            or leg["window_observations"] != governed_count
+        ):
+            raise differs
+        # ``series_sha256`` names the bytes of the ledger vintage the contract was
+        # built from.  It is identity for audit; the values above are the gate, so a
+        # byte-different vintage with equal values (a float-repr ledger and a
+        # decimal one) is not a second account return.
+
+
+def _reconciliation_published_account_return(
+    row: Mapping[str, Any],
+) -> tuple[float, str, str]:
+    metrics = _object(row.get("return_reconciliation"), "implementation comparison")
+    if metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+        metrics = _object(row.get("account_live_return_summary"), "actual account")
+        figure = metrics.get("cumulative_return")
+    else:
+        figure = metrics.get("account_cumulative_return")
+    return (
+        _finite_number(figure, "implementation account return"),
+        _date(
+            metrics.get("observed_start"), "implementation observed_start"
+        ).isoformat(),
+        _date(metrics.get("observed_end"), "implementation observed_end").isoformat(),
+    )
+
+
+def _attribution_published_account_return(
+    row: Mapping[str, Any],
+) -> tuple[float, str, str]:
+    bridge = _object(row.get("bridge"), "implementation bridge")
+    return (
+        _finite_number(bridge.get("account_return"), "implementation account return"),
+        _date(row.get("observed_start"), "implementation observed_start").isoformat(),
+        _date(row.get("observed_end"), "implementation observed_end").isoformat(),
+    )
+
+
 def _implementation_reconciliation_contract(
     path: Path,
     *,
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation reconciliation contract")
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") not in _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS
         or payload.get("builder") != "portfolio-implementation-reconciliation"
         or payload.get("verification") != "VERIFIED"
     ):
@@ -4971,6 +5120,12 @@ def _implementation_reconciliation_contract(
         raise ReportValidationError(
             "implementation reconciliation strategy boundary differs"
         )
+    _verify_implementation_account_legs(
+        by_id,
+        governed_account_returns,
+        schema_version=payload["schema_version"],
+        published=_reconciliation_published_account_return,
+    )
     sha256, size = hash_file(path)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
@@ -4990,10 +5145,11 @@ def _implementation_return_attribution_contract(
     *,
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation return attribution contract")
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") not in _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS
         or payload.get("builder") != "portfolio-implementation-return-attribution"
         or payload.get("verification")
         != "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES"
@@ -5133,6 +5289,12 @@ def _implementation_return_attribution_contract(
         raise ReportValidationError(
             "implementation return attribution strategy boundary differs"
         )
+    _verify_implementation_account_legs(
+        by_id,
+        governed_account_returns,
+        schema_version=payload["schema_version"],
+        published=_attribution_published_account_return,
+    )
     sha256, size = hash_file(path)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
@@ -7527,6 +7689,73 @@ def _current_epoch_detail(
     }
 
 
+def _implementation_contracts(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    implementation_reconciliation_path: Path | None,
+    implementation_return_attribution_path: Path | None,
+) -> tuple[
+    dict[str, dict[str, Any]] | None,
+    dict[str, Any] | None,
+    dict[str, dict[str, Any]] | None,
+    dict[str, Any] | None,
+]:
+    """Read both implementation contracts against the catalog's governed series."""
+
+    implementation_contract: dict[str, dict[str, Any]] | None = None
+    implementation_contract_ref: dict[str, Any] | None = None
+    implementation_policy_evidence = None
+    for appendix_path, comparison_key in (
+        (implementation_reconciliation_path, "return_reconciliation"),
+        (implementation_return_attribution_path, "bridge"),
+    ):
+        if appendix_path is not None and any(
+            _object(row.get(comparison_key), "implementation comparison").get("status")
+            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+            for row in _objects(
+                _load_json(appendix_path, "implementation appendix").get("strategies"),
+                "implementation strategies",
+            )
+        ):
+            implementation_policy_evidence = _selected_implementation_policy_evidence(
+                catalog,
+                baseline_root,
+                provider_ledger_root,
+                accepted_as_of=_date(catalog.get("as_of_date"), "portfolio as_of_date"),
+            )
+            break
+    if implementation_reconciliation_path is not None:
+        implementation_contract, implementation_contract_ref = (
+            _implementation_reconciliation_contract(
+                implementation_reconciliation_path,
+                portfolio_as_of=_text(
+                    catalog.get("as_of_date"), "portfolio as_of_date"
+                ),
+                expected_policy_evidence=implementation_policy_evidence,
+                governed_account_returns=_governed_account_returns(catalog),
+            )
+        )
+    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
+    implementation_return_attribution_ref: dict[str, Any] | None = None
+    if implementation_return_attribution_path is not None:
+        (
+            implementation_return_attribution_contract,
+            implementation_return_attribution_ref,
+        ) = _implementation_return_attribution_contract(
+            implementation_return_attribution_path,
+            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+            expected_policy_evidence=implementation_policy_evidence,
+            governed_account_returns=_governed_account_returns(catalog),
+        )
+    return (
+        implementation_contract,
+        implementation_contract_ref,
+        implementation_return_attribution_contract,
+        implementation_return_attribution_ref,
+    )
+
+
 def build_report_data(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
@@ -7734,49 +7963,18 @@ def build_report_data(
         raw_observation_coverage=raw_observation_coverage,
         value_basis_bounds=value_basis_bounds,
     )
-    implementation_contract: dict[str, dict[str, Any]] | None = None
-    implementation_contract_ref: dict[str, Any] | None = None
-    implementation_policy_evidence = None
-    for appendix_path, comparison_key in (
-        (implementation_reconciliation_path, "return_reconciliation"),
-        (implementation_return_attribution_path, "bridge"),
-    ):
-        if appendix_path is not None and any(
-            _object(row.get(comparison_key), "implementation comparison").get("status")
-            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
-            for row in _objects(
-                _load_json(appendix_path, "implementation appendix").get("strategies"),
-                "implementation strategies",
-            )
-        ):
-            implementation_policy_evidence = _selected_implementation_policy_evidence(
-                catalog,
-                baseline_root,
-                provider_ledger_root,
-                accepted_as_of=_date(catalog.get("as_of_date"), "portfolio as_of_date"),
-            )
-            break
-    if implementation_reconciliation_path is not None:
-        implementation_contract, implementation_contract_ref = (
-            _implementation_reconciliation_contract(
-                implementation_reconciliation_path,
-                portfolio_as_of=_text(
-                    catalog.get("as_of_date"), "portfolio as_of_date"
-                ),
-                expected_policy_evidence=implementation_policy_evidence,
-            )
-        )
-    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
-    implementation_return_attribution_ref: dict[str, Any] | None = None
-    if implementation_return_attribution_path is not None:
-        (
-            implementation_return_attribution_contract,
-            implementation_return_attribution_ref,
-        ) = _implementation_return_attribution_contract(
-            implementation_return_attribution_path,
-            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
-            expected_policy_evidence=implementation_policy_evidence,
-        )
+    (
+        implementation_contract,
+        implementation_contract_ref,
+        implementation_return_attribution_contract,
+        implementation_return_attribution_ref,
+    ) = _implementation_contracts(
+        catalog,
+        baseline_root,
+        provider_ledger_root,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
+    )
     strategy_summary = _strategies(
         catalog,
         performance,
