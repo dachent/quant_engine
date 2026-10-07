@@ -558,6 +558,15 @@ ENTRY_VARIANTS = {
         _bound_entry("current_capital", "beta:CASH1", "as_of_date", ("beta", "gamma")),
         "beta",
     ),
+    # the block declares gamma as bounded, but the report's custody capital has no gamma
+    "member_of_ghost_strategy": (
+        _bound_entry("current_capital", "gamma:M1", "as_of_date", ("gamma",)),
+        "gamma",
+    ),
+    "total_on_ghost_strategy": (
+        _bound_entry("current_capital", "systematic", "as_of_date", ("beta", "gamma")),
+        "systematic",
+    ),
     "strategy_summary_of_another_strategy": (
         _bound_entry(
             "strategy_summary", "other", "account_live_observed_end", ("beta",)
