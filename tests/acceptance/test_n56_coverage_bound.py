@@ -653,8 +653,11 @@ def test_a_row_and_total_need_every_cash_line_at_that_date_verified(
         expected=_expected(),
     )
 
+    # Round 8 (L1): this test used to assert LINE == NOT_READY beside the unproved acct-a2
+    # line.  Ruling C3 voids the whole block when any stated line is not the oracle's, so
+    # the honest-looking acct-a1 line is a blocker too and nothing is downgraded.
     assert dict(seen[CHECK]) == {
-        LINE: checks.NOT_READY,
+        LINE: checks.BLOCKER_AUTHORITY,
         "current_capital:alpha:cash:acct-a2": checks.BLOCKER_AUTHORITY,
         "current_capital:alpha": checks.BLOCKER_AUTHORITY,
         "current_capital:systematic": checks.BLOCKER_AUTHORITY,
@@ -835,6 +838,8 @@ def _context(
     tmp_path: Path,
     custody: dict[str, Any],
     block: dict[str, Any] | None,
+    expected: list[dict[str, Any]] | None = None,
+    not_derivable: list[dict[str, Any]] | None = None,
 ) -> checks.Context:
     def mutate(report: dict[str, Any]) -> None:
         report["report_schema_version"] = 3
@@ -847,8 +852,8 @@ def _context(
         gen=load_generation(gen_dir),
         cutoff=checks.to_date(CUTOFF) or checks.date.today(),
         cutoff_source="test",
-        expected=_expected(),
-        expected_not_derivable=[],
+        expected=_expected() if expected is None else expected,
+        expected_not_derivable=[] if not_derivable is None else not_derivable,
     )
 
 
@@ -1008,3 +1013,87 @@ def test_a_stale_nav_member_under_an_unavailable_parent_is_still_judged(
     seen = _world(tmp_path, custody, block=None, expected=_expected())
 
     assert (MEMBER, checks.BLOCKER_AUTHORITY) in seen[CHECK]
+
+
+# ------------------------------------------- round 8: L1 every stated line needs the oracle
+
+
+def _two_line_world(second_provider: str | None = None) -> dict[str, Any]:
+    custody = _custody_block()
+    second = copy.deepcopy(custody["strategies"][0]["derived_cash"][0])
+    second["account_id"] = "acct-a2"
+    if second_provider is not None:
+        second["provider_id"] = second_provider
+    custody["strategies"][0]["derived_cash"].append(second)
+    return custody
+
+
+SECOND = "alpha|synthetic|acct-a2"
+# What the oracle says about the SECOND stated line, by the result kind the lookup gives.
+# The first line (acct-a1) is always the oracle's own, honest and attested.
+RESULT_KINDS = {
+    # no row under this provider and no account of it: ``absent``
+    "absent": ("other-provider-x", [], []),
+    # a not-derivable row: ``unusable``
+    "unusable": (
+        None,
+        [],
+        [{"metric_id": checks.COVERAGE_END_METRIC, "entity": SECOND}],
+    ),
+    # two rows that disagree: ``unusable``
+    "conflicting": (
+        None,
+        [_coverage_row(DAY, SECOND), _coverage_row("2026-09-10", SECOND)],
+        [],
+    ),
+    # the oracle gives this strategy and provider only under acct-a1: ``other_account``
+    "other_account": (None, [], []),
+    # the oracle names this account under another provider: ``other_provider``
+    "other_provider": ("ibkr", [_coverage_row(DAY, "alpha|synthetic|acct-a2")], []),
+    # a row for the line that dates the coverage differently: ``row`` mismatch
+    "row_mismatch": (None, [_coverage_row("2026-09-10", SECOND)], []),
+}
+
+
+def test_every_unproved_stated_line_voids_every_downgrade() -> None:
+    """Astra rg8 two-strategy probe: alpha stays NOT_READY beside an unproved line.  Each
+    result kind other than a verified match is a capital.coverage_bound blocker and no
+    entity of the report is downgraded."""
+
+    import tempfile
+
+    for name, (provider, rows_extra, not_derivable) in RESULT_KINDS.items():
+        custody = _two_line_world(provider)
+        block = _disclosure(custody)
+        expected = [*_expected(), *rows_extra]
+        with tempfile.TemporaryDirectory() as raw:
+            context = _context(Path(raw), custody, block, expected, not_derivable)
+            findings = list(checks.check_capital_coverage_bound(context))
+            assert findings, name
+            assert {f.klass for f in findings} == {checks.BLOCKER_INVARIANT}, name
+            for entity in ("alpha", "systematic", LINE_ENTITY):
+                assert (
+                    checks.verified_capital_coverage_bound(context, entity, DAY_DATE)
+                    is None
+                ), (name, entity)
+            dated = [
+                f
+                for f in checks.check_current_capital_as_of(context)
+                if f.check_id == CHECK
+            ]
+            assert checks.NOT_READY not in {f.klass for f in dated}, name
+
+
+def test_a_second_line_the_oracle_proves_keeps_the_block_valid() -> None:
+    """Good control: both stated lines have a matching oracle row, so no finding and the
+    first line is downgraded as before."""
+
+    import tempfile
+
+    custody = _two_line_world()
+    block = _disclosure(custody)
+    expected = [*_expected(), _coverage_row(DAY, SECOND)]
+    with tempfile.TemporaryDirectory() as raw:
+        context = _context(Path(raw), custody, block, expected)
+        assert not list(checks.check_capital_coverage_bound(context))
+        assert checks.verified_capital_coverage_bound(context, LINE_ENTITY, DAY_DATE)

@@ -3025,6 +3025,56 @@ def _disclosure_block_void(
     return void
 
 
+def _entry_binding_problem(ctx: Context, entry: BoundedSection) -> str | None:
+    """Why an entry does not bind to the entity it names, or ``None``.
+
+    The date and ``bounded_by`` of an entry are checked against the oracle, but nothing in
+    them says WHICH entity of the report the value basis of those strategies reaches, so a
+    schema-valid entry can be re-pointed at an unrelated strategy or account and downgrade
+    that entity's date.  A ``current_capital`` entry must name something the report's own
+    custody capital carries and bind to a bounded strategy: ``systematic`` rests on
+    SYSTEMATIC strategies the report carries, a strategy row names the one strategy it is
+    bounded by, and ``strategy:account`` names a member or cash line of that strategy.  A
+    ``strategy_summary`` entry names the one strategy that bounds it.
+    """
+
+    if entry.section == "strategy_summary":
+        if entry.bounded_by != (entry.entity,):
+            return (
+                f"the strategy_summary entry for {entry.entity} is bounded by "
+                f"{list(entry.bounded_by)}, not by that strategy"
+            )
+        return None
+    if entry.section != "current_capital":
+        return None
+    carried: dict[str, set[str]] = {}
+    for row in rows(node(ctx.report, "custody_current_capital"), "strategies"):
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
+            continue
+        accounts = carried.setdefault(str(row.get("strategy_id")), set())
+        for group in ("members", "derived_cash"):
+            accounts.update(str(item.get("account_id")) for item in rows(row, group))
+    if entry.entity == "systematic":
+        missing = [name for name in entry.bounded_by if name not in carried]
+        return (
+            f"the Systematic total rests on strategies the report's custody capital "
+            f"does not carry as SYSTEMATIC: {missing}"
+            if missing
+            else None
+        )
+    strategy, _, account = entry.entity.partition(":")
+    if strategy not in carried:
+        return f"the entry names {entry.entity}, a strategy the report's custody capital does not carry"
+    if entry.bounded_by != (strategy,):
+        return (
+            f"the entry for {entry.entity} is bounded by {list(entry.bounded_by)}, "
+            f"not by {strategy}"
+        )
+    if account and account not in carried[strategy]:
+        return f"the entry names {entry.entity}, an account the strategy does not carry"
+    return None
+
+
 def verified_value_basis_bound(
     ctx: Context, section: str, entity: str, day: date
 ) -> BoundedSection | None:
@@ -3172,6 +3222,8 @@ def check_value_basis_bound(ctx: Context) -> Iterator[Finding]:
                         f"the date {entry.day} is not the earliest effective_end "
                         f"({earliest}) over bounded_by"
                     )
+                else:
+                    reason = _entry_binding_problem(ctx, entry)
         if reason is not None:
             yield _finding(
                 BOUNDS_CHECK,
@@ -3525,7 +3577,9 @@ def _coverage_line_mismatches(
 
     The line's provider, last event date, coverage end and date are each compared with
     the report's cash line, ``last_event_date`` with the latest event the line counts,
-    and the coverage end with the oracle's row for that line.
+    and the coverage end with the oracle's row for that line.  Every oracle result other
+    than one usable matching row is a mismatch (ruling C3: any invalid line voids the
+    block).
     """
 
     problems: list[str] = []
@@ -3579,16 +3633,26 @@ def _coverage_line_mismatches(
             )
         if oracle is not None:
             kind, oracle_day = _line_oracle_end(oracle, item.strategy_id, report_line)
-            if kind == "row" and oracle_day != item.coverage_end:
-                problems.append(
-                    f"{label} ends {item.coverage_end}, the oracle's coverage end "
-                    f"is {oracle_day}"
-                )
-            elif kind == "other_provider":
-                problems.append(
-                    f"{label} names provider {item.provider_id}, which the oracle "
-                    "does not give for this account"
-                )
+            if kind == "row":
+                if oracle_day != item.coverage_end:
+                    problems.append(
+                        f"{label} ends {item.coverage_end}, the oracle's coverage end "
+                        f"is {oracle_day}"
+                    )
+            else:
+                # Every result other than one usable row that matches is an unproved
+                # line (absent, unusable, other_provider, other_account): a block that
+                # states a line the oracle does not prove is not believed for any line.
+                why = {
+                    "other_provider": "names a provider the oracle does not give "
+                    "for this account",
+                    "other_account": "names an account the oracle does not give for "
+                    "this strategy and provider",
+                    "unusable": "has an oracle coverage end that is not derivable, "
+                    "unreadable or conflicting",
+                    "absent": "has no oracle coverage end at all",
+                }.get(kind, f"has no verified oracle coverage end ({kind})")
+                problems.append(f"{label} {why}")
     return problems
 
 

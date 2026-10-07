@@ -531,3 +531,107 @@ def test_the_validator_precision_is_the_producers_exact_precision() -> None:
     spec.loader.exec_module(module)
 
     assert checks.EXACT_PRECISION == module._EXACT_PRECISION
+
+
+# ------------------------------------------- round 8: L2 an entry binds to its own evidence
+
+
+def _bounds_entries(*entries: dict[str, Any], strategies: Any = None) -> dict[str, Any]:
+    return _bounds_block(strategies or [_bound_strategy("beta")], list(entries))
+
+
+ENTRY_VARIANTS = {
+    # Astra rg8-astra-fx-version: the producer's alpha entry re-pointed at another strategy
+    "member_of_an_unbounded_strategy": (
+        _bound_entry("current_capital", "other:M1", "as_of_date", ("beta",)),
+        "other",
+    ),
+    "unknown_account": (
+        _bound_entry("current_capital", "beta:NOPE", "as_of_date", ("beta",)),
+        "beta",
+    ),
+    "row_of_another_strategy": (
+        _bound_entry("current_capital", "other", "as_of_date", ("beta",)),
+        "other",
+    ),
+    "bounded_by_names_two": (
+        _bound_entry("current_capital", "beta:CASH1", "as_of_date", ("beta", "gamma")),
+        "beta",
+    ),
+    "strategy_summary_of_another_strategy": (
+        _bound_entry(
+            "strategy_summary", "other", "account_live_observed_end", ("beta",)
+        ),
+        "other",
+    ),
+}
+
+
+def test_an_entry_for_an_unrelated_entity_voids_the_whole_value_basis_block(
+    tmp_path: Path,
+) -> None:
+    """L2: every other entry of the block is the producer's and true; one entry that names
+    an entity the evidence does not bound is a dates.value_basis_bound finding and no
+    date of the report is downgraded."""
+
+    for name, (extra, _entity) in ENTRY_VARIANTS.items():
+        block = _bounds()
+        block["strategies"].append(_bound_strategy("gamma"))
+        block["bounded_sections"].append(extra)
+        findings = _run(
+            build(
+                tmp_path / name,
+                Spec(report=[_bound_world(BOUND_DAY), _attach(block)]),
+            ),
+            [_strategy_cutoff("beta"), _strategy_cutoff("gamma")],
+        )
+
+        bound = [f for f in findings if f.check_id == "dates.value_basis_bound"]
+        assert bound, name
+        assert {f.klass for f in bound} == {checks.BLOCKER_INVARIANT}, name
+        dated = [f for f in findings if f.check_id == CHECK]
+        assert checks.NOT_READY not in {f.klass for f in dated}, name
+        assert {f.klass for f in dated} == {checks.BLOCKER_AUTHORITY}, name
+
+
+def _attach(block: dict[str, Any]) -> Any:
+    def mutate(report: dict[str, Any]) -> None:
+        report["value_basis_bounds"] = copy.deepcopy(block)
+
+    return mutate
+
+
+def test_the_producers_own_entries_of_the_strategy_are_bound_to_it(
+    tmp_path: Path,
+) -> None:
+    """Good control: the member, the cash line, the row and the total of the bounded
+    strategy are all named by entries that bind to it, so the block is clean."""
+
+    findings = _findings(
+        tmp_path,
+        _bound_world(BOUND_DAY),
+        expected=[_strategy_cutoff("beta")],
+        block=_bounds(),
+    )
+    assert {f.klass for f in findings} == {checks.NOT_READY}
+
+
+def test_astras_alpha_to_beta_member_repoint_is_refused(tmp_path: Path) -> None:
+    """The member of an unbounded strategy named by an entry that the oracle dates as
+    the bounded strategy's: its stale AVAILABLE NAV member must stay a blocker."""
+
+    block = _bounds_entries(
+        _bound_entry("current_capital", "other:M1", "as_of_date", ("beta",)),
+    )
+
+    def world(report: dict[str, Any]) -> None:
+        _custody(member=_member(BOUND_DAY), row=BOUND_DAY, systematic=BOUND_DAY)(report)
+        report["custody_current_capital"]["strategies"][0]["strategy_id"] = "other"
+
+    findings = _run(
+        build(tmp_path, Spec(report=[world, _attach(block)])),
+        [_strategy_cutoff("beta")],
+    )
+
+    assert checks.NOT_READY not in {f.klass for f in findings if f.check_id == CHECK}
+    assert any(f.check_id == "dates.value_basis_bound" for f in findings)
