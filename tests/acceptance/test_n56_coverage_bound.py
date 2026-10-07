@@ -144,6 +144,37 @@ def test_a_disclosed_coverage_bound_downgrades_the_line_row_and_total(
     assert all("coverage" in f.message for f in findings)
 
 
+def test_a_version_four_report_is_judged_exactly_as_version_three_is(
+    tmp_path: Path,
+) -> None:
+    """QC-1: report schema 4 keeps the N56 coverage disclosure and its downgrade."""
+
+    custody = _custody_block()
+    by_version = {
+        version: _view(
+            _findings(
+                tmp_path / f"v{version}",
+                custody,
+                block=_disclosure(custody),
+                expected=_expected(),
+                version=version,
+            )
+        )
+        for version in (3, 4)
+    }
+
+    assert by_version[4] == by_version[3] == _expect(checks.NOT_READY)
+    # A version that never carried the block is still refused.
+    older = _findings(
+        tmp_path / "v2",
+        custody,
+        block=_disclosure(custody),
+        expected=_expected(),
+        version=2,
+    )
+    assert _view(older) != _expect(checks.NOT_READY)
+
+
 def test_an_undisclosed_coverage_date_is_still_a_blocker(tmp_path: Path) -> None:
     findings = _findings(tmp_path, _custody_block(), block=None, expected=_expected())
 

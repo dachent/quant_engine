@@ -3272,7 +3272,8 @@ COVERAGE_END_METRIC = "date.strategy_cash.coverage_end"
 COVERAGE_END_CHECK = "expected.capital.strategy_cash.coverage_end"
 _COVERAGE_BLOCK = "capital_coverage_bounds"
 _COVERAGE_DEFECTS = ("N56",)
-_COVERAGE_REPORT_VERSION = 3
+# The coverage disclosure exists from report schema 3; version 4 keeps it unchanged.
+_COVERAGE_REPORT_VERSIONS = frozenset({3, 4})
 _COVERAGE_RULE = "N56-COVERAGE"
 _COVERAGE_BLOCK_KEYS = frozenset(
     {"schema_version", "rule", "calculation_cutoff_date", "lines", "bounded_sections"}
@@ -3448,13 +3449,14 @@ def capital_coverage_disclosure(ctx: Context) -> CoverageDisclosure | None:
     result = None if block is None else _read_capital_coverage_disclosure(block)
     version = ctx.report.get("report_schema_version")
     if result is not None and (
-        type(version) is not int or version != _COVERAGE_REPORT_VERSION
+        type(version) is not int or version not in _COVERAGE_REPORT_VERSIONS
     ):
         result = replace(
             result,
             problems=(
                 f"{_COVERAGE_BLOCK} exists only at report_schema_version "
-                f"{_COVERAGE_REPORT_VERSION}, this report is {version!r}",
+                f"{' or '.join(str(item) for item in sorted(_COVERAGE_REPORT_VERSIONS))}"
+                f", this report is {version!r}",
                 *result.problems,
             ),
         )
@@ -3862,7 +3864,7 @@ def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
     if (
         oracle is None
         or type(version) is not int
-        or version != _COVERAGE_REPORT_VERSION
+        or version not in _COVERAGE_REPORT_VERSIONS
     ):
         return
     custody = node(ctx.report, "custody_current_capital")
@@ -9858,7 +9860,7 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             # The exemption is a property of the declared report schema, not of
             # field absence: a version-3 line must carry both fields.
             stated = (
-                declared_version == 3
+                declared_version in _COVERAGE_REPORT_VERSIONS
                 or "last_event_date" in line
                 or "coverage_end" in line
             )
