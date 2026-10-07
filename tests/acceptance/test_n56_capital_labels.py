@@ -326,6 +326,43 @@ def test_rule_4_a_bound_the_oracle_does_not_confirm_still_blocks(
     assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
 
 
+def test_rule_4_any_invalid_value_basis_entry_voids_every_downgrade(
+    tmp_path: Path,
+) -> None:
+    """K1 class sweep: ruling C3's whole-block void is the same for the FXB-1 block.  One
+    entry the block's own strategies do not explain, or a block dated at another cutoff,
+    is a dates.value_basis_bound finding; the other, true entries must not downgrade."""
+
+    stray = _bound_entry("current_capital", "beta:other", "as_of_date", ())
+    wrong_date = _bound_entry(
+        "current_capital", "beta:other", "as_of_date", ("beta",), day="2026-09-01"
+    )
+    for name, block in (
+        ("empty_bounded_by", _bounds_block_with(stray)),
+        ("date_is_not_the_earliest_end", _bounds_block_with(wrong_date)),
+        ("other_cutoff", _bounds_block_with(cutoff="2026-09-18")),
+    ):
+        findings = _findings(
+            tmp_path / name,
+            _bound_world(BOUND_DAY),
+            expected=[_strategy_cutoff("beta")],
+            block=block,
+        )
+
+        assert checks.NOT_READY not in {f.klass for f in findings}, name
+        assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}, name
+
+
+def _bounds_block_with(
+    extra: dict[str, Any] | None = None, *, cutoff: str = CUTOFF
+) -> dict[str, Any]:
+    block = _bounds()
+    block["calculation_cutoff_date"] = cutoff
+    if extra is not None:
+        block["bounded_sections"].append(extra)
+    return block
+
+
 def test_rule_4_a_dishonest_label_is_not_downgraded_even_if_disclosed(
     tmp_path: Path,
 ) -> None:

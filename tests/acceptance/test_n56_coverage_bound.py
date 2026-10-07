@@ -36,12 +36,17 @@ BASELINE = runpy.run_path(
 )
 
 
-def _custody_block(anchors_end: str = DAY) -> dict[str, Any]:
+def _custody_block(anchors_end: str = DAY, *, nav: bool = True) -> dict[str, Any]:
     """The custody block the real baseline producer builds when the sleeve-allocation
-    admission ends on ``anchors_end`` while the flows are admitted through the 18th."""
+    admission ends on ``anchors_end`` while the flows are admitted through the 18th.
+
+    ``nav=False`` removes the NAV records, which the real producer answers with a
+    NOT_READY_AT_CUTOFF strategy row and Systematic total around an AVAILABLE cash line."""
 
     case = BASELINE["_cr2_custody_cash_case"]()
     BASELINE["_admission_ends"](case, flows="2026-09-18", anchors=anchors_end)
+    if not nav:
+        case["nav"] = []
     block: dict[str, Any] = BASELINE["baseline"]._build_current_capital(**case)
     return block
 
@@ -256,9 +261,13 @@ def test_a_section_the_lines_do_not_explain_is_not_downgraded(tmp_path: Path) ->
 
     findings = _findings(tmp_path, custody, block=block, expected=_expected())
 
-    by_entity = dict(_view(findings))
-    assert by_entity["current_capital:alpha"] == checks.BLOCKER_AUTHORITY
-    assert by_entity[LINE] == checks.NOT_READY
+    # Round 7 (K1): this test used to assert ``by_entity[LINE] == NOT_READY``, which kept
+    # the line's downgrade while the block carried an entry its own lines do not explain.
+    # Ruling C3 reverses that: any invalid entry voids the WHOLE block, so no date is
+    # downgraded anywhere in the report.
+    assert dict(_view(findings)) == {
+        entity: checks.BLOCKER_AUTHORITY for entity in ENTITIES
+    }
 
 
 def test_a_dishonest_label_is_not_downgraded_even_if_disclosed(
@@ -650,7 +659,11 @@ def test_a_row_and_total_need_every_cash_line_at_that_date_verified(
         "current_capital:alpha": checks.BLOCKER_AUTHORITY,
         "current_capital:systematic": checks.BLOCKER_AUTHORITY,
     }
-    assert ("alpha|synthetic|acct-a2", checks.BLOCKER_AUTHORITY) in seen[COVERAGE_END]
+    # Round 7 (K1 minor): this assertion used to say BLOCKER_AUTHORITY.  The oracle names
+    # acct-a1 for this strategy and provider and has no row for acct-a2, so the line's
+    # account_id differs from the oracle entity, which ruling C2 classes
+    # BLOCKER_REGRESSION (a differing provider_id already was).
+    assert ("alpha|synthetic|acct-a2", checks.BLOCKER_REGRESSION) in seen[COVERAGE_END]
 
 
 def _disclosure_variant(name: str) -> dict[str, Any]:
@@ -740,3 +753,258 @@ def test_a_block_at_a_report_schema_other_than_3_downgrades_nothing(
 
         assert checks.NOT_READY not in {k for _, k in seen.get(CHECK, [])}, version
         assert checks.BLOCKER_INVARIANT in {k for _, k in seen[BOUND]}, version
+
+
+# ------------------------------------------- round 7: K1 (whole-block void), K2 (parents)
+
+
+LINE_ENTITY = "alpha:acct-a1"
+DAY_DATE = checks.date.fromisoformat(DAY)
+BOUND_ENTITY = "capital_coverage_bounds"
+
+
+def _section_variant(name: str) -> dict[str, Any]:
+    custody = _custody_block()
+    block = _disclosure(custody)
+    row = next(e for e in block["bounded_sections"] if e["entity"] == "alpha")
+    line_entry = next(
+        e for e in block["bounded_sections"] if e["entity"] == LINE_ENTITY
+    )
+    if name == "false_date":
+        row["date"] = "2026-09-12"
+    elif name == "false_section":
+        row["section"] = "strategy_summary"
+    elif name == "false_bounded_by":
+        row["bounded_by"] = ["beta"]
+    elif name == "line_entry_false_date":
+        line_entry["date"] = "2026-09-12"
+    else:
+        raise AssertionError(name)
+    return block
+
+
+def test_any_invalid_section_voids_every_downgrade_in_the_report(
+    tmp_path: Path,
+) -> None:
+    """K1 / ruling C3: one invalid bounded_sections entry voids the whole block.  The
+    row entry (or the line entry) is false while the OTHER entries are true; no date, and
+    not the cash label the oracle compares either, may be downgraded."""
+
+    custody = _custody_block()
+    for name in (
+        "false_date",
+        "false_section",
+        "false_bounded_by",
+        "line_entry_false_date",
+    ):
+        seen = _world(
+            tmp_path / name,
+            custody,
+            block=_section_variant(name),
+            expected=[*_expected(), _cash_expectation()],
+        )
+
+        assert checks.BLOCKER_INVARIANT in {k for _, k in seen[BOUND]}, name
+        assert checks.NOT_READY not in {k for _, k in seen[CHECK]}, name
+        assert dict(seen[CHECK]) == {
+            entity: checks.BLOCKER_AUTHORITY for entity in ENTITIES
+        }, name
+        assert seen[STRATEGY_CASH] == [
+            ("alpha|2026-09-17", checks.BLOCKER_REGRESSION)
+        ], name
+
+
+def test_a_block_dated_at_another_cutoff_voids_every_downgrade(tmp_path: Path) -> None:
+    custody = _custody_block()
+    block = _disclosure(custody)
+    block["calculation_cutoff_date"] = "2026-09-18"
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=block,
+        expected=[*_expected(), _cash_expectation()],
+    )
+
+    assert (BOUND_ENTITY, checks.BLOCKER_AUTHORITY) in seen[BOUND]
+    assert checks.NOT_READY not in {k for _, k in seen[CHECK]}
+    assert seen[STRATEGY_CASH] == [("alpha|2026-09-17", checks.BLOCKER_REGRESSION)]
+
+
+def _context(
+    tmp_path: Path,
+    custody: dict[str, Any],
+    block: dict[str, Any] | None,
+) -> checks.Context:
+    def mutate(report: dict[str, Any]) -> None:
+        report["report_schema_version"] = 3
+        report["custody_current_capital"] = copy.deepcopy(custody)
+        if block is not None:
+            report["capital_coverage_bounds"] = copy.deepcopy(block)
+
+    gen_dir = build(tmp_path, Spec(report=[mutate]))
+    return checks.Context(
+        gen=load_generation(gen_dir),
+        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
+        cutoff_source="test",
+        expected=_expected(),
+        expected_not_derivable=[],
+    )
+
+
+def test_the_verifier_is_closed_by_the_whole_block_gate(tmp_path: Path) -> None:
+    """Class sweep: verified_capital_coverage_bound is the only path from the block to a
+    downgrade (the label check and the cash-label expectation both call it), and a block
+    with any finding of check_capital_coverage_bound verifies nothing for any entity."""
+
+    custody = _custody_block()
+    context = _context(tmp_path, custody, _section_variant("false_date"))
+    assert list(checks.check_capital_coverage_bound(context))
+    for entity in ("alpha", "systematic", LINE_ENTITY):
+        assert (
+            checks.verified_capital_coverage_bound(context, entity, DAY_DATE) is None
+        ), entity
+
+    honest = _context(tmp_path / "honest", custody, _disclosure(custody))
+    assert not list(checks.check_capital_coverage_bound(honest))
+    assert checks.verified_capital_coverage_bound(honest, LINE_ENTITY, DAY_DATE)
+
+
+def test_an_oracle_row_for_another_account_is_a_regression(tmp_path: Path) -> None:
+    """K1 minor / ruling C2: a report line whose account_id differs from the oracle's
+    entity is BLOCKER_REGRESSION, as a differing provider_id is, not an absent row."""
+
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=_disclosure(custody),
+        expected=[
+            *_expected(coverage=None),
+            _coverage_row(entity="alpha|synthetic|acct-other"),
+        ],
+    )
+
+    assert seen[COVERAGE_END] == [
+        ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
+    ]
+    assert sorted(seen[CHECK]) == sorted(_expect(checks.BLOCKER_AUTHORITY))
+
+
+def test_the_not_derivable_account_placeholder_stays_an_authority_finding(
+    tmp_path: Path,
+) -> None:
+    """The ``strategy|provider|-`` placeholder names a not-derivable row, not another
+    account: it must not be read as a different account (J1 interface)."""
+
+    custody = _custody_block()
+
+    seen = _world(
+        tmp_path,
+        custody,
+        block=None,
+        expected=[*_expected(coverage=None), _coverage_row(entity="alpha|synthetic|-")],
+    )
+
+    assert seen[COVERAGE_END] == [("alpha|synthetic|acct-a1", checks.BLOCKER_AUTHORITY)]
+
+
+PARENT_FORGED = {"coverage_end": "2026-09-18", "as_of_date": CUTOFF}
+
+
+def _forged_cash(custody: dict[str, Any], **fields: str) -> dict[str, Any]:
+    forged = copy.deepcopy(custody)
+    forged["strategies"][0]["derived_cash"][0].update(fields)
+    return forged
+
+
+def test_the_unavailable_parent_world_is_the_producers_own() -> None:
+    """Precondition (Astra rg7-astra-parent-guard): no NAV gives a schema-valid
+    NOT_READY_AT_CUTOFF strategy row and total around an AVAILABLE cash line."""
+
+    custody = _custody_block(nav=False)
+    row = custody["strategies"][0]
+    assert row["status"] == "NOT_READY_AT_CUTOFF"
+    assert row["current_value"]["status"] == "UNAVAILABLE"
+    assert row["derived_cash"][0]["status"] == "AVAILABLE"
+    assert custody["systematic"]["status"] == "NOT_READY_AT_CUTOFF"
+
+
+def test_a_forged_cash_coverage_under_an_unavailable_parent_is_caught(
+    tmp_path: Path,
+) -> None:
+    """K2: forging the AVAILABLE cash component's coverage_end 2026-09-16 -> 2026-09-18 and
+    its label to the cutoff gave ZERO findings when the parent was unavailable, while the
+    available-parent control raised BLOCKER_REGRESSION and BLOCKER_INVARIANT."""
+
+    forged = _forged_cash(_custody_block(nav=False), **PARENT_FORGED)
+
+    seen = _world(tmp_path, forged, block=None, expected=_expected())
+
+    assert seen[COVERAGE_END] == [
+        ("alpha|synthetic|acct-a1", checks.BLOCKER_REGRESSION)
+    ]
+    assert (LINE, checks.BLOCKER_INVARIANT) in seen[CHECK]
+
+
+def test_the_unavailable_and_available_parent_controls_agree_on_the_cash_line(
+    tmp_path: Path,
+) -> None:
+    cash_findings = []
+    for name, custody in (
+        ("unavailable", _forged_cash(_custody_block(nav=False), **PARENT_FORGED)),
+        ("available", _forged_cash(_custody_block(), **PARENT_FORGED)),
+    ):
+        seen = _world(tmp_path / name, custody, block=None, expected=_expected())
+        cash_findings.append(
+            (
+                seen[COVERAGE_END],
+                sorted(item for item in seen[CHECK] if item[0] == LINE),
+            )
+        )
+
+    assert cash_findings[0] == cash_findings[1]
+
+
+def test_an_honest_unavailable_parent_world_is_judged_by_its_cash_line(
+    tmp_path: Path,
+) -> None:
+    """The parent claims no label (value UNAVAILABLE), the AVAILABLE cash line does: it is
+    dated before the cutoff by its coverage, NOT_READY when disclosed and the oracle
+    attests it, a blocker otherwise.  No coverage-end finding when the oracle agrees."""
+
+    custody = _custody_block(nav=False)
+
+    disclosed = _world(
+        tmp_path / "disclosed",
+        custody,
+        block=_disclosure(custody),
+        expected=[*_expected(), _cash_expectation()],
+    )
+    undisclosed = _world(
+        tmp_path / "undisclosed", custody, block=None, expected=_expected()
+    )
+
+    assert COVERAGE_END not in disclosed
+    assert dict(disclosed[CHECK]) == {LINE: checks.NOT_READY}
+    assert dict(undisclosed[CHECK]) == {LINE: checks.BLOCKER_AUTHORITY}
+
+
+def test_a_stale_nav_member_under_an_unavailable_parent_is_still_judged(
+    tmp_path: Path,
+) -> None:
+    """Class sweep of the parent-level skips: an AVAILABLE member under a strategy row
+    that is itself unavailable is dated by its own NAV observation and checked like any."""
+
+    custody = _custody_block(nav=False)
+    member = custody["strategies"][0]["members"][0]
+    member.update(
+        status="AVAILABLE",
+        as_of_date="2025-11-24",
+        value={"currency": "USD", "status": "AVAILABLE", "value": "5500"},
+    )
+
+    seen = _world(tmp_path, custody, block=None, expected=_expected())
+
+    assert (MEMBER, checks.BLOCKER_AUTHORITY) in seen[CHECK]

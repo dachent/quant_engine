@@ -3005,6 +3005,26 @@ def _oracle_cutoff_dates(ctx: Context) -> dict[str, frozenset[date]] | None:
     return result
 
 
+def _disclosure_block_void(
+    ctx: Context, key: str, block_check: Callable[[Context], Iterable[Finding]]
+) -> bool:
+    """Whether a disclosure block draws any finding, which voids every downgrade (C3).
+
+    A block is believed whole or not at all: one entry, line or field the report, the
+    oracle or the block itself does not bear out voids the block, so no date anywhere in
+    the report is downgraded on its word.  ``block_check`` is the block's own check, so the
+    findings the validator publishes about the block and the grounds on which it is
+    refused are one set.  Cached per generation.
+    """
+
+    cached = ctx._cache.get(key)
+    if isinstance(cached, bool):
+        return cached
+    void = any(True for _ in block_check(ctx))
+    ctx._cache[key] = void
+    return void
+
+
 def verified_value_basis_bound(
     ctx: Context, section: str, entity: str, day: date
 ) -> BoundedSection | None:
@@ -3025,7 +3045,15 @@ def verified_value_basis_bound(
 
     disclosure = value_basis_disclosure(ctx)
     oracle = _oracle_cutoff_dates(ctx)
-    if disclosure is None or disclosure.problems or oracle is None or day >= ctx.cutoff:
+    if (
+        disclosure is None
+        or disclosure.problems
+        or oracle is None
+        or day >= ctx.cutoff
+        or _disclosure_block_void(
+            ctx, "value_basis_block_void", check_value_basis_bound
+        )
+    ):
         return None
     declared = {item.strategy_id: item.account_ids for item in disclosure.strategies}
     for entry in disclosure.sections:
@@ -3377,13 +3405,17 @@ class OracleCoverageEnds:
     dates: Mapping[tuple[str, str, str], frozenset[date]]
     unusable: frozenset[tuple[str, str, str]]
     providers: Mapping[tuple[str, str], frozenset[str]]
+    # The accounts the oracle names for a ``strategy, provider`` pair; the ``-`` placeholder
+    # of a not-derivable row names no account and is not here.
+    accounts: Mapping[tuple[str, str], frozenset[str]] = field(default_factory=dict)
 
     def end(
         self, strategy: str, provider: str, account: str
     ) -> tuple[str, date | None]:
         """``row`` with the one stated date, or why there is none: ``unusable`` (not
         derivable, unreadable or two different dates), ``other_provider`` (the oracle
-        names this account under another provider) or ``absent``."""
+        names this account under another provider), ``other_account`` (it names this
+        provider's cash line of the strategy under another account) or ``absent``."""
 
         key = (strategy, provider, account)
         days = self.dates.get(key, frozenset())
@@ -3393,6 +3425,8 @@ class OracleCoverageEnds:
             return "row", next(iter(days))
         if self.providers.get((strategy, account)):
             return "other_provider", None
+        if self.accounts.get((strategy, provider)):
+            return "other_account", None
         return "absent", None
 
 
@@ -3407,12 +3441,15 @@ def _oracle_coverage_ends(ctx: Context) -> OracleCoverageEnds | None:
     dates: dict[tuple[str, str, str], set[date]] = {}
     unusable: set[tuple[str, str, str]] = set()
     providers: dict[tuple[str, str], set[str]] = {}
+    accounts: dict[tuple[str, str], set[str]] = {}
 
     def key_of(row: Mapping[str, Any]) -> tuple[str, str, str] | None:
         parts = str(row.get("entity")).split("|")
         if len(parts) != 3 or not all(parts):
             return None
         providers.setdefault((parts[0], parts[2]), set()).add(parts[1])
+        if parts[2] != "-":
+            accounts.setdefault((parts[0], parts[1]), set()).add(parts[2])
         return parts[0], parts[1], parts[2]
 
     for row in ctx.expected:
@@ -3436,6 +3473,7 @@ def _oracle_coverage_ends(ctx: Context) -> OracleCoverageEnds | None:
         {key: frozenset(days) for key, days in dates.items()},
         frozenset(unusable),
         {key: frozenset(names) for key, names in providers.items()},
+        {key: frozenset(names) for key, names in accounts.items()},
     )
     ctx._cache["oracle_coverage_ends"] = result
     return result
@@ -3599,9 +3637,10 @@ def verified_capital_coverage_bound(
     """The coverage entry that explains this ``current_capital`` date, when verified.
 
     The entry has the same ``(entity, date)``, names the strategies the lines the block
-    states give for it, the block is a valid disclosure of this report (version 3, closed
-    objects, every stated line the report's own cash line and the oracle's, the
-    validator's cutoff), and the oracle's ``date.strategy_cash.coverage_end`` row of every
+    states give for it, the block is a valid disclosure of this report as a WHOLE (version
+    3, closed objects, every stated line the report's own cash line and the oracle's, every
+    entry explained by the stated lines, the validator's cutoff: ``check_capital_coverage_bound``
+    has no finding, ruling C3), and the oracle's ``date.strategy_cash.coverage_end`` row of every
     stated line the entry rests on is exactly that date.  Nothing the report says about
     itself anchors the date, and an oracle with no such row confirms nothing.  The
     caller grants a strategy row or the Systematic total only when every component at
@@ -3613,11 +3652,11 @@ def verified_capital_coverage_bound(
     oracle = _oracle_coverage_ends(ctx)
     if (
         disclosure is None
-        or disclosure.problems
         or oracle is None
         or day >= ctx.cutoff
-        or disclosure.cutoff != ctx.cutoff
-        or _coverage_line_mismatches(ctx, disclosure)
+        or _disclosure_block_void(
+            ctx, "coverage_block_void", check_capital_coverage_bound
+        )
     ):
         return None
     explained = _coverage_explainable(disclosure)
@@ -3731,9 +3770,10 @@ def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
     independent proof of the date, so a coverage end the oracle does not state
     (``BLOCKER_AUTHORITY``: no row, a not-derivable row, or two rows that disagree), one
     that differs from it in either direction, or one the oracle gives to another provider
-    (``BLOCKER_REGRESSION``) is a finding.  A later report coverage end claims coverage
-    nobody attests; an earlier one means the report and the oracle used different
-    admissions.
+    or another account (``BLOCKER_REGRESSION``, ruling C2) is a finding.  A later report
+    coverage end claims coverage nobody attests; an earlier one means the report and the
+    oracle used different admissions.  The strategy row's own availability changes
+    nothing: every AVAILABLE cash line is verified.
     """
 
     oracle = _oracle_coverage_ends(ctx)
@@ -3747,9 +3787,9 @@ def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
     custody = node(ctx.report, "custody_current_capital")
     base = "$.custody_current_capital"
     for position, row in enumerate(rows(custody, "strategies")):
-        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC" or not _capital_available(
-            row
-        ):
+        # The strategy row's own availability is not a condition: a cash line is its own
+        # AVAILABLE claim, and a row whose NAV is unavailable still publishes it.
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
             continue
         strategy = str(row.get("strategy_id"))
         for line_position, line in enumerate(rows(row, "derived_cash")):
@@ -3771,6 +3811,12 @@ def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
                     BLOCKER_REGRESSION,
                     "the oracle gives this account's coverage end under another "
                     f"provider than the line's {line.get('provider_id')}",
+                )
+            elif kind == "other_account":
+                klass, why = (
+                    BLOCKER_REGRESSION,
+                    "the oracle gives this strategy's coverage end at the line's "
+                    f"provider under another account than {line.get('account_id')}",
                 )
             else:
                 klass, why = (
@@ -9575,7 +9621,9 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     5. a date after the cutoff is BLOCKER_AUTHORITY.
 
     A custody scope outside the producer's vocabulary is a finding, and
-    ``RETAINED_EXCLUDED`` rows are not systematic (echotrade is N59).
+    ``RETAINED_EXCLUDED`` rows are not systematic (echotrade is N59).  Rules 1, 2, 4 and 5
+    apply to every AVAILABLE member and cash line of a SYSTEMATIC row whether or not the
+    row itself is available; only the row's own date (rule 3) needs the row available.
     """
 
     custody = node(ctx.report, "custody_current_capital")
@@ -9695,10 +9743,11 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
                 "capital date check cannot classify the row",
             )
             continue
-        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC" or not _capital_available(
-            row
-        ):
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
             continue
+        # A row whose own value is unavailable claims no date, but its AVAILABLE members
+        # and cash lines still do: each is judged on its own (K2), whatever the parent.
+        row_available = _capital_available(row)
         component_days: list[date] = []
         component_marks: list[tuple[date, bool]] = []
         components_honest = True
@@ -9837,6 +9886,8 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             else:
                 component_days.append(day)
                 component_marks.append((day, marked))
+        if not row_available:
+            continue
         row_day_raw = row.get("as_of_date")
         row_honest = components_honest
         if components_complete and component_days:
