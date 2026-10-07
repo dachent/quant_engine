@@ -14493,3 +14493,42 @@ def test_a_row_without_a_source_key_is_rendered_under_the_default_source() -> No
 
     assert placeholder in rows
     assert {row.get("source_key") for row in rows} == {"us-economic", None}
+
+
+# QC1-P seam: every reader of the panel version accepts every version the builder emits.
+
+
+def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
+    """Builder, schema, renderer and the new-field conditionals agree on 24 and 25."""
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    renderer = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
+        encoding="utf-8"
+    )
+    emitted = {panel.PANEL_SCHEMA_VERSION, panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION}
+    allow_list = re.search(
+        r"!\[([0-9, ]+)\]\.includes\(data\.panel_schema_version\)", renderer
+    )
+    assert allow_list is not None
+    renderer_versions = {int(item) for item in allow_list.group(1).split(",")}
+    schema_versions = set(schema["properties"]["panel_schema_version"]["enum"])
+
+    assert emitted == {24, 25}
+    assert emitted <= schema_versions and emitted <= renderer_versions
+    assert schema_versions == renderer_versions
+
+    # position_snapshots and advisory.hwm_candidate are required from the version
+    # that introduced them, and only from it.
+    conditions = [
+        entry
+        for entry in schema["allOf"]
+        if "position_snapshots" in entry.get("then", {}).get("required", [])
+    ]
+    assert len(conditions) == 1
+    condition = conditions[0]
+    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25]
+    assert condition["then"]["properties"]["advisory"]["required"] == ["hwm_candidate"]
