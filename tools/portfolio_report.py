@@ -4904,16 +4904,18 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
                 flow.get("amount"), "mwr cashflow amount"
             )
-    ordered = sorted(pooled.items())
+    # The classifier solves only the dates whose pooled flows do not net to zero, so
+    # the published window is that stream's, not the raw pooled dates'.
+    ordered = [(day, amount) for day, amount in sorted(pooled.items()) if amount]
     result = classify_xirr(ordered)
     rate = result["rate"]
     return {
         "mwr_basis": "POOLED_FUNDED_EPOCH_CASHFLOWS",
         "mwr_member_account_ids": sorted(str(item["account_id"]) for item in funded),
-        "mwr_opening_date": ordered[0][0].isoformat(),
+        "mwr_opening_date": ordered[0][0].isoformat() if ordered else None,
         "mwr_reason": result["reason"],
         "mwr_status": result["status"],
-        "mwr_terminal_date": ordered[-1][0].isoformat(),
+        "mwr_terminal_date": ordered[-1][0].isoformat() if ordered else None,
         "mwr_xirr": None if rate is None else decimal_text(cast(Decimal, rate)),
     }
 
@@ -5621,7 +5623,7 @@ def _flow_reconciliation(
             for item in values
             if _object(item.get("amount"), "flow.amount").get("status") == "AVAILABLE"
         ]
-        total = sum((_amount(item, "amount") for item in available), Decimal("0"))
+        total = _exact_total([_amount(item, "amount") for item in available])
         rows.append(
             {
                 "flow_type": flow_type,

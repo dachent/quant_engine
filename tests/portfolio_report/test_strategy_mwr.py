@@ -184,3 +184,60 @@ def test_pooled_flows_use_the_one_classifier_for_non_unique_streams() -> None:
 
     assert result["mwr_status"] == "UNIQUENESS_NOT_PROVED"
     assert result["mwr_xirr"] is None
+
+
+# GLM rg3 minor: the classifier drops a date whose pooled flows net to zero, so the
+# published window must be the one the classifier solved, not the raw pooled dates.
+OFFSET_LEADING = [("2025-12-15", "-50")]
+OFFSET_LEADING_MIRROR = [("2025-12-15", "50")]
+OFFSET_TRAILING = [("2027-01-15", "20")]
+OFFSET_TRAILING_MIRROR = [("2027-01-15", "-20")]
+
+
+def test_a_zero_net_leading_or_trailing_date_is_not_the_published_window() -> None:
+    plain = reporter._strategy_mwr([_member("a", A), _member("b", B)])
+    padded = reporter._strategy_mwr(
+        [
+            _member("a", [*OFFSET_LEADING, *A, *OFFSET_TRAILING]),
+            _member("b", [*OFFSET_LEADING_MIRROR, *B, *OFFSET_TRAILING_MIRROR]),
+        ]
+    )
+
+    assert padded == plain
+    assert padded["mwr_opening_date"] == "2026-01-01"
+    assert padded["mwr_terminal_date"] == "2026-12-31"
+
+
+def test_a_pooled_stream_that_nets_to_zero_everywhere_publishes_no_window() -> None:
+    result = reporter._strategy_mwr(
+        [
+            _member("a", [("2026-01-01", "5")]),
+            _member("b", [("2026-01-01", "-5")]),
+        ]
+    )
+
+    assert result["mwr_status"] == "INDETERMINATE"
+    assert result["mwr_reason"] == "ALL_CASHFLOWS_ZERO"
+    assert result["mwr_xirr"] is None
+    assert result["mwr_opening_date"] is None
+    assert result["mwr_terminal_date"] is None
+
+
+def test_the_flow_reconciliation_net_adds_money_exactly() -> None:
+    """Class sweep of N56 (Astra rg3 4.1): a published net is not rounded at 28 digits."""
+
+    def flow(value: str) -> dict[str, Any]:
+        return {
+            "provider": "p",
+            "flow_type": "DEPOSIT",
+            "evidence_class": "OBSERVED",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        }
+
+    rows = reporter._flow_reconciliation(
+        {"flows": [flow("1.1234567890123456789012345678901234"), flow("3")]}
+    )
+
+    assert [row["net_amount_usd"] for row in rows] == [
+        "4.1234567890123456789012345678901234"
+    ]
