@@ -7482,6 +7482,119 @@ def _version_matched_history_observations(
     return int(_finite_float(observations, f"history observations {strategy_name}"))
 
 
+STALE_IMPLEMENTATION_STATUS: Final = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+NO_RETURN_RECONCILIATION_STATUS: Final = "NOT_READY_NO_RETURN_RECONCILIATION"
+_STALE_IMPLEMENTATION_KEYS: Final = frozenset(
+    {
+        "status",
+        "strategy_id",
+        "contract_kind",
+        "contract_id",
+        "contract_sha256",
+        "contract_as_of_date",
+        "window_start",
+        "window_end",
+        "governed_account_return",
+        "governed_account_basis",
+        "governed_observations",
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+        "superseded_contract_account_return",
+        "superseded_contract_account_basis",
+        "reason",
+        "repair_ref",
+    }
+)
+_IMPLEMENTATION_REFERENCE_KEYS: Final = (
+    ("reconciliation", "implementation_reconciliation_contract"),
+    ("return_attribution", "implementation_return_attribution_contract"),
+)
+
+
+def _is_stale_implementation(value: object) -> bool:
+    return isinstance(value, Mapping) and str(value.get("status", "")).startswith(
+        "NOT_READY_STALE"
+    )
+
+
+def _validate_stale_implementation_object(
+    value: object, *, kind: str, strategy_id: str
+) -> dict[str, Any]:
+    """The report's closed NOT_READY object for a contract built from another ledger.
+
+    It carries the governed account return with its basis and the reason, and no
+    model return, gap, risk statistic or waterfall.  The contract's own superseded
+    figure stays beside its explicit basis label and is never read as a return.
+    """
+
+    row = _object(value, f"stale implementation {kind} {strategy_id}")
+    if set(row) != _STALE_IMPLEMENTATION_KEYS:
+        raise ControlPanelValidationError(
+            f"stale implementation object keys differ: {strategy_id}"
+        )
+    pins = []
+    for field in (
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+    ):
+        pin = row[field]
+        if not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None:
+            raise ControlPanelValidationError(
+                f"stale implementation ledger identity is invalid: {strategy_id}"
+            )
+        pins.append(pin)
+    if (
+        row["status"] != STALE_IMPLEMENTATION_STATUS
+        or row["contract_kind"] != kind
+        or row["strategy_id"] != strategy_id
+        or row["governed_account_basis"] != "BASELINE_ACCOUNT_LIVE"
+        or row["superseded_contract_account_basis"]
+        != "SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"
+        or row["repair_ref"] != "N66-R"
+        or pins[0] == pins[1]
+        or type(row["governed_observations"]) is not int
+        or row["governed_observations"] < 1
+        or not isinstance(row["reason"], str)
+        or not row["reason"]
+    ):
+        raise ControlPanelValidationError(
+            f"stale implementation object is not a closed NOT_READY row: {strategy_id}"
+        )
+    for field in ("governed_account_return", "superseded_contract_account_return"):
+        _finite_float(row[field], f"stale implementation {field}")
+    for field in ("contract_as_of_date", "window_start", "window_end"):
+        _panel_date(row[field], f"stale implementation {field}")
+    return dict(row)
+
+
+def _implementation_contract_context(
+    strategy_id: str,
+    present: Mapping[str, bool],
+    references: Mapping[str, Mapping[str, Any] | None],
+) -> dict[str, Any]:
+    """Which contract dates and flags label this strategy's implementation rows."""
+
+    context: dict[str, Any] = {"provider_return_policy": None}
+    for kind, key in _IMPLEMENTATION_REFERENCE_KEYS:
+        reference = references.get(key)
+        context[kind] = None
+        if not isinstance(reference, Mapping) or not present.get(kind):
+            continue
+        context[kind] = {
+            "as_of_date": reference.get("as_of_date"),
+            "stale": strategy_id in (reference.get("stale_strategy_ids") or []),
+            "pre_policy": strategy_id
+            in (reference.get("pre_policy_strategy_ids") or []),
+        }
+        policy = reference.get("provider_return_policy")
+        if isinstance(policy, Mapping) and context["provider_return_policy"] is None:
+            context["provider_return_policy"] = {
+                "policy_id": policy.get("policy_id"),
+                "effective_start": policy.get("effective_start"),
+            }
+    return context
+
+
 def _model_account_gap_underwriting(
     strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -7919,6 +8032,7 @@ def _strategy_underwriting(
     policy_snapshot: bytes | None = None,
     *,
     performance_lineage_available: bool = True,
+    implementation_contracts: Mapping[str, Mapping[str, Any] | None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Compose an advisory evidence ledger without creating new fact authority."""
 
@@ -8183,8 +8297,17 @@ def _strategy_underwriting(
             else {}
         )
         implementation_value = strategy.get("implementation_reconciliation")
+        stale_reconciliation = (
+            _validate_stale_implementation_object(
+                implementation_value, kind="RECONCILIATION", strategy_id=strategy_id
+            )
+            if _is_stale_implementation(implementation_value)
+            else None
+        )
         implementation_detail = (
-            _object(
+            {"stale_reconciliation": stale_reconciliation}
+            if stale_reconciliation is not None
+            else _object(
                 implementation_value,
                 f"implementation reconciliation {strategy_name}",
             )
@@ -8192,19 +8315,54 @@ def _strategy_underwriting(
             else None
         )
         return_attribution_value = strategy.get("implementation_return_attribution")
+        stale_attribution = (
+            _validate_stale_implementation_object(
+                return_attribution_value,
+                kind="RETURN_ATTRIBUTION",
+                strategy_id=strategy_id,
+            )
+            if _is_stale_implementation(return_attribution_value)
+            else None
+        )
         return_attribution_detail = (
             _object(
                 return_attribution_value,
                 f"implementation return attribution {strategy_name}",
             )
-            if return_attribution_value is not None
+            if return_attribution_value is not None and stale_attribution is None
             else None
         )
-        if return_attribution_detail is not None:
+        if stale_attribution is not None:
+            implementation_detail = {
+                **(implementation_detail or {}),
+                "stale_return_attribution": stale_attribution,
+            }
+        elif return_attribution_detail is not None:
             implementation_detail = {
                 **(implementation_detail or {}),
                 "return_attribution": return_attribution_detail,
             }
+        if stale_reconciliation is not None or stale_attribution is not None:
+            implementation_comparison_status: object = STALE_IMPLEMENTATION_STATUS
+        elif implementation_detail is None:
+            implementation_comparison_status = gap["comparison_status"]
+        elif implementation_detail.get("return_reconciliation") is not None:
+            implementation_comparison_status = _object(
+                implementation_detail["return_reconciliation"],
+                f"implementation metrics {strategy_name}",
+            ).get("status")
+        else:
+            # A comparison that is missing is not ready; it is never read as a
+            # legacy comparison or borrowed from the other contract kind.
+            implementation_comparison_status = NO_RETURN_RECONCILIATION_STATUS
+        contract_context = _implementation_contract_context(
+            strategy_id,
+            {
+                "reconciliation": implementation_value is not None,
+                "return_attribution": return_attribution_value is not None,
+            },
+            implementation_contracts or {},
+        )
 
         def factor_value(
             row: Mapping[str, Any] | None, container: str, field: str
@@ -8270,23 +8428,8 @@ def _strategy_underwriting(
                     "implementation_reconciliation": {
                         "status": strategy.get("implementation_reconciliation_status")
                         or gap["status"],
-                        "comparison_status": (
-                            _object(
-                                implementation_detail.get("return_reconciliation"),
-                                f"implementation metrics {strategy_name}",
-                            ).get("status")
-                            if implementation_detail is not None
-                            and implementation_detail.get("return_reconciliation")
-                            is not None
-                            else (
-                                _object(
-                                    return_attribution_detail.get("bridge"),
-                                    f"causal return bridge {strategy_name}",
-                                ).get("status")
-                                if return_attribution_detail is not None
-                                else gap["comparison_status"]
-                            )
-                        ),
+                        "comparison_status": implementation_comparison_status,
+                        "contracts": contract_context,
                         "detail": implementation_detail,
                     },
                 },
@@ -9401,6 +9544,10 @@ def _panel_data(
         _text(report.get("as_of_date"), "report.as_of_date"),
         underwriting_policy_snapshot,
         performance_lineage_available=performance_lineage_available,
+        implementation_contracts={
+            key: (report[key] if isinstance(report.get(key), Mapping) else None)
+            for _kind, key in _IMPLEMENTATION_REFERENCE_KEYS
+        },
     )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
@@ -11728,6 +11875,167 @@ def _replication_disposition_counts(
     }
 
 
+def _check_implementation_layers(
+    underwriting_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Recompute the underwriting gap and implementation layers from their rows.
+
+    A stale kind is a closed NOT_READY object: its shape is validated, it carries no
+    bridge to reconcile, and the layer must report it as not ready.  The strategies
+    whose implementation layer is accounted for are the causal, the policy-unavailable
+    and the stale-attribution ones.
+    """
+
+    gap_reconciles = True
+    causal_attribution_reconciles = True
+    causal_attribution_strategy_ids: set[str] = set()
+    policy_unavailable_strategy_ids: set[str] = set()
+    stale_attribution_strategy_ids: set[str] = set()
+    stale_reconciliation_strategy_ids: set[str] = set()
+    stale_shapes_valid = True
+    for row in underwriting_rows:
+        gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
+        total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
+        residual = _optional_float(
+            gap.get("unresolved_residual"), "underwriting unresolved residual"
+        )
+        reconciliation_error = _optional_float(
+            gap.get("reconciliation_error"), "underwriting reconciliation error"
+        )
+        components = _objects(
+            gap.get("causally_bound_components"),
+            "underwriting causally bound components",
+        )
+        if components or (
+            total_gap is not None
+            and (
+                residual is None
+                or reconciliation_error is None
+                or abs(total_gap - residual) > 1e-12
+                or abs(reconciliation_error) > 1e-12
+            )
+        ):
+            gap_reconciles = False
+            break
+        layers = _object(row.get("evidence_layers"), "underwriting evidence layers")
+        implementation = _object(
+            layers.get("implementation_reconciliation"),
+            "underwriting implementation reconciliation",
+        )
+        detail_value = implementation.get("detail")
+        stale_strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        comparison_status = implementation.get("comparison_status")
+        if detail_value is None:
+            if comparison_status == STALE_IMPLEMENTATION_STATUS:
+                stale_shapes_valid = False
+            continue
+        detail = _object(detail_value, "underwriting implementation detail")
+        stale_present = False
+        for stale_key, kind, stale_ids, live_key in (
+            (
+                "stale_reconciliation",
+                "RECONCILIATION",
+                stale_reconciliation_strategy_ids,
+                "return_reconciliation",
+            ),
+            (
+                "stale_return_attribution",
+                "RETURN_ATTRIBUTION",
+                stale_attribution_strategy_ids,
+                "return_attribution",
+            ),
+        ):
+            if stale_key not in detail:
+                continue
+            stale_present = True
+            stale_ids.add(stale_strategy_id)
+            try:
+                _validate_stale_implementation_object(
+                    detail[stale_key], kind=kind, strategy_id=stale_strategy_id
+                )
+            except ControlPanelValidationError:
+                stale_shapes_valid = False
+            if live_key in detail:
+                stale_shapes_valid = False
+        if stale_present != (comparison_status == STALE_IMPLEMENTATION_STATUS):
+            stale_shapes_valid = False
+        attribution_value = detail.get("return_attribution")
+        if attribution_value is None:
+            continue
+        attribution = _object(
+            attribution_value, "underwriting implementation return attribution"
+        )
+        bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
+        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+            import portfolio_report as reporter
+
+            strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+            metrics = _object(
+                detail.get("return_reconciliation"), "underwriting return comparison"
+            )
+            reporter._validate_policy_unavailable_comparison(
+                metrics, strategy_id=strategy_id
+            )
+            reporter._validate_policy_unavailable_comparison(
+                bridge,
+                strategy_id=strategy_id,
+                attribution=True,
+                expected_policy_evidence=_object(
+                    metrics.get("policy_evidence"), "underwriting policy evidence"
+                ),
+            )
+            if gap.get("status") != "UNAVAILABLE_POLICY_NOT_ADMITTED" or any(
+                gap.get(key) is not None
+                for key in (
+                    "total_gap",
+                    "reference_cumulative_return",
+                    "beta",
+                    "correlation",
+                    "tracking_error_annualized",
+                )
+            ):
+                causal_attribution_reconciles = False
+                break
+            policy_unavailable_strategy_ids.add(strategy_id)
+            continue
+        model_return = _finite_float(
+            bridge.get("model_return"), "underwriting causal model return"
+        )
+        account_return = _finite_float(
+            bridge.get("account_return"), "underwriting causal account return"
+        )
+        gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
+        category_total = sum(
+            _finite_float(
+                category.get("effect_pp"), "underwriting causal category effect"
+            )
+            for category in _objects(
+                bridge.get("categories"), "underwriting causal categories"
+            )
+        )
+        strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        causal_attribution_strategy_ids.add(strategy_id)
+        if not math.isclose(
+            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
+        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+            causal_attribution_reconciles = False
+            break
+    return {
+        "gap_reconciles": gap_reconciles,
+        "causal_attribution_reconciles": causal_attribution_reconciles,
+        "causal_attribution_strategy_ids": sorted(causal_attribution_strategy_ids),
+        "policy_unavailable_strategy_ids": sorted(policy_unavailable_strategy_ids),
+        "stale_attribution_strategy_ids": sorted(stale_attribution_strategy_ids),
+        "stale_reconciliation_strategy_ids": sorted(stale_reconciliation_strategy_ids),
+        "stale_shapes_valid": stale_shapes_valid,
+        "implementation_strategy_ids": sorted(
+            causal_attribution_strategy_ids
+            | policy_unavailable_strategy_ids
+            | stale_attribution_strategy_ids
+        ),
+    }
+
+
 def verify_candidate(
     report_root: Path | None,
     legacy_panel: Path,
@@ -12415,104 +12723,7 @@ def verify_candidate(
         "account_live",
         "implementation_reconciliation",
     }
-    gap_reconciles = True
-    causal_attribution_reconciles = True
-    causal_attribution_strategy_ids: set[str] = set()
-    policy_unavailable_strategy_ids: set[str] = set()
-    for row in underwriting_rows:
-        gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
-        total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
-        residual = _optional_float(
-            gap.get("unresolved_residual"), "underwriting unresolved residual"
-        )
-        reconciliation_error = _optional_float(
-            gap.get("reconciliation_error"), "underwriting reconciliation error"
-        )
-        components = _objects(
-            gap.get("causally_bound_components"),
-            "underwriting causally bound components",
-        )
-        if components or (
-            total_gap is not None
-            and (
-                residual is None
-                or reconciliation_error is None
-                or abs(total_gap - residual) > 1e-12
-                or abs(reconciliation_error) > 1e-12
-            )
-        ):
-            gap_reconciles = False
-            break
-        layers = _object(row.get("evidence_layers"), "underwriting evidence layers")
-        implementation = _object(
-            layers.get("implementation_reconciliation"),
-            "underwriting implementation reconciliation",
-        )
-        detail_value = implementation.get("detail")
-        if detail_value is None:
-            continue
-        detail = _object(detail_value, "underwriting implementation detail")
-        attribution_value = detail.get("return_attribution")
-        if attribution_value is None:
-            continue
-        attribution = _object(
-            attribution_value, "underwriting implementation return attribution"
-        )
-        bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
-        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
-            import portfolio_report as reporter
-
-            strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
-            metrics = _object(
-                detail.get("return_reconciliation"), "underwriting return comparison"
-            )
-            reporter._validate_policy_unavailable_comparison(
-                metrics, strategy_id=strategy_id
-            )
-            reporter._validate_policy_unavailable_comparison(
-                bridge,
-                strategy_id=strategy_id,
-                attribution=True,
-                expected_policy_evidence=_object(
-                    metrics.get("policy_evidence"), "underwriting policy evidence"
-                ),
-            )
-            if gap.get("status") != "UNAVAILABLE_POLICY_NOT_ADMITTED" or any(
-                gap.get(key) is not None
-                for key in (
-                    "total_gap",
-                    "reference_cumulative_return",
-                    "beta",
-                    "correlation",
-                    "tracking_error_annualized",
-                )
-            ):
-                causal_attribution_reconciles = False
-                break
-            policy_unavailable_strategy_ids.add(strategy_id)
-            continue
-        model_return = _finite_float(
-            bridge.get("model_return"), "underwriting causal model return"
-        )
-        account_return = _finite_float(
-            bridge.get("account_return"), "underwriting causal account return"
-        )
-        gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
-        category_total = sum(
-            _finite_float(
-                category.get("effect_pp"), "underwriting causal category effect"
-            )
-            for category in _objects(
-                bridge.get("categories"), "underwriting causal categories"
-            )
-        )
-        strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
-        causal_attribution_strategy_ids.add(strategy_id)
-        if not math.isclose(
-            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
-        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
-            causal_attribution_reconciles = False
-            break
+    implementation_findings = _check_implementation_layers(underwriting_rows)
     causal_contract_present = any(
         row.get("artifact") == "strategy-implementation-return-attribution"
         for row in _objects(data.get("provenance"), "panel provenance")
@@ -12551,12 +12762,13 @@ def verify_candidate(
                 == "NONE"
                 for row in underwriting_rows
             )
-            and gap_reconciles
-            and causal_attribution_reconciles
+            and implementation_findings["gap_reconciles"]
+            and implementation_findings["causal_attribution_reconciles"]
+            and implementation_findings["stale_shapes_valid"]
             and (
                 not causal_contract_present
-                or causal_attribution_strategy_ids | policy_unavailable_strategy_ids
-                == {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+                or implementation_findings["implementation_strategy_ids"]
+                == ["grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"]
             ),
             {
                 "policy_id": underwriting.get("policy_id"),
@@ -12571,14 +12783,25 @@ def verify_candidate(
                     underwriting.get("counts"), "underwriting counts"
                 ).get("quantified_model_account_gap"),
                 "authority_boundary": authority_boundary,
-                "gap_reconciles_without_fabricated_components": gap_reconciles,
-                "causal_attribution_reconciles": causal_attribution_reconciles,
-                "causal_attribution_strategy_ids": sorted(
-                    causal_attribution_strategy_ids
+                "gap_reconciles_without_fabricated_components": (
+                    implementation_findings["gap_reconciles"]
                 ),
-                "policy_unavailable_strategy_ids": sorted(
-                    policy_unavailable_strategy_ids
+                "causal_attribution_reconciles": (
+                    implementation_findings["causal_attribution_reconciles"]
                 ),
+                "causal_attribution_strategy_ids": (
+                    implementation_findings["causal_attribution_strategy_ids"]
+                ),
+                "policy_unavailable_strategy_ids": (
+                    implementation_findings["policy_unavailable_strategy_ids"]
+                ),
+                "stale_attribution_strategy_ids": (
+                    implementation_findings["stale_attribution_strategy_ids"]
+                ),
+                "stale_reconciliation_strategy_ids": (
+                    implementation_findings["stale_reconciliation_strategy_ids"]
+                ),
+                "stale_shapes_valid": implementation_findings["stale_shapes_valid"],
             },
         )
     )
