@@ -5668,6 +5668,95 @@ def _current_capital_values(ctx: Context) -> dict[str, Decimal]:
     return values
 
 
+_SNAPSHOT_WEIGHT_FIELDS = (
+    "weight_denominator_usd",
+    "weight_perimeter",
+    "weight_perimeter_component_count",
+)
+
+
+def _snapshot_weight_findings(
+    ctx: Context, problem: Callable[[str, Any, Any, str, str], Finding]
+) -> Iterator[Finding]:
+    """N65: a version-4 dated snapshot's weights are its values over its own perimeter.
+
+    The recorded weight column reconciles with no denominator, so the report
+    publishes value / the snapshot's whole recorded systematic total (the excluded
+    components included).  Judged from the rows alone: each weight times the stated
+    denominator is the snap_row's value, the rows of one snapshot state one denominator,
+    and the published values cannot exceed it.  A version-4 snap_row that states none of
+    this is a finding; older versions keep the recorded column and are not judged.
+    """
+
+    if ctx.report.get("report_schema_version") != 4:
+        return
+    tolerance = Decimal("1e-12")
+    by_day: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for snap_position, snap_row in enumerate(rows(ctx.report, "allocation_history")):
+        if snap_row.get("scope") != "SYSTEMATIC" or not _historical_snapshot(snap_row):
+            continue
+        by_day.setdefault(str(snap_row.get("as_of_date")), []).append(
+            (snap_position, snap_row)
+        )
+    for day, members in sorted(by_day.items()):
+        denominators: set[Decimal] = set()
+        published = Decimal(0)
+        for snap_position, snap_row in members:
+            strategy = str(snap_row.get("strategy_id"))
+            path = f"$.allocation_history[{snap_position}]"
+            missing = [name for name in _SNAPSHOT_WEIGHT_FIELDS if name not in snap_row]
+            denominator = to_decimal(snap_row.get("weight_denominator_usd"))
+            weight = to_decimal(snap_row.get("systematic_weight"))
+            value = to_decimal(snap_row.get("current_value_usd"))
+            if missing or denominator is None or denominator <= 0:
+                yield problem(
+                    strategy,
+                    {name: snap_row.get(name) for name in _SNAPSHOT_WEIGHT_FIELDS},
+                    "the snapshot perimeter total and its component count",
+                    path + ".weight_denominator_usd",
+                    "a version-4 snapshot weight does not state its perimeter",
+                )
+                continue
+            denominators.add(denominator)
+            if weight is None or value is None:
+                yield problem(
+                    strategy,
+                    {"weight": snap_row.get("systematic_weight"), "value": value},
+                    "finite snapshot weight and value",
+                    path + ".systematic_weight",
+                    "a version-4 snapshot weight or value is missing",
+                )
+                continue
+            published += value
+            if abs(weight * denominator - value) > tolerance * max(
+                denominator, Decimal(1)
+            ):
+                yield problem(
+                    strategy,
+                    snap_row.get("systematic_weight"),
+                    f"{value} / {denominator}",
+                    path + ".systematic_weight",
+                    f"the {day} snapshot weight is not its value over the "
+                    "snapshot perimeter total",
+                )
+        if len(denominators) > 1:
+            yield problem(
+                day,
+                sorted(str(item) for item in denominators),
+                "one perimeter total per snapshot",
+                "$.allocation_history[*].weight_denominator_usd",
+                f"the {day} snapshot states more than one perimeter total",
+            )
+        elif denominators and published > next(iter(denominators)) + tolerance:
+            yield problem(
+                day,
+                str(published),
+                f"at most {next(iter(denominators))}",
+                "$.allocation_history[*].weight_denominator_usd",
+                f"the {day} snapshot values exceed its stated perimeter total",
+            )
+
+
 def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
     """B5: current shares and policy weights are distinct, independently checked sets."""
     tolerance = Decimal("5e-8")
@@ -5721,6 +5810,7 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
                 sets.setdefault(strategy, {})[f"report.{section}.systematic_weight"] = (
                     amount
                 )
+    yield from _snapshot_weight_findings(ctx, problem)
     totals = _current_capital_values(ctx)
     grand = sum(totals.values(), Decimal(0))
     if grand > 0:
