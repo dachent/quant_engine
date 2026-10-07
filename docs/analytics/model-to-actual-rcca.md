@@ -8,6 +8,26 @@ builder `1.1.0`, attribution
 `b8f387fe4509035e358a8a7ce523038b751118fa547dd97c103f68751fbc21d3`.
 Portfolio123 remains HAR-first; this analysis made no P123 API call.
 
+## Account return basis (schema version 2)
+
+The figures below were published from an older provider-ledger vintage and are
+kept as the historical analysis of that sealed contract. That vintage differs
+from the governed account-live series (`BASELINE_ACCOUNT_LIVE`) on one
+GrizzlyBulls day (2026-07-17, -3.3213% against -3.0924%) and on 28 TT days, so
+the same window carried two account returns: GrizzlyBulls +0.035% against
++0.272%, and TT 0.397% against 0.358%. Version 2 of both contracts (builders
+`1.4.0` and `1.3.0`) carries an `account_leg` per strategy: the governed series
+compounded over the window the figure declares, with its basis, window, governed
+date count, compared observations and the `ordered-date-return/1` digest of the
+ledger rows. A builder refuses a figure that is not that series within 1e-8, and
+the report refuses a contract whose leg is not the governed series. The model
+legs are labelled: the reconciliation compares the account with the signal-state
+by adjusted-close proxy (`model_basis`
+`SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY`), the causal bridge with the
+daily-open proxy (`DAILY_OPEN_SIGNAL_STATE_PROXY`); they are two models, not two
+estimates of one. The method difference between the account series and the
+transaction ledger stays the bridge's `ACCOUNT_RETURN_METHOD_RESIDUAL`.
+
 Effects below are percentage-point contributions to account-minus-model
 return. Positive values helped the account and negative values hurt it.
 

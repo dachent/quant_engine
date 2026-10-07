@@ -253,7 +253,11 @@ scheduling and remediation.
 
 Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
-uses no P123 API and emits no raw account or provider identifiers.
+uses no P123 API and emits no raw account or provider identifiers. Both commands
+must read the same provider-ledger generation the report is built from: the
+contracts carry that series as their `account_leg`, and the report refuses a
+contract whose account return is not the governed account-live series. Rebuild
+both whenever the provider ledger generation changes.
 
 ```powershell
 & $enginePython tools\portfolio_implementation_reconciliation.py `
