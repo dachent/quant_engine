@@ -1767,7 +1767,13 @@ def test_n56_panel_schema_requires_the_cash_fields_only_from_version_23():
             REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert schema["properties"]["panel_schema_version"]["enum"] == [21, 22, 23]
+    assert schema["properties"]["panel_schema_version"]["enum"] == [
+        21,
+        22,
+        23,
+        24,
+        25,
+    ]
     for definition in (
         "custody_handoff_custody_cash",
         "custody_handoff_custody_cash_v3",

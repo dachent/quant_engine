@@ -873,6 +873,7 @@ def _report() -> dict[str, object]:
                 "market_value_usd": "30",
                 "quantity": "3",
                 "security_id": "security-synthetic",
+                "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
                 "status": "AVAILABLE_MAPPED",
                 "strategy_id": ACTIVE_STRATEGY_IDS[0],
                 "symbol": "SYNTH",
@@ -2964,13 +2965,17 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
+            "position_class": "CURRENT_AT_CUTOFF",
             "security_id": "security-synthetic",
+            "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
             "status": "AVAILABLE_MAPPED",
             "strategy_id": ACTIVE_STRATEGY_IDS[0],
             "strategy_name": STRATEGY_NAMES[0],
             "symbol": "SYNTH",
         }
     ]
+    assert data["counts"]["positions"] == 1
+    assert data["position_snapshots"]["current_at_cutoff_rows"] == 1
     assert data["factor_analysis"]["available_count"] == 4
     assert data["factor_analysis"]["diagnostic_count"] == 1
     assert data["factor_analysis"]["dynamic_available_count"] == 1
@@ -6657,7 +6662,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22, 23].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23, 24, 25].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -13221,8 +13226,8 @@ def test_schema22_weight_labels_preserve_schema21(
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
     )
-    assert data["panel_schema_version"] == 22
-    assert panel.BUILDER_VERSION == "2.12.0"
+    assert data["panel_schema_version"] == 24
+    assert panel.BUILDER_VERSION == "2.13.0"
     panel._validate_panel_data_schema(data)
     data["dependence_modes"]["LIVE_PLUS_BACKTEST"] = deepcopy(
         data["dependence_modes"]["LIVE_ONLY"]
@@ -13331,15 +13336,15 @@ def test_panel_schema22_publication_records_input_report_version(
             for item in dashboard["provenance"]
             if item.get("artifact") == "portfolio-report-generation"
         )
-        assert manifest["adapter"]["version"] == "2.12.0"
-        assert dashboard["panel_schema_version"] == 22
+        assert manifest["adapter"]["version"] == "2.13.0"
+        assert dashboard["panel_schema_version"] == 24
         assert artifact["schema"]["version"] == str(report_version)
         assert artifact["sha256"] == selected_sha
         assert provenance["schema"] == f"portfolio-report-data/{report_version}"
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_22_and23(
+def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -13359,7 +13364,7 @@ def test_renderer_accepts_panel_schema21_22_and23(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23, 24):
+    for version in (21, 22, 23, 24, 25, 26):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -13387,7 +13392,7 @@ def test_renderer_accepts_panel_schema21_22_and23(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23, 24]) {
+          for (const version of [21, 22, 23, 24, 25, 26]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -13421,16 +13426,16 @@ def test_renderer_accepts_panel_schema21_22_and23(
         check=True,
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=120,
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23, 24]
-    for item in evidence[:3]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26]
+    for item in evidence[:5]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[3]
+    unsupported = evidence[5]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])
@@ -13799,7 +13804,7 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     candidate = Path(built["candidate_dir"])
     data_path = candidate / "data" / "dashboard_data.json"
     payload = json.loads(data_path.read_text(encoding="utf-8"))
-    assert payload["panel_schema_version"] == 22
+    assert payload["panel_schema_version"] == 24
     assert len(payload["allocations"]) >= 2
     payload["allocations"][0]["as_of_date"] = "2026-08-16"
     payload["allocations"][0]["weight_basis"] = "CURRENT_CUTOFF"
@@ -14126,3 +14131,170 @@ def test_a_live_event_without_a_prehistory_range_keeps_the_range_reason() -> Non
     assert negative["latest_event_range_status"] == (
         "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
     )
+
+
+# QC1-P N62: current holdings are the latest accepted snapshot at the cutoff.
+
+
+def _qc1p_position(
+    account_id: str, as_of_date: str, security_id: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "as_of_date": as_of_date,
+        "evidence_class": "WCH_CURRENT",
+        "mapping_status": "MAPPED",
+        "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+        "quantity": "1",
+        "security_id": security_id,
+        "strategy_id": ACTIVE_STRATEGY_IDS[0],
+        "symbol": "SYNTH",
+    }
+
+
+def _qc1p_producer_positions(
+    rows: Sequence[tuple[str, str, str]], as_of_date: str
+) -> list[dict[str, Any]]:
+    """Position rows exactly as the report producer emits them."""
+
+    import portfolio_report as reporter
+
+    return reporter._positions(
+        {
+            "as_of_date": as_of_date,
+            "positions": [_qc1p_position(*item) for item in rows],
+        }
+    )
+
+
+def test_positions_are_classified_against_the_cutoff_from_the_producers_rows() -> None:
+    """A9/K4/K5: only the latest snapshot dated at the cutoff is current.
+
+    The producer marks the latest snapshot per account, which may be older than
+    the cutoff (stale) or newer than it (captured after the cutoff).
+    """
+
+    rows = _qc1p_producer_positions(
+        [
+            ("account-a", "2026-02-02", "s1"),
+            ("account-a", "2026-08-05", "s2"),
+            ("account-a", "2026-09-17", "s3"),
+            ("account-a", "2026-09-17", "s4"),
+            ("account-b", "2025-11-26", "s5"),
+            ("account-b", "2026-09-10", "s6"),
+            ("account-c", "2026-09-10", "s7"),
+            ("account-c", "2026-09-18", "s8"),
+        ],
+        "2026-09-17",
+    )
+
+    classified, summary = panel._classify_positions(rows, "2026-09-17")
+
+    assert {row["security_id"]: row["position_class"] for row in classified} == {
+        "s1": "HISTORICAL",
+        "s2": "HISTORICAL",
+        "s3": "CURRENT_AT_CUTOFF",
+        "s4": "CURRENT_AT_CUTOFF",
+        "s5": "HISTORICAL",
+        "s6": "LATEST_BEFORE_CUTOFF",
+        "s7": "HISTORICAL",
+        "s8": "AFTER_CUTOFF",
+    }
+    assert summary == {
+        "cutoff_date": "2026-09-17",
+        "current_basis": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF",
+        "current_at_cutoff_rows": 2,
+        "latest_before_cutoff_rows": 1,
+        "historical_rows": 4,
+        "after_cutoff_rows": 1,
+        "unavailable_rows": 0,
+        "accepted_rows_total": 8,
+        "history_snapshot_dates": 4,
+        "history_first_as_of": "2025-11-26",
+        "history_last_as_of": "2026-09-10",
+    }
+    # Existing producer fields are preserved untouched.
+    assert [
+        {key: value for key, value in row.items() if key != "position_class"}
+        for row in classified
+    ] == rows
+
+
+def test_the_unavailable_position_row_is_not_counted_as_current() -> None:
+    rows = _qc1p_producer_positions([], "2026-09-17")
+
+    classified, summary = panel._classify_positions(rows, "2026-09-17")
+
+    assert [row["position_class"] for row in classified] == ["UNAVAILABLE"]
+    assert summary["current_at_cutoff_rows"] == 0
+    assert summary["unavailable_rows"] == 1
+    assert summary["accepted_rows_total"] == 0
+    assert summary["history_first_as_of"] is None
+
+
+def test_a_position_row_without_a_snapshot_status_is_refused() -> None:
+    rows = _qc1p_producer_positions([("account-a", "2026-09-17", "s1")], "2026-09-17")
+    del rows[0]["snapshot_status"]
+
+    with pytest.raises(panel.ControlPanelValidationError, match="snapshot_status"):
+        panel._classify_positions(rows, "2026-09-17")
+
+
+def test_the_built_panel_counts_current_holdings_at_the_cutoff_only(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    report["positions"] = _qc1p_producer_positions(
+        [
+            ("account-00", "2026-07-01", "s1"),
+            ("account-00", "2026-07-30", "s2"),
+            ("account-01", "2026-07-20", "s3"),
+        ],
+        "2026-07-30",
+    )
+    report_root = tmp_path / "qc1p-positions-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "qc1p-positions-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+
+    assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION == 24
+    assert data["counts"]["positions"] == 1
+    assert data["position_snapshots"] == {
+        "cutoff_date": "2026-07-30",
+        "current_basis": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF",
+        "current_at_cutoff_rows": 1,
+        "latest_before_cutoff_rows": 1,
+        "historical_rows": 1,
+        "after_cutoff_rows": 0,
+        "unavailable_rows": 0,
+        "accepted_rows_total": 3,
+        "history_snapshot_dates": 2,
+        "history_first_as_of": "2026-07-01",
+        "history_last_as_of": "2026-07-20",
+    }
+    assert {row["security_id"]: row["position_class"] for row in data["positions"]} == {
+        "s1": "HISTORICAL",
+        "s2": "CURRENT_AT_CUTOFF",
+        "s3": "LATEST_BEFORE_CUTOFF",
+    }
+    verified = panel.verify_candidate(
+        report_root,
+        inputs["legacy"],
+        Path(built["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert verified["all_passed"] is True

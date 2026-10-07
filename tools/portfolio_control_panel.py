@@ -88,11 +88,12 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
-PANEL_SCHEMA_VERSION: Final = 22
+PANEL_SCHEMA_VERSION: Final = 24
 # A panel built from a version-3 report (custody cash dated by its admission coverage)
-# is version 23; every other panel stays 22.
-CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 23
-BUILDER_VERSION: Final = "2.12.0"
+# is version 25; every other panel is 24.  Versions 22 and 23 (the same split before
+# the position snapshot split and the governed HWM candidate) stay readable.
+CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 25
+BUILDER_VERSION: Final = "2.13.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
         "grizzlybears-vtma",
@@ -8415,6 +8416,82 @@ def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
     return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
 
 
+POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
+_POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+_POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
+
+
+def _classify_positions(
+    rows: Sequence[Mapping[str, Any]], cutoff_date: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Split the accepted position rows into current holdings and labelled history.
+
+    A row is current only when the report marks it the latest accepted snapshot of
+    its account and that snapshot is dated at the calculation cutoff.  A latest
+    snapshot dated before the cutoff is stale, a historical snapshot is history,
+    and a row dated after the cutoff is named and never counted as current.
+    """
+
+    cutoff = _panel_date(cutoff_date, "position cutoff date")
+    classified: list[dict[str, Any]] = []
+    counts = Counter[str]()
+    history_dates: set[str] = set()
+    for row in rows:
+        if not str(row.get("status", "")).startswith("AVAILABLE"):
+            position_class = "UNAVAILABLE"
+        else:
+            snapshot_status = row.get("snapshot_status")
+            if snapshot_status not in {_POSITION_LATEST, _POSITION_HISTORICAL}:
+                raise ControlPanelValidationError(
+                    "position row lacks a recognised snapshot_status: "
+                    f"{snapshot_status!r}"
+                )
+            as_of_date = _text(row.get("as_of_date"), "position as_of_date")
+            as_of = _panel_date(as_of_date, "position as_of_date")
+            if as_of > cutoff:
+                position_class = "AFTER_CUTOFF"
+            elif snapshot_status == _POSITION_HISTORICAL:
+                position_class = "HISTORICAL"
+                history_dates.add(as_of_date)
+            elif as_of == cutoff:
+                position_class = "CURRENT_AT_CUTOFF"
+            else:
+                position_class = "LATEST_BEFORE_CUTOFF"
+                history_dates.add(as_of_date)
+        counts[position_class] += 1
+        classified.append({**row, "position_class": position_class})
+    summary = {
+        "cutoff_date": cutoff.isoformat(),
+        "current_basis": POSITION_CURRENT_BASIS,
+        "current_at_cutoff_rows": counts["CURRENT_AT_CUTOFF"],
+        "latest_before_cutoff_rows": counts["LATEST_BEFORE_CUTOFF"],
+        "historical_rows": counts["HISTORICAL"],
+        "after_cutoff_rows": counts["AFTER_CUTOFF"],
+        "unavailable_rows": counts["UNAVAILABLE"],
+        "accepted_rows_total": sum(
+            counts[name]
+            for name in (
+                "CURRENT_AT_CUTOFF",
+                "LATEST_BEFORE_CUTOFF",
+                "HISTORICAL",
+                "AFTER_CUTOFF",
+            )
+        ),
+        "history_snapshot_dates": len(history_dates),
+        "history_first_as_of": min(history_dates) if history_dates else None,
+        "history_last_as_of": max(history_dates) if history_dates else None,
+    }
+    return classified, summary
+
+
+def _position_cutoff_date(report: Mapping[str, Any]) -> str:
+    cutoff = report.get("calculation_cutoff_date")
+    return _text(
+        cutoff if cutoff is not None else report.get("as_of_date"),
+        "report position cutoff date",
+    )
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
@@ -9251,6 +9328,9 @@ def _panel_data(
         }
         for row in performance
     ]
+    classified_positions, position_snapshots = _classify_positions(
+        positions, _position_cutoff_date(report)
+    )
     normalized_positions = [
         {
             **row,
@@ -9260,7 +9340,7 @@ def _panel_data(
                 else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
             ),
         }
-        for row in positions
+        for row in classified_positions
     ]
 
     fact_by_item = {
@@ -9326,9 +9406,8 @@ def _panel_data(
     mwr_available = sum(
         str(row.get("mwr_status", "")).startswith("AVAILABLE") for row in performance
     )
-    position_count = sum(
-        str(row.get("status", "")).startswith("AVAILABLE") for row in positions
-    )
+    # Current holdings only: the history stays published under its own label.
+    position_count = position_snapshots["current_at_cutoff_rows"]
     reconciliation_passed = _reconciliation_passed(reconciliations)
     source_contract = _object(source.get("contract"), "source.contract")
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
@@ -9746,6 +9825,7 @@ def _panel_data(
             else PANEL_SCHEMA_VERSION
         ),
         "performance": normalized_performance,
+        "position_snapshots": position_snapshots,
         "positions": normalized_positions,
         "provenance": provenance,
         "provider_counts": dict(sorted(provider_counts.items())),
@@ -11979,6 +12059,9 @@ def verify_candidate(
         )
         for row in _objects(report.get("strategy_summary"), "strategy_summary")
     }
+    classified_report_positions, expected_position_snapshots = _classify_positions(
+        report_position_rows, _position_cutoff_date(report)
+    )
     expected_position_rows = [
         {
             **row,
@@ -11988,14 +12071,16 @@ def verify_candidate(
                 else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
             ),
         }
-        for row in report_position_rows
+        for row in classified_report_positions
     ]
     position_rows = _objects(data.get("positions"), "positions")
     checks.append(
         _check(
             "Current positions preserve report attribution",
             position_rows == expected_position_rows
-            and data["counts"]["positions"] == len(report_position_rows)
+            and data.get("position_snapshots") == expected_position_snapshots
+            and data["counts"]["positions"]
+            == expected_position_snapshots["current_at_cutoff_rows"]
             and all(
                 row.get("status") != "AVAILABLE_MAPPED"
                 or (
