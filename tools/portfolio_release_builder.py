@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence, TypedDict
+from typing import Any, Iterator, Mapping, Sequence, TypedDict
 
 from quant_engine.core import (
     GenerationManifest,
@@ -4829,6 +4829,44 @@ def _current_release_plan_specs(
     return sorted(rows, key=lambda row: str(row["spec_id"]))
 
 
+def _factor_records(text: str) -> list[tuple[str, list[str]]]:
+    """Split a factor CSV into its records: each one's own text and its parsed fields.
+
+    The decomposition producer reads the file with the ``csv`` module, so quoting, a
+    quoted line break and either line ending are those semantics.  Each record's text is
+    kept exactly as written, so a record that survives projection is unchanged.
+    """
+
+    consumed: list[str] = []
+
+    def lines() -> Iterator[str]:
+        for line in io.StringIO(text, newline=""):
+            consumed.append(line)
+            yield line
+
+    records: list[tuple[str, list[str]]] = []
+    start = 0
+    for fields in csv.reader(lines()):
+        records.append(("".join(consumed[start:]), fields))
+        start = len(consumed)
+    return records
+
+
+def _follows(fields: Sequence[str], cutoff: date) -> bool:
+    """Whether a factor record's date cell is an ISO date after the cutoff.
+
+    The date is the first column (the factor contract's closed header).  A cell that is
+    not an ISO date stays: refusing it is the decomposition producer's job.
+    """
+
+    if not fields:
+        return False
+    try:
+        return date.fromisoformat(fields[0].strip()) > cutoff
+    except ValueError:
+        return False
+
+
 def _project_base_factors(
     base_spec: Mapping[str, Any], factor_bytes: bytes
 ) -> tuple[dict[str, Any], bytes]:
@@ -4846,13 +4884,18 @@ def _project_base_factors(
         # The decomposition producer owns the shape of its specification and refuses a
         # spec with no date; there is no boundary here to project the factors onto.
         return dict(base_spec), factor_bytes
-    lines = factor_bytes.decode("utf-8").splitlines(keepends=True)
-    if not lines:
+    try:
+        cutoff = date.fromisoformat(as_of.strip())
+    except ValueError:
+        # An undated boundary is the decomposition producer's refusal, as above.
+        return dict(base_spec), factor_bytes
+    records = _factor_records(factor_bytes.decode("utf-8"))
+    if not records:
         raise VerticalBuildError("base factor file is empty")
-    kept = [lines[0]] + [
-        line for line in lines[1:] if line.split(",", 1)[0].strip() <= as_of
+    kept = [records[0][0]] + [
+        raw for raw, fields in records[1:] if not _follows(fields, cutoff)
     ]
-    if len(kept) == len(lines):
+    if len(kept) == len(records):
         return dict(base_spec), factor_bytes
     projected = "".join(kept).encode("utf-8")
     raw_source = base_spec.get("factor_source")

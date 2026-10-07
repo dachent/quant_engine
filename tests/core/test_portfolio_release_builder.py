@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from datetime import date
 import hashlib
 import importlib.util
 import io
@@ -11,9 +12,12 @@ from collections.abc import Callable
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from typing import Any
 import zipfile
 
 import pytest
+
+import portfolio_decomposition as decomposition
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -6298,6 +6302,104 @@ def test_base_factors_ending_on_the_spec_date_are_unchanged() -> None:
     spec = _base_spec(factors)
     policy = spec["factor_source"]["interval_policy"]  # type: ignore[index]
     policy["available_through_anchor"] = "2026-09-17"
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    assert projected == factors
+    assert derived == spec
+
+
+def _factor_spec_namespace(date_column: str, as_of: str) -> Any:
+    """The four attributes the real ``_read_factors`` reads from a specification."""
+
+    return SimpleNamespace(
+        factor_date_column=date_column,
+        risk_free_column="RF",
+        factors=[SimpleNamespace(column="SPY_XS", factor_id="spy")],
+        as_of_date=date.fromisoformat(as_of),
+    )
+
+
+# One factor file in each shape a provider can publish a date: bare, quoted cell, every
+# cell quoted, CRLF records and a byte-order mark.  The closed factor contract puts
+# the date first.
+_FACTOR_SHAPES = {
+    "unquoted": (b"", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\n"),
+    "quoted_date": (b"", b"date,RF,SPY_XS", b'"{0}",0.0001,0.01', b"\n"),
+    "all_quoted": (
+        b"",
+        b'"date","RF","SPY_XS"',
+        b'"{0}","0.0001","0.01"',
+        b"\n",
+    ),
+    "crlf": (b"", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\r\n"),
+    "bom": (b"\xef\xbb\xbf", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\n"),
+}
+
+
+def _shaped_factors(shape: str, days: list[str]) -> tuple[bytes, str]:
+    bom, header, row, eol = _FACTOR_SHAPES[shape]
+    body = b"".join(row.replace(b"{0}", day.encode()) + eol for day in days)
+    return bom + header + eol + body, "date"
+
+
+@pytest.mark.parametrize("shape", sorted(_FACTOR_SHAPES))
+def test_base_factor_projection_reads_the_date_the_decomposition_reads(
+    shape: str, tmp_path: Path
+) -> None:
+    """A valid date is compared as a date, however the CSV quotes it.
+
+    The decomposition producer parses the date cell and refuses an observation after
+    its ``as_of_date``.  The projection must drop exactly those rows: comparing the raw
+    first token would sort a quoted date before the cutoff (the quote character) and
+    leave the later rows for the producer to refuse.
+    """
+
+    factors, column = _shaped_factors(
+        shape, ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21"]
+    )
+    spec = _base_spec(factors)
+    namespace = _factor_spec_namespace(column, "2026-09-17")
+    original = tmp_path / "original.csv"
+    original.write_bytes(factors)
+    with pytest.raises(Exception, match="follows as_of_date"):
+        decomposition._read_factors(original, namespace)
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    kept = tmp_path / "projected.csv"
+    kept.write_bytes(projected)
+    rows, _headers = decomposition._read_factors(kept, namespace)
+    assert sorted(day.isoformat() for day in rows) == ["2026-09-16", "2026-09-17"]
+    # Whole records survive byte for byte, with their own quoting and line endings.
+    assert projected == factors[: len(projected)]
+    assert b"2026-09-18" not in projected and b"2026-09-21" not in projected
+    assert derived["factor_source"]["expected_sha256"] == (  # type: ignore[index]
+        hashlib.sha256(projected).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(_FACTOR_SHAPES))
+def test_base_factor_projection_leaves_a_file_ending_on_the_date_unchanged(
+    shape: str,
+) -> None:
+    factors, column = _shaped_factors(shape, ["2026-09-16", "2026-09-17"])
+    spec = _base_spec(factors)
+    spec["factor_source"]["interval_policy"]["available_through_anchor"] = (  # type: ignore[index]
+        "2026-09-17"
+    )
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    assert projected == factors
+    assert derived == spec
+
+
+def test_base_factor_projection_keeps_a_row_the_producer_must_refuse() -> None:
+    """A date cell that is not an ISO date is the producer's refusal, not ours."""
+
+    factors = b"date,RF,SPY_XS\n2026-09-16,0.0001,0.01\nnot-a-date,0.0001,0.02\n"
+    spec = _base_spec(factors, as_of="2026-09-17")
 
     derived, projected = builder._project_base_factors(spec, factors)
 
