@@ -5822,3 +5822,68 @@ def test_c2_c4_descriptive_historical_role_does_not_exempt_current_lens(tmp_path
     ]
     assert dated
     assert all(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+_LEDGER_IDENTITY = {
+    "as_of_date": CUTOFF,
+    "catalog_sha256": "a" * 64,
+    "catalog_size_bytes": 100,
+    "generation_id": "b" * 64,
+    "manifest_sha256": "c" * 64,
+    "manifest_size_bytes": 200,
+}
+
+
+def _schema_four_freshness(*extra: Mutator) -> list[Mutator]:
+    return [
+        _set(("assessment_schema_version",), 4),
+        _set(("evaluated_on",), "2026-09-23"),
+        _set(("provider_ledger",), dict(_LEDGER_IDENTITY)),
+        *extra,
+    ]
+
+
+def _schema_four_findings(tmp_path: Path, mutators: list[Mutator]) -> list[Any]:
+    return [
+        finding
+        for finding in run(build(tmp_path, Spec(freshness=mutators)))
+        if finding.check_id == "dates.freshness_vs_cutoff"
+        and "schema-4" in finding.message
+    ]
+
+
+def test_a_schema_four_freshness_bundle_with_its_ledger_at_the_cutoff_passes(
+    tmp_path: Path,
+) -> None:
+    assert _schema_four_findings(tmp_path, _schema_four_freshness()) == []
+
+
+def test_a_schema_four_freshness_bundle_without_its_ledger_identity_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: every consumer of a schema-4 bundle must require the identity."""
+
+    def drop(freshness: dict[str, Any]) -> None:
+        del freshness["provider_ledger"]
+
+    findings = _schema_four_findings(tmp_path, _schema_four_freshness(drop))
+
+    assert [(f.klass, f.entity) for f in findings] == [
+        (checks.BLOCKER_AUTHORITY, "freshness-health")
+    ]
+    assert "no provider ledger identity" in findings[0].message
+
+
+def test_a_schema_four_freshness_bundle_not_dated_at_the_cutoff_is_refused(
+    tmp_path: Path,
+) -> None:
+    findings = _schema_four_findings(
+        tmp_path,
+        _schema_four_freshness(
+            _set(("as_of_date",), "2026-09-23"),
+            _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+        ),
+    )
+
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+    assert "not dated at the data cutoff" in findings[0].message

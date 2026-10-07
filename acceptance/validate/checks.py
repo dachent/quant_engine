@@ -5373,6 +5373,26 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
         )
         return
 
+    if node(ctx.gen.freshness, "assessment_schema_version") == 4:
+        # Schema 4 is dated at the data cutoff and bound to the ledger it was judged
+        # against; the formal schema and the pipeline gate require both.
+        if "provider_ledger" not in cast(Mapping[str, Any], ctx.gen.freshness):
+            yield authority(
+                "freshness-health",
+                None,
+                "the provider ledger identity the bundle was judged against",
+                "$.provider_ledger",
+                "a schema-4 freshness bundle carries no provider ledger identity",
+            )
+        if evaluated != cutoff:
+            yield authority(
+                "freshness-health",
+                evaluated.isoformat(),
+                cutoff.isoformat(),
+                "$.as_of_date",
+                "a schema-4 freshness bundle is not dated at the data cutoff",
+            )
+
     panel_meta = node(ctx.panel, "meta")
     if isinstance(panel_meta, Mapping) and "freshness_evaluated_on" in panel_meta:
         panel_clock_raw = panel_meta.get("freshness_evaluated_on")
