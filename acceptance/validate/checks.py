@@ -7065,7 +7065,7 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
             and value == metadata.get("as_of_date")
             and isinstance(metadata.get("schema_version"), int)
             and not isinstance(metadata.get("schema_version"), bool)
-            and metadata.get("schema_version") == 1
+            and metadata.get("schema_version") in (1, 2)
             and isinstance(metadata.get(identity), str)
             and bool(metadata[identity].strip())
             and isinstance(metadata.get("sha256"), str)
@@ -10187,6 +10187,196 @@ def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
         )
 
 
+_STALE_IMPLEMENTATION_STATUS = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+_STALE_IMPLEMENTATION_KEYS = frozenset(
+    {
+        "status",
+        "strategy_id",
+        "contract_kind",
+        "contract_id",
+        "contract_sha256",
+        "contract_as_of_date",
+        "window_start",
+        "window_end",
+        "governed_account_return",
+        "governed_account_basis",
+        "governed_observations",
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+        "superseded_contract_account_return",
+        "superseded_contract_account_basis",
+        "reason",
+        "repair_ref",
+    }
+)
+_IMPLEMENTATION_ACCOUNT_LEG_CHECK = "returns.implementation_account_legs"
+
+
+def _implementation_published_account(
+    key: str, row: Mapping[str, Any]
+) -> tuple[Any, Any, Any]:
+    """The account figure and window an accepted implementation row publishes."""
+
+    if key == "implementation_return_attribution":
+        bridge = row.get("bridge")
+        figure = bridge.get("account_return") if isinstance(bridge, Mapping) else None
+        return figure, row.get("observed_start"), row.get("observed_end")
+    metrics = row.get("return_reconciliation")
+    if isinstance(metrics, Mapping) and (
+        metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    ):
+        actual = row.get("account_live_return_summary")
+        actual = actual if isinstance(actual, Mapping) else {}
+        return (
+            actual.get("cumulative_return"),
+            actual.get("observed_start"),
+            actual.get("observed_end"),
+        )
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return (
+        metrics.get("account_cumulative_return"),
+        metrics.get("observed_start"),
+        metrics.get("observed_end"),
+    )
+
+
+def check_implementation_account_legs(ctx: Context) -> Iterator[Finding]:
+    """N66/N66-R: one account return per quantity and window in the implementation layer.
+
+    Every published implementation row's account figure is recomputed from the
+    report's own ``strategy_returns`` over the window the row declares; a figure
+    that differs is a second account return (``BLOCKER_INVARIANT``).  A stale row
+    (its contract pins another provider ledger) is a closed NOT_READY object: it is
+    one ``NOT_READY`` finding, never a blocker, provided its governed figure is the
+    recompute and it names two different ledgers.
+    """
+
+    for position, strategy in enumerate(rows(ctx.report, "strategy_summary")):
+        strategy_id = str(strategy.get("strategy_id"))
+        for key in (
+            "implementation_reconciliation",
+            "implementation_return_attribution",
+        ):
+            row = strategy.get(key)
+            if not isinstance(row, Mapping):
+                continue
+            pointer = f"$.strategy_summary[{position}].{key}"
+            if row.get("status") == _STALE_IMPLEMENTATION_STATUS:
+                yield from _stale_implementation_findings(
+                    ctx, strategy_id, row, pointer
+                )
+                continue
+            figure, start_text, end_text = _implementation_published_account(key, row)
+            shown = to_decimal(figure)
+            start, end = to_date(start_text), to_date(end_text)
+            computed, count = (
+                compound_window(ctx, strategy_id, start, end)
+                if start is not None and end is not None
+                else (None, 0)
+            )
+            if shown is None or computed is None or count == 0:
+                yield _finding(
+                    _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+                    BLOCKER_INVARIANT,
+                    strategy_id,
+                    {"account_figure": figure, "window": [start_text, end_text]},
+                    "an account figure with governed account-live dates in its window",
+                    REPORT,
+                    pointer,
+                    ("N66",),
+                    "published implementation account return cannot be recomputed "
+                    "from the governed account-live series",
+                )
+            elif abs(shown - computed) > RETURN_TOLERANCE:
+                yield _finding(
+                    _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+                    BLOCKER_INVARIANT,
+                    strategy_id,
+                    shown,
+                    {
+                        "compound_live_series": computed,
+                        "live_series_rows_in_window": count,
+                        "window": [start, end],
+                    },
+                    REPORT,
+                    pointer,
+                    ("N66",),
+                    "published implementation account return differs from the "
+                    f"governed account-live series by {shown - computed}",
+                )
+
+
+def _stale_implementation_findings(
+    ctx: Context, strategy_id: str, row: Mapping[str, Any], pointer: str
+) -> Iterator[Finding]:
+    start, end = to_date(row.get("window_start")), to_date(row.get("window_end"))
+    computed, count = (
+        compound_window(ctx, strategy_id, start, end)
+        if start is not None and end is not None
+        else (None, 0)
+    )
+    shown = to_decimal(row.get("governed_account_return"))
+    contract_ledger = row.get("contract_provider_ledger_sha256")
+    problems: list[str] = []
+    if set(row) != _STALE_IMPLEMENTATION_KEYS:
+        problems.append("the stale object's key set differs from the closed shape")
+    if row.get("strategy_id") != strategy_id:
+        problems.append("the stale object names another strategy")
+    if (
+        computed is None
+        or shown is None
+        or abs(shown - computed) > RETURN_TOLERANCE
+        or row.get("governed_observations") != count
+    ):
+        problems.append(
+            "the governed account return is not the recompute from the report's "
+            "own account-live series"
+        )
+    if row.get("governed_account_basis") != "BASELINE_ACCOUNT_LIVE" or row.get(
+        "superseded_contract_account_basis"
+    ) != ("SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"):
+        problems.append("a basis label differs from the closed shape")
+    if (
+        not isinstance(contract_ledger, str)
+        or not contract_ledger
+        or contract_ledger == row.get("governed_provider_ledger_sha256")
+    ):
+        problems.append("the contract does not pin a different provider ledger")
+    if problems:
+        yield _finding(
+            _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+            BLOCKER_INVARIANT,
+            strategy_id,
+            {key: row.get(key) for key in sorted(row) if key != "reason"},
+            {
+                "compound_live_series": computed,
+                "live_series_rows_in_window": count,
+                "window": [start, end],
+            },
+            REPORT,
+            pointer,
+            ("N66",),
+            "; ".join(problems),
+        )
+        return
+    yield _finding(
+        _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+        NOT_READY,
+        strategy_id,
+        {
+            "status": row.get("status"),
+            "contract_kind": row.get("contract_kind"),
+            "governed_account_return": shown,
+            "window": [start, end],
+        },
+        "an implementation contract built from the governed provider ledger",
+        REPORT,
+        pointer,
+        ("N66-R",),
+        str(row.get("reason")),
+    )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -10218,6 +10408,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("returns.strategy_return_views_agree", check_strategy_return_views),
     ("returns.epoch_hpr_receipts_verified", check_epoch_hpr_receipts),
     ("returns.benchmark_account_return", check_benchmark_account_return),
+    (_IMPLEMENTATION_ACCOUNT_LEG_CHECK, check_implementation_account_legs),
     ("returns.flow_lists_agree", check_flow_lists),
     ("returns.mwr_opening_matches_first_flow", check_mwr_opening),
     ("returns.implied_unrecorded_flows", check_implied_flows),
