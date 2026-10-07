@@ -1718,7 +1718,7 @@ def test_n56_native_custody_baseline_is_schema_two_with_proven_through_cash(
         assert line["as_of_date"] >= line["last_event_date"]
 
 
-def test_n56_report_with_custody_cash_is_version_three_and_schema_valid(
+def test_n56_report_with_custody_cash_is_version_four_and_schema_valid(
     cr2_custody_structural_complete_world,
 ):
     from jsonschema import Draft202012Validator, FormatChecker, ValidationError
@@ -1735,7 +1735,7 @@ def test_n56_report_with_custody_cash_is_version_three_and_schema_valid(
         **epoch,
     )
 
-    assert report["report_schema_version"] == 3
+    assert report["report_schema_version"] == 4
     schema = json.loads(
         (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
             encoding="utf-8"

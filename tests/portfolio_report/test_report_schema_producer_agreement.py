@@ -168,14 +168,53 @@ def _versioned_errors(version: int, **sections: Any) -> list[str]:
     return [error.message[:120] for error in validator.iter_errors(document)]
 
 
-def test_capital_coverage_bounds_exists_only_at_report_schema_version_3() -> None:
+def test_capital_coverage_bounds_exists_only_from_report_schema_version_3() -> None:
     """N56: the block is a version-3 addition like the other N56 report fields; a
     version-1 or version-2 report that carries it is not a valid report."""
 
     block = _coverage_block()
 
     assert _versioned_errors(3, capital_coverage_bounds=block) == []
+    assert _versioned_errors(4, capital_coverage_bounds=block) == []
     assert _versioned_errors(3) == []
     for version in (1, 2):
         assert _versioned_errors(version) == []
         assert _versioned_errors(version, capital_coverage_bounds=block), version
+
+
+def test_report_schema_enumerates_version_four_and_no_other() -> None:
+    """QC-1: version 4 is declared, version 5 is not, and the older versions stay."""
+
+    versions = SCHEMA["properties"]["report_schema_version"]["enum"]
+    assert versions == [1, 2, 3, 4]
+    assert reporter.CUTOFF_BASIS_REPORT_SCHEMA_VERSION == 4
+    assert reporter.CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION == 3
+    assert _versioned_errors(4) == []
+    assert _versioned_errors(5)
+
+
+def test_version_two_weight_label_rules_cover_version_four() -> None:
+    """The Correlation-one stress label rule applies to every version from 2."""
+
+    unlabeled = [{"metric": "Correlation-one stress", "value": "0.37"}]
+
+    def label_errors(version: int) -> list[str]:
+        return [
+            message
+            for message in _versioned_errors(version, portfolio_summary=unlabeled)
+            if "weight_basis" in message
+        ]
+
+    for version in (2, 3, 4):
+        assert label_errors(version), version
+    assert label_errors(1) == []
+
+
+def test_the_custody_cash_shape_of_version_three_is_required_at_version_four() -> None:
+    """A version-4 report keeps the version-3 custody cash fields mandatory."""
+
+    shape = SCHEMA["allOf"][-2]
+    assert shape["if"]["properties"]["report_schema_version"]["enum"] == [3, 4]
+    assert shape["then"]["properties"]["custody_current_capital"]["$ref"] == (
+        "#/$defs/custody_handoff_current_capital_v3"
+    )

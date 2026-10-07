@@ -51,6 +51,19 @@ The workbook is read-only and advisory. It contains no provider connection,
 external link, macro, order-submission path, candidate refresh, optimization,
 or broker credential.
 
+## Report schema versions
+
+`report_schema_version` says which rules built the report, and a reader accepts the
+versions it can read: 1 and 2 (baseline schema 1), 3 and 4 (baseline schema 2 with a
+custody handoff). A new field exists only from the version that introduces it, so a
+retained report of an older version still validates and no sealed generation is re-pinned.
+
+- 3: each custody cash line names its `last_event_date` and `coverage_end`, and the report
+  may carry `capital_coverage_bounds`.
+- 4 (QC-1, N64 and N65): the strategy cost rate divides by the sleeve value at the
+  calculation cutoff, and the dated allocation snapshot publishes self-consistent weights.
+  Everything in version 3 is unchanged. Version 4 is emitted wherever version 3 was.
+
 ## Build and verify
 
 From the repository root, with the private roots supplied explicitly:

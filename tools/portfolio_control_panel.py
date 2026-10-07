@@ -1073,7 +1073,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3}:
+    ) not in {1, 2, 3, 4}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1155,7 +1155,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3}:
+    ) not in {1, 2, 3, 4}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -9664,7 +9664,7 @@ def _panel_data(
         },
         "panel_schema_version": (
             CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
-            if report.get("report_schema_version") == 3
+            if report.get("report_schema_version") in {3, 4}
             else PANEL_SCHEMA_VERSION
         ),
         "performance": normalized_performance,
@@ -13114,7 +13114,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2, 3}:
+    ) or retained_report_schema_version not in {1, 2, 3, 4}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )

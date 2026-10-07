@@ -94,6 +94,9 @@ REPORT_SCHEMA_VERSION: Final = 2
 # A report that carries custody cash dated by its admission coverage (baseline
 # schema 2) is version 3: each cash line names its last event and coverage end.
 CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION: Final = 3
+# Version 4 adds the cutoff-denominated cost rate and the self-consistent allocation
+# snapshot weights (QC-1 N64, N65); it is emitted wherever version 3 was.
+CUTOFF_BASIS_REPORT_SCHEMA_VERSION: Final = 4
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
@@ -8150,7 +8153,7 @@ def build_report_data(
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
-            report["report_schema_version"] = CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION
+            report["report_schema_version"] = CUTOFF_BASIS_REPORT_SCHEMA_VERSION
             if calculation_cutoff_date is not None:
                 coverage_bounds = _capital_coverage_bounds(
                     verified_capital, calculation_cutoff_date
@@ -9377,7 +9380,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2, 3}
+        or report.get("report_schema_version") not in {1, 2, 3, 4}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
