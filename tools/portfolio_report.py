@@ -1716,7 +1716,11 @@ def _member_own_trace_path(
     daily: list[tuple[date, Decimal]] = []
     for link in trace_links:
         end_day = _date(link.get("end_date"), "trace link.end_date")
-        period_return = _decimal(link.get("factor"), "trace link.factor") - Decimal(1)
+        # The factor carries up to 34 digits; the subtraction is exact, not rounded to
+        # the ambient 28, because the series text and its hash bind this value.
+        with localcontext() as exact:
+            exact.prec = _EXACT_PRECISION
+            period_return = _decimal(link.get("factor"), "trace link.factor") - 1
         series.append(
             {"date": end_day.isoformat(), "return": decimal_text(period_return)}
         )
@@ -3594,12 +3598,12 @@ def _account_live_return_series(
                 else "DAILY_GEOMETRIC_TWR"
             ),
             "current_drawdown": (
-                decimal_text(-current_drawdown)
+                decimal_text(current_drawdown.copy_negate())
                 if current_drawdown is not None
                 else None
             ),
             "maximum_drawdown": (
-                decimal_text(-maximum_drawdown)
+                decimal_text(maximum_drawdown.copy_negate())
                 if maximum_drawdown is not None
                 else None
             ),
