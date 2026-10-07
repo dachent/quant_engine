@@ -959,6 +959,78 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
     ]
 
 
+# The Schwab generation retained in the real run states, unscoped, that "current account
+# balances remain unavailable"; the baseline copies a provider's known gaps into the
+# positions fact, so the positions gate note repeated it as a portfolio-wide claim while
+# the report showed cutoff balances from accepted NAV (E9).
+LEGACY_SCHWAB_BALANCE_GAP = "current account balances remain unavailable"
+
+
+def _fact_and_provider_coverage(gaps: list[str]) -> dict[str, Any]:
+    import portfolio_baseline as baseline_tool
+
+    claims, _exceptions = baseline_tool._fact_coverage(
+        [], [], [], [], [{"position_id": "p"}], gaps, 0, date(2026, 9, 17)
+    )
+    return {
+        "calendar_coverage": [],
+        "fact_coverage": claims,
+        "provider_coverage": [
+            {
+                "coverage": {
+                    "known_gaps": [
+                        "Investor Checking is outside the accepted brokerage boundary",
+                        LEGACY_SCHWAB_BALANCE_GAP,
+                    ],
+                    "out_of_boundary": [],
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+                "generation_as_of_date": "2026-09-18",
+                "provider_id": "schwab",
+                "qualification": "STAGED_COMPLETE",
+            }
+        ],
+        "reconciliation_exceptions": [],
+    }
+
+
+def _positions_gap(rows: list[dict[str, Any]]) -> str:
+    row = next(
+        item
+        for item in rows
+        if item["category"] == "FACT_COVERAGE" and item["item"] == "positions"
+    )
+    return str(row["known_gap"])
+
+
+def test_provider_known_gaps_in_the_positions_fact_name_their_provider_and_date() -> (
+    None
+):
+    """E9: a clause that only a provider declared keeps that provider and the date of
+    its generation, so a snapshot limitation cannot read as a portfolio-wide claim."""
+
+    catalog = _fact_and_provider_coverage(
+        [
+            "Investor Checking is outside the accepted brokerage boundary",
+            LEGACY_SCHWAB_BALANCE_GAP,
+        ]
+    )
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        "schwab (as of 2026-09-18): Investor Checking is outside the accepted "
+        "brokerage boundary; "
+        f"schwab (as of 2026-09-18): {LEGACY_SCHWAB_BALANCE_GAP}"
+    )
+
+
+def test_a_gap_no_provider_declared_stays_unscoped() -> None:
+    catalog = _fact_and_provider_coverage(["a gap the baseline itself states"])
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        "a gap the baseline itself states"
+    )
+
+
 def test_positions_preserve_history_and_mark_latest_snapshot_per_account() -> None:
     catalog = {
         "positions": [

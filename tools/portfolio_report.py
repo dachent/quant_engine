@@ -5909,15 +5909,50 @@ def _allocations(
     return rows
 
 
+def _scoped_known_gap(
+    gap: object, provider_coverage: Sequence[Mapping[str, Any]]
+) -> str:
+    """A known gap that only providers declared, scoped to them and their generation.
+
+    The baseline pools every provider's declared gaps into one sorted list, so a clause
+    such as a snapshot's "current account balances remain unavailable" loses the provider
+    it describes and reads as a portfolio-wide claim in the gate note (E9).  A clause that
+    appears in the declared gaps of one or more providers is published as
+    ``<providers> (as of <latest generation date>): <clause>``; a clause no provider
+    declared is the baseline's own statement and stays as it is.
+    """
+
+    text = str(gap)
+    owners: dict[str, str] = {}
+    for item in provider_coverage:
+        coverage = item.get("coverage")
+        provider_id = item.get("provider_id")
+        day = item.get("generation_as_of_date")
+        if (
+            isinstance(coverage, Mapping)
+            and isinstance(provider_id, str)
+            and isinstance(day, str)
+            and text in coverage.get("known_gaps", [])
+        ):
+            owners[provider_id] = day
+    if not owners:
+        return text
+    return f"{'/'.join(sorted(owners))} (as of {max(owners.values())}): {text}"
+
+
 def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    provider_coverage = _objects(
+        catalog.get("provider_coverage", []), "provider_coverage"
+    )
     for claim in _objects(catalog.get("fact_coverage"), "fact_coverage"):
         rows.append(
             {
                 "category": "FACT_COVERAGE",
                 "item": claim.get("fact_type"),
                 "known_gap": "; ".join(
-                    str(item) for item in claim.get("known_gaps", [])
+                    _scoped_known_gap(item, provider_coverage)
+                    for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
