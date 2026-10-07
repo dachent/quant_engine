@@ -79,8 +79,15 @@ def _publish(root: Path, filename: str, payload: dict[str, object], name: str) -
     return manifest.generation_id
 
 
-def _ledger(root: Path, marker: str) -> tuple[str, dict[str, object]]:
-    source = canonical_json_bytes({"catalog": marker})
+def _ledger(
+    root: Path, marker: str, catalog_as_of: date | None = None
+) -> tuple[str, dict[str, object]]:
+    """A ledger whose catalog states ``catalog_as_of`` as its financial cutoff."""
+
+    catalog: dict[str, object] = {"catalog": marker}
+    if catalog_as_of is not None:
+        catalog["as_of_date"] = catalog_as_of.isoformat()
+    source = canonical_json_bytes(catalog)
     manifest = GenerationManifest.build(
         as_of_date=PREVIOUS,
         adapter=AdapterIdentity(f"synthetic-ledger-{marker}", "1.0.0"),
@@ -225,6 +232,9 @@ def _cycle_inputs(
     marker: str = "one",
     stale: bool = False,
     schema_four: bool = False,
+    undated_catalog: bool = False,
+    mutate: object = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> tuple[Path, str, Path, dict[str, object]]:
     correlation_root = tmp_path / f"correlation-{marker}"
     correlation_generation = _publish(
@@ -259,24 +269,40 @@ def _cycle_inputs(
         f"report-{marker}",
     )
     ledger_root = tmp_path / f"ledger-{marker}"
-    ledger_generation, ledger_identity = _ledger(ledger_root, marker)
+    ledger_generation, ledger_identity = _ledger(
+        ledger_root, marker, PREVIOUS if schema_four and not undated_catalog else None
+    )
     health = _freshness(ledger_identity, stale=stale)
+    payload = _schema_four(health) if schema_four else health
+    if callable(mutate):
+        mutate(payload)
     candidate, freshness = _candidate(
         tmp_path / f"panel-{marker}",
         correlation_generation,
         report_generation,
-        _schema_four(health) if schema_four else health,
-        freshness_evaluated_on=PREVIOUS if schema_four else CURRENT,
+        payload,
+        freshness_evaluated_on=date.fromisoformat(str(payload["as_of_date"])),
     )
-    recomputation = recompute.build_receipt(
-        correlation_root,
-        report_root,
-        candidate,
-        freshness,
-        ledger_root,
-        ledger_generation,
-        CURRENT,
-    )
+    with pytest.MonkeyPatch.context() as bypass:
+        if monkeypatch is not None:
+            # The standalone recomputation shares the date binding, so a receipt over
+            # an artifact the release disowns can only be minted with it switched off;
+            # the cycle must then refuse on its own account.
+            bypass.setattr(
+                recompute,
+                "_bind_freshness_cutoff",
+                lambda *_a, **_k: None,
+                raising=False,
+            )
+        recomputation = recompute.build_receipt(
+            correlation_root,
+            report_root,
+            candidate,
+            freshness,
+            ledger_root,
+            ledger_generation,
+            CURRENT,
+        )
     return ledger_root, ledger_generation, freshness, recomputation
 
 
@@ -363,6 +389,66 @@ def test_cycle_accepts_schema_four_freshness_dated_at_the_cutoff(
 
     assert receipt["evaluation_date"] == CURRENT.isoformat()
     assert receipt["pointer_effects"]["advanced"] is False
+
+
+def _backdate(payload: dict[str, object]) -> None:
+    """Re-date the payload and its rows so they agree with each other, not the release."""
+
+    earlier = date(2026, 8, 1).isoformat()
+    payload["as_of_date"] = earlier
+    for row in payload["assessments"]:  # type: ignore[attr-defined]
+        row["evaluated_on"] = earlier
+
+
+def test_cycle_refuses_schema_four_freshness_dated_before_the_ledger_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rulings round 1, item 3: a backdated payload cannot retire an escalation.
+
+    The receipt is minted over the backdated artifact with the recomputation's own
+    date binding switched off, so only the cycle's binding stands between the
+    artifact and a PASS.
+    """
+
+    ledger_root, generation_id, backdated, recomputation = _cycle_inputs(
+        tmp_path,
+        schema_four=True,
+        stale=True,
+        mutate=_backdate,
+        monkeypatch=monkeypatch,
+    )
+    recomputation_path = tmp_path / "backdated-recomputation.json"
+    _write(recomputation_path, recomputation)
+
+    with pytest.raises(cycle.RollforwardCycleError, match="provider-ledger cutoff"):
+        cycle.build_receipt(
+            ledger_root,
+            generation_id,
+            backdated,
+            recomputation_path,
+            CURRENT,
+            PREVIOUS,
+        )
+
+
+def test_cycle_refuses_schema_four_freshness_over_a_catalog_without_a_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger_root, generation_id, freshness, recomputation = _cycle_inputs(
+        tmp_path, schema_four=True, undated_catalog=True, monkeypatch=monkeypatch
+    )
+    recomputation_path = tmp_path / "undated-recomputation.json"
+    _write(recomputation_path, recomputation)
+
+    with pytest.raises(cycle.RollforwardCycleError, match="provider-ledger cutoff"):
+        cycle.build_receipt(
+            ledger_root,
+            generation_id,
+            freshness,
+            recomputation_path,
+            CURRENT,
+            PREVIOUS,
+        )
 
 
 def test_cycle_rejects_schema_four_freshness_replayed_from_another_cycle(

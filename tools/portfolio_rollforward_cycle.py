@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 from quant_engine.core import hash_file, read_current, read_generation
 from quant_engine.core.authority import FreshnessPolicy, ManifestValidationError
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.pipeline import (
+    PipelineValidationError,
+    freshness_catalog_cutoff,
+    require_freshness_cutoff,
+)
 
 
 SCHEMA_VERSION = 1
@@ -340,6 +345,25 @@ def _validate_recomputation(
     _validate_generation_identity(inputs["report"], "report")
 
 
+def _bind_freshness_cutoff(catalog_path: Path, data_clock: str) -> None:
+    """Hold a schema-4 artifact to the cutoff its hash-verified ledger catalog states.
+
+    This is the pipeline gate's own rule, so a payload re-dated to agree with itself is
+    refused here as it is at the release.
+    """
+
+    try:
+        require_freshness_cutoff(
+            date.fromisoformat(data_clock), freshness_catalog_cutoff(catalog_path)
+        )
+    except PipelineValidationError as exc:
+        raise RollforwardCycleError(str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise RollforwardCycleError(
+            "freshness data date cannot be bound to the ledger"
+        ) from exc
+
+
 def _request_identity(row: Mapping[str, Any], evaluation_date: date) -> str:
     identity = {
         "evaluation_date": evaluation_date.isoformat(),
@@ -444,6 +468,8 @@ def build_receipt(
         != manifest_identity["size_bytes"]
     ):
         raise RollforwardCycleError("freshness provider ledger identity differs")
+    if schema_version == 4:
+        _bind_freshness_cutoff(catalog_path, data_clock)
     policies: dict[str, FreshnessPolicy] = {}
     for raw_policy in _objects(freshness.get("policies"), "freshness policies"):
         try:

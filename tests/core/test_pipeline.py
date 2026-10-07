@@ -239,13 +239,17 @@ def _freshness_gate_with_optional_gap(path: Path, evaluated_on: date) -> Path:
 def _provider_ledger_generation(
     tmp_path: Path,
     *,
-    catalog_as_of: date | None = None,
+    catalog_as_of: date | str | None = None,
 ) -> tuple[Path, GenerationManifest, dict[str, object]]:
     root = tmp_path / "provider-ledger"
     source = tmp_path / "provider-ledger.json"
     catalog: dict[str, object] = {"reconciliation_checks": []}
     if catalog_as_of is not None:
-        catalog["as_of_date"] = catalog_as_of.isoformat()
+        catalog["as_of_date"] = (
+            catalog_as_of
+            if isinstance(catalog_as_of, str)
+            else catalog_as_of.isoformat()
+        )
     source.write_bytes(canonical_json_bytes(catalog))
     manifest = GenerationManifest.build(
         as_of_date=AS_OF,
@@ -1266,7 +1270,7 @@ def _spec_with_freshness_gate(
     tmp_path: Path,
     gate: Path,
     *,
-    catalog_as_of: date | None = None,
+    catalog_as_of: date | str | None = None,
     catalog_dated: bool = True,
     bind_ledger: bool = True,
 ) -> tuple[dict[str, object], GenerationManifest, Path]:
@@ -1487,3 +1491,23 @@ def test_schema_four_freshness_gate_refuses_a_catalog_without_a_cutoff(
 
     with pytest.raises(PipelineValidationError, match="provider-ledger cutoff"):
         execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+
+def test_schema_four_freshness_gate_refuses_a_malformed_catalog_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A catalog whose own date is not a date is a refusal, not a bare ValueError."""
+
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", CATALOG_CUTOFF, AS_OF
+    )
+    raw, previous, target = _spec_with_freshness_gate(
+        tmp_path, gate, catalog_as_of="31 July 2026"
+    )
+
+    with pytest.raises(
+        PipelineValidationError, match="provider-ledger catalog date is not a date"
+    ) as raised:
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert type(raised.value) is PipelineValidationError
+    assert read_current(target).generation_id == previous.generation_id

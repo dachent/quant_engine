@@ -4115,9 +4115,40 @@ def _verify_freshness_provider_ledger(
         raise PipelineValidationError(
             "freshness provider ledger identity differs from the release"
         )
-    catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    return freshness_catalog_cutoff(generation / "provider-ledger.json")
+
+
+def freshness_catalog_cutoff(catalog_path: Path) -> date | None:
+    """Return the financial cutoff a hash-verified provider-ledger catalog states.
+
+    ``None`` when the catalog states none.  The caller has already tied the bytes to
+    their manifest; this only reads the date they carry.
+    """
+
+    catalog = json.loads(catalog_path.read_bytes())
     cutoff = catalog.get("as_of_date") if isinstance(catalog, dict) else None
-    return date.fromisoformat(cutoff) if isinstance(cutoff, str) else None
+    if not isinstance(cutoff, str):
+        return None
+    try:
+        return date.fromisoformat(cutoff)
+    except ValueError as exc:
+        raise PipelineValidationError(
+            "freshness provider-ledger catalog date is not a date"
+        ) from exc
+
+
+def require_freshness_cutoff(assessed_on: date, catalog_cutoff: date | None) -> None:
+    """Refuse a schema-4 freshness artifact not dated at its ledger's cutoff.
+
+    Schema 4 re-assesses every row at its own date, so that date must be the release's
+    financial cutoff or a back-dated payload is merely self-consistent.  Every
+    consumer of a schema-4 artifact applies this one rule.
+    """
+
+    if assessed_on != catalog_cutoff:
+        raise PipelineValidationError(
+            "freshness gate data date differs from the bound provider-ledger cutoff"
+        )
 
 
 def _verify_freshness_gate(
@@ -4174,13 +4205,8 @@ def _verify_freshness_gate(
             catalog_cutoff = _verify_freshness_provider_ledger(
                 spec, payload.get("provider_ledger"), executed_on
             )
-            # Version 4 re-assesses at its own date, so that date must be the release's
-            # financial cutoff or a back-dated payload is merely self-consistent.
-            if schema_version == 4 and assessed_on != catalog_cutoff:
-                raise PipelineValidationError(
-                    "freshness gate data date differs from the bound "
-                    "provider-ledger cutoff"
-                )
+            if schema_version == 4:
+                require_freshness_cutoff(assessed_on, catalog_cutoff)
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
             policies = {parsed.policy_id: parsed}
