@@ -5994,10 +5994,85 @@ def _flow_reconciliation(
     return rows
 
 
+SNAPSHOT_WEIGHT_PERIMETER: Final = "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"
+SNAPSHOT_WEIGHT_TOLERANCE: Final = Decimal("1e-12")
+# The dated snapshot is sealed: its systematic total is the baseline's sequential
+# 28-digit half-even sum (``portfolio_baseline._snapshot_sum``), and the denominator
+# here must be that very figure, not an exact variant of it.
+_SNAPSHOT_SUM_PRECISION: Final = 28
+
+
+def _verify_snapshot_weight_sum(
+    weights: Sequence[Decimal], *, tolerance: Decimal = SNAPSHOT_WEIGHT_TOLERANCE
+) -> None:
+    with localcontext() as context:
+        context.prec = _EXACT_PRECISION
+        total = sum(weights, Decimal(0))
+    if abs(total - 1) > tolerance:
+        raise ReportValidationError("snapshot weights do not sum to one")
+
+
+def _snapshot_weights(
+    catalog: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[str, int, Decimal]]:
+    """Each systematic snapshot row's share of its own recorded perimeter.
+
+    The recorded ``systematic_weight`` column of the component decision table does
+    not reconcile with the recorded values over any denominator (the value-implied
+    totals differ row by row), so it is source residue that stays in the baseline.
+    The published weight is the row's value over the sum of every systematic
+    component the snapshot records, the excluded ones included: that is the
+    snapshot's own perimeter, not a renormalisation to the current required set.
+    Returns ``(as_of_date, allocation_id)`` to ``(denominator, count, weight)``.
+    """
+
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for member in _objects(catalog.get("allocations"), "allocations"):
+        if member.get("scope") == "SYSTEMATIC":
+            by_date[_text(member.get("as_of_date"), "allocation.as_of_date")].append(
+                member
+            )
+    replay = catalog.get("replay")
+    recorded_total = (
+        replay.get("systematic_total_usd") if isinstance(replay, Mapping) else None
+    )
+    result: dict[tuple[str, str], tuple[str, int, Decimal]] = {}
+    for day, day_members in by_date.items():
+        values = [_amount(member, "current_value") for member in day_members]
+        with localcontext() as context:
+            context.prec = _SNAPSHOT_SUM_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            denominator = sum(values, Decimal(0))
+        if (
+            len(by_date) == 1
+            and recorded_total is not None
+            and _decimal(recorded_total, "replay systematic total") != denominator
+        ):
+            raise ReportValidationError(
+                "allocation snapshot perimeter differs from its recorded systematic total"
+            )
+        if denominator <= 0:
+            raise ReportValidationError("allocation snapshot perimeter is not positive")
+        weights: list[Decimal] = []
+        with localcontext() as context:
+            context.prec = 34
+            for member, value in zip(day_members, values):
+                weight = value / denominator
+                weights.append(weight)
+                result[(day, _text(member.get("allocation_id"), "allocation_id"))] = (
+                    decimal_text(denominator),
+                    len(day_members),
+                    weight,
+                )
+        _verify_snapshot_weight_sum(weights)
+    return result
+
+
 def _allocations(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
+    snapshot_weights = _snapshot_weights(catalog) if _uses_cutoff_basis(catalog) else {}
     rows = []
     for item in _objects(catalog.get("allocations"), "allocations"):
         strategy_id = item.get("strategy_id")
@@ -6028,6 +6103,17 @@ def _allocations(
                 ),
             }
         )
+        key = (str(item.get("as_of_date")), str(item.get("allocation_id")))
+        if key in snapshot_weights:
+            denominator, count, weight = snapshot_weights[key]
+            rows[-1].update(
+                {
+                    "systematic_weight": decimal_text(weight),
+                    "weight_denominator_usd": denominator,
+                    "weight_perimeter": SNAPSHOT_WEIGHT_PERIMETER,
+                    "weight_perimeter_component_count": count,
+                }
+            )
     rows = sorted(
         rows,
         key=lambda item: (

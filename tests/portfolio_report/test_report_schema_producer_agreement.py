@@ -213,7 +213,11 @@ def test_version_two_weight_label_rules_cover_version_four() -> None:
 def test_the_custody_cash_shape_of_version_three_is_required_at_version_four() -> None:
     """A version-4 report keeps the version-3 custody cash fields mandatory."""
 
-    shape = SCHEMA["allOf"][-2]
+    shape = next(
+        item
+        for item in SCHEMA["allOf"]
+        if "custody_current_capital" in item["then"].get("properties", {})
+    )
     assert shape["if"]["properties"]["report_schema_version"]["enum"] == [3, 4]
     assert shape["then"]["properties"]["custody_current_capital"]["$ref"] == (
         "#/$defs/custody_handoff_current_capital_v3"

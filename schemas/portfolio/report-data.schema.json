@@ -1849,6 +1849,20 @@
       "if": {"properties": {"report_schema_version": {"const": 4}}, "required": ["report_schema_version"]},
       "then": {
         "properties": {
+          "allocation_history": {
+            "items": {
+              "if": {"properties": {"scope": {"const": "SYSTEMATIC"}}, "required": ["scope"]},
+              "then": {
+                "required": ["systematic_weight", "weight_denominator_usd", "weight_perimeter", "weight_perimeter_component_count"],
+                "properties": {
+                  "systematic_weight": {"$ref": "#/$defs/decimal"},
+                  "weight_denominator_usd": {"$ref": "#/$defs/decimal"},
+                  "weight_perimeter": {"const": "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"},
+                  "weight_perimeter_component_count": {"type": "integer", "minimum": 1}
+                }
+              }
+            }
+          },
           "strategy_summary": {
             "items": {
               "properties": {
@@ -1879,6 +1893,11 @@
       "if": {"properties": {"report_schema_version": {"enum": [1, 2, 3]}}, "required": ["report_schema_version"]},
       "then": {
         "properties": {
+          "allocation_history": {
+            "items": {
+              "not": {"anyOf": [{"required": ["weight_denominator_usd"]}, {"required": ["weight_perimeter"]}, {"required": ["weight_perimeter_component_count"]}]}
+            }
+          },
           "strategy_summary": {
             "items": {
               "not": {"anyOf": [{"required": ["cost_rate_status"]}, {"required": ["cost_rate_denominator_usd"]}, {"required": ["cost_schedule_as_of_date"]}]}

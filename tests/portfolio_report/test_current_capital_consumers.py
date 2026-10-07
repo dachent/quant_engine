@@ -18,7 +18,7 @@ visible, and they pin the three labeled weight sets:
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import importlib.util
 import json
 from pathlib import Path
@@ -2238,3 +2238,146 @@ def test_the_cost_schedule_date_is_the_cost_economics_artifact_date() -> None:
 
     assert reporter._cost_schedule_as_of_date(catalog) == "2026-07-25"
     assert reporter._cost_schedule_as_of_date({"source_artifacts": []}) is None
+
+
+# ---- QC1-R N65: a dated snapshot publishes weights its own values give ----------
+
+
+def _custody_world() -> dict[str, Any]:
+    """The dated-snapshot world as a schema-2 custody baseline carries it."""
+
+    catalog = _world()
+    catalog["baseline_schema_version"] = 2
+    catalog["current_capital"]["custody_authority"] = {"ledger_generation_id": "a" * 64}
+    return catalog
+
+
+def _snapshot_rows(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = reporter._allocations(catalog, _controls())
+    return {
+        str(row["strategy_id"]): row for row in rows if row["scope"] == "SYSTEMATIC"
+    }
+
+
+def test_snapshot_weights_are_value_over_the_whole_recorded_perimeter() -> None:
+    """90, 120, 110 and the retained 0.19 give a 320.19 perimeter, not the recorded column."""
+
+    rows = _snapshot_rows(_custody_world())
+
+    assert set(rows) == {"s-alpha", "s-beta", "s-gamma"}
+    total = Decimal("320.19")
+    for strategy_id, value in (
+        ("s-alpha", "90"),
+        ("s-beta", "120"),
+        ("s-gamma", "110"),
+    ):
+        weight = Decimal(rows[strategy_id]["systematic_weight"])
+        with localcontext() as context:
+            context.prec = 50
+            expected = Decimal(value) / total
+        assert abs(weight - expected) < Decimal("1e-30"), strategy_id
+        assert rows[strategy_id]["weight_denominator_usd"] == "320.19"
+        assert rows[strategy_id]["weight_perimeter_component_count"] == 4
+        assert rows[strategy_id]["weight_perimeter"] == (
+            "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"
+        )
+        assert rows[strategy_id]["weight_basis"] == "HISTORICAL_SNAPSHOT_2025_12_31"
+    # The recorded column (0.25, 0.35, 0.30) reconciles with no denominator and is
+    # never published; the excluded retained component keeps its share of the total.
+    assert {"0.25", "0.35", "0.30"}.isdisjoint(
+        {row["systematic_weight"] for row in rows.values()}
+    )
+    published = sum(Decimal(row["systematic_weight"]) for row in rows.values())
+    assert abs(published + Decimal("0.19") / total - 1) < Decimal("1e-12")
+    # Not renormalised to the current required three (B5).
+    assert published != 1
+
+
+def test_snapshot_weights_leave_the_reserve_row_without_a_weight() -> None:
+    reserve = next(
+        row
+        for row in reporter._allocations(_custody_world(), _controls())
+        if row["scope"] == "RESERVE"
+    )
+
+    assert reserve["systematic_weight"] is None
+    assert "weight_denominator_usd" not in reserve
+
+
+def test_a_snapshot_whose_perimeter_differs_from_its_recorded_total_is_refused() -> (
+    None
+):
+    catalog = _custody_world()
+    catalog["replay"]["systematic_total_usd"] = "320.20"
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="allocation snapshot perimeter differs from its recorded systematic total",
+    ):
+        reporter._allocations(catalog, _controls())
+
+
+def test_a_snapshot_weight_set_that_does_not_sum_to_one_is_refused() -> None:
+    with pytest.raises(
+        reporter.ReportValidationError, match="snapshot weights do not sum to one"
+    ):
+        reporter._verify_snapshot_weight_sum(
+            [Decimal("0.5"), Decimal("0.4999")], tolerance=Decimal("1e-12")
+        )
+    reporter._verify_snapshot_weight_sum(
+        [Decimal("0.5"), Decimal("0.5")], tolerance=Decimal("1e-12")
+    )
+
+
+def test_a_legacy_baseline_keeps_the_recorded_snapshot_weights() -> None:
+    """A schema-1 report is a sealed shape: its allocation column stays as recorded."""
+
+    rows = _snapshot_rows(_world())
+
+    assert {key: row["systematic_weight"] for key, row in rows.items()} == {
+        "s-alpha": "0.25",
+        "s-beta": "0.35",
+        "s-gamma": "0.30",
+    }
+    assert all("weight_denominator_usd" not in row for row in rows.values())
+
+
+def test_a_version_four_report_publishes_self_consistent_snapshot_weights(
+    cr2_custody_structural_complete_world,
+) -> None:
+    """Through the real baseline builder: value over the recorded perimeter, schema valid."""
+
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    catalog = cr2_custody_structural_complete_world[5]
+    assert report["report_schema_version"] == 4
+    recorded = [
+        Decimal(row["current_value"]["value"])
+        for row in catalog["allocations"]
+        if row["scope"] == "SYSTEMATIC"
+    ]
+    rows = [r for r in report["allocation_history"] if r["scope"] == "SYSTEMATIC"]
+    assert rows
+    denominator = Decimal(rows[0]["weight_denominator_usd"])
+    assert abs(denominator - sum(recorded, Decimal(0))) < Decimal("1e-20")
+    assert denominator == Decimal(catalog["replay"]["systematic_total_usd"])
+    for row in rows:
+        value = Decimal(row["current_value_usd"])
+        assert abs(Decimal(row["systematic_weight"]) - value / denominator) < Decimal(
+            "1e-30"
+        )
+        assert row["weight_perimeter_component_count"] == len(recorded)
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(report)
+    older = deepcopy(report)
+    older["report_schema_version"] = 3
+    assert list(validator.iter_errors(older))
+    stripped = deepcopy(report)
+    del stripped["allocation_history"][1]["weight_denominator_usd"]
+    assert list(validator.iter_errors(stripped))

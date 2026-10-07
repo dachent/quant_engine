@@ -83,6 +83,27 @@ longer has, so the report ignores that quotient and the cost mirror under
   `*_contract_cap` is `UPPER_BOUND_CONTRACT_CAP_PRE_TAX` (a ceiling the contract allows, not
   an observed cost), no amount is `UNAVAILABLE`. A rate over a cap is an upper bound too.
 
+## Allocation snapshot weights
+
+`allocation_history` is the dated allocation snapshot (2026-08-16), kept as a labelled
+historical reference (`weight_basis` `HISTORICAL_SNAPSHOT_<date>`). The snapshot's recorded
+`systematic_weight` column does not reconcile with its recorded values over any
+denominator (the value-implied totals differ row by row), so from report schema 4 the
+report does not publish it. A systematic row's `systematic_weight` is its
+`current_value_usd` over the sum of every systematic component the snapshot records (nine
+in the retained inputs, including the two retained-excluded ones), before the
+current-product filter. That is the snapshot's own perimeter; it is not a renormalisation
+to the current required strategies, so the three weight sets (current cutoff, policy,
+historical) stay distinct. Each row states `weight_denominator_usd`,
+`weight_perimeter` and `weight_perimeter_component_count`. The recorded column stays in
+the baseline catalog, which is sealed and unchanged.
+
+The denominator is the baseline's own sequential 28-digit half-even sum, equal to the
+replayed `systematic_total_usd`; the report refuses a snapshot whose perimeter total
+differs from that figure, and one whose weights over the whole perimeter do not sum to one
+within 1e-12. The acceptance validator re-derives each weight from the row's value and
+stated denominator.
+
 ## Build and verify
 
 From the repository root, with the private roots supplied explicitly:
