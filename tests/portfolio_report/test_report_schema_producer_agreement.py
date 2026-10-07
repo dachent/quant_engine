@@ -37,6 +37,11 @@ BOUNDS_FIXTURE = runpy.run_path(
 )
 
 
+BASELINE_FIXTURE = runpy.run_path(
+    str(REPOSITORY_ROOT / "tests" / "portfolio_baseline" / "test_portfolio_baseline.py")
+)
+
+
 def _errors(section: str, value: Any) -> list[str]:
     validator = Draft202012Validator(SECTION_SCHEMA, format_checker=FormatChecker())
     return [
@@ -120,3 +125,38 @@ def test_account_roles_the_report_labels_are_typed_in_the_schema() -> None:
     for row in rows:
         assert list(leverage_role.iter_errors(row["account_role"])) == []
     assert list(leverage_role.iter_errors(7))
+
+
+def _coverage_block() -> dict[str, Any]:
+    """The coverage disclosure of a custody block the real baseline producer built:
+    the sleeve-allocation admission ends the day before the cutoff."""
+
+    case = BASELINE_FIXTURE["_cr2_custody_cash_case"]()
+    BASELINE_FIXTURE["_admission_ends"](case, flows="2026-09-18", anchors="2026-09-16")
+    custody = BASELINE_FIXTURE["baseline"]._build_current_capital(**case)
+    block = reporter._capital_coverage_bounds(custody, "2026-09-17")
+    assert block is not None
+    return block
+
+
+def test_capital_coverage_bounds_is_schema_valid() -> None:
+    block = _coverage_block()
+
+    assert [row["entity"] for row in block["bounded_sections"]] == [
+        "alpha",
+        "alpha:acct-a1",
+        "systematic",
+    ]
+    assert _errors("capital_coverage_bounds", block) == []
+
+
+def test_capital_coverage_bounds_schema_is_closed() -> None:
+    block = _coverage_block()
+    forged = json.loads(json.dumps(block))
+    forged["bounded_sections"][0]["section"] = "account_summary"
+
+    assert _errors("capital_coverage_bounds", forged)
+    assert _errors("capital_coverage_bounds", {**block, "note": "x"})
+    missing = json.loads(json.dumps(block))
+    del missing["lines"][0]["coverage_end"]
+    assert _errors("capital_coverage_bounds", missing)

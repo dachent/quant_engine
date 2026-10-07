@@ -1809,3 +1809,155 @@ def test_n56_panel_schema_requires_the_cash_fields_only_from_version_23():
         "custody_handoff_custody_cash_v3",
         {**cash, "last_event_date": "2026-09-16", "coverage_end": "2026-09-18"},
     )
+
+
+ROBUXIO_CASH_ACCOUNT = "account-d2e5821e608e25f1"
+
+
+def _complete_world_report(world: Any) -> dict[str, Any]:
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = world
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    return report
+
+
+def test_n56_report_discloses_the_coverage_that_dates_a_custody_cash_line_early(
+    cr2_custody_structural_complete_world,
+):
+    """The Matrixport sleeve allocations are admitted only through the last
+    subscription, so the producer dates the robuxio cash line there, honestly, before
+    the cutoff.  That date is not an FX value-basis end, so ``value_basis_bounds``
+    never carries it (the block is absent from the real run); the report must state
+    the coverage bound itself, or the validator can only call the label a blocker.
+    """
+
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    custody = report["custody_current_capital"]
+    cutoff = report["calculation_cutoff_date"]
+    early = {
+        (row["strategy_id"], line["account_id"]): line
+        for row in custody["strategies"]
+        for line in row.get("derived_cash", [])
+        if line["as_of_date"] < cutoff
+    }
+    # The producer world: one cash line is honestly dated before the cutoff.
+    assert list(early) == [("robuxio-crypto", ROBUXIO_CASH_ACCOUNT)]
+    line = early[("robuxio-crypto", ROBUXIO_CASH_ACCOUNT)]
+    assert line["as_of_date"] == line["coverage_end"] < cutoff
+    day = line["as_of_date"]
+    assert "value_basis_bounds" not in report
+
+    assert report["capital_coverage_bounds"] == {
+        "schema_version": 1,
+        "rule": "N56-COVERAGE",
+        "calculation_cutoff_date": cutoff,
+        "lines": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "account_id": ROBUXIO_CASH_ACCOUNT,
+                "provider_id": line["provider_id"],
+                "as_of_date": day,
+                "coverage_end": day,
+                "last_event_date": line["last_event_date"],
+            }
+        ],
+        # The row and Systematic are dated by a member NAV in this world (older than
+        # the cash line), not by the cash line, so the coverage bound explains neither.
+        "bounded_sections": [
+            {
+                "section": "current_capital",
+                "entity": f"robuxio-crypto:{ROBUXIO_CASH_ACCOUNT}",
+                "field": "as_of_date",
+                "date": day,
+                "bounded_by": ["robuxio-crypto"],
+            }
+        ],
+    }
+    robuxio = next(
+        row for row in custody["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    assert robuxio["as_of_date"] < day
+    assert custody["systematic"]["as_of_date"] < day
+
+
+def test_n56_coverage_disclosure_also_states_the_row_and_total_the_line_dates(
+    cr2_custody_structural_complete_world,
+):
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    cutoff = report["calculation_cutoff_date"]
+    custody = deepcopy(report["custody_current_capital"])
+    for row in custody["strategies"]:
+        for member in row.get("members", []):
+            member["as_of_date"] = cutoff
+        row["as_of_date"] = min(
+            [m["as_of_date"] for m in row.get("members", [])]
+            + [c["as_of_date"] for c in row.get("derived_cash", [])]
+        )
+    day = next(
+        c["as_of_date"]
+        for row in custody["strategies"]
+        for c in row.get("derived_cash", [])
+        if c["as_of_date"] < cutoff
+    )
+    custody["systematic"]["as_of_date"] = day
+
+    block = reporter._capital_coverage_bounds(custody, cutoff)
+
+    assert block is not None
+    assert [
+        (item["entity"], item["date"], item["bounded_by"])
+        for item in block["bounded_sections"]
+    ] == [
+        ("robuxio-crypto", day, ["robuxio-crypto"]),
+        (f"robuxio-crypto:{ROBUXIO_CASH_ACCOUNT}", day, ["robuxio-crypto"]),
+        ("systematic", day, ["robuxio-crypto"]),
+    ]
+
+
+def test_n56_coverage_disclosure_is_absent_when_every_cash_line_reaches_the_cutoff(
+    cr2_custody_structural_complete_world,
+):
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    custody = deepcopy(report["custody_current_capital"])
+    cutoff = report["calculation_cutoff_date"]
+    for row in custody["strategies"]:
+        for line in row.get("derived_cash", []):
+            line["as_of_date"] = line["coverage_end"] = cutoff
+        row["as_of_date"] = cutoff
+    custody["systematic"]["as_of_date"] = cutoff
+
+    assert reporter._capital_coverage_bounds(custody, cutoff) is None
+
+
+def test_n56_coverage_disclosure_never_explains_a_date_the_line_does_not_prove(
+    cr2_custody_structural_complete_world,
+):
+    """A label that is not the line's own coverage end is not disclosed: the
+    validator then keeps the finding a blocker."""
+
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    cutoff = report["calculation_cutoff_date"]
+    custody = deepcopy(report["custody_current_capital"])
+    robuxio = next(
+        row for row in custody["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    line = robuxio["derived_cash"][0]
+    day = line["as_of_date"]
+    # The label is older than the coverage that would prove it: not honest, not disclosed.
+    line["coverage_end"] = cutoff
+    assert reporter._capital_coverage_bounds(custody, cutoff) is None
+    # A row dated by something other than its cash line is not disclosed as a bound.
+    line["coverage_end"] = day
+    robuxio["as_of_date"] = "2026-01-01"
+    block = reporter._capital_coverage_bounds(custody, cutoff)
+    assert block is not None
+    entities = [item["entity"] for item in block["bounded_sections"]]
+    assert "robuxio-crypto" not in entities
+    assert f"robuxio-crypto:{ROBUXIO_CASH_ACCOUNT}" in entities
+    # A retained-excluded strategy makes no claim.
+    robuxio["scope"] = "RETAINED_EXCLUDED"
+    assert reporter._capital_coverage_bounds(custody, cutoff) is None

@@ -1466,6 +1466,114 @@ def _value_basis_bounds_disclosure(
     }
 
 
+CAPITAL_COVERAGE_RULE_ID = "N56-COVERAGE"
+
+
+def _capital_coverage_bounds(
+    custody: Mapping[str, Any], calculation_cutoff_date: str
+) -> dict[str, Any] | None:
+    """The report-only ``capital_coverage_bounds`` block (N56).
+
+    A custody cash line is proven true through ``min(cutoff, coverage_end)``, where
+    ``coverage_end`` is the end of the admissions it is derived from.  When that end
+    precedes the cutoff (the Matrixport sleeve allocations are admitted only through the
+    last subscription) the line, its strategy row and the Systematic total are honestly
+    dated before the cutoff.  That is a coverage bound, not an FX value-basis end, so
+    ``value_basis_bounds`` never states it.  This block does: one entry per cash line of
+    a SYSTEMATIC strategy whose label is its own coverage end before the cutoff, and one
+    ``current_capital`` entry for each date that line explains (the line, a strategy
+    row dated by its oldest line, and the Systematic total dated by the oldest row).
+    A label that is not the line's own coverage end is never stated, so the validator
+    keeps it a blocker.  The block is absent when no line is bounded.
+    """
+
+    cutoff = _date(calculation_cutoff_date, "calculation cutoff date")
+    lines: list[dict[str, Any]] = []
+    for row in _objects(custody.get("strategies", []), "custody strategies"):
+        strategy_id = row.get("strategy_id")
+        if (
+            not isinstance(strategy_id, str)
+            or row.get("scope", "SYSTEMATIC") != "SYSTEMATIC"
+        ):
+            continue
+        for line in _objects(row.get("derived_cash", []), "custody derived_cash"):
+            coverage_end = line.get("coverage_end")
+            value = line.get("current_value")
+            if (
+                not isinstance(coverage_end, str)
+                or line.get("as_of_date") != coverage_end
+                or not isinstance(value, Mapping)
+                or value.get("status") != "AVAILABLE"
+                or _date(coverage_end, "custody coverage end") >= cutoff
+            ):
+                continue
+            lines.append(
+                {
+                    "strategy_id": strategy_id,
+                    "account_id": line.get("account_id"),
+                    "provider_id": line.get("provider_id"),
+                    "as_of_date": coverage_end,
+                    "coverage_end": coverage_end,
+                    "last_event_date": line.get("last_event_date"),
+                }
+            )
+    if not lines:
+        return None
+    lines.sort(key=lambda item: (item["strategy_id"], str(item["account_id"])))
+    sections: list[dict[str, Any]] = []
+
+    def add(entity: str, day: str, bounded_by: Sequence[str]) -> None:
+        sections.append(
+            {
+                "section": "current_capital",
+                "entity": entity,
+                "field": "as_of_date",
+                "date": day,
+                "bounded_by": sorted(bounded_by),
+            }
+        )
+
+    oldest_by_strategy: dict[str, str] = {}
+    for item in lines:
+        add(
+            f"{item['strategy_id']}:{item['account_id']}",
+            item["coverage_end"],
+            [item["strategy_id"]],
+        )
+        strategy_id = item["strategy_id"]
+        oldest_by_strategy[strategy_id] = min(
+            oldest_by_strategy.get(strategy_id, item["coverage_end"]),
+            item["coverage_end"],
+        )
+    for row in _objects(custody.get("strategies", []), "custody strategies"):
+        strategy_id = row.get("strategy_id")
+        if (
+            isinstance(strategy_id, str)
+            and strategy_id in oldest_by_strategy
+            and row.get("as_of_date") == oldest_by_strategy[strategy_id]
+        ):
+            add(strategy_id, oldest_by_strategy[strategy_id], [strategy_id])
+    systematic = custody.get("systematic")
+    total_day = (
+        systematic.get("as_of_date") if isinstance(systematic, Mapping) else None
+    )
+    if isinstance(total_day, str):
+        total_bounded = [
+            strategy_id
+            for strategy_id, day in oldest_by_strategy.items()
+            if day == total_day
+        ]
+        if total_bounded:
+            add("systematic", total_day, total_bounded)
+    return {
+        "schema_version": 1,
+        "rule": CAPITAL_COVERAGE_RULE_ID,
+        "calculation_cutoff_date": cutoff.isoformat(),
+        "lines": lines,
+        "bounded_sections": sorted(sections, key=lambda item: item["entity"]),
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -7948,6 +8056,12 @@ def build_report_data(
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
             report["report_schema_version"] = CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION
+            if calculation_cutoff_date is not None:
+                coverage_bounds = _capital_coverage_bounds(
+                    verified_capital, calculation_cutoff_date
+                )
+                if coverage_bounds is not None:
+                    report["capital_coverage_bounds"] = coverage_bounds
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
     if decomposition_lenses is not None:
