@@ -212,6 +212,31 @@
         "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
         "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
         "hwm_numerical_reason": { "type": "string", "minLength": 1 },
+        "hwm_candidate": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["complete_through", "current_drawdown", "current_hwm", "current_index", "evaluated_on", "financial_acceptance", "label", "maximum_drawdown", "not_accepted_reason", "not_accepted_register", "policy_id", "receipt_sha256", "status"],
+              "properties": {
+                "complete_through": { "type": "string", "format": "date" },
+                "current_drawdown": { "$ref": "#/$defs/decimal" },
+                "current_hwm": { "$ref": "#/$defs/decimal" },
+                "current_index": { "$ref": "#/$defs/decimal" },
+                "evaluated_on": { "type": "string", "format": "date" },
+                "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                "maximum_drawdown": { "$ref": "#/$defs/decimal" },
+                "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+                "not_accepted_register": { "const": "E2" },
+                "policy_id": { "const": "PORT-HWM-4" },
+                "receipt_sha256": { "$ref": "#/$defs/hash" },
+                "status": { "const": "CANDIDATE_PENDING_OWNER_ACCEPTANCE" }
+              }
+            }
+          ]
+        },
         "hwm_status": { "type": "string" },
         "hwm_status_code_version": { "const": 2 },
         "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
@@ -702,7 +727,10 @@
   "allOf": [
     {
       "if": {"properties": {"panel_schema_version": {"enum": [24, 25]}}, "required": ["panel_schema_version"]},
-      "then": {"required": ["position_snapshots"]}
+      "then": {
+        "required": ["position_snapshots"],
+        "properties": {"advisory": {"required": ["hwm_candidate"]}}
+      }
     },
     {
       "if": {"properties": {"panel_schema_version": {"enum": [23, 25]}}, "required": ["panel_schema_version"]},
@@ -874,6 +902,7 @@
               "readiness": { "const": "DO_NOT_EXPAND_SYSTEMATIC_RISK" },
               "hwm_numerical_status": { "const": "UNAVAILABLE" },
               "hwm_numerical_reason": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" },
+              "hwm_candidate": { "type": "null" },
               "hwm_status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
             }
           },

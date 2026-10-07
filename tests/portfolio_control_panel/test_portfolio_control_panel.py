@@ -2976,6 +2976,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     ]
     assert data["counts"]["positions"] == 1
     assert data["position_snapshots"]["current_at_cutoff_rows"] == 1
+    assert data["advisory"]["hwm_candidate"] is None
     assert data["factor_analysis"]["available_count"] == 4
     assert data["factor_analysis"]["diagnostic_count"] == 1
     assert data["factor_analysis"]["dynamic_available_count"] == 1
@@ -14298,3 +14299,110 @@ def test_the_built_panel_counts_current_holdings_at_the_cutoff_only(
         weekly_returns_root=inputs["weekly"],
     )
     assert verified["all_passed"] is True
+
+
+# QC1-P N67: the governed PORT-HWM-4 number is a labelled candidate.
+
+
+def _qc1p_governed_proof(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(
+        panel,
+        "_PORTABLE_HWM_POLICY",
+        REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
+    )
+    result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
+    return panel._panel_governed_hwm_proof(
+        result, generation_bytes, calendar_bytes, receipt_bytes
+    )
+
+
+def test_the_governed_number_is_a_candidate_beside_the_unaccepted_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A5: the E2 register keeps the numeric status unaccepted; the number shows."""
+
+    proof = _qc1p_governed_proof(monkeypatch)
+    assert proof["status"] == "AVAILABLE"
+    assert proof["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
+    summary = {
+        "hwm_numerical_status": "UNAVAILABLE",
+        "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+    }
+
+    candidate = panel._hwm_candidate(proof, summary)
+
+    assert candidate == {
+        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "policy_id": "PORT-HWM-4",
+        "current_drawdown": proof["current_drawdown"],
+        "maximum_drawdown": proof["maximum_drawdown"],
+        "current_index": proof["current_index"],
+        "current_hwm": proof["current_hwm"],
+        "complete_through": proof["complete_through"],
+        "evaluated_on": proof["evaluated_on"],
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "not_accepted_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        "not_accepted_register": "E2",
+        "receipt_sha256": proof["receipt_sha256"],
+        "label": "Governed PORT-HWM-4 candidate, pending owner acceptance",
+    }
+
+
+def test_no_candidate_without_an_available_governed_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": "X"}
+    proof = _qc1p_governed_proof(monkeypatch)
+
+    assert panel._hwm_candidate(None, summary) is None
+    assert panel._hwm_candidate({**proof, "status": "UNAVAILABLE"}, summary) is None
+
+
+def test_the_built_panel_publishes_the_candidate_and_leaves_the_status_alone(
+    inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(
+        panel,
+        "_PORTABLE_HWM_POLICY",
+        REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
+    )
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
+    proof = panel._panel_governed_hwm_proof(
+        result, generation_bytes, calendar_bytes, receipt_bytes
+    )
+    report["hwm_governed_proof"] = proof
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_governed_result=result,
+        hwm_governed_generation_bytes=generation_bytes,
+        hwm_governed_calendar_bytes=calendar_bytes,
+        hwm_governed_receipt_bytes=receipt_bytes,
+    )
+    data = _candidate_data(candidate)
+
+    published = data["advisory"]["hwm_candidate"]
+    assert published["status"] == "CANDIDATE_PENDING_OWNER_ACCEPTANCE"
+    assert published["current_index"] == proof["current_index"]
+    assert published["maximum_drawdown"] == proof["maximum_drawdown"]
+    assert published["not_accepted_reason"] is None
+    assert (
+        data["hwm_summary"]["hwm_numerical_status"]
+        == (data["advisory"]["hwm_numerical_status"])
+    )

@@ -8416,6 +8416,46 @@ def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
     return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
 
 
+HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
+
+
+def _hwm_candidate(
+    proof: Mapping[str, Any] | None, hwm_summary: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The governed number as a labelled candidate beside the numeric status.
+
+    The numeric status stays what the report says: the E2 register (two Robuxio
+    two-day spans can hide a peak) keeps it unaccepted, and the governed PORT-HWM-4
+    receipt is pending owner acceptance.  The panel shows that number under its own
+    label instead of hiding it, so no "no number is calculated" text sits beside it.
+    """
+
+    if proof is None or proof.get("status") != "AVAILABLE":
+        return None
+    if proof.get("financial_acceptance") != "PENDING_OWNER_ACCEPTANCE":
+        raise ControlPanelValidationError(
+            "governed HWM proof carries an unexpected financial acceptance state"
+        )
+    unaccepted = hwm_summary.get("hwm_numerical_status", "UNAVAILABLE") == "UNAVAILABLE"
+    return {
+        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "policy_id": proof["policy_id"],
+        "current_drawdown": proof["current_drawdown"],
+        "maximum_drawdown": proof["maximum_drawdown"],
+        "current_index": proof["current_index"],
+        "current_hwm": proof["current_hwm"],
+        "complete_through": proof["complete_through"],
+        "evaluated_on": proof["evaluated_on"],
+        "financial_acceptance": proof["financial_acceptance"],
+        "not_accepted_reason": (
+            hwm_summary.get("hwm_numerical_reason") if unaccepted else None
+        ),
+        "not_accepted_register": "E2",
+        "receipt_sha256": proof["receipt_sha256"],
+        "label": HWM_CANDIDATE_LABEL,
+    }
+
+
 POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
 _POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
 _POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
@@ -9663,6 +9703,7 @@ def _panel_data(
                 if hwm_summary.get("hwm_numerical_status") == "AVAILABLE"
                 else {}
             ),
+            "hwm_candidate": _hwm_candidate(governed_hwm_proof, hwm_summary),
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": (
                 _summary_value(summary, "Advisory readiness")
