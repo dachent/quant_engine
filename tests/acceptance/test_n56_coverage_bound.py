@@ -167,6 +167,30 @@ def test_a_disclosure_that_disagrees_with_the_report_line_does_not_downgrade(
     assert {f.klass for f in problems} == {checks.BLOCKER_INVARIANT}
 
 
+def test_a_block_that_states_a_cash_line_the_report_does_not_carry_downgrades_nothing(
+    tmp_path: Path,
+) -> None:
+    """The entries are explained by the stated lines, and one stated line is invented:
+    the block is not borne out by the report, so none of it is believed."""
+
+    custody = _custody_block()
+    block = _disclosure(custody)
+    block["lines"].append({**block["lines"][0], "account_id": "invented-account"})
+
+    findings = _findings(tmp_path, custody, block=block, expected=_expected())
+
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
+    problems = _findings(
+        tmp_path / "problems",
+        custody,
+        block=block,
+        expected=_expected(),
+        check="capital.coverage_bound",
+    )
+    assert [f.klass for f in problems] == [checks.BLOCKER_INVARIANT]
+    assert "not a cash line of the report" in problems[0].observed
+
+
 def test_a_section_the_lines_do_not_explain_is_not_downgraded(tmp_path: Path) -> None:
     """The block names the row at a date the strategy's oldest line does not have."""
 
