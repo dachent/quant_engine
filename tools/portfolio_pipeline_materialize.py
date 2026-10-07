@@ -3752,6 +3752,35 @@ def _semantic_gate_payload(
     }
 
 
+def _financial_snapshot_sums(
+    allocations: Sequence[object], systematic: Decimal, reserve: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """The audit snapshot's allocation sum, weight sum and systematic plus reserve.
+
+    All three are added exactly: the first and the last are compared for equality
+    with figures the baseline adds exactly, and the default 28-digit context rounds a
+    wide sum differently depending on the order of its terms.
+    """
+
+    values = [
+        _decimal(row["current_value"]["value"], "allocation value")
+        for row in allocations
+        if isinstance(row, dict)
+        and row.get("pool_id") == "systematic-capital"
+        and isinstance(row.get("current_value"), dict)
+    ]
+    weights = [
+        _decimal(row.get("systematic_weight"), "systematic weight")
+        for row in allocations
+        if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
+    ]
+    return (
+        _capital_sum(values),
+        _capital_sum(weights),
+        _capital_sum([systematic, reserve]),
+    )
+
+
 def semantic(
     recipe_path: Path, output_path: Path, financial_spec_path: Path | None = None
 ) -> dict[str, Any]:
@@ -3876,29 +3905,14 @@ def semantic(
     systematic = _decimal(replay.get("systematic_total_usd"), "systematic total")
     reserve = _decimal(replay.get("reserve_total_usd"), "reserve total")
     total = _decimal(replay.get("total_liquid_usd"), "total liquid")
-    systematic_allocations = sum(
-        (
-            _decimal(row["current_value"]["value"], "allocation value")
-            for row in allocations
-            if isinstance(row, dict)
-            and row.get("pool_id") == "systematic-capital"
-            and isinstance(row.get("current_value"), dict)
-        ),
-        Decimal(0),
-    )
-    weights = sum(
-        (
-            _decimal(row.get("systematic_weight"), "systematic weight")
-            for row in allocations
-            if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
-        ),
-        Decimal(0),
+    systematic_allocations, weights, expected_total = _financial_snapshot_sums(
+        allocations, systematic, reserve
     )
     # The dated audit snapshot keeps its identity (its own table against its own
     # replay) but is only ever a labeled historical reference; the current block
     # is verified separately, from the NAV facts, and never against that table.
     snapshot_ok = (
-        total == systematic + reserve
+        total == expected_total
         and systematic_allocations == systematic
         and abs(weights - Decimal(1)) <= WEIGHT_SUM_TOLERANCE
         and audit_snapshot.get("status") == "HISTORICAL_REFERENCE"

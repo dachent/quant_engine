@@ -1389,11 +1389,15 @@ def _normalize_transactions(
             "security_id": security_id,
             "symbol": symbol,
         }
-        signed_amount = (
-            quantity
-            * price
-            * (Decimal("-1") if row["type"] == "buy_fill" else Decimal("1"))
-        )
+        # Nine decimals of quantity times nine of price exceed the ambient 28
+        # digits; the published transaction amount is the exact product.
+        with localcontext() as context:
+            context.prec = _EXACT_PRECISION
+            signed_amount = (
+                quantity
+                * price
+                * (Decimal("-1") if row["type"] == "buy_fill" else Decimal("1"))
+            )
         mapping_status, strategy_id = _strategy_for_date(
             assignments, account_id, event_date
         )
@@ -1545,16 +1549,13 @@ def _schwab_facts(
     mapped_position_count = sum(
         item.get("mapping_status") == MappingStatus.MAPPED.value for item in positions
     )
-    position_market_value = sum(
-        (
-            _decimal(
-                _object(item.get("market_value"), "position.market_value").get("value"),
-                "position.market_value.value",
-            )
-            or Decimal("0")
-            for item in positions
-        ),
-        Decimal("0"),
+    position_market_value = _exact_sum(
+        _decimal(
+            _object(item.get("market_value"), "position.market_value").get("value"),
+            "position.market_value.value",
+        )
+        or Decimal("0")
+        for item in positions
     )
     position_reconciliation = {
         "check_id": "current-position-strategy-attribution",
@@ -2053,7 +2054,7 @@ def _allocations_and_coverage(
         )
 
     coverage: list[dict[str, Any]] = []
-    nav_covered = Decimal("0")
+    nav_covered_values: list[Decimal] = []
     for row in _read_csv(paths["data-coverage-matrix"], "data-coverage-matrix"):
         strategy_id = _resolve_strategy(strategy_aliases, row["component"])
         value = _decimal(row["current_value"], "coverage.current_value")
@@ -2066,7 +2067,7 @@ def _allocations_and_coverage(
         if daily not in {"yes", "no"}:
             raise BaselineValidationError("daily-series coverage must be yes or no")
         if daily == "yes":
-            nav_covered += value
+            nav_covered_values.append(value)
         coverage.append(
             {
                 "current_value_usd": decimal_text(value),
@@ -2094,7 +2095,10 @@ def _allocations_and_coverage(
                 "strategy_id": strategy_id,
             }
         )
-    systematic_total = sum((item[0] for item in by_strategy.values()), Decimal("0"))
+    # Exact, in the order-free sense: these totals are compared for equality with the
+    # audit's reported total and with the materializer's own sum.
+    systematic_total = _exact_sum(item[0] for item in by_strategy.values())
+    nav_covered = _exact_sum(nav_covered_values)
     return (
         sorted(allocations, key=lambda item: str(item["strategy_id"])),
         sorted(coverage, key=lambda item: str(item["strategy_id"])),
@@ -2243,7 +2247,7 @@ def _replay(
             "allocation total does not reconcile to audit systematic total"
         )
     nav_ratio = nav_covered / systematic_total
-    total = systematic_total + reserve
+    total = _exact_sum([systematic_total, reserve])
 
     actuals: dict[str, Decimal | str] = {
         "correlation_one_stress": stress,
