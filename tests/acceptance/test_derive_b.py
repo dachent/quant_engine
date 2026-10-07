@@ -3292,6 +3292,23 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
     assert values[("capital.strategy_cash.cutoff", "volatis-strategy")] == "4.00"
     assert values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
+    # No capture proves a boundary in this synthetic selection, so each cash line
+    # ends at its last event (the capture-free MX-2 fallback); the row is keyed by
+    # strategy, provider and account.
+    coverage_ends = {
+        row["entity"]: (row["value"], row["unit"], row["as_of"])
+        for row in output["metrics"]
+        if row["metric_id"] == "date.strategy_cash.coverage_end"
+    }
+    assert coverage_ends == {
+        "volatis-strategy|quantbase|volatis": ("2026-09-01", "date", "2026-09-17"),
+    }
+    # robuxio's cash line is withheld in this selection, so its row is not derivable.
+    assert {
+        row["entity"]
+        for row in output["not_derivable"]
+        if row["metric_id"] == "date.strategy_cash.coverage_end"
+    } == {"robuxio-crypto|matrixport|robuxio"}
 
     rates_path = paths["rates.csv"]
     admitted_rates = rates_path.read_text(encoding="utf-8")
@@ -3400,6 +3417,11 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
             *(f"generic-strategy-{index}" for index in range(2, 7)),
         )
     }.issubset(unavailable_ids)
+    # A withheld cash line leaves its coverage row not derivable too.
+    assert (
+        "date.strategy_cash.coverage_end",
+        "volatis-strategy|quantbase|volatis",
+    ) in unavailable_ids
 
     activity_path.write_text(
         "activity_type,type,fund,amount,created_at,time\n"
@@ -3737,4 +3759,347 @@ def test_oracle_v3_b_native_complete_fee_journal_uses_provider_type_field(fee_ty
         "invested": Decimal("100"),
         "cash": Decimal("4"),
         "allocation": Decimal("96"),
+    }
+
+
+# ------------------------------------------- date.strategy_cash.coverage_end (ruling C1)
+
+MP_HOST = "GET https://mapi.matrixport.com"
+FIRST_ALLOCATION = date(2025, 12, 5)
+
+
+def _cov_row(path: str, **fields: str) -> dict[str, str]:
+    row = {
+        "endpoint": f"{MP_HOST}{path}",
+        "status": "complete_to_observed_boundary",
+        "terminal_reason": "structured_parameter_rejections_dispositioned",
+        "updated_at_utc": "2026-09-18T18:42:59.174000+00:00",
+    }
+    row.update(fields)
+    return row
+
+
+def _request(path: str, **params: object) -> str:
+    return json.dumps(
+        {"endpoint": path, "safe_params": json.dumps({"limit": 50, **params})}
+    )
+
+
+def _wallet_rows() -> list[dict[str, str]]:
+    return [
+        _cov_row("/mapi/v1/wallet/deposits"),
+        _cov_row("/mapi/v1/wallet/withdrawals"),
+    ]
+
+
+def _wallet_requests() -> list[str]:
+    return [
+        _request("/mapi/v1/wallet/deposits", currency="USDT"),
+        _request("/mapi/v1/wallet/withdrawals", currency="USDT"),
+    ]
+
+
+def _ms(text: str) -> int:
+    from datetime import datetime, timezone
+
+    moment = datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+    return int(moment.timestamp() * 1000)
+
+
+TRADE = "/strategy/api/v2/user/trade_record"
+
+
+def _trade_row(**fields: str) -> dict[str, str]:
+    return _cov_row(TRADE, terminal_reason="empty_page", **fields)
+
+
+def test_unwindowed_wallet_list_carries_its_response_date() -> None:
+    derivation = load_derivation_module()
+    end = derivation.list_endpoint_coverage_end(
+        _wallet_rows(),
+        _wallet_requests(),
+        "/mapi/v1/wallet/deposits",
+        date(2025, 12, 5),
+    )
+    assert end == date(2026, 9, 18)
+
+
+def test_robuxio_shape_anchors_end_at_the_last_anchor() -> None:
+    """The real 0918 capture: the only trade_record window starts 2026-08-04, after
+    the first (and only) subscription, so it leaves a gap and proves no date; the
+    order detail row is a set-completion row; flows are proven through 09-18."""
+    derivation = load_derivation_module()
+    rows = [
+        *_wallet_rows(),
+        _trade_row(),
+        _cov_row(
+            "/strategy/api/v2/order",
+            terminal_reason="all_discovered_subscription_ids",
+        ),
+    ]
+    requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    assert (
+        derivation.list_endpoint_coverage_end(rows, requests, TRADE, FIRST_ALLOCATION)
+        is None
+    )
+    assert (
+        derivation.list_endpoint_coverage_end(
+            rows, requests, "/strategy/api/v2/order", FIRST_ALLOCATION
+        )
+        is None
+    )
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]},
+        {},
+        None,
+        rows,
+        requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def test_a_hash_bound_window_chain_back_to_the_first_event_extends_the_anchors() -> (
+    None
+):
+    derivation = load_derivation_module()
+    rows = [_trade_row()]
+    chain = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    assert derivation.list_endpoint_coverage_end(
+        rows, chain, TRADE, FIRST_ALLOCATION
+    ) == date(2026, 9, 18)
+    # The same two windows with a hole between them prove nothing past the first.
+    gapped = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+        _request(
+            TRADE,
+            start_time=_ms("2026-09-05T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    assert derivation.list_endpoint_coverage_end(
+        rows, gapped, TRADE, FIRST_ALLOCATION
+    ) == date(2026, 9, 3)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"status": "partial"},
+        {"terminal_reason": "all_discovered_subscription_ids"},
+        {"terminal_reason": "single_response"},
+        {"terminal_reason": "catalog_disposition"},
+        {"terminal_reason": ""},
+    ],
+)
+def test_a_row_without_a_natural_complete_terminal_proves_no_date(
+    mutation: dict[str, str],
+) -> None:
+    derivation = load_derivation_module()
+    rows = [_cov_row("/mapi/v1/wallet/deposits", **mutation)]
+    assert (
+        derivation.list_endpoint_coverage_end(
+            rows,
+            [_request("/mapi/v1/wallet/deposits", currency="USDT")],
+            "/mapi/v1/wallet/deposits",
+            date(2025, 12, 5),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "requests",
+    [
+        # A time parameter this derivation does not read proves nothing.
+        [_request("/mapi/v1/wallet/deposits", created_after=1)],
+        # A window mixed with a full-history list is ambiguous.
+        [
+            _request("/mapi/v1/wallet/deposits", currency="USDT"),
+            _request("/mapi/v1/wallet/deposits", start_time=0, end_time=5),
+        ],
+        # No request for the endpoint at all.
+        [_request("/mapi/v1/wallet/withdrawals", currency="USDT")],
+    ],
+)
+def test_unreadable_or_absent_requests_prove_no_date(requests: list[str]) -> None:
+    derivation = load_derivation_module()
+    assert (
+        derivation.list_endpoint_coverage_end(
+            [_cov_row("/mapi/v1/wallet/deposits")],
+            requests,
+            "/mapi/v1/wallet/deposits",
+            date(2025, 12, 5),
+        )
+        is None
+    )
+
+
+def test_a_capture_time_alone_never_carries_a_date() -> None:
+    derivation = load_derivation_module()
+    # An unparseable or naive response instant on an unwindowed list is no date.
+    for stamp in ("", "not-a-time", "2026-09-18T18:42:59"):
+        assert (
+            derivation.list_endpoint_coverage_end(
+                [_cov_row("/mapi/v1/wallet/deposits", updated_at_utc=stamp)],
+                [_request("/mapi/v1/wallet/deposits", currency="USDT")],
+                "/mapi/v1/wallet/deposits",
+                date(2025, 12, 5),
+            )
+            is None
+        )
+
+
+def test_matrixport_without_any_capture_ends_every_type_at_its_last_event() -> None:
+    derivation = load_derivation_module()
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        {
+            "owner": [date(2026, 1, 2), date(2026, 1, 4)],
+            "allocation": [date(2026, 1, 3)],
+        },
+        {},
+        None,
+        None,
+        None,
+    )
+    assert ended == date(2026, 1, 3)
+
+
+def test_matrixport_flows_need_both_wallet_endpoints() -> None:
+    derivation = load_derivation_module()
+    only_deposits = [_cov_row("/mapi/v1/wallet/deposits")]
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        {"owner": [date(2025, 12, 5)], "allocation": [date(2025, 12, 5)]},
+        {},
+        None,
+        only_deposits,
+        [_request("/mapi/v1/wallet/deposits", currency="USDT")],
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def _quantbase_ledger(generation_id: str, day: str) -> dict[str, object]:
+    return {
+        "provider_generations": [
+            {
+                "provider_id": "quantbase",
+                "generation_id": generation_id,
+                "generation_as_of_date": day,
+            },
+            {
+                "provider_id": "matrixport",
+                "generation_id": "m",
+                "generation_as_of_date": "2000-01-01",
+            },
+        ]
+    }
+
+
+def test_quantbase_flows_and_anchors_share_the_activity_capture_date() -> None:
+    derivation = load_derivation_module()
+    events = {"owner": [date(2024, 7, 20)], "allocation": [date(2026, 1, 15)]}
+    selection = {"quantbase": {"generation_id": "q1"}}
+    assert derivation.custody_coverage_end(
+        "volatis-strategy",
+        events,
+        _quantbase_ledger("q1", "2026-09-18"),
+        selection,
+        None,
+        None,
+    ) == date(2026, 9, 18)
+    # A selection that names another generation proves nothing: each type ends at
+    # its own last event and the line at the smaller, the same as an admission
+    # window with no capture claim.
+    assert derivation.custody_coverage_end(
+        "volatis-strategy",
+        events,
+        _quantbase_ledger("q2", "2026-09-18"),
+        selection,
+        None,
+        None,
+    ) == date(2024, 7, 20)
+    assert derivation.custody_coverage_end(
+        "volatis-strategy",
+        events,
+        _quantbase_ledger("q1", "2026-09-18"),
+        None,
+        None,
+        None,
+    ) == date(2024, 7, 20)
+
+
+def test_a_capture_boundary_before_the_last_event_is_not_derivable() -> None:
+    derivation = load_derivation_module()
+    reason = derivation.custody_coverage_end(
+        "volatis-strategy",
+        {"owner": [date(2024, 7, 20)], "allocation": [date(2026, 1, 15)]},
+        _quantbase_ledger("q1", "2026-01-10"),
+        {"quantbase": {"generation_id": "q1"}},
+        None,
+        None,
+    )
+    assert isinstance(reason, str) and "precedes its last event" in reason
+
+
+def test_a_line_without_owner_funding_has_no_coverage_end() -> None:
+    derivation = load_derivation_module()
+    reason = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        {"owner": [], "allocation": [date(2026, 1, 3)]},
+        {},
+        None,
+        None,
+        None,
+    )
+    assert isinstance(reason, str) and "no owner-funding event" in reason
+
+
+def test_raw_custody_capital_reports_the_days_of_each_event_type() -> None:
+    derivation = load_derivation_module()
+    days: dict[str, dict[str, list[date]]] = {}
+    derivation.raw_custody_capital(
+        [
+            {
+                "activity_type": "transfer",
+                "status": "C",
+                "type": "DEPOSIT",
+                "id": "t1",
+                "destination_account_id": "acct",
+                "amount": "100",
+                "amount_cents": "10000",
+                "created_at": "2026-09-01T12:00:00+00:00",
+            },
+            {
+                "activity_type": "filled_txn",
+                "type": "BUY",
+                "fund": "107",
+                "amount": "96",
+                "time": "2026-09-02T14:00:00+00:00",
+            },
+        ],
+        [],
+        [],
+        {"USDC": {}, "USDT": {}},
+        None,
+        days,
+    )
+    assert days["volatis-strategy"] == {
+        "owner": [date(2026, 9, 1)],
+        "allocation": [date(2026, 9, 2)],
     }

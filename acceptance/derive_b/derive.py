@@ -1171,6 +1171,7 @@ def raw_custody_capital(
     matrixport_bill_rows: Iterable[dict[str, str]],
     fx_rates: dict[str, dict[date, Decimal]],
     matrixport_subscription_rows: Iterable[dict[str, str]] | None = None,
+    event_days: dict[str, dict[str, list[date]]] | None = None,
 ) -> dict[str, dict[str, Decimal]]:
     """Derive R8 owner capital and unallocated cash from raw custody events.
 
@@ -1187,6 +1188,10 @@ def raw_custody_capital(
         if amount <= 0:
             raise ValueError("raw custody event amount must be positive")
         events[strategy_id][occurred_on][kind] += amount
+        if event_days is not None:
+            event_days.setdefault(strategy_id, {"owner": [], "allocation": []})[
+                kind
+            ].append(occurred_on)
 
     def event_date(timestamp: str) -> date:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -1368,6 +1373,236 @@ def raw_custody_capital(
             "allocation": allocation,
         }
     return result
+
+
+COVERAGE_METRIC_ID = "date.strategy_cash.coverage_end"
+# Terminals that end a list endpoint naturally.  A discovery terminal
+# (all_discovered_*_ids), single_response or catalog_disposition never carries a date.
+NATURAL_LIST_TERMINALS = frozenset(
+    {
+        "empty_page",
+        "short_page",
+        "no_next_id",
+        "structured_parameter_rejections_dispositioned",
+    }
+)
+MATRIXPORT_COVERAGE_HOST = "GET https://mapi.matrixport.com"
+MATRIXPORT_WALLET_PATHS = ("/mapi/v1/wallet/deposits", "/mapi/v1/wallet/withdrawals")
+MATRIXPORT_TRADE_RECORD_PATH = "/strategy/api/v2/user/trade_record"
+PLAIN_LIST_PARAMS = frozenset({"currency", "limit", "offset"})
+WINDOW_START_KEYS = frozenset({"start_time"})
+WINDOW_END_KEYS = frozenset({"end_time"})
+CUSTODY_CAPTURE_PROVIDERS = {
+    "volatis-strategy": "quantbase",
+    "robuxio-crypto": "matrixport",
+}
+
+
+def coverage_entity(strategy_id: str, members: set[str]) -> str:
+    """``<strategy>|<provider>|<account>``; the account is ``-`` unless exactly one."""
+    provider = CUSTODY_CAPTURE_PROVIDERS[strategy_id]
+    account = next(iter(members)) if len(members) == 1 else "-"
+    return f"{strategy_id}|{provider}|{account}"
+
+
+def utc_day_of_ms(milliseconds: int) -> date:
+    return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).date()
+
+
+def request_time_window(request: dict[str, object]) -> tuple[int, int] | None | str:
+    """The (start_ms, end_ms) a list request asked for.
+
+    None means the request has no time parameter (a full-history list); the
+    string "unbounded" marks a request whose time parameters this derivation
+    cannot read, which proves nothing.
+    """
+    raw = request.get("safe_params")
+    try:
+        params = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return "unbounded"
+    if not isinstance(params, dict):
+        return "unbounded"
+    unread = set(params) - PLAIN_LIST_PARAMS - WINDOW_START_KEYS - WINDOW_END_KEYS
+    if unread:
+        return "unbounded"
+    if not set(params) & (WINDOW_START_KEYS | WINDOW_END_KEYS):
+        return None
+    end = params.get("end_time")
+    start = params.get("start_time", 0)
+    if (
+        isinstance(end, bool)
+        or not isinstance(end, int)
+        or isinstance(start, bool)
+        or not isinstance(start, int)
+    ):
+        return "unbounded"
+    return start, end
+
+
+def list_endpoint_coverage_end(
+    coverage_rows: list[dict[str, str]],
+    request_lines: list[str],
+    path: str,
+    first_event: date | None,
+) -> date | None:
+    """The date a captured list endpoint proves, or None when it proves no date.
+
+    A coverage row extends a date only if (a) its status is
+    complete_to_observed_boundary, (b) its terminal is a natural list terminal,
+    (c) every request for the endpoint in the pinned request manifest is either
+    a full-history list (then the boundary is the UTC date of the response
+    instant of the coverage row) or a time window (then the windows must chain
+    without a gap and the boundary is the end of the chain), and (d) the chain
+    starts at or before the first event.  A detail-fetch row, a discovery
+    terminal and a capture time on their own never carry a date.
+    """
+    endpoint = f"{MATRIXPORT_COVERAGE_HOST}{path}"
+    rows = [row for row in coverage_rows if row.get("endpoint") == endpoint]
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+    if (
+        row.get("status") != "complete_to_observed_boundary"
+        or row.get("terminal_reason") not in NATURAL_LIST_TERMINALS
+    ):
+        return None
+    windows: list[tuple[int, int]] = []
+    unwindowed = 0
+    for line in request_lines:
+        if not line.strip():
+            continue
+        request = json.loads(line)
+        if not isinstance(request, dict) or request.get("endpoint") != path:
+            continue
+        window = request_time_window(request)
+        if window == "unbounded":
+            return None
+        if window is None:
+            unwindowed += 1
+        else:
+            assert isinstance(window, tuple)
+            windows.append(window)
+    if unwindowed and windows:
+        return None
+    if unwindowed:
+        captured = row.get("updated_at_utc") or ""
+        try:
+            moment = datetime.fromisoformat(captured.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+            return None
+        return moment.date()
+    if not windows:
+        return None
+    first_ms = (
+        0
+        if first_event is None
+        else int(
+            datetime(
+                first_event.year,
+                first_event.month,
+                first_event.day,
+                tzinfo=timezone.utc,
+            ).timestamp()
+            * 1000
+        )
+    )
+    segments: list[list[int]] = []
+    for start, end in sorted(windows):
+        if segments and start <= segments[-1][1] + 1:
+            segments[-1][1] = max(segments[-1][1], end)
+        else:
+            segments.append([start, end])
+    for start, end in segments:
+        if start <= first_ms <= end:
+            return utc_day_of_ms(end)
+    return None
+
+
+def quantbase_capture_end(ledger: dict[str, object], selection: object) -> date | None:
+    """The UTC date of the selected Quantbase account-activity capture.
+
+    The account-activity list is one unwindowed API response from which both
+    the owner flows and the sleeve allocations are read, so one boundary serves
+    both.  The 24 pinned roles carry no Quantbase capture-time artifact; the
+    capture date is the generation date of the selected Quantbase generation
+    named by the manifest's generation selection evidence.
+    """
+    if not isinstance(selection, dict):
+        return None
+    quantbase = selection.get("quantbase")
+    generations = ledger.get("provider_generations")
+    if not isinstance(quantbase, dict) or not isinstance(generations, list):
+        return None
+    matches = [
+        item
+        for item in generations
+        if isinstance(item, dict)
+        and item.get("provider_id") == "quantbase"
+        and item.get("generation_id") == quantbase.get("generation_id")
+    ]
+    if len(matches) != 1:
+        return None
+    try:
+        return parse_date(str(matches[0].get("generation_as_of_date")))
+    except ValueError:
+        return None
+
+
+def custody_coverage_end(
+    strategy_id: str,
+    event_days: dict[str, list[date]],
+    ledger: dict[str, object],
+    selection: object,
+    coverage_rows: list[dict[str, str]] | None,
+    request_lines: list[str] | None,
+) -> date | str:
+    """The unclamped coverage end of one custody cash line, from the raw captures.
+
+    Owner flows and sleeve allocations are each proven through their own end and
+    the line through the smaller one.  A fact type no capture proves past its
+    last event ends at that last event (MX-2), never at a capture time.
+    """
+    owner, allocation = event_days.get("owner", []), event_days.get("allocation", [])
+    if not owner:
+        return "the line has no owner-funding event, so no flow boundary applies"
+    provider = CUSTODY_CAPTURE_PROVIDERS[strategy_id]
+    claimed: dict[str, date | None]
+    if provider == "quantbase":
+        capture = quantbase_capture_end(ledger, selection)
+        claimed = {"flows": capture, "capital_anchors": capture}
+    else:
+        rows, lines = coverage_rows or [], request_lines or []
+        wallet = [
+            list_endpoint_coverage_end(rows, lines, path, min(owner))
+            for path in MATRIXPORT_WALLET_PATHS
+        ]
+        claimed = {
+            "flows": None if None in wallet else min(cast(list[date], wallet)),
+            "capital_anchors": list_endpoint_coverage_end(
+                rows,
+                lines,
+                MATRIXPORT_TRADE_RECORD_PATH,
+                min(allocation) if allocation else None,
+            ),
+        }
+    ends: list[date] = []
+    for fact_type, days in (("flows", owner), ("capital_anchors", allocation)):
+        last = max(days) if days else None
+        end = claimed[fact_type]
+        if end is None:
+            if last is None:
+                continue
+            end = last
+        elif last is not None and end < last:
+            return (
+                f"the {fact_type} capture boundary {end.isoformat()} precedes its "
+                f"last event {last.isoformat()}"
+            )
+        ends.append(end)
+    return min(ends)
 
 
 ACCOUNT_METRIC_IDS = (
@@ -2334,6 +2569,9 @@ def derive(
     )
     custody_capital: dict[str, dict[str, Decimal]] = {}
     custody_capital_error: str | None = None
+    custody_event_days: dict[str, dict[str, list[date]]] = {}
+    matrixport_coverage_rows: list[dict[str, str]] | None = None
+    matrixport_request_lines: list[str] | None = None
     if schema_v3:
         try:
             with (qe_root / input_paths["quantbase_activity"]).open(
@@ -2374,7 +2612,18 @@ def derive(
                     ),
                 },
                 matrixport_subscriptions,
+                custody_event_days,
             )
+            if "matrixport_owner_flow_coverage" in input_paths:
+                with (qe_root / input_paths["matrixport_owner_flow_coverage"]).open(
+                    encoding="utf-8-sig", newline=""
+                ) as handle:
+                    matrixport_coverage_rows = list(csv.DictReader(handle))
+                matrixport_request_lines = (
+                    (qe_root / input_paths["matrixport_owner_flow_request_manifest"])
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
             custody_capital_error = f"R8 raw custody capital is not derivable: {error}"
     if schema_v3:
@@ -2788,6 +3037,12 @@ def derive(
                     "capital.strategy.cutoff",
                 ):
                     add_not_derivable(output, metric_id, strategy_id, reason)
+                add_not_derivable(
+                    output,
+                    COVERAGE_METRIC_ID,
+                    coverage_entity(strategy_id, members),
+                    reason,
+                )
                 continue
             aggregate["strategies"][strategy_id] += custody["cash"]
             aggregate["systematic"] += custody["cash"]
@@ -2811,6 +3066,43 @@ def derive(
                     notes="R8 derived raw provider-account cash; not an observed NAV.",
                 )
             )
+            selection = (
+                inputs_manifest.get("generation_selection_evidence")
+                if inputs_manifest is not None
+                else None
+            )
+            coverage = custody_coverage_end(
+                strategy_id,
+                custody_event_days.get(strategy_id, {}),
+                ledger,
+                selection,
+                matrixport_coverage_rows,
+                matrixport_request_lines,
+            )
+            if isinstance(coverage, str):
+                add_not_derivable(
+                    output,
+                    COVERAGE_METRIC_ID,
+                    coverage_entity(strategy_id, members),
+                    coverage,
+                )
+            else:
+                metrics.append(
+                    metric(
+                        COVERAGE_METRIC_ID,
+                        coverage_entity(strategy_id, members),
+                        coverage.isoformat(),
+                        "date",
+                        used_inputs,
+                        notes=(
+                            "R8 unclamped coverage end from the raw captures: the "
+                            "smaller of the owner-flow and allocation boundaries; "
+                            "a list endpoint with a natural terminal and requests "
+                            "that reach the date extends a boundary, a detail "
+                            "fetch or capture time never does."
+                        ),
+                    )
+                )
     for strategy_id in active_strategy_ids:
         members = {
             account_id
