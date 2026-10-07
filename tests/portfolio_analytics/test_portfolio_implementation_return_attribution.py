@@ -822,6 +822,16 @@ def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
     )
 
     assert first == second
+    leg = first["account_leg"]
+    assert leg["basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert leg["series_sha256"] == _canonical_series_sha(
+        [
+            {"date": "2026-01-05", "return": "0.008"},
+            {"date": "2026-01-20", "return": "0.015"},
+        ]
+    )
+    assert leg["cumulative_return"] == first["bridge"]["account_return"]
+    assert (leg["window_start"], leg["window_end"]) == ("2026-01-05", "2026-01-20")
     if policy_not_admitted:
         bridge = first["bridge"]
         assert bridge["status"] == "UNAVAILABLE_POLICY_NOT_ADMITTED"
@@ -855,3 +865,145 @@ def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
     assert shortfall["matched_event_pairs_tested"] is None
     assert shortfall["quantity_ratio_observations"] is None
     assert shortfall["missed_buy_closed_model_quantity"] is None
+
+
+def _canonical_series_sha(rows: list[dict[str, str]]) -> str:
+    """The ordered-date-return/1 digest, written out independently of the builder."""
+
+    return hashlib.sha256(
+        (
+            json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _account_rows(strategy_id: str, *returns: tuple[str, str]) -> list[dict[str, str]]:
+    return [
+        {
+            "date": observed,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": value,
+            "strategy_id": strategy_id,
+        }
+        for observed, value in returns
+    ]
+
+
+def _bridge_row(
+    strategy_id: str, account_return: float, **extra: object
+) -> dict[str, object]:
+    return {
+        "bridge": {
+            "account_return": account_return,
+            "categories": [],
+            "gap_pp": -1.0,
+            "model_return": account_return + 0.01,
+            "status": "EXACT_OPERATIONAL_BRIDGE_NO_UNNAMED_RESIDUAL",
+            **extra,
+        },
+        "observed_end": "2026-01-07",
+        "observed_start": "2026-01-05",
+        "strategy_id": strategy_id,
+        "verification": "VERIFIED_WITH_DECLARED_PROXY",
+    }
+
+
+def test_attribution_contract_schema_is_version_two() -> None:
+    assert attribution.SCHEMA_VERSION == 2
+
+
+def test_bridge_account_leg_is_the_governed_series_over_the_declared_window() -> None:
+    rows = _account_rows(
+        "grizzlybears-vtma",
+        ("2026-01-05", "0.01"),
+        ("2026-01-06", "0"),
+        ("2026-01-07", "0.03"),
+        ("2026-03-01", "0.5"),
+    )
+    row = _bridge_row("grizzlybears-vtma", 1.01 * 1.03 - 1)
+
+    bound = attribution.with_account_leg(
+        row,
+        rows,
+        strategy_id="grizzlybears-vtma",
+        accepted_as_of=date(2026, 1, 31),
+        model_basis="DAILY_OPEN_SIGNAL_STATE_PROXY",
+    )
+
+    assert bound["account_leg"] == {
+        "basis": "BASELINE_ACCOUNT_LIVE",
+        "compared_observations": 3,
+        "cumulative_return": bound["bridge"]["account_return"],
+        "series_schema": "ordered-date-return/1",
+        "series_sha256": _canonical_series_sha(
+            [
+                {"date": "2026-01-05", "return": "0.01"},
+                {"date": "2026-01-06", "return": "0"},
+                {"date": "2026-01-07", "return": "0.03"},
+            ]
+        ),
+        "window_end": "2026-01-07",
+        "window_observations": 3,
+        "window_start": "2026-01-05",
+    }
+    assert bound["bridge"]["account_basis"] == "BASELINE_ACCOUNT_LIVE"
+    assert bound["bridge"]["model_basis"] == "DAILY_OPEN_SIGNAL_STATE_PROXY"
+    assert row["bridge"].get("account_basis") is None  # the input is not mutated
+
+
+def test_bridge_account_return_off_the_governed_window_is_refused() -> None:
+    # The Grizzly/TT shape: the bridge carries an account return that is not the
+    # governed series compounded over its own window.
+    rows = _account_rows(
+        "grizzlybears-vtma",
+        ("2026-01-05", "0.01"),
+        ("2026-01-06", "0.02"),
+        ("2026-01-07", "0.03"),
+    )
+    row = _bridge_row("grizzlybears-vtma", 1.01 * 1.02 * 1.03 - 1 + 0.0023)
+
+    with pytest.raises(
+        attribution.ReturnAttributionError,
+        match="account return differs from the governed account-live series",
+    ):
+        attribution.with_account_leg(
+            row,
+            rows,
+            strategy_id="grizzlybears-vtma",
+            accepted_as_of=date(2026, 1, 31),
+            model_basis="DAILY_OPEN_SIGNAL_STATE_PROXY",
+        )
+
+
+def test_policy_unavailable_bridge_keeps_its_closed_key_set() -> None:
+    rows = _account_rows(
+        "p123-ai-factor", ("2026-01-05", "0.008"), ("2026-01-07", "0.015")
+    )
+    row = {
+        "bridge": {
+            "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+            "policy_evidence": {"authority_issue": 303},
+            "account_return": 1.008 * 1.015 - 1,
+            "model_return": None,
+            "gap_pp": None,
+            "categories": [],
+        },
+        "observed_end": "2026-01-07",
+        "observed_start": "2026-01-05",
+        "strategy_id": "p123-ai-factor",
+    }
+
+    bound = attribution.with_account_leg(
+        row,
+        rows,
+        strategy_id="p123-ai-factor",
+        accepted_as_of=date(2026, 1, 31),
+        model_basis=None,
+    )
+
+    # The report validates this bridge by exact key set.
+    assert set(bound["bridge"]) == set(row["bridge"])
+    assert (
+        bound["account_leg"]["cumulative_return"] == bound["bridge"]["account_return"]
+    )

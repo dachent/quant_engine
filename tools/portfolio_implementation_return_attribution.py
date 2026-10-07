@@ -30,8 +30,10 @@ import portfolio_implementation_reconciliation as reconciliation
 import provider_ledger
 
 
-SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.0"
+#: Version 2 adds the governed account leg (QC-1 N66).  A version-1 contract is
+#: sealed: it keeps its bytes and the report reads it by its declared window.
+SCHEMA_VERSION: Final = 2
+BUILDER_VERSION: Final = "1.3.0"
 UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = (
     reconciliation.UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT
 )
@@ -857,7 +859,7 @@ def _ai_execution_shortfall(
     }
 
 
-def ai_attribution(
+def _ai_attribution(
     *,
     p123_root: Path,
     ibkr_catalog: Mapping[str, Any],
@@ -1248,7 +1250,7 @@ def _grizzly_actual_ledger_return(
     return (cash + quantity * prices[end]["Close"]) / 50_000.0 - 1.0
 
 
-def grizzly_attribution(
+def _grizzly_attribution(
     *,
     signals: Path,
     market_data: Path,
@@ -1789,7 +1791,7 @@ def _tt_broker_returns(
     ]
 
 
-def tt_attribution(
+def _tt_attribution(
     *,
     workbook: Path,
     source_manifest_path: Path,
@@ -2176,6 +2178,117 @@ def tt_attribution(
         "strategy_id": "tt-portfolio",
         "verification": "VERIFIED_WITH_DECLARED_PUBLIC_PRICE_PROXY",
     }
+
+
+def with_account_leg(
+    row: Mapping[str, Any],
+    ledger_rows: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str,
+    accepted_as_of: date,
+    model_basis: str | None,
+) -> dict[str, Any]:
+    """Return the strategy row with its governed account leg and basis labels.
+
+    The bridge's account return must be the governed account-live series
+    compounded over the row's declared window (closure-matrix B2: one account
+    return per account and window).  The bridge's own model and method residual
+    stay as they are; they are labelled, not folded into the account figure.
+    """
+
+    bridge = dict(row["bridge"])
+    leg = reconciliation.account_leg(
+        ledger_rows,
+        strategy_id=strategy_id,
+        accepted_as_of=accepted_as_of,
+        window_start=str(row["observed_start"]),
+        window_end=str(row["observed_end"]),
+        figure=float(bridge["account_return"]),
+        compared_observations=0,
+        error=ReturnAttributionError,
+    )
+    # An attribution bridge states no date count of its own; the figure was
+    # verified over every governed date in its window, so the two counts agree.
+    leg["compared_observations"] = leg["window_observations"]
+    if bridge.get("status") == reconciliation.UNAVAILABLE_POLICY_NOT_ADMITTED:
+        return {**row, "account_leg": leg}
+    bridge["account_basis"] = reconciliation.ACCOUNT_LEG_BASIS
+    if model_basis is not None:
+        bridge["model_basis"] = model_basis
+    return {**row, "account_leg": leg, "bridge": bridge}
+
+
+def ai_attribution(
+    *,
+    p123_root: Path,
+    ibkr_catalog: Mapping[str, Any],
+    xml_paths: Sequence[Path],
+    ledger: Mapping[str, Any],
+    accepted_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return with_account_leg(
+        _ai_attribution(
+            p123_root=p123_root,
+            ibkr_catalog=ibkr_catalog,
+            xml_paths=xml_paths,
+            ledger=ledger,
+            accepted_as_of=accepted_as_of,
+            provider_return_policy=provider_return_policy,
+        ),
+        ledger.get("strategy_returns", []),
+        strategy_id="p123-ai-factor",
+        accepted_as_of=accepted_as_of,
+        model_basis="EXACT_PROVIDER_LIVE_RETURNS",
+    )
+
+
+def grizzly_attribution(
+    *,
+    signals: Path,
+    market_data: Path,
+    schwab: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+    accepted_as_of: date,
+) -> dict[str, Any]:
+    return with_account_leg(
+        _grizzly_attribution(
+            signals=signals,
+            market_data=market_data,
+            schwab=schwab,
+            ledger=ledger,
+            accepted_as_of=accepted_as_of,
+        ),
+        ledger.get("strategy_returns", []),
+        strategy_id="grizzlybears-vtma",
+        accepted_as_of=accepted_as_of,
+        model_basis="DAILY_OPEN_SIGNAL_STATE_PROXY",
+    )
+
+
+def tt_attribution(
+    *,
+    workbook: Path,
+    source_manifest_path: Path,
+    market_data: Sequence[Path],
+    schwab: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+    accepted_as_of: date,
+) -> dict[str, Any]:
+    return with_account_leg(
+        _tt_attribution(
+            workbook=workbook,
+            source_manifest_path=source_manifest_path,
+            market_data=market_data,
+            schwab=schwab,
+            ledger=ledger,
+            accepted_as_of=accepted_as_of,
+        ),
+        ledger.get("strategy_returns", []),
+        strategy_id="tt-portfolio",
+        accepted_as_of=accepted_as_of,
+        model_basis="EXACT_WORKBOOK_MODEL_RETURNS",
+    )
 
 
 def build_attribution(
