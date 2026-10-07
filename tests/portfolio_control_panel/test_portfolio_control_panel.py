@@ -569,6 +569,11 @@ def _frozen_financial_receipt(
     return _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa_dir)
 
 
+# Strategy versions a test binds to the real producer's identities (see
+# ``real_history_versions``); the default is the synthetic ``synthetic-version:<id>``.
+_STRATEGY_VERSION_OVERRIDES: dict[str, str] = {}
+
+
 def _canonical_return_series_fixture() -> dict[str, Any]:
     """Bind the seven active test strategies to one canonical live window.
 
@@ -587,7 +592,9 @@ def _canonical_return_series_fixture() -> dict[str, Any]:
     by_series_id: dict[str, dict[str, Any]] = {}
     for index, series_id in enumerate(ACTIVE_STRATEGY_NAMES):
         strategy_id = ACTIVE_STRATEGY_IDS[index]
-        strategy_version = f"synthetic-version:{strategy_id}"
+        strategy_version = _STRATEGY_VERSION_OVERRIDES.get(
+            strategy_id, f"synthetic-version:{strategy_id}"
+        )
         rows = [
             {
                 "date": observed_start,
@@ -4385,27 +4392,54 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 7
 
 
+_PRODUCER_HYBRID_FIELDS = (
+    "backtest_version_ref",
+    "history_compatibility_reason",
+    "history_compatibility_status",
+    "history_version_ref",
+    "live_plus_backtest_reason",
+    "live_plus_backtest_status",
+    "version_compatibility_reason",
+    "version_compatibility_status",
+    "version_disposition",
+    "version_ref",
+)
+
+
 def _real_shape_partial_hybrid_report(
-    inputs: dict[str, Path], registry_status: str, *, second_eligible: bool = False
+    inputs: dict[str, Path],
+    registry_status: str,
+    *,
+    second_eligible: bool = False,
+    producer_row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Report rows in the real registry shape: live-path ref, history model id."""
+    """Report rows in the real registry shape: live-path ref, history model id.
+
+    ``producer_row`` is a strategy row the real report builder emitted; its hybrid
+    fields replace the hand-written ones, so the panel reads what the producer wrote.
+    """
 
     report = _report()
     report["baseline"] = inputs["baseline_identity"]
-    report["strategy_summary"][0].update(
-        {
-            "backtest_version_ref": "synthetic-version:p123-ai-factor",
-            "history_compatibility_reason": "HASH_BOUND_EXACT_VERSION",
-            "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
-            "history_version_ref": "synthetic-version:p123-ai-factor",
-            "live_plus_backtest_reason": "History is accepted for inference.",
-            "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
-            "version_compatibility_reason": "Registry live path is bound.",
-            "version_compatibility_status": registry_status,
-            "version_disposition": "REFERENCE_ONLY",
-            "version_ref": "accepted-live-path:" + "5" * 64,
-        }
-    )
+    if producer_row is not None:
+        report["strategy_summary"][0].update(
+            {field: producer_row[field] for field in _PRODUCER_HYBRID_FIELDS}
+        )
+    else:
+        report["strategy_summary"][0].update(
+            {
+                "backtest_version_ref": "synthetic-version:p123-ai-factor",
+                "history_compatibility_reason": "HASH_BOUND_EXACT_VERSION",
+                "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+                "history_version_ref": "synthetic-version:p123-ai-factor",
+                "live_plus_backtest_reason": "History is accepted for inference.",
+                "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+                "version_compatibility_reason": "Registry live path is bound.",
+                "version_compatibility_status": registry_status,
+                "version_disposition": "REFERENCE_ONLY",
+                "version_ref": "accepted-live-path:" + "5" * 64,
+            }
+        )
     if second_eligible:
         # A separately proven strategy keeps the hybrid mode published, so the
         # per-strategy backtest checks run for the strategy under test, which
@@ -4444,6 +4478,7 @@ def _publish_real_shape_partial_hybrid(
     registry_status: str,
     *,
     second_eligible: bool = False,
+    producer_row: dict[str, Any] | None = None,
 ) -> Path:
     report_root = tmp_path / "real-shape-reporting"
     _publish_report(
@@ -4451,7 +4486,10 @@ def _publish_real_shape_partial_hybrid(
         tmp_path / "real-shape-portfolio-report-data.json",
         _with_hwm_summary(
             _real_shape_partial_hybrid_report(
-                inputs, registry_status, second_eligible=second_eligible
+                inputs,
+                registry_status,
+                second_eligible=second_eligible,
+                producer_row=producer_row,
             ),
             inputs["freshness"],
             _panel_baseline_catalog(),
@@ -4504,6 +4542,79 @@ def test_real_registry_shape_completes_the_panel_with_hybrid_eligibility(
     ] == [(STRATEGY_NAMES[0], "PROVEN_COMPATIBLE", "synthetic-version:p123-ai-factor")]
     assert len(gate["blocked_strategies"]) == 6
     assert "LIVE_PLUS_BACKTEST" in data["dependence_modes"]
+
+
+@pytest.fixture
+def real_history_versions(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Version the weekly and evidence surfaces carry for the strategy under test.
+
+    Requested before ``inputs`` so those fixtures are built with the model identity
+    the real history contract emits instead of ``synthetic-version:<id>``.
+    """
+
+    namespace = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py")
+    )
+    live_version = str(namespace["_real_path_contracts"]()[1])
+    monkeypatch.setitem(_STRATEGY_VERSION_OVERRIDES, "p123-ai-factor", live_version)
+    return live_version
+
+
+def test_real_report_producer_rows_complete_the_panel_with_hybrid_eligibility(
+    real_history_versions: str,
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report builder's own rows, from the real history-contract path, feed the panel.
+
+    The hybrid fields are not written here: the real report builder reads a packaged
+    dependence source whose history coverage admits exact-version prehistory, binds
+    the live-path registry row, and the panel candidate build consumes its row.
+    """
+
+    namespace = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py")
+    )
+    rows, _report_data = namespace["_real_path_report"](
+        tmp_path / "producer",
+        monkeypatch,
+        coverage=namespace["_real_path_coverage"](
+            namespace["_real_path_contracts"]()[1]
+        ),
+    )
+    producer_row = rows["strategy-1"]
+    assert producer_row["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert producer_row["history_version_ref"] == real_history_versions
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "PROVEN_COMPATIBLE", producer_row=producer_row
+    )
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = data["hybrid_mode_gate"]
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (row["strategy_name"], row["compatibility_status"], row["version_ref"])
+        for row in gate["eligible_strategies"]
+    ] == [
+        (
+            STRATEGY_NAMES[0],
+            "PROVEN_COMPATIBLE",
+            producer_row["history_version_ref"],
+        )
+    ]
 
 
 def test_unbound_registry_beside_accepted_history_still_refuses_the_panel(

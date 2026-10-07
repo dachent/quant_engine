@@ -3372,6 +3372,336 @@ def test_equal_registry_ref_binds_without_a_live_start(
     assert rows["strategy-1"]["version_disposition"] == "REFERENCE_ONLY"
 
 
+# --- the real history-contract path (no mock of ``_history_contract``) ------------
+#
+# The tests above replace ``_history_contract`` with hand-written rows, so a producer
+# that stopped emitting a field the registry bind consumes (``account_live_start``)
+# left them green.  These build a packaged dependence source through the real
+# builders, with history coverage in the shape the layered-history builder emits, and
+# let the real ``_history_contract`` read it.
+
+REAL_PATH_STRATEGY_ID = "grizzlybears-vtma"
+REAL_PATH_SERIES_ID = "GrizzlyBears VTMA"
+
+
+def _real_path_contracts() -> tuple[dict[str, Any], str]:
+    policy = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-dependence-policy-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    live_version = next(
+        row["strategy_version"]
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["strategy_id"] == REAL_PATH_STRATEGY_ID
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    )
+    return policy, live_version
+
+
+def _real_path_coverage(
+    live_version: str,
+    *,
+    live_start: str = "2026-01-01",
+    prehistory_end: str | None = "2025-12-31",
+    prehistory_version: str | None = None,
+) -> list[dict[str, Any]]:
+    def segment(
+        layer: str, admission: str, start: str, end: str, version: str
+    ) -> dict[str, Any]:
+        return {
+            "calendar": "WEEKDAY_SESSION",
+            "evidence_layer": layer,
+            "frequency": "DAILY",
+            "gap_disposition": "NO_UNEXPLAINED_GAP",
+            "mode_admission": admission,
+            "observed_end": end,
+            "observed_start": start,
+            "return_observations": 3912 if layer == "BACKTEST" else 2,
+            "segment_id": f"{layer.lower()}-{start}",
+            "sha256": "d" * 64,
+            "source_generation_id": "e" * 64,
+            "source_id": f"synthetic-{layer.lower()}",
+            "strategy_version": version,
+        }
+
+    segments = [
+        segment(
+            "ACCOUNT_LIVE",
+            "INCLUDE_SELECTED_LIVE",
+            live_start,
+            "2026-01-02",
+            live_version,
+        )
+    ]
+    if prehistory_end is not None:
+        segments.append(
+            segment(
+                "BACKTEST",
+                "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                "2009-04-20",
+                prehistory_end,
+                prehistory_version or live_version,
+            )
+        )
+    return [
+        {
+            "series_id": REAL_PATH_SERIES_ID,
+            "strategy_id": REAL_PATH_STRATEGY_ID,
+            "segments": segments,
+        }
+    ]
+
+
+def _real_path_history_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coverage: list[dict[str, Any]],
+) -> tuple[Path, Any, dict[str, Any]]:
+    namespace = runpy.run_path(
+        str(
+            REPOSITORY_ROOT
+            / "tests/portfolio_analytics/test_portfolio_current_dependence.py"
+        )
+    )
+    current = namespace["current"]
+    selected = namespace["_unmocked_fixture"](
+        tmp_path / "dependence", monkeypatch, coverage_strategies=coverage
+    )
+    built = current.build_source(
+        contract_path=selected["contract_path"],
+        policy_path=selected["policy_path"],
+        history_generation_root=selected["history_root"],
+        allocation_generation_root=selected["allocation_root"],
+        evaluated_on=date(2026, 1, 3),
+    )
+    source = tmp_path / "dependence" / built["receipt"]["bundle_id"]
+    source.mkdir(parents=True)
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "returns.csv",
+        "segments.csv",
+        "spec.json",
+    ):
+        (source / name).write_bytes(built[name])
+    helpers = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests/core/mvp2_consumers_fixture.py")
+    )
+    helpers["_install_dynamic_dependence_loader"](monkeypatch, reporter, current)
+    return source / "dependence-source.json", current, selected
+
+
+def _real_path_names() -> list[str]:
+    policy, _ = _real_path_contracts()
+    others = [
+        str(row["series_id"])
+        for row in policy["series"]
+        if row["series_id"] != REAL_PATH_SERIES_ID
+    ]
+    return [
+        REAL_PATH_SERIES_ID,
+        *others,
+        "Synthetic Strategy 8",
+        "Synthetic Strategy 9",
+    ]
+
+
+def _real_path_catalog(*, live_start: str = "2026-01-01") -> dict[str, Any]:
+    catalog = _real_shape_catalog(live_start=live_start)
+    for strategy, name in zip(catalog["strategies"], _real_path_names(), strict=True):
+        strategy["name"] = name
+    return catalog
+
+
+def _real_path_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    coverage: list[dict[str, Any]],
+    catalog: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build the report through the real ``_history_contract`` and ``_strategies``."""
+
+    source_path, _current, selected = _real_path_history_source(
+        tmp_path, monkeypatch, coverage
+    )
+    baseline_root = _published_baseline(
+        tmp_path, _real_path_catalog() if catalog is None else catalog
+    )
+    real_history_contract = reporter._history_contract
+
+    def bound_history_contract(*args: Any, **kwargs: Any) -> Any:
+        # Pass-through: the product contract and policy the packaged source was
+        # built against are bound only for the duration of the real call, because
+        # the synthetic baseline binds its own product contract for the rest of the
+        # report.  The producer's output is not substituted.
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", selected["contract_path"]
+            )
+            scoped.setattr(reporter, "DEPENDENCE_POLICY", selected["policy_path"])
+            return real_history_contract(*args, **kwargs)
+
+    monkeypatch.setattr(reporter, "_history_contract", bound_history_contract)
+    report, _, _ = reporter.build_report_data(
+        baseline_root, history_contract_path=source_path
+    )
+    return {item["strategy_id"]: item for item in report["strategy_summary"]}, report
+
+
+def test_real_history_contract_emits_the_live_start_the_registry_bind_consumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, live_version = _real_path_contracts()
+    source_path, _current, selected = _real_path_history_source(
+        tmp_path,
+        monkeypatch,
+        _real_path_coverage(live_version),
+    )
+    monkeypatch.setattr(
+        reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", selected["contract_path"]
+    )
+    monkeypatch.setattr(reporter, "DEPENDENCE_POLICY", selected["policy_path"])
+
+    rows, _identity = reporter._history_contract(
+        source_path,
+        portfolio_as_of="2026-01-03",
+        strategy_names=set(_real_path_names()),
+    )
+
+    row = rows[REAL_PATH_SERIES_ID]
+    assert row["history_status"] == "ACCEPTED_VERSION_COMPATIBLE_PREHISTORY"
+    assert row["strategy_version"] == live_version
+    assert row["backtest_observations"] == 3912
+    assert row["account_live_start"] == "2026-01-01"
+
+
+def test_real_history_to_report_binds_the_live_path_registry_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GrizzlyBears chain: coverage -> history contract -> registry bind."""
+
+    _, live_version = _real_path_contracts()
+    rows, _report = _real_path_report(
+        tmp_path, monkeypatch, coverage=_real_path_coverage(live_version)
+    )
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+    assert first["history_version_ref"] == live_version
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "EVIDENCED"
+    # The strategies the history does not admit stay live-only and unresolved.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+
+
+def test_real_history_whose_live_start_differs_from_the_registry_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, live_version = _real_path_contracts()
+    # The registry's live window starts on 2026-01-02, the history's on 2026-01-01.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"not bound to the version registry: strategy-1 \(UNRESOLVED\)",
+    ):
+        _real_path_report(
+            tmp_path,
+            monkeypatch,
+            coverage=_real_path_coverage(live_version),
+            catalog=_real_path_catalog(live_start="2026-01-02"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "UNAVAILABLE"),
+        ("evidence_layer", "PROVIDER_LIVE"),
+        ("version_ref", "accepted-live-path:" + "6" * 64),
+    ],
+)
+def test_real_history_needs_an_evidenced_account_live_boundary_carrying_the_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    _, live_version = _real_path_contracts()
+    catalog = _real_path_catalog()
+    catalog["strategy_version_catalog"]["strategies"][0]["live_boundary"][field] = value
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"not bound to the version registry: strategy-1 \(UNRESOLVED\)",
+    ):
+        _real_path_report(
+            tmp_path,
+            monkeypatch,
+            coverage=_real_path_coverage(live_version),
+            catalog=catalog,
+        )
+
+
+@pytest.mark.parametrize("case", ["no-prehistory-before-live", "other-version"])
+def test_real_history_without_admitted_prehistory_stays_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _, live_version = _real_path_contracts()
+    coverage = (
+        _real_path_coverage(live_version, prehistory_end="2026-01-01")
+        if case == "no-prehistory-before-live"
+        else _real_path_coverage(
+            live_version, prehistory_version="grizzlybears-vtma-other-model:" + "9" * 64
+        )
+    )
+    rows, _report = _real_path_report(tmp_path, monkeypatch, coverage=coverage)
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+    assert first["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "UNAVAILABLE"
+
+
+def test_real_history_report_rows_drive_the_panel_hybrid_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer rows from the real history path, not hand-built, reach the panel gate."""
+
+    _, live_version = _real_path_contracts()
+    rows, _report = _real_path_report(
+        tmp_path, monkeypatch, coverage=_real_path_coverage(live_version)
+    )
+    panel_spec = importlib.util.spec_from_file_location(
+        "portfolio_control_panel_for_real_history_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py",
+    )
+    assert panel_spec is not None and panel_spec.loader is not None
+    panel = importlib.util.module_from_spec(panel_spec)
+    sys.modules[panel_spec.name] = panel
+    try:
+        panel_spec.loader.exec_module(panel)
+        gate = panel._hybrid_mode_gate(
+            [rows[key] for key in sorted(rows) if key.startswith("strategy-")]
+        )
+    finally:
+        sys.modules.pop(panel_spec.name, None)
+
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (item["strategy_id"], item["compatibility_status"], item["version_ref"])
+        for item in gate["eligible_strategies"]
+    ] == [("strategy-1", "PROVEN_COMPATIBLE", live_version)]
+
+
 def test_transaction_without_amount_remains_explicitly_unavailable(
     tmp_path: Path,
 ) -> None:

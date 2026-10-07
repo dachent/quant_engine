@@ -9,6 +9,7 @@ import io
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -615,7 +616,15 @@ def _unmocked_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     return_shift: str = "0",
+    coverage_strategies: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Build one synthetic history and allocation authority through the real builders.
+
+    ``coverage_strategies`` are history coverage rows in the shape the layered
+    history builder emits (``portfolio_target_series``: ``series_id`` plus
+    ``segments``); the packaged coverage file is hash-bound to them.
+    """
+
     authority_root = tmp_path / "authority"
     contracts = authority_root / "contracts"
     schemas = authority_root / "schemas" / "portfolio"
@@ -742,6 +751,11 @@ def _unmocked_fixture(
     )
     history_files["coverage.json"] = canonical_json_bytes(
         {"fixture": "synthetic-current-dependence"}
+        if coverage_strategies is None
+        else {
+            "fixture": "synthetic-current-dependence",
+            "strategies": [dict(row) for row in coverage_strategies],
+        }
     )
     output_authority = {
         name: {"sha256": _sha256(content), "size_bytes": len(content)}
