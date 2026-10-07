@@ -337,8 +337,13 @@ def test_t5c_custody_governed_builder_and_verifier_keep_generic_opening_flow(
     )
 
 
-def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path):
-    """Native constructor preserves exact pre-epoch basis under caller contexts."""
+def _t5c_constructor_world(tmp_path):
+    """The synthetic world the native capital-input constructor reads.
+
+    The pre-epoch deposit carries 32 significant digits, wider than the ambient
+    28-digit context.  Returns the constructor module, its keyword arguments, the
+    epoch row and the deposit source row.
+    """
     from quant_engine.core import GenerationManifest
     from quant_engine.core.contracts import canonical_json_bytes
     from quant_engine.core.publication import (
@@ -512,6 +517,15 @@ def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path
         "requested_as_of": epoch_document["calculation_cutoff_date"],
         "evaluated_on": epoch_document["calculation_cutoff_date"],
     }
+
+    return cli, kwargs, epoch, deposit
+
+
+def test_t5c_custody_input_constructor_precision_is_context_independent(tmp_path):
+    """Native constructor preserves exact pre-epoch basis under caller contexts."""
+    from quant_engine.core.contracts import canonical_json_bytes
+
+    cli, kwargs, epoch, _deposit = _t5c_constructor_world(tmp_path)
 
     results = []
     for precision in (28, 80):
@@ -2266,3 +2280,65 @@ def test_missing_or_invalid_evidence_never_yields_a_capital_value(mutation, reas
     mutation(case)
     with pytest.raises(capital.CapitalValidationError, match=reason):
         capital.calculate_invested_capital(**case)
+
+
+def test_verifier_accepts_the_native_constructors_wide_account_ledger_opening(
+    tmp_path,
+):
+    """Astra rg4 class sweep: the verifier adds at the precision the producer used.
+
+    The native constructor (``build_capital_input``) adds an account's selected owner
+    capital at ``_capital_precision`` and publishes the exact opening amount.  The
+    verifier re-added the same components in the ambient 28-digit context, so a
+    32-digit deposit was rejected as an arithmetic mismatch.
+    """
+
+    from quant_engine.core.contracts import canonical_json_bytes
+
+    cli, kwargs, epoch, deposit = _t5c_constructor_world(tmp_path)
+    generation, _locators = cli.build_input_generation(**kwargs)
+    opening = next(
+        row
+        for row in generation["opening_basis"]
+        if row["account_id"] == epoch["account_id"]
+    )
+    assert opening["amount"] == "100.00000000000000000000000000002"
+
+    components = capital._verify_account_ledger_opening(
+        opening,
+        {
+            "account_id": epoch["account_id"],
+            "effective_start": epoch["effective_start"],
+        },
+        {capital._digest(deposit): deposit},
+        capital._load_flow_classification_rules(),
+        {epoch["account_id"]},
+    )
+
+    assert components == {capital._digest(deposit)}
+    assert canonical_json_bytes(generation)
+
+
+def test_equal_and_opposite_wide_transfer_legs_are_internal():
+    """Unary minus rounds: ``-native`` is not the opposite leg of a wide amount."""
+
+    rules = capital._load_flow_classification_rules()
+    wide = "100.000000000000000000000000000001"
+
+    def leg(record_id: str, account_id: str, value: str) -> dict:
+        return {
+            "record_id": record_id,
+            "account_id": account_id,
+            "strategy_id": None,
+            "flow_type": "ACCOUNT_TRANSFER",
+            "event_date": "2026-01-02",
+            "amount": {"value": value, "currency": "USD", "status": "AVAILABLE"},
+        }
+
+    dispositions = capital._account_flow_dispositions(
+        [leg("out", "account-a", "-" + wide), leg("in", "account-b", wide)],
+        rules,
+        {"account-a", "account-b"},
+    )
+
+    assert dispositions == {"out": "INTERNAL", "in": "INTERNAL"}
