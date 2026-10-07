@@ -160,3 +160,22 @@ def test_capital_coverage_bounds_schema_is_closed() -> None:
     missing = json.loads(json.dumps(block))
     del missing["lines"][0]["coverage_end"]
     assert _errors("capital_coverage_bounds", missing)
+
+
+def _versioned_errors(version: int, **sections: Any) -> list[str]:
+    validator = Draft202012Validator(SECTION_SCHEMA, format_checker=FormatChecker())
+    document = {"report_schema_version": version, **sections}
+    return [error.message[:120] for error in validator.iter_errors(document)]
+
+
+def test_capital_coverage_bounds_exists_only_at_report_schema_version_3() -> None:
+    """N56: the block is a version-3 addition like the other N56 report fields; a
+    version-1 or version-2 report that carries it is not a valid report."""
+
+    block = _coverage_block()
+
+    assert _versioned_errors(3, capital_coverage_bounds=block) == []
+    assert _versioned_errors(3) == []
+    for version in (1, 2):
+        assert _versioned_errors(version) == []
+        assert _versioned_errors(version, capital_coverage_bounds=block), version

@@ -1840,6 +1840,10 @@
           "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
         }
       }
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"enum": [1, 2]}}, "required": ["report_schema_version"]},
+      "then": {"not": {"required": ["capital_coverage_bounds"]}}
     }
   ]
 }
