@@ -2374,9 +2374,7 @@ def test_a_truthful_receipt_beside_a_disclosed_unproven_flow_path_passes(
     """
 
     status = "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-    findings = run(
-        build(tmp_path / "ok", Spec(report=[_unproven_flow_path(status)]))
-    )
+    findings = run(build(tmp_path / "ok", Spec(report=[_unproven_flow_path(status)])))
     assert not [f for f in findings if f.check_id == "flows.admission_consistency"]
 
 
