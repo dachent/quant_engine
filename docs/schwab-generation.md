@@ -16,7 +16,9 @@ or credential surface. Current web positions are normalized from a previously
 captured, hash-bound response. Cash and money-market rows are excluded as sweep
 vehicles. External account identifiers are mapped to internal IDs and are not
 written to the normalized snapshot. If current account balances are absent,
-they remain `UNAVAILABLE`.
+they remain `UNAVAILABLE`, and the coverage known gap names the snapshot and the
+number of accounts without a liquidation value; it never states that account
+balances are unavailable in general, because downstream gates copy that text.
 
 ## Web capture methods and boundaries
 

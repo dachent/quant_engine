@@ -1982,7 +1982,12 @@ def build_generation(
             else ()
         ),
         *(
-            ("current account balances remain unavailable",)
+            (
+                f"Schwab current snapshot ({current_transport}): liquidation value "
+                f"is not available for "
+                f"{len(current_accounts) - current_balance_available_count} of "
+                f"{len(current_accounts)} accounts",
+            )
             if current_accounts is not None
             and current_balance_available_count < len(current_accounts)
             else ()

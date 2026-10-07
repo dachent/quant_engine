@@ -2349,6 +2349,48 @@ def test_bad_fixture_fires_and_good_does_not(tmp_path: Path, case: str) -> None:
     assert fired, [(f.check_id, f.klass, f.entity) for f in bad]
 
 
+def _unproven_flow_path(disclosed: str | None) -> Mutator:
+    """Account A1's flows coverage row is unproven; its MWR rows disclose ``disclosed``."""
+
+    def mutate(report: dict[str, Any]) -> None:
+        report["fact_coverage_matrix"][0]["status"] = (
+            "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+        )
+        for row in report["twr_mwr"]:
+            if row.get("account_id") == "A1":
+                row["mwr_flow_path_status"] = disclosed
+
+    return mutate
+
+
+def test_a_truthful_receipt_beside_a_disclosed_unproven_flow_path_passes(
+    tmp_path: Path,
+) -> None:
+    """The receipt's COMPLETE and the flow-path status are two claims (R1 profile).
+
+    mwr_coverage_status is the manifest receipt, copied verbatim; the report's own
+    flows coverage status is published beside it as mwr_flow_path_status.  A COMPLETE
+    receipt whose row discloses the unproven path is truthful, not BLOCKER_AUTHORITY.
+    """
+
+    status = "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    findings = run(build(tmp_path / "ok", Spec(report=[_unproven_flow_path(status)])))
+    assert not [f for f in findings if f.check_id == "flows.admission_consistency"]
+
+
+@pytest.mark.parametrize(
+    "disclosed", [None, "OBSERVED_NOT_COMPLETENESS_PROOF"], ids=["absent", "mismatch"]
+)
+def test_a_complete_receipt_without_the_matching_disclosure_still_blocks(
+    tmp_path: Path, disclosed: str | None
+) -> None:
+    findings = run(
+        build(tmp_path / "bad", Spec(report=[_unproven_flow_path(disclosed)]))
+    )
+    fired = [f for f in findings if f.check_id == "flows.admission_consistency"]
+    assert [f.klass for f in fired] == [checks.BLOCKER_AUTHORITY]
+
+
 def test_expected_regression_fires_on_mismatch(tmp_path: Path) -> None:
     gen_dir = build(tmp_path)
     expected = [
@@ -5780,3 +5822,146 @@ def test_c2_c4_descriptive_historical_role_does_not_exempt_current_lens(tmp_path
     ]
     assert dated
     assert all(f.klass == checks.BLOCKER_AUTHORITY for f in dated)
+
+
+_LEDGER_IDENTITY = {
+    "as_of_date": CUTOFF,
+    "catalog_sha256": "a" * 64,
+    "catalog_size_bytes": 100,
+    "generation_id": "b" * 64,
+    "manifest_sha256": "c" * 64,
+    "manifest_size_bytes": 200,
+}
+
+
+def _schema_four_freshness(*extra: Mutator) -> list[Mutator]:
+    return [
+        _set(("assessment_schema_version",), 4),
+        _set(("evaluated_on",), "2026-09-23"),
+        _set(("provider_ledger",), dict(_LEDGER_IDENTITY)),
+        *extra,
+    ]
+
+
+def _schema_four_findings(tmp_path: Path, mutators: list[Mutator]) -> list[Any]:
+    return [
+        finding
+        for finding in run(build(tmp_path, Spec(freshness=mutators)))
+        if finding.check_id == "dates.freshness_vs_cutoff"
+        and "schema-4" in finding.message
+    ]
+
+
+def test_a_schema_four_freshness_bundle_with_its_ledger_at_the_cutoff_passes(
+    tmp_path: Path,
+) -> None:
+    assert _schema_four_findings(tmp_path, _schema_four_freshness()) == []
+
+
+def test_a_schema_four_freshness_bundle_without_its_ledger_identity_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: every consumer of a schema-4 bundle must require the identity."""
+
+    def drop(freshness: dict[str, Any]) -> None:
+        del freshness["provider_ledger"]
+
+    findings = _schema_four_findings(tmp_path, _schema_four_freshness(drop))
+
+    assert [(f.klass, f.entity) for f in findings] == [
+        (checks.BLOCKER_AUTHORITY, "freshness-health")
+    ]
+    assert "no provider ledger identity" in findings[0].message
+
+
+def test_a_schema_four_freshness_bundle_not_dated_at_the_cutoff_is_refused(
+    tmp_path: Path,
+) -> None:
+    findings = _schema_four_findings(
+        tmp_path,
+        _schema_four_freshness(
+            _set(("as_of_date",), "2026-09-23"),
+            _set(("assessments", 0, "evaluated_on"), "2026-09-23"),
+            # the bundle's own ledger identity is coherent with its stated date, so
+            # only the cutoff binding is in question
+            _set(("provider_ledger", "as_of_date"), "2026-09-23"),
+        ),
+    )
+
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+    assert "not dated at the data cutoff" in findings[0].message
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "ledger-null",
+        "ledger-empty",
+        "ledger-string",
+        "ledger-list",
+        "ledger-missing-field",
+        "ledger-extra-field",
+        "ledger-short-hash",
+        "ledger-nonhex-hash",
+        "ledger-bool-size",
+        "ledger-zero-size",
+        "ledger-bad-date",
+        "ledger-date-before-cutoff",
+        "ledger-date-after-evaluation",
+        "evaluated-missing",
+        "evaluated-null",
+        "evaluated-malformed",
+        "evaluated-before-cutoff",
+    ],
+)
+def test_a_schema_four_freshness_bundle_with_a_malformed_value_is_refused(
+    tmp_path: Path, case: str
+) -> None:
+    """Astra rg4: the identity and the execution clock are validated by value."""
+
+    def mutate(freshness: dict[str, Any]) -> None:
+        ledger = freshness["provider_ledger"]
+        if case == "ledger-null":
+            freshness["provider_ledger"] = None
+        elif case == "ledger-empty":
+            freshness["provider_ledger"] = {}
+        elif case == "ledger-string":
+            freshness["provider_ledger"] = "a-ledger"
+        elif case == "ledger-list":
+            freshness["provider_ledger"] = [dict(_LEDGER_IDENTITY)]
+        elif case == "ledger-missing-field":
+            del ledger["manifest_sha256"]
+        elif case == "ledger-extra-field":
+            ledger["note"] = "x"
+        elif case == "ledger-short-hash":
+            ledger["catalog_sha256"] = "a" * 63
+        elif case == "ledger-nonhex-hash":
+            ledger["generation_id"] = "Z" * 64
+        elif case == "ledger-bool-size":
+            ledger["catalog_size_bytes"] = True
+        elif case == "ledger-zero-size":
+            ledger["manifest_size_bytes"] = 0
+        elif case == "ledger-bad-date":
+            ledger["as_of_date"] = "2026-09-23garbage"
+        elif case == "ledger-date-before-cutoff":
+            ledger["as_of_date"] = "2026-09-16"
+        elif case == "ledger-date-after-evaluation":
+            ledger["as_of_date"] = "2026-09-24"
+        elif case == "evaluated-missing":
+            del freshness["evaluated_on"]
+        elif case == "evaluated-null":
+            freshness["evaluated_on"] = None
+        elif case == "evaluated-malformed":
+            freshness["evaluated_on"] = "2026-09-23T00:00"
+        else:
+            freshness["evaluated_on"] = "2026-09-16"
+
+    findings = _schema_four_findings(
+        tmp_path,
+        _schema_four_freshness(
+            mutate,
+        ),
+    )
+
+    assert findings, case
+    assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}, case

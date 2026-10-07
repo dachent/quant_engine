@@ -472,6 +472,20 @@
   // source's own reason token, and nothing is aggregated across data classes.
   const LEVERAGE_MAX_ROWS = 250;
 
+  // D6: the report labels each account row with its role.  A product account is the
+  // unmarked case; a reserve account or one with no current assignment is named
+  // beside the account so a history-only account cannot read as a current one.
+  const ACCOUNT_ROLE_NOTES = {
+    RESERVE: "Reserve account",
+    HISTORY_ONLY_NO_CURRENT_ASSIGNMENT: "History only · no current assignment",
+  };
+  function accountRoleNote(row) {
+    const role = row && row.account_role;
+    if (!role || role === "PRODUCT") return "";
+    const label = ACCOUNT_ROLE_NOTES[role] || humanStatus(role);
+    return `<span class="cell-secondary" data-account-role="${safe(role)}">${safe(label)}</span>`;
+  }
+
   function renderLeverageDisclosures() {
     const rows = Array.isArray(data.leverage_disclosures) ? data.leverage_disclosures : [];
     const status = $("#leverage-status");
@@ -517,7 +531,7 @@
         ? currencyExact(amount.value)
         : statusText(amount ? amount.status : "UNAVAILABLE");
       const account = [row.provider_id, row.account_id].filter(Boolean).join(" · ");
-      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}${accountRoleNote(row)}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
     });
     $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], detailRows);
     truncation.textContent = rows.length > shown.length
@@ -592,7 +606,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -691,14 +705,19 @@
     const captureDisclosure = `Artifact/provider capture date: ${safe(providerCaptureDate || "unavailable")}.`;
     $("#account-manifest-authority").textContent = ACCOUNT_MANIFEST_AUTHORITY_LABELS[authorityProfile]
       || "Unknown authority profile — non-releaseable";
-    // T5d-lite: a row opened from a provider capital anchor measures Invested, Net
+    // T5d-lite: a row opened from a provider capital anchor measures Capital in, Net
     // capital and Gain on the sleeve allocation basis (what entered the strategy
     // sleeve), not the deposits into the provider cash or wallet account.  The label
     // is an attribute and a legend sentence: every header and cell text stays what the
     // attended interaction QA compares.
     const sleeveRow = (row) => row.opening_basis === "PROVIDER_CAPITAL_ANCHOR";
     const hasSleeveRows = manifest.rows.some(sleeveRow);
-    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account.";
+    // Without a governed invested-capital result the sleeve allocation is the only
+    // capital figure on these rows, so the label says it is an allocation and that
+    // invested capital was not supplied (N36).
+    const governedCapitalSupplied = Boolean(data.invested_capital);
+    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account."
+      + (governedCapitalSupplied ? "" : " Governed invested capital was not supplied to this build, so this is an allocation, not invested capital.");
     const sleeveAttribute = (row) => (sleeveRow(row) ? ` title="${safe(sleeveTitle)}"` : "");
     const sleeveHeader = hasSleeveRows ? "Sleeve allocation basis for rows opened from a provider capital anchor" : "";
     const rows = manifest.rows.map((row) => {
@@ -706,16 +725,16 @@
       if (row.status !== "OK") {
         return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
-      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}${sleeveRow(row) ? `<span class="cell-secondary">sleeve allocation</span>` : ""}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
     });
     $("#account-manifest-table").innerHTML = tableMarkup([
       ["Account"], ["Strategy"], ["Observed interval"],
-      ["Invested", "numeric", sleeveHeader], ["Withdrawn", "numeric"], ["Net capital", "numeric", sleeveHeader],
+      ["Capital in", "numeric", sleeveHeader], ["Withdrawn", "numeric"], ["Net capital", "numeric", sleeveHeader],
       ["Current", "numeric"], ["Gain", "numeric", sleeveHeader],
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
     ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
-    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? " Rows opened from a provider capital anchor show Invested, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. Governed invested capital (the deposits) and the strategy cash line are reported separately." : ""}`;
+    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Capital in = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Capital in − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Capital in, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. ${governedCapitalSupplied ? "Governed invested capital (the deposits) and the strategy cash line are reported separately." : "Governed invested capital was not supplied to this build: on these rows Capital in is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;
     const notes = [
@@ -1503,7 +1522,7 @@
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
       return row.missing_interval_reason || "No missing interval declared";
     };
-    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span></th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
+    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span>${accountRoleNote(row)}</th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
     const matrixTable = $("#fact-coverage-matrix-table");
     matrixTable.dataset.totalRows = String(factMatrix.length);
     matrixTable.dataset.noPathRows = String(noPathRows.length);
@@ -1809,7 +1828,7 @@
 
   function init() {
     try {
-      if (!data || ![21, 22].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || ![21, 22, 23].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
       renderLimitations();
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);

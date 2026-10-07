@@ -23,7 +23,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import math
@@ -59,6 +59,12 @@ BLOCKERS = frozenset({BLOCKER_INVARIANT, BLOCKER_AUTHORITY, BLOCKER_REGRESSION})
 
 USD_TOLERANCE = Decimal("0.01")
 RETURN_TOLERANCE = Decimal("1e-8")
+# The custody producer adds money events exactly, at 100 significant digits
+# (``tools/portfolio_baseline._EXACT_PRECISION``); a check that compares a sum with a
+# producer value by equality must add at the same precision, not at the ambient 28. The
+# acceptance layer does not import product code, so the literal is pinned to the
+# producer's by ``tests/acceptance/test_n56_capital_labels.py``.
+EXACT_PRECISION = 100
 # C1 section 5-5: the published label of an epoch TWR that splices hash-bound HPR
 # gap spans, and the only span length the epoch HPR receipt admits.
 EPOCH_RETURN_LABEL = "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
@@ -211,6 +217,14 @@ class Context:
 
 
 # ------------------------------------------------------------------------ helpers
+
+
+def exact_sum(values: Iterable[Decimal]) -> Decimal:
+    """Add money at the producer's exact precision, whatever the ambient context is."""
+
+    with localcontext() as context:
+        context.prec = EXACT_PRECISION
+        return sum(values, Decimal(0))
 
 
 def to_decimal(value: Any) -> Decimal | None:
@@ -2109,7 +2123,16 @@ def check_publication_state(ctx: Context) -> Iterator[Finding]:
 
 
 def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
-    """A sealed manifest may not claim no known gaps while its payload fails gates."""
+    """A COMPLETE manifest's boundary must name every non-available fact it renders.
+
+    Ruling N6: a manifest cannot carry ``known_gaps`` and stay publishable, so the gaps are
+    disclosed in the payload ``fact_status`` and the manifest ``coverage.boundary`` text
+    ends ``; declared non-available facts: key=value, ...`` (or ``none``). The declared
+    entries come from ``fact_status`` only (FAILED, PARTIAL or UNAVAILABLE); readiness
+    NOT_READY / NOT_PERFORMED is ``identity.publication_state``'s. A WARNING, because the
+    gaps are rendered in the payload: this is a missing disclosure in the sealed identity,
+    not a false claim of availability.
+    """
 
     coverage = node(ctx.gen.manifest, "coverage")
     if not isinstance(coverage, Mapping):
@@ -2131,14 +2154,16 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
         )
         if value in ("FAILED", "PARTIAL", "UNAVAILABLE")
     }
-    declared.update(
-        {
-            k: v
-            for k, v in _readiness(ctx).items()
-            if v in ("NOT_READY", "NOT_PERFORMED")
-        }
+    boundary = str(coverage.get("boundary", ""))
+    marker = "declared non-available facts:"
+    _, found, tail = boundary.rpartition(marker)
+    named = {entry.strip() for entry in tail.split(",")} if found else set()
+    missing = sorted(
+        key
+        for key, value in declared.items()
+        if f"{key.split('.', 1)[1]}={value}" not in named
     )
-    if declared:
+    if missing:
         yield _finding(
             "identity.manifest_coverage_claim",
             WARNING,
@@ -2146,14 +2171,15 @@ def check_manifest_coverage_claim(ctx: Context) -> Iterator[Finding]:
             {
                 "coverage_status": status,
                 "known_gaps": gaps,
+                "missing": missing,
                 "payload_declares": declared,
             },
-            "known_gaps names every gap the payload declares",
+            "coverage.boundary names every non-available fact_status entry",
             GENERATION_MANIFEST,
-            "$.coverage.known_gaps",
+            "$.coverage.boundary",
             (),
-            "sealed manifest claims complete coverage with no known gaps while the "
-            "payload declares failed/partial facts or not-ready readiness",
+            "sealed manifest claims complete coverage but its boundary does not name "
+            f"the non-available facts the payload declares: {', '.join(missing)}",
         )
 
 
@@ -2979,6 +3005,79 @@ def _oracle_cutoff_dates(ctx: Context) -> dict[str, frozenset[date]] | None:
     return result
 
 
+def _disclosure_block_void(
+    ctx: Context, key: str, block_check: Callable[[Context], Iterable[Finding]]
+) -> bool:
+    """Whether a disclosure block draws any finding, which voids every downgrade (C3).
+
+    A block is believed whole or not at all: one entry, line or field the report, the
+    oracle or the block itself does not bear out voids the block, so no date anywhere in
+    the report is downgraded on its word.  ``block_check`` is the block's own check, so the
+    findings the validator publishes about the block and the grounds on which it is
+    refused are one set.  Cached per generation.
+    """
+
+    cached = ctx._cache.get(key)
+    if isinstance(cached, bool):
+        return cached
+    void = any(True for _ in block_check(ctx))
+    ctx._cache[key] = void
+    return void
+
+
+def _entry_binding_problem(ctx: Context, entry: BoundedSection) -> str | None:
+    """Why an entry does not bind to the entity it names, or ``None``.
+
+    The date and ``bounded_by`` of an entry are checked against the oracle, but nothing in
+    them says WHICH entity of the report the value basis of those strategies reaches, so a
+    schema-valid entry can be re-pointed at an unrelated strategy or account and downgrade
+    that entity's date.  A ``current_capital`` entry must name something the report's own
+    custody capital carries and bind to a bounded strategy: ``systematic`` rests on
+    SYSTEMATIC strategies the report carries, a strategy row names the one strategy it is
+    bounded by, and ``strategy:account`` names a member or cash line of that strategy.  A
+    ``strategy_summary`` entry names the one strategy that bounds it.
+
+    ``account_summary`` and ``decomposition_lenses`` entries are not bound here: declared
+    residual R9-FXB-ENTRY, see ``verified_value_basis_bound``.
+    """
+
+    if entry.section == "strategy_summary":
+        if entry.bounded_by != (entry.entity,):
+            return (
+                f"the strategy_summary entry for {entry.entity} is bounded by "
+                f"{list(entry.bounded_by)}, not by that strategy"
+            )
+        return None
+    if entry.section != "current_capital":
+        return None
+    carried: dict[str, set[str]] = {}
+    for row in rows(node(ctx.report, "custody_current_capital"), "strategies"):
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
+            continue
+        accounts = carried.setdefault(str(row.get("strategy_id")), set())
+        for group in ("members", "derived_cash"):
+            accounts.update(str(item.get("account_id")) for item in rows(row, group))
+    if entry.entity == "systematic":
+        missing = [name for name in entry.bounded_by if name not in carried]
+        return (
+            f"the Systematic total rests on strategies the report's custody capital "
+            f"does not carry as SYSTEMATIC: {missing}"
+            if missing
+            else None
+        )
+    strategy, _, account = entry.entity.partition(":")
+    if strategy not in carried:
+        return f"the entry names {entry.entity}, a strategy the report's custody capital does not carry"
+    if entry.bounded_by != (strategy,):
+        return (
+            f"the entry for {entry.entity} is bounded by {list(entry.bounded_by)}, "
+            f"not by {strategy}"
+        )
+    if account and account not in carried[strategy]:
+        return f"the entry names {entry.entity}, an account the strategy does not carry"
+    return None
+
+
 def verified_value_basis_bound(
     ctx: Context, section: str, entity: str, day: date
 ) -> BoundedSection | None:
@@ -2994,12 +3093,34 @@ def verified_value_basis_bound(
     account the bound says nothing about, and a real freshness blocker would be
     relabelled. A ``decomposition_lenses`` entry is exempt: its entity is
     ``{lens_id}:{evidence_mode}``, not an account id, and only the oracle check above
-    ties it to its strategies. ``None`` means the finding is unchanged.
+    ties it to its strategies.
+
+    DECLARED RESIDUAL R9-FXB-ENTRY (decision seat, rulings-round9-fx-entry-binding.md):
+    the block is not bound to which report entity its strategies reach for
+    ``account_summary`` (only to the block's own ``account_ids``) or
+    ``decomposition_lenses`` (only to the oracle date), and a ``strategy_summary`` or other
+    entry naming an entity the report does not carry is inert but does not void the block.
+    Only a hand-forged block reaches this; the producer derives entries and ``account_ids``
+    from the report rows and the ledger NAV mapping.  Closing it needs an oracle
+    account-to-strategy and lens-to-member map (backlog W32).  Pinned by
+    tests/acceptance/test_validate_alignment.py ``test_r9_residual_*``; those tests fail
+    when the limit is closed, and the residual register entry is removed in the same
+    change.
+
+    ``None`` means the finding is unchanged.
     """
 
     disclosure = value_basis_disclosure(ctx)
     oracle = _oracle_cutoff_dates(ctx)
-    if disclosure is None or disclosure.problems or oracle is None or day >= ctx.cutoff:
+    if (
+        disclosure is None
+        or disclosure.problems
+        or oracle is None
+        or day >= ctx.cutoff
+        or _disclosure_block_void(
+            ctx, "value_basis_block_void", check_value_basis_bound
+        )
+    ):
         return None
     declared = {item.strategy_id: item.account_ids for item in disclosure.strategies}
     for entry in disclosure.sections:
@@ -3118,6 +3239,8 @@ def check_value_basis_bound(ctx: Context) -> Iterator[Finding]:
                         f"the date {entry.day} is not the earliest effective_end "
                         f"({earliest}) over bounded_by"
                     )
+                else:
+                    reason = _entry_binding_problem(ctx, entry)
         if reason is not None:
             yield _finding(
                 BOUNDS_CHECK,
@@ -3129,6 +3252,671 @@ def check_value_basis_bound(ctx: Context) -> Iterator[Finding]:
                 f"$.{_BOUNDS_BLOCK}.bounded_sections[{entry.position}]",
                 _BOUNDS_DEFECTS,
                 f"the value-basis entry is inconsistent: {reason}",
+            )
+
+
+# N56 coverage bound: a custody cash line is dated by the end of the admissions it is
+# derived from, which can precede the cutoff without any FX value-basis bound (the
+# Matrixport sleeve allocations are admitted through the last subscription).  The report
+# states it in ``capital_coverage_bounds``: one ``lines`` entry per such cash line and
+# the ``current_capital`` dates each line explains.  The disclosure is necessary, never
+# sufficient: the oracle's ``date.strategy_cash.coverage_end`` row is the independent
+# anchor of the date (the report's own claims never are), the validator compares every
+# custody cash line's coverage end with it in both directions, and a date is downgraded
+# to NOT_READY only when the block, the report's own cash line and that row agree.
+# ``capital.coverage_bound`` blocks a block the report or the oracle does not bear out,
+# and one such finding voids every downgrade in the report.
+
+COVERAGE_BOUNDS_CHECK = "capital.coverage_bound"
+COVERAGE_END_METRIC = "date.strategy_cash.coverage_end"
+COVERAGE_END_CHECK = "expected.capital.strategy_cash.coverage_end"
+_COVERAGE_BLOCK = "capital_coverage_bounds"
+_COVERAGE_DEFECTS = ("N56",)
+_COVERAGE_REPORT_VERSION = 3
+_COVERAGE_RULE = "N56-COVERAGE"
+_COVERAGE_BLOCK_KEYS = frozenset(
+    {"schema_version", "rule", "calculation_cutoff_date", "lines", "bounded_sections"}
+)
+_COVERAGE_LINE_KEYS = frozenset(
+    {
+        "strategy_id",
+        "account_id",
+        "provider_id",
+        "as_of_date",
+        "coverage_end",
+        "last_event_date",
+    }
+)
+_COVERAGE_SECTION_KEYS = frozenset({"section", "entity", "field", "date", "bounded_by"})
+
+
+@dataclass(frozen=True)
+class CoverageLine:
+    position: int
+    strategy_id: str
+    account_id: str
+    provider_id: str
+    as_of: date
+    coverage_end: date
+    last_event: date
+
+
+@dataclass(frozen=True)
+class CoverageDisclosure:
+    """The ``capital_coverage_bounds`` block as read, with every structural problem."""
+
+    cutoff: date | None
+    raw_cutoff: Any
+    lines: tuple[CoverageLine, ...]
+    sections: tuple[BoundedSection, ...]
+    problems: tuple[str, ...]
+
+
+def _key_problem(label: str, item: Mapping[str, Any], expected: frozenset[str]) -> str:
+    unexpected, missing = sorted(set(item) - expected), sorted(expected - set(item))
+    if not unexpected and not missing:
+        return ""
+    return (
+        f"{label} is not the producer's closed object (unexpected {unexpected}, "
+        f"missing {missing})"
+    )
+
+
+def _read_capital_coverage_disclosure(block: Any) -> CoverageDisclosure:
+    if not isinstance(block, Mapping):
+        return CoverageDisclosure(
+            None, None, (), (), (f"{_COVERAGE_BLOCK} is not an object",)
+        )
+    problems: list[str] = []
+    keys = _key_problem(_COVERAGE_BLOCK, block, _COVERAGE_BLOCK_KEYS)
+    if keys:
+        problems.append(keys)
+    version = block.get("schema_version")
+    if type(version) is not int or version != 1:
+        problems.append(f"schema_version is {version!r}, not the integer 1")
+    if block.get("rule") != _COVERAGE_RULE:
+        problems.append(f"rule is {block.get('rule')!r}, not {_COVERAGE_RULE}")
+    raw_cutoff = block.get("calculation_cutoff_date")
+    cutoff = _canonical_iso_day(raw_cutoff)
+    if cutoff is None:
+        problems.append("calculation_cutoff_date is not a date")
+    lines: list[CoverageLine] = []
+    seen_lines: set[tuple[str, str]] = set()
+    raw_lines = block.get("lines")
+    if not isinstance(raw_lines, list):
+        problems.append("lines is not a list")
+    else:
+        for position, item in enumerate(raw_lines):
+            if not isinstance(item, Mapping):
+                problems.append(f"lines[{position}] is not an object")
+                continue
+            keys = _key_problem(f"lines[{position}]", item, _COVERAGE_LINE_KEYS)
+            if keys:
+                problems.append(keys)
+            strategy = item.get("strategy_id")
+            account = item.get("account_id")
+            provider = item.get("provider_id")
+            as_of = _canonical_iso_day(item.get("as_of_date"))
+            end = _canonical_iso_day(item.get("coverage_end"))
+            last = _canonical_iso_day(item.get("last_event_date"))
+            if (
+                not isinstance(strategy, str)
+                or not strategy
+                or not isinstance(account, str)
+                or not account
+            ):
+                problems.append(f"lines[{position}] has no strategy_id or account_id")
+            elif not isinstance(provider, str) or not provider:
+                problems.append(f"lines[{position}] has no provider_id")
+            elif as_of is None or end is None or last is None:
+                problems.append(
+                    f"lines[{position}] has no as_of_date, coverage_end or "
+                    "last_event_date"
+                )
+            elif (strategy, account) in seen_lines:
+                problems.append(
+                    f"lines[{position}] ({strategy}:{account}) repeats an earlier line"
+                )
+            else:
+                seen_lines.add((strategy, account))
+                lines.append(
+                    CoverageLine(
+                        position, strategy, account, provider, as_of, end, last
+                    )
+                )
+    sections: list[BoundedSection] = []
+    seen_entities: set[str] = set()
+    raw_sections = block.get("bounded_sections")
+    if not isinstance(raw_sections, list):
+        problems.append("bounded_sections is not a list")
+    else:
+        for position, item in enumerate(raw_sections):
+            if not isinstance(item, Mapping):
+                problems.append(f"bounded_sections[{position}] is not an object")
+                continue
+            keys = _key_problem(
+                f"bounded_sections[{position}]", item, _COVERAGE_SECTION_KEYS
+            )
+            if keys:
+                problems.append(keys)
+            section, entity = item.get("section"), item.get("entity")
+            bounded_by = item.get("bounded_by")
+            day = _canonical_iso_day(item.get("date"))
+            if item.get("field") != "as_of_date":
+                problems.append(
+                    f"bounded_sections[{position}].field is {item.get('field')!r}, "
+                    "not as_of_date"
+                )
+            if not isinstance(section, str) or not isinstance(entity, str):
+                problems.append(
+                    f"bounded_sections[{position}] has no section or entity"
+                )
+            elif day is None:
+                problems.append(f"bounded_sections[{position}].date is not a date")
+            elif not isinstance(bounded_by, list) or not all(
+                isinstance(name, str) and name for name in bounded_by
+            ):
+                problems.append(
+                    f"bounded_sections[{position}].bounded_by is not a list of "
+                    "strategy ids"
+                )
+            elif entity in seen_entities:
+                problems.append(
+                    f"bounded_sections[{position}] ({entity}) repeats an earlier entry"
+                )
+            else:
+                seen_entities.add(entity)
+                sections.append(
+                    BoundedSection(position, section, entity, day, tuple(bounded_by))
+                )
+    return CoverageDisclosure(
+        cutoff, raw_cutoff, tuple(lines), tuple(sections), tuple(problems)
+    )
+
+
+def capital_coverage_disclosure(ctx: Context) -> CoverageDisclosure | None:
+    """The report's ``capital_coverage_bounds`` block, or ``None`` when it has none.
+
+    The block exists only at report schema version 3; at any other version it is read
+    with that as a problem, so nothing in it is believed.
+    """
+
+    if "capital_coverage_disclosure" in ctx._cache:
+        cached = ctx._cache["capital_coverage_disclosure"]
+        return cached if isinstance(cached, CoverageDisclosure) else None
+    block = ctx.report.get(_COVERAGE_BLOCK)
+    result = None if block is None else _read_capital_coverage_disclosure(block)
+    version = ctx.report.get("report_schema_version")
+    if result is not None and (
+        type(version) is not int or version != _COVERAGE_REPORT_VERSION
+    ):
+        result = replace(
+            result,
+            problems=(
+                f"{_COVERAGE_BLOCK} exists only at report_schema_version "
+                f"{_COVERAGE_REPORT_VERSION}, this report is {version!r}",
+                *result.problems,
+            ),
+        )
+    ctx._cache["capital_coverage_disclosure"] = result
+    return result
+
+
+@dataclass(frozen=True)
+class OracleCoverageEnds:
+    """The oracle's ``date.strategy_cash.coverage_end`` rows, by custody cash line.
+
+    ``dates`` holds each line's stated dates (``strategy, provider, account``);
+    ``unusable`` the lines the oracle states not derivable or states unreadably;
+    ``providers`` the providers the oracle names for a ``strategy, account`` pair.
+    """
+
+    dates: Mapping[tuple[str, str, str], frozenset[date]]
+    unusable: frozenset[tuple[str, str, str]]
+    providers: Mapping[tuple[str, str], frozenset[str]]
+    # The accounts the oracle names for a ``strategy, provider`` pair; the ``-`` placeholder
+    # of a not-derivable row names no account and is not here.
+    accounts: Mapping[tuple[str, str], frozenset[str]] = field(default_factory=dict)
+
+    def end(
+        self, strategy: str, provider: str, account: str
+    ) -> tuple[str, date | None]:
+        """``row`` with the one stated date, or why there is none: ``unusable`` (not
+        derivable, unreadable or two different dates), ``other_provider`` (the oracle
+        names this account under another provider), ``other_account`` (it names this
+        provider's cash line of the strategy under another account) or ``absent``."""
+
+        key = (strategy, provider, account)
+        days = self.dates.get(key, frozenset())
+        if key in self.unusable or len(days) > 1:
+            return "unusable", None
+        if days:
+            return "row", next(iter(days))
+        if self.providers.get((strategy, account)):
+            return "other_provider", None
+        if self.accounts.get((strategy, provider)):
+            return "other_account", None
+        return "absent", None
+
+
+def _oracle_coverage_ends(ctx: Context) -> OracleCoverageEnds | None:
+    """The oracle's coverage-end rows; ``None`` without an expected baseline."""
+
+    if ctx.expected is None:
+        return None
+    cached = ctx._cache.get("oracle_coverage_ends")
+    if isinstance(cached, OracleCoverageEnds):
+        return cached
+    dates: dict[tuple[str, str, str], set[date]] = {}
+    unusable: set[tuple[str, str, str]] = set()
+    providers: dict[tuple[str, str], set[str]] = {}
+    accounts: dict[tuple[str, str], set[str]] = {}
+
+    def key_of(row: Mapping[str, Any]) -> tuple[str, str, str] | None:
+        parts = str(row.get("entity")).split("|")
+        if len(parts) != 3 or not all(parts):
+            return None
+        providers.setdefault((parts[0], parts[2]), set()).add(parts[1])
+        if parts[2] != "-":
+            accounts.setdefault((parts[0], parts[1]), set()).add(parts[2])
+        return parts[0], parts[1], parts[2]
+
+    for row in ctx.expected:
+        if row.get("metric_id") != COVERAGE_END_METRIC:
+            continue
+        key = key_of(row)
+        if key is None:
+            continue
+        day = _canonical_iso_day(row.get("expected", row.get("value")))
+        if day is None:
+            unusable.add(key)
+        else:
+            dates.setdefault(key, set()).add(day)
+    for row in ctx.expected_not_derivable:
+        if row.get("metric_id") != COVERAGE_END_METRIC:
+            continue
+        key = key_of(row)
+        if key is not None:
+            unusable.add(key)
+    result = OracleCoverageEnds(
+        {key: frozenset(days) for key, days in dates.items()},
+        frozenset(unusable),
+        {key: frozenset(names) for key, names in providers.items()},
+        {key: frozenset(names) for key, names in accounts.items()},
+    )
+    ctx._cache["oracle_coverage_ends"] = result
+    return result
+
+
+def _line_oracle_end(
+    oracle: OracleCoverageEnds, strategy: str, line: Mapping[str, Any]
+) -> tuple[str, date | None]:
+    provider = line.get("provider_id")
+    return oracle.end(
+        strategy,
+        provider if isinstance(provider, str) else "",
+        str(line.get("account_id")),
+    )
+
+
+def _coverage_explainable(
+    disclosure: CoverageDisclosure,
+) -> dict[tuple[str, date], tuple[str, ...]]:
+    """What the lines the block states can explain: the line, its row, the total.
+
+    The row of a strategy is explained at the oldest coverage end of its lines and the
+    Systematic total at the oldest of those, naming the strategies that reach it.
+    """
+
+    explained: dict[tuple[str, date], tuple[str, ...]] = {}
+    oldest: dict[str, date] = {}
+    for line in disclosure.lines:
+        explained[(f"{line.strategy_id}:{line.account_id}", line.coverage_end)] = (
+            line.strategy_id,
+        )
+        oldest[line.strategy_id] = min(
+            oldest.get(line.strategy_id, line.coverage_end), line.coverage_end
+        )
+    for strategy, day in oldest.items():
+        explained[(strategy, day)] = (strategy,)
+    if oldest:
+        total = min(oldest.values())
+        explained[("systematic", total)] = tuple(
+            sorted(name for name, day in oldest.items() if day == total)
+        )
+    return explained
+
+
+def _coverage_line_mismatches(
+    ctx: Context, disclosure: CoverageDisclosure
+) -> list[str]:
+    """Every way a stated line is not the report's own cash line, or the oracle's.
+
+    The line's provider, last event date, coverage end and date are each compared with
+    the report's cash line, ``last_event_date`` with the latest event the line counts,
+    and the coverage end with the oracle's row for that line.  Every oracle result other
+    than one usable matching row is a mismatch (ruling C3: any invalid line voids the
+    block).
+    """
+
+    problems: list[str] = []
+    custody = node(ctx.report, "custody_current_capital")
+    carried: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for row in rows(custody, "strategies"):
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
+            continue
+        for line in rows(row, "derived_cash"):
+            carried[(str(row.get("strategy_id")), str(line.get("account_id")))] = line
+    oracle = _oracle_coverage_ends(ctx)
+    for item in disclosure.lines:
+        label = f"lines[{item.position}] ({item.strategy_id}:{item.account_id})"
+        report_line = carried.get((item.strategy_id, item.account_id))
+        if item.as_of != item.coverage_end:
+            problems.append(f"{label} is not dated at its own coverage end")
+        if disclosure.cutoff is not None and item.coverage_end >= disclosure.cutoff:
+            problems.append(f"{label} does not end before the cutoff")
+        if report_line is None:
+            problems.append(f"{label} is not a cash line of the report")
+            continue
+        if not (
+            _canonical_iso_day(report_line.get("as_of_date"))
+            == _canonical_iso_day(report_line.get("coverage_end"))
+            == item.coverage_end
+        ):
+            problems.append(
+                f"{label} differs from the report's cash line "
+                f"(as_of_date {report_line.get('as_of_date')}, coverage_end "
+                f"{report_line.get('coverage_end')})"
+            )
+        if report_line.get("provider_id") != item.provider_id:
+            problems.append(
+                f"{label} names provider {item.provider_id}, the report's cash line "
+                f"{report_line.get('provider_id')}"
+            )
+        events = [
+            _canonical_iso_day(event.get("event_date"))
+            for event in rows(report_line, "events")
+        ]
+        latest = max((day for day in events if day is not None), default=None)
+        if not (
+            _canonical_iso_day(report_line.get("last_event_date"))
+            == latest
+            == item.last_event
+        ):
+            problems.append(
+                f"{label} states last_event_date {item.last_event}, the report's cash "
+                f"line {report_line.get('last_event_date')} and its latest event "
+                f"{latest}"
+            )
+        if oracle is not None:
+            kind, oracle_day = _line_oracle_end(oracle, item.strategy_id, report_line)
+            if kind == "row":
+                if oracle_day != item.coverage_end:
+                    problems.append(
+                        f"{label} ends {item.coverage_end}, the oracle's coverage end "
+                        f"is {oracle_day}"
+                    )
+            else:
+                # Every result other than one usable row that matches is an unproved
+                # line (absent, unusable, other_provider, other_account): a block that
+                # states a line the oracle does not prove is not believed for any line.
+                why = {
+                    "other_provider": "names a provider the oracle does not give "
+                    "for this account",
+                    "other_account": "names an account the oracle does not give for "
+                    "this strategy and provider",
+                    "unusable": "has an oracle coverage end that is not derivable, "
+                    "unreadable or conflicting",
+                    "absent": "has no oracle coverage end at all",
+                }.get(kind, f"has no verified oracle coverage end ({kind})")
+                problems.append(f"{label} {why}")
+    return problems
+
+
+def _coverage_lines_attested(
+    ctx: Context,
+    disclosure: CoverageDisclosure,
+    oracle: OracleCoverageEnds,
+    entity: str,
+    day: date,
+) -> bool:
+    """Whether every stated line this entry rests on at ``day`` is the oracle's own.
+
+    A line entry rests on that line; a strategy row on the strategy's lines dated
+    ``day``; the Systematic total on every stated line dated ``day``.  An entry that
+    rests on no line is not attested.
+    """
+
+    custody = node(ctx.report, "custody_current_capital")
+    carried: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for row in rows(custody, "strategies"):
+        for line in rows(row, "derived_cash"):
+            carried[(str(row.get("strategy_id")), str(line.get("account_id")))] = line
+    resting = [
+        item
+        for item in disclosure.lines
+        if item.coverage_end == day
+        and (
+            entity == "systematic"
+            or entity == item.strategy_id
+            or entity == f"{item.strategy_id}:{item.account_id}"
+        )
+    ]
+    for item in resting:
+        report_line = carried.get((item.strategy_id, item.account_id))
+        if report_line is None:
+            return False
+        kind, oracle_day = _line_oracle_end(oracle, item.strategy_id, report_line)
+        if kind != "row" or oracle_day != day:
+            return False
+    return bool(resting)
+
+
+def verified_capital_coverage_bound(
+    ctx: Context, entity: str, day: date
+) -> BoundedSection | None:
+    """The coverage entry that explains this ``current_capital`` date, when verified.
+
+    The entry has the same ``(entity, date)``, names the strategies the lines the block
+    states give for it, the block is a valid disclosure of this report as a WHOLE (version
+    3, closed objects, every stated line the report's own cash line and the oracle's, every
+    entry explained by the stated lines, the validator's cutoff: ``check_capital_coverage_bound``
+    has no finding, ruling C3), and the oracle's ``date.strategy_cash.coverage_end`` row of every
+    stated line the entry rests on is exactly that date.  Nothing the report says about
+    itself anchors the date, and an oracle with no such row confirms nothing.  The
+    caller grants a strategy row or the Systematic total only when every component at
+    that date is itself verified, and never grants a NAV member.  ``None`` means the
+    finding is unchanged.
+    """
+
+    disclosure = capital_coverage_disclosure(ctx)
+    oracle = _oracle_coverage_ends(ctx)
+    if (
+        disclosure is None
+        or oracle is None
+        or day >= ctx.cutoff
+        or _disclosure_block_void(
+            ctx, "coverage_block_void", check_capital_coverage_bound
+        )
+    ):
+        return None
+    explained = _coverage_explainable(disclosure)
+    for entry in disclosure.sections:
+        if (
+            (entry.section, entry.entity, entry.day) == ("current_capital", entity, day)
+            and entry.bounded_by
+            and explained.get((entry.entity, entry.day))
+            == tuple(sorted(entry.bounded_by))
+            and _coverage_lines_attested(ctx, disclosure, oracle, entity, day)
+        ):
+            return entry
+    return None
+
+
+def _coverage_message(entry: BoundedSection) -> str:
+    return (
+        "current capital ends before the cutoff only because the admitted coverage of "
+        f"{', '.join(entry.bounded_by)} ends at that date (capital_coverage_bounds "
+        "entry confirmed by the report's cash line and the oracle's coverage end, N56)"
+    )
+
+
+def check_capital_coverage_bound(ctx: Context) -> Iterator[Finding]:
+    """N56: the report's ``capital_coverage_bounds`` block must be what its lines bear out.
+
+    ``BLOCKER_INVARIANT`` for a block the check cannot read (an unsupported version or
+    rule, an object that is not the producer's closed shape, a repeated line or entry), a
+    line that is not the report's own cash line (provider, last event date, coverage end
+    and date) or the oracle's, or does not end before the cutoff, and an entry that the
+    stated lines do not explain; ``BLOCKER_AUTHORITY`` for a block dated at a cutoff
+    other than the validator's.  Silent when the report has no block.  Any finding voids
+    every downgrade in the report.
+    """
+
+    disclosure = capital_coverage_disclosure(ctx)
+    if disclosure is None:
+        return
+
+    def finding(
+        klass: str,
+        entity: str,
+        observed: Any,
+        expected: Any,
+        pointer: str,
+        message: str,
+    ) -> Finding:
+        return _finding(
+            COVERAGE_BOUNDS_CHECK,
+            klass,
+            entity,
+            observed,
+            expected,
+            REPORT,
+            pointer,
+            _COVERAGE_DEFECTS,
+            message,
+        )
+
+    for problem in disclosure.problems:
+        yield finding(
+            BLOCKER_INVARIANT,
+            _COVERAGE_BLOCK,
+            problem,
+            "a well-formed capital_coverage_bounds block",
+            f"$.{_COVERAGE_BLOCK}",
+            f"the coverage disclosure cannot be read: {problem}",
+        )
+    if disclosure.cutoff is not None and disclosure.cutoff != ctx.cutoff:
+        yield finding(
+            BLOCKER_AUTHORITY,
+            _COVERAGE_BLOCK,
+            disclosure.raw_cutoff,
+            ctx.cutoff,
+            f"$.{_COVERAGE_BLOCK}.calculation_cutoff_date",
+            "the coverage disclosure is dated at a cutoff other than the declared one",
+        )
+    for problem in _coverage_line_mismatches(ctx, disclosure):
+        yield finding(
+            BLOCKER_INVARIANT,
+            _COVERAGE_BLOCK,
+            problem,
+            "each stated line is the report's own cash line at its coverage end, and "
+            "the oracle's",
+            f"$.{_COVERAGE_BLOCK}.lines",
+            f"the coverage disclosure is not borne out by the report: {problem}",
+        )
+    explained = _coverage_explainable(disclosure)
+    for entry in disclosure.sections:
+        if entry.section != "current_capital" or explained.get(
+            (entry.entity, entry.day)
+        ) != tuple(sorted(entry.bounded_by)):
+            yield finding(
+                BLOCKER_INVARIANT,
+                f"{entry.section}|{entry.entity}",
+                {"date": entry.day, "bounded_by": list(entry.bounded_by)},
+                "a current_capital date the stated lines explain, by the strategies "
+                "that reach it",
+                f"$.{_COVERAGE_BLOCK}.bounded_sections[{entry.position}]",
+                "the coverage entry is not explained by the lines the block states",
+            )
+
+
+def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
+    """N56: every custody cash line's coverage end against the oracle's, both directions.
+
+    Runs for every AVAILABLE ``derived_cash`` line of a SYSTEMATIC strategy in a report
+    at schema version 3, whatever the line's date and whether or not the report discloses
+    anything, and only when an expected baseline is supplied.  The oracle's
+    ``date.strategy_cash.coverage_end`` row (entity ``strategy|provider|account``) is the
+    independent proof of the date, so a coverage end the oracle does not state
+    (``BLOCKER_AUTHORITY``: no row, a not-derivable row, or two rows that disagree), one
+    that differs from it in either direction, or one the oracle gives to another provider
+    or another account (``BLOCKER_REGRESSION``, ruling C2) is a finding.  A later report
+    coverage end claims coverage nobody attests; an earlier one means the report and the
+    oracle used different admissions.  The strategy row's own availability changes
+    nothing: every AVAILABLE cash line is verified.
+    """
+
+    oracle = _oracle_coverage_ends(ctx)
+    version = ctx.report.get("report_schema_version")
+    if (
+        oracle is None
+        or type(version) is not int
+        or version != _COVERAGE_REPORT_VERSION
+    ):
+        return
+    custody = node(ctx.report, "custody_current_capital")
+    base = "$.custody_current_capital"
+    for position, row in enumerate(rows(custody, "strategies")):
+        # The strategy row's own availability is not a condition: a cash line is its own
+        # AVAILABLE claim, and a row whose NAV is unavailable still publishes it.
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
+            continue
+        strategy = str(row.get("strategy_id"))
+        for line_position, line in enumerate(rows(row, "derived_cash")):
+            end = _canonical_iso_day(line.get("coverage_end"))
+            if not _capital_available(line) or end is None:
+                continue
+            entity = f"{strategy}|{line.get('provider_id')}|{line.get('account_id')}"
+            kind, oracle_day = _line_oracle_end(oracle, strategy, line)
+            if kind == "row" and oracle_day == end:
+                continue
+            if kind == "row":
+                klass, why = (
+                    BLOCKER_REGRESSION,
+                    f"the cash line's coverage end {end} differs from the oracle's "
+                    f"{oracle_day}",
+                )
+            elif kind == "other_provider":
+                klass, why = (
+                    BLOCKER_REGRESSION,
+                    "the oracle gives this account's coverage end under another "
+                    f"provider than the line's {line.get('provider_id')}",
+                )
+            elif kind == "other_account":
+                klass, why = (
+                    BLOCKER_REGRESSION,
+                    "the oracle gives this strategy's coverage end at the line's "
+                    f"provider under another account than {line.get('account_id')}",
+                )
+            else:
+                klass, why = (
+                    BLOCKER_AUTHORITY,
+                    "the oracle states no derivable coverage end for this cash line "
+                    f"({kind}); the date proves nothing the independent instrument "
+                    "does not give",
+                )
+            yield _finding(
+                COVERAGE_END_CHECK,
+                klass,
+                entity,
+                end.isoformat(),
+                oracle_day.isoformat() if oracle_day is not None else None,
+                REPORT,
+                f"{base}.strategies[{position}].derived_cash[{line_position}]"
+                ".coverage_end",
+                _COVERAGE_DEFECTS,
+                why,
             )
 
 
@@ -5094,6 +5882,12 @@ def check_flow_admission(ctx: Context) -> Iterator[Finding]:
             located is not None
             and located[1].get("status") in _UNADMITTED_FLOW_PATHS
             and row.get("mwr_coverage_status") == "COMPLETE"
+            # mwr_coverage_status is the manifest's flow-coverage receipt, copied
+            # verbatim; the report's flows coverage status travels beside it as
+            # mwr_flow_path_status.  A row that discloses the very status the
+            # coverage matrix carries makes the receipt truthful, not a claim of
+            # an admitted path.
+            and row.get("mwr_flow_path_status") != located[1].get("status")
         ):
             yield _finding(
                 "flows.admission_consistency",
@@ -5252,8 +6046,59 @@ def check_methodology(ctx: Context) -> Iterator[Finding]:
             )
 
 
+# A clause the report scopes to the one provider that declared it and the date of that
+# provider's generation ("schwab (as of 2026-09-18): ...",
+# portfolio_report._scoped_known_gap): a statement about that provider's snapshot, not
+# about the balances the panel shows.
+_PROVIDER_SCOPED_CLAUSE = re.compile(
+    r"^(?P<provider>[a-z0-9_-]+) \(as of (?P<day>\d{4}-\d{2}-\d{2})\): (?P<text>.+)$",
+    re.DOTALL,
+)
+_BALANCES_UNAVAILABLE = re.compile(r"(?i)balances?\s+(?:remain|are|is)\s+unavailable")
+
+
+def _declared_provider_clause(
+    ctx: Context, clause: str, positions_clauses: frozenset[str]
+) -> bool:
+    """Whether a gate-note clause is exactly a provider's declared, scoped snapshot gap.
+
+    The clause names exactly one provider and a valid calendar date; that provider has
+    exactly one ``provider_coverage`` row in the report, whose generation date is that
+    date and whose declared ``known_gaps`` hold the clause text verbatim (equality, not
+    containment, so an appended sentence is never exempt); and the clause occurs verbatim
+    in the report's own positions coverage text of this gate (``positions_clauses``).
+    """
+
+    match = _PROVIDER_SCOPED_CLAUSE.match(clause)
+    if match is None or clause not in positions_clauses:
+        return False
+    day = match.group("day")
+    if _canonical_iso_day(day) is None:
+        return False
+    declared = [
+        row
+        for row in rows(ctx.report, "provider_coverage")
+        if row.get("provider_id") == match.group("provider")
+    ]
+    if len(declared) != 1:
+        return False
+    coverage = node(declared[0], "coverage")
+    gaps = coverage.get("known_gaps") if isinstance(coverage, Mapping) else None
+    return (
+        declared[0].get("generation_as_of_date") == day
+        and isinstance(gaps, list)
+        and match.group("text") in gaps
+    )
+
+
 def check_gate_notes(ctx: Context) -> Iterator[Finding]:
-    """E9: a gate note cannot claim balances unavailable when they are shown."""
+    """E9: a gate note cannot claim balances unavailable when they are shown.
+
+    A clause is exempt only when it is a provider-scoped statement the named provider
+    declared at that generation date and the report's positions coverage text carries
+    (``_declared_provider_clause``); an unscoped clause, or a scoped one that is not,
+    still contradicts the balances shown.
+    """
 
     shown = [
         row
@@ -5263,8 +6108,19 @@ def check_gate_notes(ctx: Context) -> Iterator[Finding]:
     ]
     for position, row in enumerate(rows(ctx.panel, "gates")):
         note = str(row.get("note", ""))
+        positions_clauses = frozenset(
+            clause
+            for entry in rows(ctx.report, "coverage_data_quality")
+            if entry.get("category") == "FACT_COVERAGE"
+            and entry.get("item") == row.get("item")
+            for clause in str(entry.get("known_gap", "")).split("; ")
+        )
         if (
-            re.search(r"(?i)balances?\s+(?:remain|are|is)\s+unavailable", note)
+            any(
+                _BALANCES_UNAVAILABLE.search(clause)
+                and not _declared_provider_clause(ctx, clause, positions_clauses)
+                for clause in note.split("; ")
+            )
             and shown
         ):
             yield _finding(
@@ -5294,6 +6150,54 @@ def _age(policy: Mapping[str, Any], last: date, cutoff: date) -> int:
     if policy.get("calendar") == "WEEKDAY_SESSION":
         return weekdays_between(last, cutoff)
     return max(0, (cutoff - last).days)
+
+
+_LEDGER_IDENTITY_FIELDS = frozenset(
+    {
+        "as_of_date",
+        "catalog_sha256",
+        "catalog_size_bytes",
+        "generation_id",
+        "manifest_sha256",
+        "manifest_size_bytes",
+    }
+)
+
+
+def _ledger_identity_problem(
+    ledger: Any, cutoff: date, executed: date | None
+) -> str | None:
+    """Name what makes a schema-4 provider-ledger identity unusable, else ``None``.
+
+    Mirrors the pipeline gate: exactly the six identity fields, 64-hex digests,
+    positive integer sizes, and a manifest date that follows the cutoff but not the
+    execution date.
+    """
+
+    if not isinstance(ledger, Mapping) or not ledger:
+        return "it is not a non-empty mapping"
+    if set(ledger) != _LEDGER_IDENTITY_FIELDS:
+        return "its fields differ from the identity fields"
+    for name in ("catalog_sha256", "generation_id", "manifest_sha256"):
+        value = ledger[name]
+        if not isinstance(value, str) or not _RELEASE_DIGEST.fullmatch(value):
+            return f"{name} is not a sha-256 digest"
+    for name in ("catalog_size_bytes", "manifest_size_bytes"):
+        size = ledger[name]
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            return f"{name} is not a positive integer"
+    raw = ledger["as_of_date"]
+    try:
+        manifest_day = date.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        manifest_day = None
+    if manifest_day is None or manifest_day.isoformat() != raw:
+        return "as_of_date is not a canonical date"
+    if manifest_day < cutoff:
+        return "its manifest date precedes the data cutoff"
+    if executed is not None and manifest_day > executed:
+        return "its manifest date follows the execution date"
+    return None
 
 
 def check_freshness(ctx: Context) -> Iterator[Finding]:
@@ -5340,6 +6244,49 @@ def check_freshness(ctx: Context) -> Iterator[Finding]:
             "freshness operational clock is missing or invalid",
         )
         return
+
+    if node(ctx.gen.freshness, "assessment_schema_version") == 4:
+        # Schema 4 is dated at the data cutoff and bound to the ledger it was judged
+        # against; the formal schema and the pipeline gate require both.
+        fresh_map = cast(Mapping[str, Any], ctx.gen.freshness)
+        raw_executed = fresh_map.get("evaluated_on")
+        executed = canonical_day(raw_executed)
+        if executed is None or executed < evaluated:
+            yield authority(
+                "freshness-health",
+                raw_executed,
+                f"canonical execution date not before {evaluated.isoformat()}",
+                "$.evaluated_on",
+                "a schema-4 freshness bundle carries no valid execution date",
+            )
+        if "provider_ledger" not in fresh_map:
+            yield authority(
+                "freshness-health",
+                None,
+                "the provider ledger identity the bundle was judged against",
+                "$.provider_ledger",
+                "a schema-4 freshness bundle carries no provider ledger identity",
+            )
+        else:
+            ledger = fresh_map["provider_ledger"]
+            problem = _ledger_identity_problem(ledger, evaluated, executed)
+            if problem is not None:
+                yield authority(
+                    "freshness-health",
+                    ledger,
+                    "the provider ledger identity the bundle was judged against",
+                    "$.provider_ledger",
+                    f"a schema-4 freshness bundle carries an unusable provider ledger "
+                    f"identity: {problem}",
+                )
+        if evaluated != cutoff:
+            yield authority(
+                "freshness-health",
+                evaluated.isoformat(),
+                cutoff.isoformat(),
+                "$.as_of_date",
+                "a schema-4 freshness bundle is not dated at the data cutoff",
+            )
 
     panel_meta = node(ctx.panel, "meta")
     if isinstance(panel_meta, Mapping) and "freshness_evaluated_on" in panel_meta:
@@ -7349,6 +8296,11 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
 
 # ----------------------------------------------------------------- expected values
 
+_RETAINED_EXCLUDED_DATE = (
+    "a RETAINED_EXCLUDED member is dated by its last admitted NAV; the oracle reads "
+    "later reference rows of the deprecated account (N59)"
+)
+
 _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
     "capital.account.cutoff": ("B4",),
     "capital.strategy.cutoff": ("B4",),
@@ -7365,6 +8317,7 @@ _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
     "mwr.account": (),
     "mwr.strategy": (),
     "date.source_last_observation": ("C5",),
+    COVERAGE_END_METRIC: ("N56",),
 }
 
 
@@ -7393,6 +8346,9 @@ class Observed:
     as_of: str | None
     file: str
     json_path: str
+    # Why a label older than the oracle's date is still honest (N56, N59); when it is
+    # set, a matching value dated earlier is NOT_READY instead of a regression.
+    date_disclosure: str | None = None
 
 
 def _epoch_views(ctx: Context, account: str) -> list[tuple[int, dict[str, Any]]]:
@@ -7407,6 +8363,48 @@ def _flows_net(row: Mapping[str, Any]) -> Decimal | None:
     net = to_decimal(row.get("net_capital"))
     opening = to_decimal(row.get("opening_capital"))
     return net - opening if net is not None and opening is not None else None
+
+
+def _cash_label(
+    ctx: Context, row: Mapping[str, Any], counted: Sequence[CashLine]
+) -> tuple[Any, str | None]:
+    """The date the counted cash lines of a strategy carry, and why it is honest.
+
+    The oldest ``as_of_date`` of the counted lines; a date before the cutoff is
+    disclosed when every such line is explained by a verified coverage bound.  Lines
+    without a canonical date fall back to the strategy row's label, undisclosed.
+    """
+
+    lines = rows(row, "derived_cash")
+    days: list[tuple[date, str]] = []
+    for item in counted:
+        if item.line_position >= len(lines):
+            return row.get("as_of_date"), None
+        day = _canonical_iso_day(lines[item.line_position].get("as_of_date"))
+        if day is None:
+            return row.get("as_of_date"), None
+        days.append((day, f"{item.strategy_id}:{item.account_id}"))
+    oldest = min(day for day, _ in days)
+    early = [(day, entity) for day, entity in days if day < ctx.cutoff]
+    if not early:
+        return oldest.isoformat(), None
+    entries = [
+        verified_capital_coverage_bound(ctx, entity, day) for day, entity in early
+    ]
+    if all(entry is not None for entry in entries):
+        names = sorted(
+            {
+                name
+                for entry in entries
+                if entry is not None
+                for name in entry.bounded_by
+            }
+        )
+        return oldest.isoformat(), (
+            "the cash line is dated by the admitted coverage of "
+            f"{', '.join(names)} (capital_coverage_bounds, N56)"
+        )
+    return oldest.isoformat(), None
 
 
 def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
@@ -7449,6 +8447,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             REPORT,
                             f"$.custody_current_capital.strategies[{position}]"
                             f".members[{member_position}].value.value",
+                            _RETAINED_EXCLUDED_DATE
+                            if row.get("scope") == "RETAINED_EXCLUDED"
+                            else None,
                         )
                     )
         for position, row in manifest_rows(ctx):
@@ -7499,6 +8500,7 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                 and line.amount is not None
             ]
             if counted:
+                label, disclosure = _cash_label(ctx, row, counted)
                 out.append(
                     Observed(
                         "report:custody_current_capital.strategies.derived_cash",
@@ -7507,9 +8509,10 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         ),
                         None,
                         None,
-                        row.get("as_of_date"),
+                        label,
                         REPORT,
                         f"$.custody_current_capital.strategies[{position}].derived_cash",
+                        disclosure,
                     )
                 )
     elif metric_id == "capital.strategy.cutoff":
@@ -8364,6 +9367,10 @@ def check_expected(ctx: Context) -> Iterator[Finding]:
         )
     for position, row in enumerate(ctx.expected):
         metric_id = str(row.get("metric_id"))
+        if metric_id == COVERAGE_END_METRIC:
+            # The oracle's proof of a custody cash line's coverage end: no production
+            # view carries it by this name; check_capital_coverage_end compares it.
+            continue
         entity = str(row.get("entity"))
         expected = row.get("expected", row.get("value"))
         unit = metric_unit(metric_id, row.get("unit"))
@@ -8493,16 +9500,26 @@ def _compare_views(
             and str(view.as_of)[:10] != str(row.get("as_of"))[:10]
             and metric_id.startswith("capital.")
         ):
+            # A label that errs old and says why is the disclosed N56/N59 condition;
+            # the amount agrees with the oracle, so it is NOT_READY.  A newer label, or
+            # an older one nothing explains, is still the regression.
+            disclosed = (
+                view.date_disclosure is not None
+                and str(view.as_of)[:10] < str(row.get("as_of"))[:10]
+            )
             yield _finding(
                 f"expected.{metric_id}",
-                BLOCKER_REGRESSION,
+                NOT_READY if disclosed else BLOCKER_REGRESSION,
                 label,
                 {"view": view.view, "as_of": view.as_of},
                 {"as_of": row.get("as_of")},
                 view.file,
                 view.json_path,
                 defects,
-                "value matches but is dated differently",
+                "value matches; its date is earlier than the oracle's and "
+                f"{view.date_disclosure}"
+                if disclosed
+                else "value matches but is dated differently",
             )
 
 
@@ -8650,83 +9667,361 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
 CAPITAL_SCOPES = frozenset({"SYSTEMATIC", "RETAINED_EXCLUDED"})
 
 
-def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
-    """N56: the custody capital labels carry the date they are valued at.
+def _capital_available(entry: Mapping[str, Any]) -> bool:
+    """Whether a custody capital object is an AVAILABLE value (not explicitly unavailable)."""
 
-    The systematic total and each systematic strategy are valued at the cutoff; an
-    as_of older than that (the last event date or the minimum over members) labels a
-    current value with a past date. An AVAILABLE value must carry a canonical ISO
-    ``as_of_date``: a missing, null or malformed one is a finding, not a pass. Retained
-    and excluded rows (``RETAINED_EXCLUDED``) are not systematic; a scope outside the
-    producer's vocabulary is itself a finding (it would switch this check off).
+    status = entry.get("status") if "status" in entry else None
+    if status is not None and not is_available(status):
+        return False
+    value = node(entry, "current_value")
+    return not (isinstance(value, Mapping) and not is_available(value.get("status")))
+
+
+def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
+    """N56: the custody capital labels are recomputed, not trusted.
+
+    ``as_of_date`` on a custody capital object is the last date through which its value is
+    proven true: a NAV member's observation date; a derived cash line's
+    ``min(cutoff, coverage_end)`` (its ``last_event_date`` is the latest event, not the
+    proof); a strategy row's the oldest of its members and cash lines; the Systematic
+    total's the oldest of its rows. Rules, in order:
+
+    1. every AVAILABLE member, cash line, row and total needs a canonical ``as_of_date``
+       (missing: BLOCKER_AUTHORITY);
+    2. a cash line that states ``last_event_date`` / ``coverage_end`` (schema versions
+       baseline 2, report 3, panel 23) must have ``last_event_date`` equal to its latest
+       event date and ``as_of_date`` equal to ``min(cutoff, coverage_end)``
+       (BLOCKER_INVARIANT); lines of older versions are judged by rule 4 only;
+    3. a row's date equals the oldest of its AVAILABLE members and cash lines, the
+       Systematic date the oldest of its rows (BLOCKER_INVARIANT: a stale member hidden
+       behind a cutoff label);
+    4. anything dated before the cutoff is NOT_READY only when its labels are honest
+       (rules 2 and 3 hold for it and everything under it) and
+       ``verified_value_basis_bound`` discloses it (section ``current_capital``);
+       otherwise BLOCKER_AUTHORITY, so it never passes;
+    5. a date after the cutoff is BLOCKER_AUTHORITY.
+
+    A custody scope outside the producer's vocabulary is a finding, and
+    ``RETAINED_EXCLUDED`` rows are not systematic (echotrade is N59).  Rules 1, 2, 4 and 5
+    apply to every AVAILABLE member and cash line of a SYSTEMATIC row whether or not the
+    row itself is available; only the row's own date (rule 3) needs the row available.
     """
 
     custody = node(ctx.report, "custody_current_capital")
-    candidates: list[tuple[str, str, Mapping[str, Any]]] = []
-    systematic = node(custody, "systematic")
-    if isinstance(systematic, Mapping):
-        candidates.append(
-            (
-                "current_capital:systematic",
-                "$.custody_current_capital.systematic",
-                systematic,
+    base = "$.custody_current_capital"
+    findings: list[Finding] = []
+    declared_version = ctx.report.get("report_schema_version")
+    if isinstance(declared_version, bool):
+        declared_version = None
+
+    def emit(
+        klass: str,
+        entity: str,
+        observed: Any,
+        expected: Any,
+        pointer: str,
+        message: str,
+    ) -> None:
+        findings.append(
+            _finding(
+                "capital.as_of_cutoff",
+                klass,
+                entity,
+                observed,
+                expected,
+                REPORT,
+                pointer,
+                ("N56",),
+                message,
             )
         )
-    for position, row in enumerate(rows(custody, "strategies")):
-        pointer = f"$.custody_current_capital.strategies[{position}]"
-        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
-            yield _finding(
-                "capital.as_of_cutoff",
-                BLOCKER_AUTHORITY,
-                f"current_capital:{row.get('strategy_id')}:scope",
-                row.get("scope"),
-                sorted(CAPITAL_SCOPES),
-                REPORT,
-                f"{pointer}.scope",
-                ("N56",),
-                "the custody scope is outside the producer's vocabulary, so the "
-                "capital date check cannot classify the row",
-            )
-            continue
-        if row.get("scope", "SYSTEMATIC") == "SYSTEMATIC":
-            candidates.append(
-                (f"current_capital:{row.get('strategy_id')}", pointer, row)
-            )
-    for entity, pointer, entry in candidates:
-        value = node(entry, "current_value")
-        available = entry.get("status") if "status" in entry else None
-        if available is not None and not is_available(available):
-            continue
-        if isinstance(value, Mapping) and not is_available(value.get("status")):
-            continue
+
+    def judge_date(
+        entity: str,
+        pointer: str,
+        entry: Mapping[str, Any],
+        honest: bool,
+        section_entity: str,
+        kind: str,
+        marks: Sequence[tuple[date, bool]] | None = None,
+    ) -> tuple[date | None, bool]:
+        """Rules 1, 4 and 5 for one object.
+
+        Returns its canonical date (or ``None``) and whether the date was downgraded to
+        NOT_READY by a verified bound.  ``kind`` is ``member``, ``cash``, ``row`` or
+        ``total``: a NAV member is dated by its NAV observation, so only the FX
+        value-basis bound can downgrade it (the coverage of an admission says nothing
+        about it, C4).  ``marks`` is ``(date, downgraded)`` of the components of a row or
+        a total: the coverage bound is granted to the aggregate only when every component
+        at its date is itself verified.
+        """
+
         day = _canonical_iso_day(entry.get("as_of_date"))
         if day is None:
-            yield _finding(
-                "capital.as_of_cutoff",
+            emit(
                 BLOCKER_AUTHORITY,
                 entity,
                 entry.get("as_of_date"),
                 "a canonical ISO as_of_date",
-                REPORT,
                 f"{pointer}.as_of_date",
-                ("N56",),
                 "an available current-capital value carries no canonical as_of_date",
             )
+            return None, False
+        if day > ctx.cutoff:
+            emit(
+                BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                ctx.cutoff,
+                f"{pointer}.as_of_date",
+                "current capital is valued at the cutoff but labelled with an as_of "
+                "after it",
+            )
+        elif day < ctx.cutoff:
+            bound = (
+                verified_value_basis_bound(ctx, "current_capital", section_entity, day)
+                if honest
+                else None
+            )
+            coverage = (
+                verified_capital_coverage_bound(ctx, section_entity, day)
+                if honest
+                and bound is None
+                and kind != "member"
+                and (marks is None or all(ok for at, ok in marks if at == day))
+                else None
+            )
+            downgraded = bound is not None or coverage is not None
+            emit(
+                NOT_READY if downgraded else BLOCKER_AUTHORITY,
+                entity,
+                entry.get("as_of_date"),
+                ctx.cutoff,
+                f"{pointer}.as_of_date",
+                _bound_message(bound, "current capital")
+                if bound is not None
+                else _coverage_message(coverage)
+                if coverage is not None
+                else "current capital is valued at the cutoff but labelled with an "
+                "as_of before it"
+                + ("" if honest else " (its labels do not recompute)"),
+            )
+            return day, downgraded
+        return day, False
+
+    rows_honest: list[tuple[date, bool, bool]] = []
+    for position, row in enumerate(rows(custody, "strategies")):
+        pointer = f"{base}.strategies[{position}]"
+        strategy = str(row.get("strategy_id"))
+        if "scope" in row and row.get("scope") not in CAPITAL_SCOPES:
+            emit(
+                BLOCKER_AUTHORITY,
+                f"current_capital:{strategy}:scope",
+                row.get("scope"),
+                sorted(CAPITAL_SCOPES),
+                f"{pointer}.scope",
+                "the custody scope is outside the producer's vocabulary, so the "
+                "capital date check cannot classify the row",
+            )
             continue
-        if day == ctx.cutoff:
+        if row.get("scope", "SYSTEMATIC") != "SYSTEMATIC":
             continue
-        yield _finding(
-            "capital.as_of_cutoff",
-            BLOCKER_AUTHORITY,
-            entity,
-            entry.get("as_of_date"),
-            ctx.cutoff,
-            REPORT,
-            f"{pointer}.as_of_date",
-            ("N56",),
-            "current capital is valued at the cutoff but labelled with an as_of "
-            f"{'after' if day > ctx.cutoff else 'before'} it",
+        # A row whose own value is unavailable claims no date, but its AVAILABLE members
+        # and cash lines still do: each is judged on its own (K2), whatever the parent.
+        row_available = _capital_available(row)
+        component_days: list[date] = []
+        component_marks: list[tuple[date, bool]] = []
+        components_honest = True
+        components_complete = True
+        for member_position, member in enumerate(rows(row, "members")):
+            if not _capital_available(member):
+                continue
+            day, marked = judge_date(
+                f"current_capital:{strategy}:member:{member.get('account_id')}",
+                f"{pointer}.members[{member_position}]",
+                member,
+                True,
+                f"{strategy}:{member.get('account_id')}",
+                "member",
+            )
+            if day is None:
+                components_complete = False
+            else:
+                component_days.append(day)
+                component_marks.append((day, marked))
+        for line_position, line in enumerate(rows(row, "derived_cash")):
+            if not _capital_available(line):
+                continue
+            line_pointer = f"{pointer}.derived_cash[{line_position}]"
+            entity = f"current_capital:{strategy}:cash:{line.get('account_id')}"
+            honest = True
+            # The exemption is a property of the declared report schema, not of
+            # field absence: a version-3 line must carry both fields.
+            stated = (
+                declared_version == 3
+                or "last_event_date" in line
+                or "coverage_end" in line
+            )
+            if stated:
+                last = _canonical_iso_day(line.get("last_event_date"))
+                coverage_end = _canonical_iso_day(line.get("coverage_end"))
+                events = [
+                    _canonical_iso_day(event.get("event_date"))
+                    for event in rows(line, "events")
+                ]
+                latest = max((day for day in events if day is not None), default=None)
+                if last is None or coverage_end is None:
+                    honest = False
+                    emit(
+                        BLOCKER_INVARIANT,
+                        entity,
+                        {
+                            "last_event_date": line.get("last_event_date"),
+                            "coverage_end": line.get("coverage_end"),
+                        },
+                        "canonical last_event_date and coverage_end",
+                        line_pointer,
+                        "the cash line states last_event_date or coverage_end but not "
+                        "both as canonical dates",
+                    )
+                else:
+                    if last != latest:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("last_event_date"),
+                            latest.isoformat() if latest else None,
+                            f"{line_pointer}.last_event_date",
+                            "last_event_date is not the latest event date of the line",
+                        )
+                    label = _canonical_iso_day(line.get("as_of_date"))
+                    if label is not None and latest is not None and latest > label:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            latest.isoformat(),
+                            f"an event on or before {label.isoformat()}",
+                            f"{line_pointer}.events",
+                            "the line counts an event dated after its as_of_date, so it "
+                            "states a balance it did not have on that date",
+                        )
+                    amount = to_decimal(node(line, "current_value", "value"))
+                    signed = [
+                        to_decimal(event.get("signed_usd"))
+                        for event in rows(line, "events")
+                    ]
+                    if (
+                        amount is not None
+                        and signed
+                        and None not in signed
+                        and exact_sum(s for s in signed if s is not None) != amount
+                    ):
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("current_value"),
+                            "the sum of its events' signed_usd",
+                            f"{line_pointer}.current_value",
+                            "the line's value is not the sum of its events' signed "
+                            "amounts",
+                        )
+                    # The oracle, not the report, says how far the admissions prove the
+                    # line: its coverage end is the anchor of the label whenever it
+                    # states one, and the report's own claim only when it states none
+                    # (check_capital_coverage_end reports that case).
+                    anchor, anchored = coverage_end, False
+                    oracle = _oracle_coverage_ends(ctx)
+                    if oracle is not None:
+                        kind, oracle_day = _line_oracle_end(oracle, strategy, line)
+                        if kind == "row" and oracle_day is not None:
+                            anchor, anchored = oracle_day, True
+                    proven = min(ctx.cutoff, anchor)
+                    if _canonical_iso_day(line.get("as_of_date")) != proven:
+                        honest = False
+                        emit(
+                            BLOCKER_INVARIANT,
+                            entity,
+                            line.get("as_of_date"),
+                            proven.isoformat(),
+                            f"{line_pointer}.as_of_date",
+                            "the cash line's as_of_date is not min(cutoff, the coverage "
+                            "end the oracle states)"
+                            if anchored
+                            else "the cash line's as_of_date is not min(cutoff, "
+                            "coverage_end)",
+                        )
+            day, marked = judge_date(
+                entity,
+                line_pointer,
+                line,
+                honest,
+                f"{strategy}:{line.get('account_id')}",
+                "cash",
+            )
+            components_honest = components_honest and honest
+            if day is None:
+                components_complete = False
+            else:
+                component_days.append(day)
+                component_marks.append((day, marked))
+        if not row_available:
+            continue
+        row_day_raw = row.get("as_of_date")
+        row_honest = components_honest
+        if components_complete and component_days:
+            oldest = min(component_days)
+            if _canonical_iso_day(row_day_raw) not in (None, oldest):
+                row_honest = False
+                emit(
+                    BLOCKER_INVARIANT,
+                    f"current_capital:{strategy}",
+                    row_day_raw,
+                    oldest.isoformat(),
+                    f"{pointer}.as_of_date",
+                    "the strategy's as_of_date is not the oldest of its members and "
+                    "cash lines",
+                )
+        row_day, row_marked = judge_date(
+            f"current_capital:{strategy}",
+            pointer,
+            row,
+            row_honest,
+            strategy,
+            "row",
+            component_marks,
         )
+        if row_day is not None:
+            rows_honest.append((row_day, row_honest, row_marked))
+    systematic = node(custody, "systematic")
+    if isinstance(systematic, Mapping) and _capital_available(systematic):
+        honest = all(flag for _, flag, _ in rows_honest)
+        raw = systematic.get("as_of_date")
+        if rows_honest and _canonical_iso_day(raw) not in (
+            None,
+            min(day for day, _, _ in rows_honest),
+        ):
+            honest = False
+            emit(
+                BLOCKER_INVARIANT,
+                "current_capital:systematic",
+                raw,
+                min(day for day, _, _ in rows_honest).isoformat(),
+                f"{base}.systematic.as_of_date",
+                "the Systematic as_of_date is not the oldest of its rows",
+            )
+        judge_date(
+            "current_capital:systematic",
+            f"{base}.systematic",
+            systematic,
+            honest,
+            "systematic",
+            "total",
+            [(day, marked) for day, _, marked in rows_honest],
+        )
+    yield from findings
 
 
 def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
@@ -8848,6 +10143,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
     ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
+    (COVERAGE_BOUNDS_CHECK, check_capital_coverage_bound),
+    (COVERAGE_END_CHECK, check_capital_coverage_end),
     ("dates.weekly_current_week", check_weekly_current_week),
     ("completeness.required_outputs", check_completeness),
     ("code.data_deref_before_guard", check_app_guard),

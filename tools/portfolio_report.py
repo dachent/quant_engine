@@ -76,6 +76,7 @@ from quant_engine.portfolio_ledger.returns import (
     ReturnsError,
     ReturnSpan,
     ValuePeriod,
+    classify_xirr,
     splice_spans,
     summed_value_composite,
     value_periods,
@@ -90,6 +91,9 @@ from portfolio_invested_capital import (
 
 
 REPORT_SCHEMA_VERSION: Final = 2
+# A report that carries custody cash dated by its admission coverage (baseline
+# schema 2) is version 3: each cash line names its last event and coverage end.
+CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION: Final = 3
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
@@ -624,7 +628,7 @@ def _baseline(
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("baseline catalog is missing or linked")
     catalog = _load_json(catalog_path, "baseline catalog")
-    if catalog.get("baseline_schema_version") != 1:
+    if catalog.get("baseline_schema_version") not in {1, 2}:
         raise ReportValidationError("baseline schema version is unsupported")
     if catalog.get("policy_version") != POLICY_VERSION:
         raise ReportValidationError("baseline performance policy differs")
@@ -646,7 +650,7 @@ def _baseline(
         sha256,
         size_bytes,
         "portfolio-baseline-catalog",
-        "1",
+        str(catalog.get("baseline_schema_version")),
     ):
         raise ReportValidationError("baseline artifact identity differs")
     return (
@@ -1359,6 +1363,68 @@ def _value_basis_bounds_disclosure(
                 str(row["as_of_date"]),
                 bounded,
             )
+    custody = report.get("custody_current_capital")
+    if isinstance(custody, Mapping):
+        # N56: the dates the report labels on its custody current capital.  The
+        # entity names are the acceptance validator's: ``strategy:account`` for a
+        # NAV member or a derived cash line, ``strategy`` for a strategy row and
+        # ``systematic`` for the total.  A date is disclosed only where a bounded
+        # strategy's value basis really ends there.
+        for strategy_row in _objects(
+            custody.get("strategies", []), "custody_current_capital.strategies"
+        ):
+            strategy_id = strategy_row.get("strategy_id")
+            if (
+                not isinstance(strategy_id, str)
+                or strategy_id not in ends
+                or strategy_row.get("scope", "SYSTEMATIC") != "SYSTEMATIC"
+            ):
+                continue
+            for group in ("members", "derived_cash"):
+                for line in _objects(
+                    strategy_row.get(group, []),
+                    f"custody_current_capital.strategies.{group}",
+                ):
+                    if line.get("as_of_date") == ends[strategy_id]:
+                        add(
+                            "current_capital",
+                            f"{strategy_id}:{line.get('account_id')}",
+                            "as_of_date",
+                            ends[strategy_id],
+                            [strategy_id],
+                        )
+            if strategy_row.get("as_of_date") == ends[strategy_id]:
+                add(
+                    "current_capital",
+                    strategy_id,
+                    "as_of_date",
+                    ends[strategy_id],
+                    [strategy_id],
+                )
+        systematic = custody.get("systematic")
+        total_day = (
+            systematic.get("as_of_date") if isinstance(systematic, Mapping) else None
+        )
+        if isinstance(total_day, str):
+            total_bounded = [
+                strategy_id
+                for strategy_id, end in ends.items()
+                if end == total_day
+                and any(
+                    isinstance(item, Mapping)
+                    and item.get("strategy_id") == strategy_id
+                    and item.get("scope", "SYSTEMATIC") == "SYSTEMATIC"
+                    for item in custody.get("strategies", [])
+                )
+            ]
+            if total_bounded:
+                add(
+                    "current_capital",
+                    "systematic",
+                    "as_of_date",
+                    total_day,
+                    total_bounded,
+                )
     for row in _objects(report.get("strategy_summary", []), "strategy_summary"):
         strategy_id = row.get("strategy_id")
         if (
@@ -1397,6 +1463,114 @@ def _value_basis_bounds_disclosure(
         "bounded_sections": sorted(
             entries, key=lambda item: (item["section"], item["entity"])
         ),
+    }
+
+
+CAPITAL_COVERAGE_RULE_ID = "N56-COVERAGE"
+
+
+def _capital_coverage_bounds(
+    custody: Mapping[str, Any], calculation_cutoff_date: str
+) -> dict[str, Any] | None:
+    """The report-only ``capital_coverage_bounds`` block (N56).
+
+    A custody cash line is proven true through ``min(cutoff, coverage_end)``, where
+    ``coverage_end`` is the end of the admissions it is derived from.  When that end
+    precedes the cutoff (the Matrixport sleeve allocations are admitted only through the
+    last subscription) the line, its strategy row and the Systematic total are honestly
+    dated before the cutoff.  That is a coverage bound, not an FX value-basis end, so
+    ``value_basis_bounds`` never states it.  This block does: one entry per cash line of
+    a SYSTEMATIC strategy whose label is its own coverage end before the cutoff, and one
+    ``current_capital`` entry for each date that line explains (the line, a strategy
+    row dated by its oldest line, and the Systematic total dated by the oldest row).
+    A label that is not the line's own coverage end is never stated, so the validator
+    keeps it a blocker.  The block is absent when no line is bounded.
+    """
+
+    cutoff = _date(calculation_cutoff_date, "calculation cutoff date")
+    lines: list[dict[str, Any]] = []
+    for row in _objects(custody.get("strategies", []), "custody strategies"):
+        strategy_id = row.get("strategy_id")
+        if (
+            not isinstance(strategy_id, str)
+            or row.get("scope", "SYSTEMATIC") != "SYSTEMATIC"
+        ):
+            continue
+        for line in _objects(row.get("derived_cash", []), "custody derived_cash"):
+            coverage_end = line.get("coverage_end")
+            value = line.get("current_value")
+            if (
+                not isinstance(coverage_end, str)
+                or line.get("as_of_date") != coverage_end
+                or not isinstance(value, Mapping)
+                or value.get("status") != "AVAILABLE"
+                or _date(coverage_end, "custody coverage end") >= cutoff
+            ):
+                continue
+            lines.append(
+                {
+                    "strategy_id": strategy_id,
+                    "account_id": line.get("account_id"),
+                    "provider_id": line.get("provider_id"),
+                    "as_of_date": coverage_end,
+                    "coverage_end": coverage_end,
+                    "last_event_date": line.get("last_event_date"),
+                }
+            )
+    if not lines:
+        return None
+    lines.sort(key=lambda item: (item["strategy_id"], str(item["account_id"])))
+    sections: list[dict[str, Any]] = []
+
+    def add(entity: str, day: str, bounded_by: Sequence[str]) -> None:
+        sections.append(
+            {
+                "section": "current_capital",
+                "entity": entity,
+                "field": "as_of_date",
+                "date": day,
+                "bounded_by": sorted(bounded_by),
+            }
+        )
+
+    oldest_by_strategy: dict[str, str] = {}
+    for item in lines:
+        add(
+            f"{item['strategy_id']}:{item['account_id']}",
+            item["coverage_end"],
+            [item["strategy_id"]],
+        )
+        strategy_id = item["strategy_id"]
+        oldest_by_strategy[strategy_id] = min(
+            oldest_by_strategy.get(strategy_id, item["coverage_end"]),
+            item["coverage_end"],
+        )
+    for row in _objects(custody.get("strategies", []), "custody strategies"):
+        strategy_id = row.get("strategy_id")
+        if (
+            isinstance(strategy_id, str)
+            and strategy_id in oldest_by_strategy
+            and row.get("as_of_date") == oldest_by_strategy[strategy_id]
+        ):
+            add(strategy_id, oldest_by_strategy[strategy_id], [strategy_id])
+    systematic = custody.get("systematic")
+    total_day = (
+        systematic.get("as_of_date") if isinstance(systematic, Mapping) else None
+    )
+    if isinstance(total_day, str):
+        total_bounded = [
+            strategy_id
+            for strategy_id, day in oldest_by_strategy.items()
+            if day == total_day
+        ]
+        if total_bounded:
+            add("systematic", total_day, total_bounded)
+    return {
+        "schema_version": 1,
+        "rule": CAPITAL_COVERAGE_RULE_ID,
+        "calculation_cutoff_date": cutoff.isoformat(),
+        "lines": lines,
+        "bounded_sections": sorted(sections, key=lambda item: item["entity"]),
     }
 
 
@@ -1622,6 +1796,23 @@ def _live_strategy_components(
     }
 
 
+# Retained report generations bind the member return path (through its series hash) and
+# the strategy drawdowns as published text, rounded to 28 digits.  A rebuild from the
+# same inputs must reproduce those bytes, so the two roundings keep that precision no
+# matter what context the caller runs in.  Money sums are different: they are exact
+# (``_exact_total``) because nothing sealed compares with them.
+_PUBLISHED_RETURN_PRECISION = 28
+
+
+def _published_negation(value: Decimal) -> Decimal:
+    """Negate a drawdown as retained generations did: rounded to 28 digits."""
+
+    with localcontext() as published:
+        published.prec = _PUBLISHED_RETURN_PRECISION
+        published.rounding = ROUND_HALF_EVEN
+        return -value
+
+
 def _member_own_trace_path(
     links: object,
 ) -> dict[str, Any] | None:
@@ -1650,7 +1841,13 @@ def _member_own_trace_path(
     daily: list[tuple[date, Decimal]] = []
     for link in trace_links:
         end_day = _date(link.get("end_date"), "trace link.end_date")
-        period_return = _decimal(link.get("factor"), "trace link.factor") - Decimal(1)
+        # The series text and its hash bind this value, and retained report
+        # generations were sealed with the sub-period return rounded to 28 digits.
+        with localcontext() as published:
+            published.prec = _PUBLISHED_RETURN_PRECISION
+            published.rounding = ROUND_HALF_EVEN
+            factor = _decimal(link.get("factor"), "trace link.factor")
+            period_return = factor - Decimal(1)
         series.append(
             {"date": end_day.isoformat(), "return": decimal_text(period_return)}
         )
@@ -1952,6 +2149,11 @@ def _reconcile_multi_account_strategy_composite(
             "multi-account member own paths do not reconcile "
             f"to the strategy composite for {strategy_id}"
         )
+
+
+MWR_FLOW_PATH_UNPROVEN = frozenset(
+    {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
+)
 
 
 def _account_strategy_performance(
@@ -2328,6 +2530,20 @@ def _account_strategy_performance(
             # arrived through the epoch manifest performance payload or the
             # account-live return path.
             row["source_last_observation"] = raw_day
+    flows_status_by_account = {
+        str(item.get("account_id")): item.get("status")
+        for item in _objects(
+            catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix"
+        )
+        if item.get("fact_type") == "flows"
+    }
+    for row in rows:
+        # D1/D2: mwr_coverage_status is the manifest's flow-coverage receipt
+        # status and is copied verbatim.  The report's own flows coverage row is
+        # a separate fact, published beside it without overwriting it.
+        row["mwr_flow_path_status"] = flows_status_by_account.get(
+            str(row["account_id"])
+        )
     return sorted(
         rows,
         key=lambda item: (
@@ -2349,11 +2565,17 @@ def _latest_nav(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     return latest
 
 
+# Precision at which money, cash flows and capital are added: wide enough that no sum
+# of native (up to 40-digit) amounts rounds.  It equals the baseline's exact
+# precision (``portfolio_baseline._EXACT_PRECISION``).
+_EXACT_PRECISION = 100
+
+
 def _exact_total(values: Sequence[Decimal]) -> Decimal:
     """Add money exactly: the default 28-digit context would round long sums."""
 
     with localcontext() as context:
-        context.prec = 100
+        context.prec = _EXACT_PRECISION
         return sum(values, Decimal(0))
 
 
@@ -2717,7 +2939,9 @@ def _verify_custody_current_capital(
         raise ReportValidationError("custody raw selected ledger differs")
     try:
         cash = _derived_custody_cash(
-            raw, _date(block["valuation_date"], "custody cutoff")
+            raw,
+            _date(block["valuation_date"], "custody cutoff"),
+            legacy=catalog.get("baseline_schema_version") == 1,
         )
     except (RuntimeError, ValueError, KeyError) as exc:
         raise ReportValidationError(f"custody raw recompute failed: {exc}") from exc
@@ -3501,12 +3725,12 @@ def _account_live_return_series(
                 else "DAILY_GEOMETRIC_TWR"
             ),
             "current_drawdown": (
-                decimal_text(-current_drawdown)
+                decimal_text(_published_negation(current_drawdown))
                 if current_drawdown is not None
                 else None
             ),
             "maximum_drawdown": (
-                decimal_text(-maximum_drawdown)
+                decimal_text(_published_negation(maximum_drawdown))
                 if maximum_drawdown is not None
                 else None
             ),
@@ -3907,6 +4131,85 @@ def _current_product_fact_rows(
     return accepted
 
 
+ACCOUNT_ROLE_PRODUCT = "PRODUCT"
+ACCOUNT_ROLE_RESERVE = "RESERVE"
+ACCOUNT_ROLE_HISTORY_ONLY = "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT"
+
+
+def _label_account_roles(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    product_account_ids: set[str] | None,
+    reserve_account_ids: set[str],
+    excluded_account_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Name the role of every account row and drop owner-excluded accounts.
+
+    A product account is a current product member, a reserve account a component
+    of the custody reserve; any other account has no current assignment and is
+    labelled history only, so it cannot pass for a current account.  An account
+    the current-epoch crosswalk excludes (deprecated or immaterial) is not a
+    current output at all, like its siblings in `provider_admissions`.  Without a
+    known product perimeter (a legacy report) the rows stay as the baseline wrote
+    them.  A row that names no account carries no account role.
+    """
+
+    if product_account_ids is None:
+        return [dict(row) for row in rows]
+    labelled: list[dict[str, Any]] = []
+    for row in rows:
+        account_id = row.get("account_id")
+        if not isinstance(account_id, str):
+            labelled.append({**row, "account_role": None})
+            continue
+        if account_id in product_account_ids:
+            role = ACCOUNT_ROLE_PRODUCT
+        elif account_id in excluded_account_ids:
+            continue
+        elif account_id in reserve_account_ids:
+            role = ACCOUNT_ROLE_RESERVE
+        else:
+            role = ACCOUNT_ROLE_HISTORY_ONLY
+        labelled.append({**row, "account_role": role})
+    return labelled
+
+
+def _reserve_account_ids(current_capital: Mapping[str, Any]) -> set[str]:
+    reserve = current_capital.get("reserve")
+    components = reserve.get("components") if isinstance(reserve, Mapping) else None
+    if not isinstance(components, list):
+        return set()
+    return {item for item in components if isinstance(item, str)}
+
+
+def _strategy_attribution_section(
+    attribution_catalog: Mapping[str, Any],
+    attribution_ref: Mapping[str, str],
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None,
+) -> dict[str, Any]:
+    """Project every attribution list through the same current-product filter."""
+
+    def current(key: str) -> list[dict[str, Any]]:
+        optional = key == "benchmark_comparisons"
+        rows = (
+            attribution_catalog.get(key, []) if optional else attribution_catalog[key]
+        )
+        return _current_product_fact_rows(
+            rows,
+            strategy_product_controls,
+            None,
+            f"strategy_attribution.{key}",
+        )
+
+    return {
+        "benchmark_assignments": current("benchmark_assignments"),
+        "benchmark_comparisons": current("benchmark_comparisons"),
+        "comparisons": current("comparisons"),
+        "costs": current("costs"),
+        "generation_id": attribution_ref["generation_id"],
+    }
+
+
 def _strategy_provider_evidence(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
@@ -4066,10 +4369,14 @@ def _strategy_provider_evidence(
     return rows
 
 
-def _accepted_pre_live_observations(
+def _accepted_pre_live(
     history: Mapping[str, Any], strategy_version: str
-) -> int:
-    """Count admitted prehistory in an already authenticated coverage row."""
+) -> tuple[int, str | None]:
+    """Admitted prehistory count and the account-live start it precedes.
+
+    The start is the earliest ACCOUNT_LIVE segment of the same exact version;
+    it is None when no prehistory is admitted.
+    """
     segments = _objects(history.get("segments"), "history segments")
     live_starts = [
         segment["observed_start"]
@@ -4078,7 +4385,7 @@ def _accepted_pre_live_observations(
         and segment.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
         and segment.get("strategy_version") == strategy_version
     ]
-    return sum(
+    observations = sum(
         segment["return_observations"]
         for segment in segments
         if live_starts
@@ -4087,6 +4394,21 @@ def _accepted_pre_live_observations(
         and segment.get("strategy_version") == strategy_version
         and segment["observed_end"] < min(live_starts)
     )
+    return observations, (min(live_starts) if observations > 0 else None)
+
+
+def _accepted_pre_live_observations(
+    history: Mapping[str, Any], strategy_version: str
+) -> int:
+    """Count admitted prehistory in an already authenticated coverage row."""
+    return _accepted_pre_live(history, strategy_version)[0]
+
+
+def _accepted_pre_live_account_live_start(
+    history: Mapping[str, Any], strategy_version: str
+) -> str | None:
+    """Account-live start of the exact version whose prehistory is admitted."""
+    return _accepted_pre_live(history, strategy_version)[1]
 
 
 def _history_contract(
@@ -4157,12 +4479,13 @@ def _history_contract(
             if name not in current_by_name:
                 continue
             target = current_by_name[name]
-            observations = _accepted_pre_live_observations(
+            observations, account_live_start = _accepted_pre_live(
                 history, target["strategy_version"]
             )
             if observations > 0:
                 target.update(
                     {
+                        "account_live_start": account_live_start,
                         "backtest_observations": observations,
                         "compatibility_basis": (
                             "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
@@ -4679,6 +5002,92 @@ def _implementation_return_attribution_contract(
     }
 
 
+_ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
+_ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
+_ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"
+# The stale catalog gap that contradicts a bound exact-version prehistory.
+_NO_COMPATIBLE_BACKTEST_GAP = (
+    "No compatible backtest prehistory is admitted; LIVE_ONLY remains mandatory."
+)
+
+
+# Every outcome ``classify_xirr`` can return for a member's own stream.  A member in any
+# of them completed admission and carries its full cash flows; only its own root failed.
+_MWR_CLASSIFIER_OUTCOME_STATUSES = frozenset(
+    {
+        "AVAILABLE",
+        "INDETERMINATE",
+        "NO_ROOT",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "UNIQUENESS_NOT_PROVED",
+    }
+)
+
+
+def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One MWR per strategy over its funded epochs' pooled investor cash flows.
+
+    Plan v5 4.5 D lists MWR per account and per strategy.  The funded epochs'
+    own cash flows (opening, interior legs, terminal value) are netted by date
+    and classified by the one XIRR classifier, the pooling both oracles use.  An
+    epoch the manifest did not fund (an assignment-only predecessor) carries no
+    capital and stays out.  A funded epoch pools when it carries cash flows and
+    a classifier outcome status: whether a root is unique is a property of the
+    stream being solved, so a member's own non-unique rate says nothing about
+    the pooled stream.  A funded epoch whose cash flows are unavailable (blocked
+    or unavailable) leaves the strategy without a number, with a named reason,
+    never a partial pool.  The member receipt coverage status gates nothing.
+    """
+
+    unavailable: dict[str, Any] = {
+        "mwr_xirr": None,
+        "mwr_opening_date": None,
+        "mwr_terminal_date": None,
+        "mwr_member_account_ids": [],
+        "mwr_basis": "POOLED_FUNDED_EPOCH_CASHFLOWS",
+    }
+    funded = [item for item in items if item.get("epoch_admission_status") == "FUNDED"]
+    if not funded:
+        return {
+            **unavailable,
+            "mwr_status": "UNAVAILABLE_NO_FUNDED_EPOCH_MWR",
+            "mwr_reason": "NO_FUNDED_EPOCH_ROWS",
+        }
+    pooled: dict[date, Decimal] = defaultdict(Decimal)
+    for item in funded:
+        flows = item.get("mwr_cashflows")
+        if item.get("mwr_status") not in _MWR_CLASSIFIER_OUTCOME_STATUSES or not flows:
+            return {
+                **unavailable,
+                "mwr_status": "UNAVAILABLE_MEMBER_MWR_NOT_AVAILABLE",
+                "mwr_reason": "MEMBER_CASHFLOWS_NOT_AVAILABLE",
+            }
+        # Member flows are native, up to 40 significant digits.  Added in the ambient
+        # 28-digit context two opposite legs leave a rounding residual that survives
+        # or not with the member order, so a date that nets to zero would stay in the
+        # pool.  The pool is added exactly, as every other published sum is.
+        with localcontext() as context:
+            context.prec = _EXACT_PRECISION
+            for flow in _objects(flows, "mwr_cashflows"):
+                pooled[_date(flow.get("date"), "mwr cashflow date")] += _decimal(
+                    flow.get("amount"), "mwr cashflow amount"
+                )
+    # The classifier solves only the dates whose pooled flows do not net to zero, so
+    # the published window is that stream's, not the raw pooled dates'.
+    ordered = [(day, amount) for day, amount in sorted(pooled.items()) if amount]
+    result = classify_xirr(ordered)
+    rate = result["rate"]
+    return {
+        "mwr_basis": "POOLED_FUNDED_EPOCH_CASHFLOWS",
+        "mwr_member_account_ids": sorted(str(item["account_id"]) for item in funded),
+        "mwr_opening_date": ordered[0][0].isoformat() if ordered else None,
+        "mwr_reason": result["reason"],
+        "mwr_status": result["status"],
+        "mwr_terminal_date": ordered[-1][0].isoformat() if ordered else None,
+        "mwr_xirr": None if rate is None else decimal_text(cast(Decimal, rate)),
+    }
+
+
 def _strategies(
     catalog: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
@@ -4923,6 +5332,16 @@ def _strategies(
             "compatibility_reason",
             "Compatibility is unavailable without an effective-dated registry row.",
         )
+        registry_version_ref = version.get("version_ref", strategy.get("version_ref"))
+        registry_disposition = version.get(
+            "disposition", strategy.get("version_disposition", "UNRESOLVED")
+        )
+        registry_disposition_reason = version.get(
+            "disposition_reason",
+            "Legacy provenance has no effective-dated strategy version row.",
+        )
+        backtest_slot_status = backtest.get("status", "UNAVAILABLE")
+        backtest_slot_version_ref = backtest.get("version_ref")
         history = (
             dict(history_contract.get(str(strategy.get("name")), {}))
             if history_contract is not None
@@ -4938,6 +5357,7 @@ def _strategies(
             if implementation_return_attribution_contract is not None
             else {}
         )
+        version_gaps = list(version.get("gaps", strategy.get("gaps", [])))
         history_observations = history.get("backtest_observations")
         history_accepted = bool(
             history
@@ -4963,11 +5383,8 @@ def _strategies(
                     or history.get("history_status")
                 )
             )
-            live_plus_backtest_status = (
-                "ELIGIBLE_ACCEPTED_HISTORY"
-                if history_accepted
-                else "BLOCKED_NO_ACCEPTED_HISTORY"
-            )
+            # The routing decision follows the registry binding below.
+            live_plus_backtest_status = "BLOCKED_NO_ACCEPTED_HISTORY"
             live_plus_backtest_reason = (
                 "History is accepted for economic inference under "
                 f"{history_compatibility_reason}; live implementation reconciliation "
@@ -4991,6 +5408,76 @@ def _strategies(
                 if compatibility_status == "PROVEN_COMPATIBLE"
                 else f"{compatibility_status}: {compatibility_reason}"
             )
+        if history_accepted:
+            # The authenticated history contract admitted exact-version
+            # prehistory for this strategy, so the declared backtest slot and the
+            # version registry follow that admission instead of the stale
+            # effective-dated catalog default (UNAVAILABLE and UNRESOLVED). The
+            # catalog's live_boundary identity window is hash-pinned and is not
+            # touched here.
+            admitted_version_ref = history.get("strategy_version")
+            if backtest_slot_status in _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST:
+                backtest_slot_status = _ADMITTED_PREHISTORY_BACKTEST_STATUS
+                if backtest_slot_version_ref is None and isinstance(
+                    admitted_version_ref, str
+                ):
+                    backtest_slot_version_ref = admitted_version_ref
+            history_live_start = history.get("account_live_start")
+            # The registry's version_ref is the hash-pinned accepted-live-path
+            # identity of the live window while the history version is a model
+            # identity, so the two namespaces never compare equal. The registry
+            # binds to the history when it is empty (legacy), equals the history
+            # version, or names an evidenced ACCOUNT_LIVE window that carries
+            # this same ref and starts on the live start the history's
+            # prehistory precedes.
+            live_path_bound = (
+                isinstance(registry_version_ref, str)
+                and registry_version_ref.startswith(_ACCEPTED_LIVE_VERSION_PREFIX)
+                and live_boundary.get("status") == "EVIDENCED"
+                and live_boundary.get("evidence_layer") == "ACCOUNT_LIVE"
+                and live_boundary.get("version_ref") == registry_version_ref
+                and isinstance(history_live_start, str)
+                and live_boundary.get("observed_start") == history_live_start
+            )
+            if (
+                isinstance(admitted_version_ref, str)
+                and admitted_version_ref not in {"", "UNRESOLVED"}
+                and compatibility_status == "UNRESOLVED"
+                and (
+                    registry_version_ref in {None, admitted_version_ref}
+                    or live_path_bound
+                )
+            ):
+                if registry_version_ref is None:
+                    registry_version_ref = admitted_version_ref
+                if registry_disposition == "UNRESOLVED":
+                    registry_disposition = "EVIDENCED"
+                    registry_disposition_reason = (
+                        "Bound to the hash-bound exact version named by the "
+                        "authenticated history contract: "
+                        f"{history_compatibility_reason}"
+                    )
+                compatibility_status = "PROVEN_COMPATIBLE"
+                compatibility_reason = (
+                    "Authenticated history contract accepts this exact version "
+                    f"{admitted_version_ref}"
+                    + (
+                        f" for registry live path {registry_version_ref} starting "
+                        f"{history_live_start}"
+                        if live_path_bound
+                        else f" as registry version {registry_version_ref}"
+                    )
+                    + f": {history_compatibility_reason}"
+                )
+                version_gaps = [
+                    gap for gap in version_gaps if gap != _NO_COMPATIBLE_BACKTEST_GAP
+                ]
+            if compatibility_status != "PROVEN_COMPATIBLE":
+                raise ReportValidationError(
+                    "accepted exact-version prehistory is not bound to the version "
+                    f"registry: {strategy_id} ({compatibility_status})"
+                )
+            live_plus_backtest_status = "ELIGIBLE_ACCEPTED_HISTORY"
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -5029,6 +5516,13 @@ def _strategies(
                 ),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
+                **_strategy_mwr(
+                    [
+                        item
+                        for item in performance
+                        if item.get("strategy_id") == strategy_id
+                    ]
+                ),
                 "account_live_status": (
                     "HISTORICAL_ONLY"
                     if historical_account
@@ -5111,14 +5605,9 @@ def _strategies(
                 ),
                 "cost_status": cost_row.get("cost_status", "UNAVAILABLE"),
                 "implementation_gap_status": gap_row.get("status", "UNAVAILABLE"),
-                "version_ref": version.get("version_ref", strategy.get("version_ref")),
-                "version_disposition": version.get(
-                    "disposition", strategy.get("version_disposition", "UNRESOLVED")
-                ),
-                "version_disposition_reason": version.get(
-                    "disposition_reason",
-                    "Legacy provenance has no effective-dated strategy version row.",
-                ),
+                "version_ref": registry_version_ref,
+                "version_disposition": registry_disposition,
+                "version_disposition_reason": registry_disposition_reason,
                 "version_effective_start": version.get("effective_start"),
                 "version_effective_end": version.get("effective_end"),
                 "version_compatibility_status": compatibility_status,
@@ -5152,8 +5641,8 @@ def _strategies(
                 "design_version_ref": design.get("version_ref"),
                 "configuration_status": configuration.get("status", "UNAVAILABLE"),
                 "configuration_version_ref": configuration.get("version_ref"),
-                "backtest_status": backtest.get("status", "UNAVAILABLE"),
-                "backtest_version_ref": backtest.get("version_ref"),
+                "backtest_status": backtest_slot_status,
+                "backtest_version_ref": backtest_slot_version_ref,
                 "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
                 "live_boundary_observed_start": live_boundary.get("observed_start"),
                 "live_boundary_observed_end": live_boundary.get("observed_end"),
@@ -5162,7 +5651,7 @@ def _strategies(
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
-                "version_gaps": version.get("gaps", strategy.get("gaps", [])),
+                "version_gaps": version_gaps,
             }
         )
     return sorted(rows, key=lambda item: str(item["strategy_id"]))
@@ -5339,7 +5828,7 @@ def _flow_reconciliation(
             for item in values
             if _object(item.get("amount"), "flow.amount").get("status") == "AVAILABLE"
         ]
-        total = sum((_amount(item, "amount") for item in available), Decimal("0"))
+        total = _exact_total([_amount(item, "amount") for item in available])
         rows.append(
             {
                 "flow_type": flow_type,
@@ -5420,15 +5909,63 @@ def _allocations(
     return rows
 
 
+def _scoped_known_gap(
+    gap: object, provider_coverage: Sequence[Mapping[str, Any]]
+) -> str:
+    """A known gap that only providers declared, scoped to each of them and its generation.
+
+    The baseline pools every provider's declared gaps into one sorted list, so a clause
+    such as a snapshot's "current account balances remain unavailable" loses the provider
+    it describes and reads as a portfolio-wide claim in the gate note (E9).  A clause that
+    appears in the declared gaps of one or more providers is published as one
+    ``<provider> (as of <that provider's generation date>): <clause>`` per declaring
+    provider, in provider order and joined with ``"; "``, so no provider's snapshot is
+    dated at another's generation; a clause no provider declared is the baseline's own
+    statement and stays as it is.  A provider listed in two coverage rows has no single
+    generation, so the report refuses it rather than keeping the last one seen.
+    """
+
+    text = str(gap)
+    seen: set[str] = set()
+    owners: dict[str, str] = {}
+    for item in provider_coverage:
+        provider_id = item.get("provider_id")
+        if isinstance(provider_id, str):
+            if provider_id in seen:
+                raise ReportValidationError(
+                    f"provider_coverage lists provider {provider_id} more than once"
+                )
+            seen.add(provider_id)
+        coverage = item.get("coverage")
+        day = item.get("generation_as_of_date")
+        if (
+            isinstance(coverage, Mapping)
+            and isinstance(provider_id, str)
+            and isinstance(day, str)
+            and text in coverage.get("known_gaps", [])
+        ):
+            owners[provider_id] = day
+    if not owners:
+        return text
+    return "; ".join(
+        f"{provider_id} (as of {owners[provider_id]}): {text}"
+        for provider_id in sorted(owners)
+    )
+
+
 def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    provider_coverage = _objects(
+        catalog.get("provider_coverage", []), "provider_coverage"
+    )
     for claim in _objects(catalog.get("fact_coverage"), "fact_coverage"):
         rows.append(
             {
                 "category": "FACT_COVERAGE",
                 "item": claim.get("fact_type"),
                 "known_gap": "; ".join(
-                    str(item) for item in claim.get("known_gaps", [])
+                    _scoped_known_gap(item, provider_coverage)
+                    for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
@@ -5929,6 +6466,29 @@ def _baseline_provider_ledger_identity(
     return by_schema
 
 
+def _declared_schema_version(payload: Mapping[str, Any], field: str, label: str) -> str:
+    """The schema version an artifact declares in ``field``, as it is sealed.
+
+    The publisher names every artifact it seals with the version the producer wrote into
+    it, never with a version typed into the publisher: ``portfolio_freshness`` moved to
+    schema 4 while the sealed name stayed at 3, and the attribution catalog and the
+    current-dependence source were sealed as version 1 while their producers write 2.
+    """
+
+    version = payload.get(field)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ReportValidationError(f"{label} schema version differs")
+    return str(version)
+
+
+def _freshness_artifact_version(path: Path) -> str:
+    return _declared_schema_version(
+        _load_json(path, "freshness health"),
+        "assessment_schema_version",
+        "freshness health",
+    )
+
+
 def _freshness_assessments(
     path: Path,
     portfolio_as_of: date,
@@ -5943,14 +6503,36 @@ def _freshness_assessments(
         "assessments",
         "policy" if schema_version == 2 else "policies",
     }
-    accepted = {frozenset(expected)}
-    if schema_version == 3:
-        accepted.add(frozenset(expected | {"provider_ledger"}))
-    if schema_version not in {2, 3} or frozenset(payload) not in accepted:
+    if schema_version == 4:
+        # Version 4 is dated at the data cutoff and carries the execution date.
+        expected.add("evaluated_on")
+    with_ledger = frozenset(expected | {"provider_ledger"})
+    if schema_version == 4:
+        # Version 4 is bound to the ledger it was judged against: the identity is
+        # required, not optional, as in the formal schema and the pipeline gate.
+        accepted = {with_ledger}
+    elif schema_version == 3:
+        accepted = {frozenset(expected), with_ledger}
+    else:
+        accepted = {frozenset(expected)}
+    if schema_version not in {2, 3, 4} or frozenset(payload) not in accepted:
         raise ReportValidationError("freshness health contract differs")
     as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")
     if as_of < portfolio_as_of:
         raise ReportValidationError("freshness health predates the portfolio")
+    execution_date = as_of
+    if schema_version == 4:
+        if as_of != portfolio_as_of:
+            raise ReportValidationError(
+                "freshness health is not dated at the portfolio data cutoff"
+            )
+        execution_date = _date(
+            payload.get("evaluated_on"), "freshness health evaluated_on"
+        )
+        if execution_date < as_of:
+            raise ReportValidationError(
+                "freshness health was evaluated before its data date"
+            )
     if "provider_ledger" in payload:
         ledger = _object(payload.get("provider_ledger"), "freshness provider ledger")
         if set(ledger) != {
@@ -5965,7 +6547,7 @@ def _freshness_assessments(
         ledger_as_of = _date(
             ledger.get("as_of_date"), "freshness provider ledger as_of_date"
         )
-        if ledger_as_of > as_of:
+        if ledger_as_of > execution_date:
             raise ReportValidationError(
                 "freshness provider ledger postdates the evaluation"
             )
@@ -6775,6 +7357,7 @@ def build_report_data(
         dict[tuple[str, str, str, str | None], dict[str, Any]] | None
     ) = None
     current_epoch_account_details: dict[str, dict[str, Any]] | None = None
+    excluded_epoch_account_ids: set[str] = set()
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_supplied = _require_epoch_manifest_triplet(
@@ -6853,6 +7436,11 @@ def build_report_data(
                     "last_four": row["last_four"],
                 }
         current_account_ids = {row[0] for row in current_epoch_tuples}
+        excluded_epoch_account_ids = {
+            row["account_id"]
+            for row in crosswalk_payload["rows"]
+            if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH"
+        } - current_account_ids
         catalog = _calculation_catalog_through(catalog, calculation_cutoff_date)
         current_product_catalog = _current_product_baseline_projection(
             catalog, strategy_product_controls
@@ -7296,6 +7884,21 @@ def build_report_data(
     verified_capital = _current_capital(catalog)
     _verify_current_capital_perimeter(verified_capital, strategy_product_controls)
     _verify_current_capital_accounts(verified_capital, account_summary)
+    product_account_ids = (
+        current_account_ids
+        if current_account_ids is not None
+        else baseline_current_account_ids
+    )
+    reserve_account_ids = _reserve_account_ids(verified_capital)
+
+    def with_account_roles(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return _label_account_roles(
+            rows,
+            product_account_ids=product_account_ids,
+            reserve_account_ids=reserve_account_ids,
+            excluded_account_ids=excluded_epoch_account_ids,
+        )
+
     report: dict[str, Any] = {
         "account_summary": account_summary,
         "allocation_history": allocation_history,
@@ -7305,7 +7908,9 @@ def build_report_data(
         "coverage_data_quality": coverage,
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
-        "fact_coverage_matrix": catalog.get("fact_coverage_matrix", []),
+        "fact_coverage_matrix": with_account_roles(
+            _objects(catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix")
+        ),
         "flow_reconciliation": _flow_reconciliation(
             catalog,
             strategy_product_controls,
@@ -7386,7 +7991,10 @@ def build_report_data(
             {
                 "artifact": "baseline-catalog",
                 "as_of_date": catalog.get("as_of_date"),
-                "schema": "portfolio-baseline-catalog/1",
+                "schema": (
+                    "portfolio-baseline-catalog/"
+                    f"{catalog.get('baseline_schema_version')}"
+                ),
                 "sha256": baseline_ref["catalog_sha256"],
             },
             *[
@@ -7492,8 +8100,8 @@ def build_report_data(
         **({"source_clock": source_clock} if source_clock is not None else {}),
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
-        "leverage_disclosures": _leverage_disclosures(
-            catalog, baseline_root, provider_ledger_root
+        "leverage_disclosures": with_account_roles(
+            _leverage_disclosures(catalog, baseline_root, provider_ledger_root)
         ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
@@ -7517,6 +8125,14 @@ def build_report_data(
     report["hwm_summary"] = hwm_summary
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
+        if catalog.get("baseline_schema_version") == 2:
+            report["report_schema_version"] = CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION
+            if calculation_cutoff_date is not None:
+                coverage_bounds = _capital_coverage_bounds(
+                    verified_capital, calculation_cutoff_date
+                )
+                if coverage_bounds is not None:
+                    report["capital_coverage_bounds"] = coverage_bounds
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
     if decomposition_lenses is not None:
@@ -7528,30 +8144,9 @@ def build_report_data(
     if current_product_catalog.get("hwm_inputs") is not None:
         report["hwm_inputs"] = current_product_catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
-        report["strategy_attribution"] = {
-            "benchmark_assignments": _current_product_fact_rows(
-                attribution_catalog["benchmark_assignments"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.benchmark_assignments",
-            ),
-            "benchmark_comparisons": attribution_catalog.get(
-                "benchmark_comparisons", []
-            ),
-            "comparisons": _current_product_fact_rows(
-                attribution_catalog["comparisons"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.comparisons",
-            ),
-            "costs": _current_product_fact_rows(
-                attribution_catalog["costs"],
-                strategy_product_controls,
-                None,
-                "strategy_attribution.costs",
-            ),
-            "generation_id": attribution_ref["generation_id"],
-        }
+        report["strategy_attribution"] = _strategy_attribution_section(
+            attribution_catalog, attribution_ref, strategy_product_controls
+        )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(
             value_basis_bounds,
@@ -8758,7 +9353,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2}
+        or report.get("report_schema_version") not in {1, 2, 3}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
@@ -11017,7 +11612,7 @@ def _validate_current_epoch_crosswalk(
         or not isinstance(selected["generation_id"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected["generation_id"])
         or selected["schema_name"] != "portfolio-baseline-catalog"
-        or selected["schema_version"] != "1"
+        or selected["schema_version"] not in {"1", "2"}
         or not isinstance(selected["sha256"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected["sha256"])
         or isinstance(selected["size_bytes"], bool)
@@ -11046,7 +11641,7 @@ def _validate_current_epoch_crosswalk(
             ),
             "generation_id": baseline_ref["generation_id"],
             "schema_name": "portfolio-baseline-catalog",
-            "schema_version": "1",
+            "schema_version": str(baseline_catalog.get("baseline_schema_version")),
             "sha256": baseline_ref["catalog_sha256"],
             "size_bytes": baseline_catalog_path.stat().st_size,
         }
@@ -12564,7 +13159,11 @@ def publish_report(
             baseline_catalog_path,
             "input/portfolio-baseline.json",
             "portfolio-baseline-catalog",
-            "1",
+            str(
+                json.loads(baseline_catalog_path.read_bytes()).get(
+                    "baseline_schema_version"
+                )
+            ),
         ),
         (
             candidate_dir / REPORT_DATA_NAME,
@@ -12687,7 +13286,11 @@ def publish_report(
                 attribution_catalog_path,
                 "input/strategy-attribution.json",
                 "strategy-attribution",
-                "1",
+                _declared_schema_version(
+                    _attribution_catalog,
+                    "catalog_schema_version",
+                    "strategy attribution catalog",
+                ),
             )
         )
     if snapshot_correlation_root is not None:
@@ -12719,7 +13322,9 @@ def publish_report(
                 snapshot_history_path,
                 "input/strategy-history-compatibility-contract.json",
                 history_schema_name,
-                "1",
+                _declared_schema_version(
+                    history_payload, "schema_version", "strategy history contract"
+                ),
             )
         )
     if snapshot_implementation_path is not None:
@@ -12747,7 +13352,7 @@ def publish_report(
                     snapshot_freshness_path,
                     "input/freshness-health.json",
                     "freshness-assessment",
-                    "3",
+                    _freshness_artifact_version(snapshot_freshness_path),
                 ),
                 (
                     snapshot_hwm_policy,

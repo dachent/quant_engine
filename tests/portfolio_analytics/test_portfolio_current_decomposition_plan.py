@@ -3151,6 +3151,42 @@ def test_emitted_base_spec_carries_the_computed_source_period_policy(
         assert "declared_unavailable_labels" in series_policy, series_id
 
 
+def test_emitted_base_spec_is_dated_at_the_layered_data_boundary(
+    tmp_path: Path,
+) -> None:
+    """R2-3 / N5: the base spec date is computed from the data, never the template's.
+
+    The retained template carried the execution date (2026-09-19) while the layered
+    history is complete only through the cutoff, so the base decomposition, and the
+    panel's factor_analysis built from it, were dated after the data.  The emitted
+    specification is computed from the layered history, like its composition.
+    """
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    template = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    template["as_of_date"] = inputs["evaluation_date"]
+    _write_json(inputs["base_spec_path"], template)
+
+    outputs, manifest = planner.build_bundle(**kwargs)
+
+    emitted = json.loads(
+        outputs["inputs/governance/base-decomposition-spec.json"].decode("utf-8")
+    )
+    boundary = manifest["layered_history"]["calculation_boundary"]["complete_through"]
+    assert boundary < inputs["evaluation_date"]
+    assert emitted["as_of_date"] == boundary
+
+    # The template's own date is not an input: changing it changes nothing.
+    template["as_of_date"] = "2099-01-01"
+    _write_json(inputs["base_spec_path"], template)
+    changed_outputs, changed = planner.build_bundle(**kwargs)
+    assert (
+        changed_outputs["inputs/governance/base-decomposition-spec.json"]
+        == outputs["inputs/governance/base-decomposition-spec.json"]
+    )
+    assert changed["bundle_id"] == manifest["bundle_id"]
+
+
 def test_a_stale_template_interval_policy_cannot_reach_the_bundle(
     tmp_path: Path,
 ) -> None:

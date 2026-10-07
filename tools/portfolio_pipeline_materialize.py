@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 import hashlib
 import importlib.util
 import json
@@ -3606,7 +3606,10 @@ def _release_evaluation_date(recipe: Mapping[str, Any]) -> str:
 
 
 def _generation_as_of_allowed(
-    role: str, generation_as_of: date, release_as_of: date
+    role: str,
+    generation_as_of: date,
+    release_as_of: date,
+    cutoff: date | None = None,
 ) -> bool:
     """Allow data-dated roles to lag the release; keep the panel exact-date.
 
@@ -3624,15 +3627,15 @@ def _generation_as_of_allowed(
     still applies -- so the boundary is enforced where the data age is actually
     measured rather than duplicated here.
 
-    The panel is generated at release time and carries no upstream data date, so
-    it stays exact.
+    The panel manifest has one date field and downstream readers take it as the data
+    date, so it is dated at the financial cutoff exactly -- never at the later date the
+    release is cut, which the freshness artifact carries as its own ``evaluated_on``.
+    Without a cutoff the panel is held to the release date, as before.
     """
 
-    return (
-        generation_as_of <= release_as_of
-        if role in _DATA_DATED_RELEASE_ROLES
-        else generation_as_of == release_as_of
-    )
+    if role in _DATA_DATED_RELEASE_ROLES:
+        return generation_as_of <= release_as_of
+    return generation_as_of == (release_as_of if cutoff is None else cutoff)
 
 
 def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
@@ -3749,20 +3752,64 @@ def _semantic_gate_payload(
     }
 
 
+# The audit snapshot is sealed (see ``portfolio_baseline._snapshot_sum``): the baseline
+# replays it, and this check compares with that replay, adding sequentially at 28 digits.
+_SNAPSHOT_PRECISION: Final = 28
+
+
+def _snapshot_sum(values: Sequence[Decimal]) -> Decimal:
+    with localcontext() as context:
+        context.prec = _SNAPSHOT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return sum(values, Decimal(0))
+
+
+def _financial_snapshot_sums(
+    allocations: Sequence[object], systematic: Decimal, reserve: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """The audit snapshot's allocation sum, weight sum and systematic plus reserve.
+
+    The snapshot is a sealed, retained artifact: its sums are compared for equality
+    with the figures the baseline replayed from it, so they keep the historical
+    arithmetic (28 digits, in row order) and never the exact arithmetic that current
+    capital uses.
+    """
+
+    values = [
+        _decimal(row["current_value"]["value"], "allocation value")
+        for row in allocations
+        if isinstance(row, dict)
+        and row.get("pool_id") == "systematic-capital"
+        and isinstance(row.get("current_value"), dict)
+    ]
+    weights = [
+        _decimal(row.get("systematic_weight"), "systematic weight")
+        for row in allocations
+        if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
+    ]
+    return (
+        _snapshot_sum(values),
+        _snapshot_sum(weights),
+        _snapshot_sum([systematic, reserve]),
+    )
+
+
 def semantic(
     recipe_path: Path, output_path: Path, financial_spec_path: Path | None = None
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     output_root = output_path.parent.parent
     checks: dict[str, dict[str, Any]] = {}
-    # `_generation_as_of_allowed` reasons about the date the release is CUT -- data-dated
-    # roles "legitimately lag the evaluation date" and the panel "is generated at release
-    # time". Handing it the financial cutoff conflated the two clocks, so a ledger whose
-    # provenance is one day past the cutoff (which `provider_ledger._generation_as_of_date`
-    # produces by design) failed, and every freshness row had to be stamped with the data
-    # date to pass -- which is what the previous release did, asserting nothing.
+    # `_generation_as_of_allowed` reasons about the date the release is CUT for the
+    # data-dated roles, which "legitimately lag the evaluation date": handing them the
+    # financial cutoff conflated the two clocks, so a ledger whose provenance is one day
+    # past the cutoff (which `provider_ledger._generation_as_of_date` produces by design)
+    # failed.  The panel manifest is the one date readers take as the DATA date, so it is
+    # held to the financial cutoff exactly while the execution date is carried by the
+    # freshness artifact (`evaluated_on`) and this receipt.
     evaluated_on = _release_evaluation_date(recipe)
     release_as_of = date.fromisoformat(evaluated_on)
+    financial_cutoff = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     if recipe.get("schema_version") == 3:
         conformance = recipe["product_authority"]["conformance"]
         _result(
@@ -3827,14 +3874,16 @@ def semantic(
                 and manifest.verification is VerificationStatus.VERIFIED
                 and manifest.coverage.status
                 is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
-                and _generation_as_of_allowed(role, generation_as_of, release_as_of)
+                and _generation_as_of_allowed(
+                    role, generation_as_of, release_as_of, financial_cutoff
+                )
             )
             generation_rows[role] = {
                 "actual_generation_id": actual["generation_id"],
                 "as_of_rule": (
                     "ON_OR_BEFORE_RELEASE"
                     if role in _DATA_DATED_RELEASE_ROLES
-                    else "EXACT_RELEASE_DATE"
+                    else "EXACT_FINANCIAL_CUTOFF"
                 ),
                 "expected_generation_id": expected["generation_id"],
                 "file_count": len(inventory_files),
@@ -3869,29 +3918,14 @@ def semantic(
     systematic = _decimal(replay.get("systematic_total_usd"), "systematic total")
     reserve = _decimal(replay.get("reserve_total_usd"), "reserve total")
     total = _decimal(replay.get("total_liquid_usd"), "total liquid")
-    systematic_allocations = sum(
-        (
-            _decimal(row["current_value"]["value"], "allocation value")
-            for row in allocations
-            if isinstance(row, dict)
-            and row.get("pool_id") == "systematic-capital"
-            and isinstance(row.get("current_value"), dict)
-        ),
-        Decimal(0),
-    )
-    weights = sum(
-        (
-            _decimal(row.get("systematic_weight"), "systematic weight")
-            for row in allocations
-            if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
-        ),
-        Decimal(0),
+    systematic_allocations, weights, expected_total = _financial_snapshot_sums(
+        allocations, systematic, reserve
     )
     # The dated audit snapshot keeps its identity (its own table against its own
     # replay) but is only ever a labeled historical reference; the current block
     # is verified separately, from the NAV facts, and never against that table.
     snapshot_ok = (
-        total == systematic + reserve
+        total == expected_total
         and systematic_allocations == systematic
         and abs(weights - Decimal(1)) <= WEIGHT_SUM_TOLERANCE
         and audit_snapshot.get("status") == "HISTORICAL_REFERENCE"
@@ -4072,8 +4106,19 @@ def semantic(
     assessment_shape_ok = isinstance(assessments, list) and len(assessment_rows) == len(
         assessments
     )
+    # Schema 4 judges every assessment at the financial cutoff and carries the
+    # execution date beside it; earlier schemas judged at the execution date.
+    if freshness.get("assessment_schema_version") == 4:
+        data_clock_ok = (
+            freshness.get("as_of_date") == recipe["as_of_date"]
+            and freshness.get("evaluated_on") == evaluated_on
+        )
+        row_clock = freshness.get("as_of_date")
+    else:
+        data_clock_ok = freshness.get("as_of_date") == evaluated_on
+        row_clock = evaluated_on
     evaluation_ok = assessment_shape_ok and all(
-        row.get("evaluated_on") == evaluated_on for row in assessment_rows
+        row.get("evaluated_on") == row_clock for row in assessment_rows
     )
     blocking = [
         row for row in assessment_rows if row.get("blocks_current_consumers") is True
@@ -4108,7 +4153,7 @@ def semantic(
     }
     rendered_disclosures_ok = blocking_disclosures == rendered_disclosures
     freshness_ok = (
-        freshness.get("as_of_date") == evaluated_on
+        data_clock_ok
         and evaluation_ok
         and blockers_disclosed
         and rendered_disclosures_ok
@@ -4118,6 +4163,7 @@ def semantic(
         "freshness",
         freshness_ok,
         as_of_date=freshness.get("as_of_date"),
+        evaluated_on=freshness.get("evaluated_on"),
         blocking_assessment_count=len(blocking),
         blockers_explicitly_disclosed=blockers_disclosed,
         blockers_rendered_in_panel=rendered_disclosures_ok,
@@ -5909,6 +5955,15 @@ def _attended_stage_financial_inputs(
             **ATTENDED_CAPITAL_INPUTS,
         }.items()
     }
+    # The contract marks INVESTED_CAPITAL REQUIRED for every current strategy, so
+    # an attended run without the governed capital family can only end in a
+    # blocked validator.  HWM stays all-or-none and is not gated here.
+    if any(supplied[flag] is None for flag in ATTENDED_CAPITAL_INPUTS):
+        raise MaterializationError(
+            "attended run requires the governed invested-capital result and input "
+            "generation (--invested-capital-result and "
+            "--invested-capital-input-generation); start it with --preparation-spec"
+        )
     try:
         release._governed_hwm_arguments(  # noqa: SLF001
             result=supplied["--hwm-governed-result"],
@@ -7186,9 +7241,7 @@ def _attended_stage_command(
     capital = [financial_stage_inputs.get(flag) for flag in ATTENDED_CAPITAL_INPUTS]
     if any(path is not None for path in hwm) and any(path is None for path in hwm):
         raise MaterializationError("attended financial input family differs")
-    if any(path is not None for path in capital) and any(
-        path is None for path in capital
-    ):
+    if any(path is None for path in capital):
         raise MaterializationError("attended financial input family differs")
     for flag in (*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS):
         if (path := financial_stage_inputs.get(flag)) is not None:

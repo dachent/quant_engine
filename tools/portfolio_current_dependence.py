@@ -1134,7 +1134,7 @@ def _expected_spec(
     policy: Mapping[str, Any],
     selected_identities: Sequence[Mapping[str, Any]],
     returns_content: bytes,
-    evaluated_on: date,
+    complete_through: date,
 ) -> tuple[dict[str, Any], Decimal]:
     policy_series = _objects(policy.get("series"), "dependence policy series")
     normalized_weights, required_weight, expected_loss = _policy_calculation(
@@ -1158,7 +1158,9 @@ def _expected_spec(
         raise CurrentDependenceError("conceptual prior pair set differs")
     parameters = _object(policy.get("calculation_parameters"), "calculation parameters")
     spec = {
-        "as_of_date": evaluated_on.isoformat(),
+        # The spec feeds the correlation generation, whose date downstream readers take
+        # as the data date.  It is the data cutoff; the run date stays in the receipt.
+        "as_of_date": complete_through.isoformat(),
         "conceptual_priors": [
             {
                 "evidence_note": str(row["evidence_note"]),
@@ -1373,7 +1375,9 @@ def build_source(
     returns_content = _csv_content(RETURN_FIELDS, projection)
     parameters = _object(policy.get("calculation_parameters"), "calculation parameters")
     spec = {
-        "as_of_date": evaluated_on.isoformat(),
+        # The spec feeds the correlation generation, whose date downstream readers take
+        # as the data date.  It is the data cutoff; the run date stays in the receipt.
+        "as_of_date": complete_through.isoformat(),
         "conceptual_priors": [
             {
                 "evidence_note": str(row["evidence_note"]),
@@ -1753,7 +1757,7 @@ def verify_packaged_source(
         policy=policy,
         selected_identities=selected_identities,
         returns_content=returns_content,
-        evaluated_on=evaluated_on,
+        complete_through=complete_through,
     )
     spec_content = contents["spec.json"]
     spec = _json_bytes(spec_content, "dependence spec")

@@ -83,12 +83,21 @@ without preserving stale calculations or hard-coded operator conclusions.
   remain separately labeled.
 - Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
   also contains `LIVE_PLUS_BACKTEST`, the operator may switch to the explicitly
-  labeled hybrid view only when every current effective-dated strategy registry
-  row is `PROVEN_COMPATIBLE`. Otherwise the hybrid payload is suppressed and the
-  selector remains visible but disabled with the named compatibility blockers.
-  An admitted hybrid uses only version-matched backtest observations before live
-  inception; live observations remain authoritative from inception onward, and
-  the hybrid view cannot change readiness, allocation, or risk-control conclusions.
+  labeled hybrid view when at least one strategy is eligible: the report marks
+  its accepted exact-version history `ELIGIBLE_ACCEPTED_HISTORY` beside a
+  `PROVEN_COMPATIBLE` registry row (the report binds an `UNRESOLVED` row to the
+  history only when its version is empty or equal, or its `accepted-live-path:`
+  ref names the evidenced account-live window that starts on the history's live
+  start; otherwise the report refuses). The gate then reports
+  `ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY` when some strategies are blocked.
+  Each blocked strategy stays in the hybrid view on its live observations only
+  (zero backtest observations) with its named blocker, and a blocked strategy
+  that uses backtest observations refuses the build. Only when no strategy is
+  eligible is the hybrid payload suppressed, with the selector visible but
+  disabled and the named compatibility blockers shown. An admitted hybrid uses
+  only version-matched backtest observations before live inception; live
+  observations remain authoritative from inception onward, and the hybrid view
+  cannot change readiness, allocation, or risk-control conclusions.
 - Dependence separately displays a measured-path central case and the
   correlation-one conservative bound. The central case uses accepted-path
   maximum drawdowns, measured exact-date Pearson dependence, governed
@@ -196,9 +205,17 @@ uv run --frozen --no-sync python tools/portfolio_freshness.py `
 ```
 
 Every material strategy must have a `nav` or `strategy-returns` assessment.
-The evaluation date is the local operational publication date, not merely the
-provider-ledger date. Pipeline preparation and commit both recompute every
-assessment from the embedded policy and reject an older or forged bundle.
+The evaluation date is the local operational publication date, recorded as the
+artifact's `evaluated_on`; the artifact itself (`as_of_date`) and every assessment
+are dated at the financial data cutoff (the provider-ledger catalog date), so a
+strategy last accepted on the cutoff is current as of it however late the run is,
+and a source that published past the cutoff is accepted through it. The panel
+generation manifest is dated at that same cutoff, never the later run date, and
+publication refuses a freshness artifact or any bound input dated after it.
+Pipeline preparation and commit both recompute every assessment from the embedded
+policy and reject an older or forged bundle. Portfolio123 is a finite source in
+the provider ledger and uses the `finite-history` policy: `FINITE_COMPLETE` at its
+own last accepted date, not a recurring cadence it never owed.
 `STALE`, `UNAVAILABLE`, or an absent assessment revokes the HWM-available
 claim and reduces freshness-adjusted NAV coverage. `LATE` remains visible and
 escalated but does not yet block current consumers. The exact freshness file

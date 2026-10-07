@@ -1606,13 +1606,49 @@ def _deposits_v3(*rows: tuple[str, str, str]) -> str:
     )
 
 
-def _ledger_v3() -> dict[str, Any]:
+def _admission(
+    provider: str,
+    account: str,
+    fact_type: str,
+    start: str,
+    end: str,
+    disposition: str = "AUTHORITATIVE",
+    layer: str = "ACCOUNT_LIVE",
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "disposition": disposition,
+        "effective_end": end,
+        "effective_start": start,
+        "evidence_layer": layer,
+        "fact_type": fact_type,
+        "pool_id": None,
+        "provider_id": provider,
+        "strategy_id": None,
+    }
+
+
+# Quantbase: one capture proves both fact types through 2026-01-12 (past the 01-10
+# cutoff). Matrixport: the wallet list proves flows through 01-12, while the
+# subscription (anchor) window ends at the last anchor, 01-02: the Robuxio shape.
+V3_ADMISSIONS = (
+    _admission("quantbase", "acct-qb", "flows", "2025-12-01", "2026-01-12"),
+    _admission("quantbase", "acct-qb", "capital_anchors", "2025-12-01", "2026-01-12"),
+    _admission("matrixport", "acct-mp", "flows", "2026-01-02", "2026-01-12"),
+    _admission("matrixport", "acct-mp", "capital_anchors", "2026-01-02", "2026-01-02"),
+)
+
+
+def _ledger_v3(
+    admissions: tuple[dict[str, object], ...] | None = None,
+) -> dict[str, Any]:
     document = _ledger()
     nav_rows = [
         row for row in document["nav_observations"] if row["account_id"] != "acct-qb"
     ]
     nav_rows += _nav("acct-qb", "quantbase", {"2026-01-08": "105", "2026-01-09": "106"})
     document["nav_observations"] = nav_rows
+    document["admissions"] = list(V3_ADMISSIONS if admissions is None else admissions)
     return document
 
 
@@ -4196,3 +4232,268 @@ def test_v3_native_matrixport_missing_selected_fx_fails_closed(
     assert ("capital.strategy_cash.cutoff", "robuxio-crypto") not in metrics
     # The fund-only path (USDT product NAV) is unaffected.
     assert metrics[("capital.account.cutoff", "acct-mp")]["value"] == "99.00"
+
+
+# ------------------------------------------------- oracle arithmetic at any caller precision
+
+_WIDE_OPEN = "100000000000.0000000000000000001"  # 31 significant digits
+
+
+def _at_precision(precision: int, call: Any) -> Any:
+    from decimal import localcontext
+
+    with localcontext() as context:
+        context.prec = precision
+        return call()
+
+
+def test_root_bound_total_is_exact_whatever_precision_the_caller_runs_at() -> None:
+    """Astra rg4 class sweep: the oracle is the independent arithmetic, so a caller's
+    context must not change which outcome it proves.
+
+    The two amounts sum to 1E-19, not zero.  Added in a 28-digit context the 1E-19 is
+    rounded away, the bound counts a root at rate zero that does not exist, and a
+    stream whose uniqueness is provable is refused.
+    """
+
+    amounts = [D(_WIDE_OPEN), D("-100000000000")]
+
+    bounds = {
+        precision: _at_precision(precision, lambda: numerics.irr_root_bound(amounts))
+        for precision in (28, 60)
+    }
+
+    assert bounds == {28: 1, 60: 1}
+    assert numerics.irr_root_bound(list(reversed(amounts))) == 1
+
+
+def test_investor_cash_flows_keep_every_digit_of_a_wide_amount() -> None:
+    wide = "123456789012345678901234567890.123456789012345678"
+    segment = member(
+        "a",
+        {"2026-01-01": wide, "2026-12-31": "5"},
+        "2026-01-01",
+        "2026-12-31",
+        flows=(("2026-06-30", wide, "EOD"),),
+    )
+
+    flows = _at_precision(28, lambda: numerics.investor_cash_flows([segment]))
+
+    assert [amount for _day, amount in flows] == [
+        D(wide).copy_negate(),
+        D(wide).copy_negate(),
+        D("5"),
+    ]
+
+
+# ------------------------------------------- date.strategy_cash.coverage_end (ruling C1)
+
+COVERAGE_METRIC = "date.strategy_cash.coverage_end"
+QB_ENTITY = "volatis-strategy|quantbase|acct-qb"
+MP_ENTITY = "robuxio-crypto|matrixport|acct-mp"
+
+
+def _coverage_run(tmp_path: Path, *admissions: dict[str, object]) -> Any:
+    ledger = _ledger_v3(admissions)
+    return _run_v3(tmp_path, _manifest_tree_v3(tmp_path, ledger_document=ledger))
+
+
+def _without(*pairs: tuple[str, str]) -> tuple[dict[str, object], ...]:
+    """The default admissions minus the listed (provider, fact_type) pairs."""
+
+    return tuple(
+        row
+        for row in V3_ADMISSIONS
+        if (row["provider_id"], row["fact_type"]) not in pairs
+    )
+
+
+def _coverage_value(document: Any, entity: str) -> str:
+    return str(_index(document)[(COVERAGE_METRIC, entity)]["value"])
+
+
+def test_v3_coverage_end_row_for_every_custody_line(tmp_path: Path) -> None:
+    document = _run_v3(tmp_path)
+    metrics = _index(document)
+    quantbase = metrics[(COVERAGE_METRIC, QB_ENTITY)]
+    matrixport = metrics[(COVERAGE_METRIC, MP_ENTITY)]
+    # Both Quantbase windows run through 01-12, past the cutoff: unclamped.
+    assert (quantbase["value"], quantbase["unit"], quantbase["as_of"]) == (
+        "2026-01-12",
+        "date",
+        CUTOFF,
+    )
+    # Matrixport: flows through 01-12 but the anchor window ends at the last anchor.
+    assert (matrixport["value"], matrixport["unit"], matrixport["as_of"]) == (
+        "2026-01-02",
+        "date",
+        CUTOFF,
+    )
+    assert quantbase["window"] is None
+    assert "v3in/provider-ledger.json" in matrixport["inputs_used"]
+    # One row per custody cash line, and nothing else carries the id.
+    carried = {
+        row["entity"]
+        for row in document["metrics"]
+        if row["metric_id"] == COVERAGE_METRIC
+    }
+    assert carried == {QB_ENTITY, MP_ENTITY}
+    assert not [
+        r for r in document["not_derivable"] if r["metric_id"] == COVERAGE_METRIC
+    ]
+
+
+def test_v3_coverage_end_stops_at_a_hole_between_flow_windows(tmp_path: Path) -> None:
+    # Flow windows [01-02, 01-04] and [01-06, 01-12] leave 01-05 attested by
+    # nothing; the earliest flow event (01-02) sits in the first segment.
+    document = _coverage_run(
+        tmp_path,
+        *_without(("matrixport", "flows"), ("matrixport", "capital_anchors")),
+        _admission("matrixport", "acct-mp", "flows", "2026-01-02", "2026-01-04"),
+        _admission("matrixport", "acct-mp", "flows", "2026-01-06", "2026-01-12"),
+        _admission(
+            "matrixport", "acct-mp", "capital_anchors", "2026-01-02", "2026-01-12"
+        ),
+    )
+    assert _coverage_value(document, MP_ENTITY) == "2026-01-04"
+
+
+def test_v3_coverage_end_is_bounded_by_the_ledger_generation_date(
+    tmp_path: Path,
+) -> None:
+    """K5: the Quantbase windows run to 01-12 but the ledger states the provider
+    generation at 01-11, so no admission can have observed 01-12.  The bound shortens a
+    future end and never extends a short one: Matrixport states no generation here and
+    keeps its admitted windows."""
+
+    ledger = _ledger_v3()
+    ledger["provider_generations"] = [
+        {
+            "provider_id": "quantbase",
+            "generation_id": "q" * 64,
+            "generation_as_of_date": "2026-01-11",
+        }
+    ]
+    document = _run_v3(tmp_path, _manifest_tree_v3(tmp_path, ledger_document=ledger))
+
+    assert _coverage_value(document, QB_ENTITY) == "2026-01-11"
+    assert _coverage_value(document, MP_ENTITY) == "2026-01-02"
+
+
+def test_v3_coverage_end_joins_windows_that_touch(tmp_path: Path) -> None:
+    # [01-02, 01-04] and [01-05, 01-12] are adjacent days: one segment to 01-12.
+    document = _coverage_run(
+        tmp_path,
+        *_without(("matrixport", "flows"), ("matrixport", "capital_anchors")),
+        _admission("matrixport", "acct-mp", "flows", "2026-01-02", "2026-01-04"),
+        _admission("matrixport", "acct-mp", "flows", "2026-01-05", "2026-01-12"),
+        _admission(
+            "matrixport", "acct-mp", "capital_anchors", "2026-01-02", "2026-01-12"
+        ),
+    )
+    assert _coverage_value(document, MP_ENTITY) == "2026-01-12"
+
+
+@pytest.mark.parametrize(
+    "flows_end, anchors_end",
+    [("2026-01-12", "2026-01-06"), ("2026-01-06", "2026-01-12")],
+)
+def test_v3_coverage_end_is_the_smaller_of_the_two_fact_types(
+    tmp_path: Path, flows_end: str, anchors_end: str
+) -> None:
+    document = _coverage_run(
+        tmp_path,
+        *_without(("quantbase", "flows"), ("quantbase", "capital_anchors")),
+        _admission("quantbase", "acct-qb", "flows", "2025-12-01", flows_end),
+        _admission(
+            "quantbase", "acct-qb", "capital_anchors", "2025-12-01", anchors_end
+        ),
+    )
+    assert _coverage_value(document, QB_ENTITY) == "2026-01-06"
+
+
+def test_v3_coverage_end_ignores_non_authoritative_and_other_windows(
+    tmp_path: Path,
+) -> None:
+    extras = (
+        # A REFERENCE_ONLY or provider-level window never extends coverage.
+        _admission(
+            "matrixport",
+            "acct-mp",
+            "capital_anchors",
+            "2026-01-02",
+            "2026-01-12",
+            disposition="REFERENCE_ONLY",
+        ),
+        _admission(
+            "matrixport",
+            "acct-mp",
+            "capital_anchors",
+            "2026-01-02",
+            "2026-01-12",
+            layer="PROVIDER_LIVE",
+        ),
+        # Another account or provider with the same fact type is not this line.
+        _admission(
+            "matrixport", "acct-other", "capital_anchors", "2026-01-02", "2026-01-12"
+        ),
+        _admission(
+            "quantbase", "acct-mp", "capital_anchors", "2026-01-02", "2026-01-12"
+        ),
+    )
+    document = _coverage_run(tmp_path, *V3_ADMISSIONS, *extras)
+    assert _coverage_value(document, MP_ENTITY) == "2026-01-02"
+
+
+@pytest.mark.parametrize("fact_type", ["capital_anchors", "flows"])
+def test_v3_coverage_end_without_a_window_is_not_derivable(
+    tmp_path: Path, fact_type: str
+) -> None:
+    document = _coverage_run(tmp_path, *_without(("matrixport", fact_type)))
+    assert (COVERAGE_METRIC, MP_ENTITY) not in _index(document)
+    assert fact_type in _reasons(document)[(COVERAGE_METRIC, MP_ENTITY)]
+    # The other line is unaffected.
+    assert _coverage_value(document, QB_ENTITY) == "2026-01-12"
+
+
+def test_v3_coverage_end_event_outside_every_window_is_not_derivable(
+    tmp_path: Path,
+) -> None:
+    # The first Matrixport flow event is 01-02; a window starting 01-03 does not
+    # contain it, so there is no segment holding the earliest event.
+    document = _coverage_run(
+        tmp_path,
+        *_without(("matrixport", "flows")),
+        _admission("matrixport", "acct-mp", "flows", "2026-01-03", "2026-01-12"),
+    )
+    assert (COVERAGE_METRIC, MP_ENTITY) not in _index(document)
+    assert "earliest" in _reasons(document)[(COVERAGE_METRIC, MP_ENTITY)]
+
+
+def test_v3_coverage_end_without_admissions_is_not_derivable(tmp_path: Path) -> None:
+    ledger = _ledger_v3()
+    del ledger["admissions"]
+    document = _run_v3(tmp_path, _manifest_tree_v3(tmp_path, ledger_document=ledger))
+    reasons = _reasons(document)
+    assert (COVERAGE_METRIC, QB_ENTITY) in reasons
+    assert (COVERAGE_METRIC, MP_ENTITY) in reasons
+    assert (COVERAGE_METRIC, QB_ENTITY) not in _index(document)
+
+
+def test_v3_coverage_end_follows_a_withheld_cash_line(tmp_path: Path) -> None:
+    # A date for a cash line that has no value is no attestation: when the line is
+    # not derivable (here: no owner funding at all) its coverage row is not either.
+    activity = ACTIVITY_HEADER + _activity_row(
+        activity_type="filled_txn",
+        amount="96",
+        filled="Y",
+        fund="7",
+        fund_title="Demo Fund",
+        id="15",
+        time="2026-01-03T02:00:00Z",
+        type="BUY",
+    )
+    document = _run_v3(tmp_path, _manifest_tree_v3(tmp_path, activity=activity))
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") in _reasons(document)
+    assert (COVERAGE_METRIC, QB_ENTITY) not in _index(document)
+    assert (COVERAGE_METRIC, QB_ENTITY) in _reasons(document)

@@ -9,6 +9,7 @@ import io
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -331,6 +332,27 @@ def _rewrite_bundle(source: Path, receipt: dict[str, Any]) -> Path:
     return destination
 
 
+def test_dependence_spec_is_dated_at_the_data_cutoff_and_the_receipt_keeps_the_run_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3: the spec feeds the correlation generation, which downstream reads as data.
+
+    The data is complete through 2026-01-02 and the run executes on 2026-01-03.  The
+    correlation spec (and so the correlation and weekly artifacts built from it) is
+    dated at the data; the execution date stays in the receipt as ``evaluated_on``.
+    """
+
+    source, _contract, _policy = _fixture(tmp_path, monkeypatch)
+
+    spec = json.loads((source / "spec.json").read_text(encoding="utf-8"))
+    receipt = json.loads((source / "dependence-source.json").read_text("utf-8"))
+
+    assert spec["as_of_date"] == "2026-01-02"
+    assert receipt["complete_through"] == "2026-01-02"
+    assert receipt["evaluated_on"] == "2026-01-03"
+    assert receipt["calculation_age_days"] == 1
+
+
 def test_packaged_current_dependence_is_exact_and_self_verifying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -594,7 +616,15 @@ def _unmocked_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     return_shift: str = "0",
+    coverage_strategies: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Build one synthetic history and allocation authority through the real builders.
+
+    ``coverage_strategies`` are history coverage rows in the shape the layered
+    history builder emits (``portfolio_target_series``: ``series_id`` plus
+    ``segments``); the packaged coverage file is hash-bound to them.
+    """
+
     authority_root = tmp_path / "authority"
     contracts = authority_root / "contracts"
     schemas = authority_root / "schemas" / "portfolio"
@@ -721,6 +751,11 @@ def _unmocked_fixture(
     )
     history_files["coverage.json"] = canonical_json_bytes(
         {"fixture": "synthetic-current-dependence"}
+        if coverage_strategies is None
+        else {
+            "fixture": "synthetic-current-dependence",
+            "strategies": [dict(row) for row in coverage_strategies],
+        }
     )
     output_authority = {
         name: {"sha256": _sha256(content), "size_bytes": len(content)}

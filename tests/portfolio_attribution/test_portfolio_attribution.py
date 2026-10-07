@@ -48,6 +48,7 @@ def _baseline(
     strategy_returns: object = _NO_OVERRIDE,
     provider_admissions: list[dict[str, Any]] | None = None,
     strategy_version_refs: dict[str, str] | None = None,
+    baseline_schema_version: int = 1,
 ) -> Path:
     root = tmp_path / "baseline"
     version_refs = strategy_version_refs or {}
@@ -90,7 +91,7 @@ def _baseline(
             for index in range(1, 10)
         ],
         "as_of_date": "2026-01-03",
-        "baseline_schema_version": 1,
+        "baseline_schema_version": baseline_schema_version,
         "costs": [
             {
                 "annual_external_cost_usd": "7.18" if index == 1 else None,
@@ -121,7 +122,7 @@ def _baseline(
         size_bytes=len(content),
         as_of_date=date(2026, 1, 3),
         schema_name="portfolio-baseline-catalog",
-        schema_version="1",
+        schema_version=str(baseline_schema_version),
     )
     retained_source = SourceArtifact(
         artifact_id="source/retained-baseline-provenance.json",
@@ -1243,6 +1244,45 @@ def test_staged_catalog_matches_verified_baseline_in_guard_and_report_reader(
             stale_baseline_identity,
             attribution_generation_id=generation_id,
         )
+
+
+def test_attribution_labels_a_v2_baseline_input_with_its_own_schema_version(
+    tmp_path: Path,
+) -> None:
+    """The baseline SourceArtifact carries the selected catalog's declared version.
+
+    The reader accepts baseline schema 1 and 2; the artifact label must follow the
+    catalog (as the report producer's own baseline artifact does), and the staged
+    output must still pass the release guard and the report reader.
+    """
+    import portfolio_release_builder as release
+    import portfolio_report as report
+
+    for version in (1, 2):
+        base = tmp_path / f"v{version}"
+        baseline_root = _baseline(base / "selected", baseline_schema_version=version)
+        baseline_identity = attribution._baseline(baseline_root)[1]
+        spec, _ = _inputs(base / "inputs")
+        output = base / "attribution"
+        staged = attribution.stage_catalog(baseline_root, spec, output)
+        generation_id = staged["generation_id"]
+        generation = json.loads(
+            (output / "generations" / generation_id / "generation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        versions = {
+            item["artifact_id"]: item["schema"]["version"]
+            for item in generation["artifacts"]
+        }
+        assert versions["input/portfolio-baseline.json"] == str(version)
+        release._validate_strategy_attribution_baseline_binding(
+            output, generation_id, baseline_root, baseline_identity["generation_id"]
+        )
+        _catalog, identity, _path = report._attribution(
+            output, baseline_identity, attribution_generation_id=generation_id
+        )
+        assert identity["generation_id"] == generation_id
 
 
 def test_attribution_preserves_baseline_financial_cutoff_with_later_provenance(

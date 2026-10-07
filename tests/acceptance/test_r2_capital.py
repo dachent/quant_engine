@@ -220,7 +220,11 @@ def test_an_unknown_custody_scope_is_a_finding(tmp_path: Path) -> None:
 
 def test_the_known_scopes_are_dated_or_exempt_as_before(tmp_path: Path) -> None:
     stale = _only(_all(tmp_path / "s", Spec(report=[_scoped("SYSTEMATIC")])), AS_OF)
-    assert [f.entity for f in stale] == ["current_capital:beta"]
+    # the stale row, and (rule 3) the total labelled the cutoff above it
+    assert sorted(f.entity for f in stale) == [
+        "current_capital:beta",
+        "current_capital:systematic",
+    ]
     kept = _only(
         _all(tmp_path / "r", Spec(report=[_scoped("RETAINED_EXCLUDED")])), AS_OF
     )

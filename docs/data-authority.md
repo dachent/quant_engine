@@ -59,15 +59,28 @@ in-place edit.
 evaluation date, acquisition timestamp, original/revised state, human-readable
 reason, escalation flag, and whether current consumers must block. Local alert
 hooks return deterministic warning/error records without sending an external
-notification. The legacy version-2 freshness bundle is governed by the closed
-`schemas/core/freshness-assessment.schema.json` and embeds the complete policy
-with the operational publication date. The current panel freshness bundle is
-version 3 and includes provider-ledger identity; no matching governed JSON
-schema exists for v3. It is instead structurally validated with closed keys,
+notification. The current freshness bundle is version 4, dated at the data
+cutoff with the operational date carried as `evaluated_on`; it is governed by
+the closed `schemas/core/freshness-assessment.schema.json`, which a test
+validates the producer output against so the two cannot drift. It includes the
+provider-ledger identity and is also structurally validated with closed keys,
 types, dates, hashes, sizes, and the selected current provider-ledger catalog
 and manifest before its rows appear in the Data view. Both the panel build and
 coordinated publication recompute the assessment rather than trusting stored
-state labels.
+state labels. `last_accepted_date` always names a day on or before the cutoff
+on which an observation is proven: a declared capture interval that starts on or
+before the cutoff and ends after it is accepted through the cutoff, and a capture
+interval that starts after the cutoff, or has no start, is only a capture envelope
+(the date the run was taken) and proves nothing, so the provider-ledger catalog's own
+AUTHORITATIVE admissions for that provider and fact decide instead (balances read
+`nav_observations`, positions `positions`, transactions `transactions`, flows `flows`,
+costs `financing_cost_observations`, fx none). An admitted window that starts on or
+before the cutoff gives the latest such window end, capped at the cutoff, and the normal
+policy then decides FRESH, LATE or STALE; windows that all start after the cutoff are
+`UNAVAILABLE` and still block; a fact the ledger admits nothing of from that provider is
+`UNAVAILABLE`, disclosed, and not required for current consumers. A capture, generation
+or run date is never an observation date. A strategy lane known only by its first and
+last row dates and ending after the cutoff has no accepted date and is `UNAVAILABLE`.
 
 ## Failure and recovery
 

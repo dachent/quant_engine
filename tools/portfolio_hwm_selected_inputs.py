@@ -316,9 +316,17 @@ def _source_generation_from_path(
         for filename, schema in files.items():
             artifact_id = f"normalized/{filename}"
             artifact = artifacts.get(artifact_id)
+            # A baseline that carries custody cash is catalog schema 2; the layout names
+            # the family's first version, so schema 2 is accepted for the baseline only.
+            accepted_schema = (
+                {schema, ("portfolio-baseline-catalog", "2")}
+                if schema == ("portfolio-baseline-catalog", "1")
+                else {schema}
+            )
             if (
                 artifact is None
-                or (artifact.schema_name, artifact.schema_version) != schema
+                or (artifact.schema_name, artifact.schema_version)
+                not in accepted_schema
             ):
                 raise SelectedHwmInputError(f"{field} source artifact schema differs")
             payload = (directory / filename).read_bytes()

@@ -10005,3 +10005,113 @@ def test_internal_transfer_with_available_amount_is_counted() -> None:
     assert len(rows) == 1
     # (200 - 100) / 100 - 1 = 0 â€” the doubling is flow, not performance.
     assert ledger._observed_decimal(rows[0]["return"], "return") == 0
+
+
+def _anchor_row(account_id: str, provider_id: str, event_date: str) -> dict[str, str]:
+    return {
+        "account_id": account_id,
+        "event_date": event_date,
+        "mapping_status": "MAPPED",
+        "provider_id": provider_id,
+        "record_id": f"{provider_id}-anchor:{event_date}",
+        "source_record_id": f"anchor-{event_date}",
+        "strategy_id": "volatis-strategy",
+    }
+
+
+def test_quantbase_sleeve_allocations_carry_the_account_activity_capture_coverage(
+    tmp_path: Path,
+) -> None:
+    """N56: the allocations are read from the same complete capture as the flows.
+
+    Cash subtracts sleeve allocations, so an allocation admission that ends at the last
+    anchor (2026-01-15) cannot prove cash past it.  The anchors are admitted through the
+    capture end, like the flows.
+    """
+
+    root, catalog, manifest = _quantbase_account_activity_capture_fixture(
+        tmp_path,
+        capture_time="2026-09-18T16:43:34.401+00:00",
+        current_request_proof=True,
+    )
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+    coverage = ledger._quantbase_flow_coverage(manifest, catalog, root, {account_id})
+
+    admissions = ledger._admissions(
+        {
+            "flows": [
+                {
+                    **_anchor_row(account_id, "quantbase", "2024-07-20"),
+                    "mapping_status": "UNMAPPED",
+                }
+            ],
+            "capital_anchors": [_anchor_row(account_id, "quantbase", "2026-01-15")],
+        },
+        [],
+        authoritative_provider_ids={"quantbase"},
+        authoritative_strategy_ids=set(),
+        quantbase_flow_coverage=coverage,
+    )
+
+    by_fact = {item.fact_type: item for item in admissions}
+    assert by_fact["capital_anchors"].effective_end == date(2026, 9, 18)
+    assert by_fact["capital_anchors"].effective_start == date(2024, 7, 20)
+    assert by_fact["flows"].effective_end == date(2026, 9, 18)
+
+
+def test_quantbase_anchor_after_the_capture_end_is_refused() -> None:
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+    claim = {
+        "capture_observed_at": "2026-09-18T16:43:34+00:00",
+        "effective_end": "2026-09-18",
+        "effective_start": "2024-07-20",
+        "record_count": 2,
+        "source_artifact_ids": [],
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="outside terminal"):
+        ledger._admissions(
+            {"capital_anchors": [_anchor_row(account_id, "quantbase", "2026-09-19")]},
+            [],
+            authoritative_provider_ids={"quantbase"},
+            authoritative_strategy_ids=set(),
+            quantbase_flow_coverage={account_id: claim},
+        )
+
+
+def test_matrixport_anchors_keep_their_own_window_without_a_captured_boundary() -> None:
+    """subscription_details records no observed boundary, so no coverage is invented.
+
+    Its coverage.csv row is a completion over "all_discovered_subscription_ids" with
+    empty observed bounds; the anchor admission therefore ends at the last anchor even
+    when the wallet-deposit flows are claimed through the capture date.
+    """
+
+    account_id = ledger._CSV_FACT_ACCOUNT["matrixport"]
+    claim = {
+        "capture_observed_at": "2026-09-18T18:42:50+00:00",
+        "effective_end": "2026-09-18",
+        "effective_start": "2025-12-05",
+        "record_count": 1,
+        "source_artifact_ids": [],
+    }
+
+    admissions = ledger._admissions(
+        {
+            "flows": [
+                {
+                    **_anchor_row(account_id, "matrixport", "2025-12-05"),
+                    "mapping_status": "UNMAPPED",
+                }
+            ],
+            "capital_anchors": [_anchor_row(account_id, "matrixport", "2025-12-05")],
+        },
+        [],
+        authoritative_provider_ids={"matrixport"},
+        authoritative_strategy_ids=set(),
+        matrixport_flow_coverage={account_id: claim},
+    )
+
+    by_fact = {item.fact_type: item for item in admissions}
+    assert by_fact["flows"].effective_end == date(2026, 9, 18)
+    assert by_fact["capital_anchors"].effective_end == date(2025, 12, 5)

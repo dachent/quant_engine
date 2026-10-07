@@ -4035,7 +4035,14 @@ def _verify_freshness_provider_ledger(
     spec: PipelineSpec,
     value: object,
     evaluation_date: date,
-) -> None:
+) -> date | None:
+    """Verify the bound ledger identity and return the catalog's own cutoff.
+
+    The identity's ``as_of_date`` is the generation manifest date, which is provenance
+    and can follow the cutoff.  The financial cutoff is the date inside the
+    hash-verified catalog; ``None`` when the catalog states none.
+    """
+
     ledger = _object(value, "freshness provider ledger")
     _strict(
         ledger,
@@ -4108,6 +4115,40 @@ def _verify_freshness_provider_ledger(
         raise PipelineValidationError(
             "freshness provider ledger identity differs from the release"
         )
+    return freshness_catalog_cutoff(generation / "provider-ledger.json")
+
+
+def freshness_catalog_cutoff(catalog_path: Path) -> date | None:
+    """Return the financial cutoff a hash-verified provider-ledger catalog states.
+
+    ``None`` when the catalog states none.  The caller has already tied the bytes to
+    their manifest; this only reads the date they carry.
+    """
+
+    catalog = json.loads(catalog_path.read_bytes())
+    cutoff = catalog.get("as_of_date") if isinstance(catalog, dict) else None
+    if not isinstance(cutoff, str):
+        return None
+    try:
+        return date.fromisoformat(cutoff)
+    except ValueError as exc:
+        raise PipelineValidationError(
+            "freshness provider-ledger catalog date is not a date"
+        ) from exc
+
+
+def require_freshness_cutoff(assessed_on: date, catalog_cutoff: date | None) -> None:
+    """Refuse a schema-4 freshness artifact not dated at its ledger's cutoff.
+
+    Schema 4 re-assesses every row at its own date, so that date must be the release's
+    financial cutoff or a back-dated payload is merely self-consistent.  Every
+    consumer of a schema-4 artifact applies this one rule.
+    """
+
+    if assessed_on != catalog_cutoff:
+        raise PipelineValidationError(
+            "freshness gate data date differs from the bound provider-ledger cutoff"
+        )
 
 
 def _verify_freshness_gate(
@@ -4132,23 +4173,40 @@ def _verify_freshness_gate(
                 "assessments",
                 "policies",
             }
-            if schema_version == 3
+            if schema_version in {3, 4}
             else set()
         )
+        if schema_version == 4:
+            base_keys.add("evaluated_on")
         accepted_keys = {frozenset(base_keys)}
-        if schema_version == 3:
+        if schema_version in {3, 4}:
             accepted_keys.add(frozenset(base_keys | {"provider_ledger"}))
         if frozenset(payload) not in accepted_keys:
             raise PipelineValidationError("freshness gate schema differs")
         assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
-        if assessed_on != evaluation_date:
+        # Version 4 judges every assessment at its data cutoff and states the
+        # operational date separately; older versions judged at the operational date.
+        executed_on = assessed_on
+        if schema_version == 4:
+            executed_on = date.fromisoformat(str(payload.get("evaluated_on")))
+            if assessed_on > executed_on:
+                raise PipelineValidationError(
+                    "freshness gate data date follows its evaluation date"
+                )
+        if executed_on != evaluation_date:
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
             )
-        if "provider_ledger" in payload:
-            _verify_freshness_provider_ledger(
-                spec, payload.get("provider_ledger"), assessed_on
+        if schema_version == 4 and "provider_ledger" not in payload:
+            raise PipelineValidationError(
+                "freshness gate requires the provider ledger it was judged against"
             )
+        if "provider_ledger" in payload:
+            catalog_cutoff = _verify_freshness_provider_ledger(
+                spec, payload.get("provider_ledger"), executed_on
+            )
+            if schema_version == 4:
+                require_freshness_cutoff(assessed_on, catalog_cutoff)
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
             policies = {parsed.policy_id: parsed}
@@ -4179,7 +4237,7 @@ def _verify_freshness_gate(
                 if observed_text is None
                 else date.fromisoformat(str(observed_text))
             )
-            expected = policy.assess(observed, evaluation_date).to_dict()
+            expected = policy.assess(observed, assessed_on).to_dict()
             required_for_current = item.get("required_for_current", True)
             if not isinstance(required_for_current, bool):
                 raise PipelineValidationError(

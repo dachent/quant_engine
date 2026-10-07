@@ -20,6 +20,12 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
+# Version 4 dates the artifact at the data cutoff and adds ``evaluated_on``, the
+# execution date.  Version 3 dated it at the execution date, which every consumer then
+# read as the data date.
+ASSESSMENT_SCHEMA_VERSION = 4
+
+
 class PortfolioFreshnessError(ValueError):
     """Provider-ledger freshness inputs violate the current-strategy contract."""
 
@@ -114,12 +120,20 @@ def _policies() -> dict[str, FreshnessPolicy]:
     }
 
 
+# Providers whose selected generation is a finite manifest boundary. The provider
+# ledger declares the same set as FINITE_SELECTED_MANIFEST_BOUNDARY finality
+# (tools/provider_ledger.py, _validate_observed_finality_evidence) and the report
+# source clock labels them applies_to_latest_common_eod false, so freshness judges
+# them against their own declared end instead of a recurring cadence they never owed.
+FINITE_HISTORY_PROVIDER_IDS = frozenset({"alpaca", "fidelity", "portfolio123"})
+
+
 def _provider_policy(
     provider_id: str, policies: Mapping[str, FreshnessPolicy]
 ) -> FreshnessPolicy:
     if provider_id == "matrixport":
         return policies["daily-calendar-24x7"]
-    if provider_id in {"alpaca", "fidelity"}:
+    if provider_id in FINITE_HISTORY_PROVIDER_IDS:
         return policies["finite-history"]
     return policies["daily-weekday-session"]
 
@@ -128,6 +142,45 @@ def _supports_fact(declared: Sequence[str], canonical_fact: str) -> bool:
     tokens = _FACT_TOKENS[canonical_fact]
     normalized = [item.casefold().replace("-", "_") for item in declared]
     return any(token in item for item in normalized for token in tokens)
+
+
+# Canonical freshness fact -> the catalog admission fact types that attest it.
+_ADMISSION_FACTS = {
+    "balances": ("nav_observations",),
+    "positions": ("positions",),
+    "transactions": ("transactions",),
+    "flows": ("flows",),
+    "fx": (),
+    "costs": ("financing_cost_observations",),
+}
+
+
+def _admitted_windows(
+    catalog: Mapping[str, Any], provider_id: str, canonical_fact: str
+) -> list[tuple[date, date]]:
+    """Authoritative admitted windows of one provider for one canonical fact."""
+
+    windows: list[tuple[date, date]] = []
+    raw = catalog.get("admissions")
+    for item in raw if isinstance(raw, list) else []:
+        row = _object(item, "provider admission")
+        if (
+            row.get("provider_id") != provider_id
+            or row.get("disposition") != "AUTHORITATIVE"
+            or row.get("fact_type") not in _ADMISSION_FACTS[canonical_fact]
+        ):
+            continue
+        windows.append(
+            (
+                date.fromisoformat(
+                    _text(row.get("effective_start"), f"{provider_id}.effective_start")
+                ),
+                date.fromisoformat(
+                    _text(row.get("effective_end"), f"{provider_id}.effective_end")
+                ),
+            )
+        )
+    return windows
 
 
 def _assessment(
@@ -142,7 +195,32 @@ def _assessment(
     lane: str,
     coverage_status: str,
     required_for_current: bool,
+    observed_start: date | None = None,
+    declared_interval: bool = False,
+    admitted_windows: Sequence[tuple[date, date]] | None = None,
 ) -> dict[str, object]:
+    # Judged as of the data cutoff, and ``last_accepted_date`` names a day on which an
+    # observation is proven.  A declared contiguous interval that starts on or before
+    # the cutoff and ends after it covers the cutoff.  A capture interval that starts
+    # after the cutoff (or has no start) is only a capture envelope, the date the run
+    # was taken, and proves nothing: the ledger's own authoritative admitted windows for
+    # the provider and fact decide instead.  A lane known only by its first and last row
+    # dates and ending after the cutoff proves nothing at the cutoff.
+    if observed_end is not None and observed_end > as_of:
+        if declared_interval and observed_start is not None and observed_start <= as_of:
+            observed_end = as_of
+        elif declared_interval and admitted_windows is not None:
+            started = [end for start, end in admitted_windows if start <= as_of]
+            if started:
+                observed_end = min(max(started), as_of)
+            else:
+                observed_end = None
+                if not admitted_windows:
+                    # The ledger admits nothing of this fact from the provider, so
+                    # no current consumer reads it: disclosed, but not blocking.
+                    required_for_current = False
+        else:
+            observed_end = None
     assessed = policy.assess(observed_end, as_of).to_dict()
     if not required_for_current:
         assessed = {
@@ -170,11 +248,20 @@ def build_health(
     catalog, ledger_identity = _load_catalog(
         provider_ledger_root.resolve(), provider_ledger_generation_id
     )
-    ledger_as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
-    as_of = evaluation_date or ledger_as_of
-    if as_of < ledger_as_of:
+    # The catalog date is the owner-selected financial cutoff.  Freshness is judged
+    # there so that a source last accepted on the cutoff is current as of it; the date
+    # the run executes is a separate clock and is carried as ``evaluated_on``.
+    as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
+    # The identity date is the generation manifest date, which is the cutoff or a later
+    # provenance date.  A catalog dated after it cannot have come from this generation.
+    if as_of > date.fromisoformat(str(ledger_identity["as_of_date"])):
         raise PortfolioFreshnessError(
-            "freshness evaluation date precedes the provider ledger"
+            "provider ledger catalog cutoff follows its manifest date"
+        )
+    evaluated_on = evaluation_date or as_of
+    if evaluated_on < as_of:
+        raise PortfolioFreshnessError(
+            "freshness evaluation date precedes the data cutoff"
         )
     evidence = catalog.get("strategy_evidence")
     if not isinstance(evidence, list) or not evidence:
@@ -248,6 +335,14 @@ def build_health(
                 _text(observed_end, f"{provider_id}.coverage.observed_end")
             )
         )
+        observed_start_raw = coverage.get("observed_start")
+        observed_start = (
+            None
+            if observed_start_raw is None
+            else date.fromisoformat(
+                _text(observed_start_raw, f"{provider_id}.coverage.observed_start")
+            )
+        )
         policy = _provider_policy(provider_id, policies)
         for fact_type in _CANONICAL_FACTS:
             supported = _supports_fact(declared_raw, fact_type)
@@ -255,6 +350,9 @@ def build_health(
                 _assessment(
                     policy=policy,
                     observed_end=observed_day if supported else None,
+                    observed_start=observed_start,
+                    declared_interval=True,
+                    admitted_windows=_admitted_windows(catalog, provider_id, fact_type),
                     as_of=as_of,
                     provider_id=provider_id,
                     subject_id=provider_id,
@@ -271,8 +369,9 @@ def build_health(
                 )
             )
     return {
-        "assessment_schema_version": 3,
+        "assessment_schema_version": ASSESSMENT_SCHEMA_VERSION,
         "as_of_date": as_of.isoformat(),
+        "evaluated_on": evaluated_on.isoformat(),
         "assessments": sorted(
             assessments,
             key=lambda item: (
@@ -316,6 +415,7 @@ def write_health(
     return {
         "assessment_count": len(assessments),
         "as_of_date": payload["as_of_date"],
+        "evaluated_on": payload["evaluated_on"],
         "output": str(output),
         "provider_ledger_generation_id": provider_ledger_generation_id,
         "sha256": digest,

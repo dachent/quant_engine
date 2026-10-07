@@ -2016,6 +2016,13 @@ def build_bundle(
     # rebinding here yields the new bundle identity a changed specification should have.
     rebound_base_spec = dict(base_spec)
     rebound_base_spec["series_composition"] = layered_history["composition"]
+    # The template's date is whatever day it was cut on, usually the execution date.  The
+    # base decomposition is dated by the data it is computed from: the layered history's
+    # common complete boundary, never a later run date.
+    rebound_base_spec["as_of_date"] = cast(
+        dict[str, Any],
+        cast(dict[str, Any], layered_history["identity"])["calculation_boundary"],
+    )["complete_through"]
     rebound_target_source = dict(
         _object(rebound_base_spec.get("target_source"), "base.target_source")
     )

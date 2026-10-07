@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from datetime import date
 import hashlib
 import importlib.util
 import io
@@ -11,9 +12,12 @@ from collections.abc import Callable
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from typing import Any
 import zipfile
 
 import pytest
+
+import portfolio_decomposition as decomposition
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -6242,3 +6246,240 @@ def test_cr2_custody_template_reference_survives_build_baseline(tmp_path, monkey
     )
     emitted = json.loads(Path(result["spec"]).read_text(encoding="utf-8"))
     assert emitted["provider_ledger"].get("financial_mvp") == ref
+
+
+_BASE_FACTORS = (
+    b"date,RF,SPY_XS\n"
+    b"2026-09-16,0.0001,0.01\n"
+    b"2026-09-17,0.0001,0.02\n"
+    b"2026-09-18,0.0001,0.03\n"
+)
+
+
+def _base_spec(factors: bytes, as_of: str = "2026-09-17") -> dict[str, object]:
+    digest = hashlib.sha256(factors).hexdigest()
+    return {
+        "as_of_date": as_of,
+        "factor_source": {
+            "expected_sha256": digest,
+            "expected_size_bytes": len(factors),
+            "interval_policy": {
+                "available_through_anchor": "2026-09-18",
+                "source_vintage": digest,
+            },
+            "relative_path": "factors.csv",
+        },
+        "provenance_sources": [],
+    }
+
+
+def test_base_factors_after_the_spec_date_are_set_aside_and_restated() -> None:
+    """R2-3 / N5: a spec dated at the data boundary reads no later factor row."""
+
+    derived, projected = builder._project_base_factors(
+        _base_spec(_BASE_FACTORS), _BASE_FACTORS
+    )
+
+    assert projected == (
+        b"date,RF,SPY_XS\n2026-09-16,0.0001,0.01\n2026-09-17,0.0001,0.02\n"
+    )
+    digest = hashlib.sha256(projected).hexdigest()
+    source = derived["factor_source"]
+    assert isinstance(source, dict)
+    assert source["expected_sha256"] == digest
+    assert source["expected_size_bytes"] == len(projected)
+    assert source["interval_policy"] == {
+        "available_through_anchor": "2026-09-17",
+        "source_vintage": digest,
+    }
+    assert derived["as_of_date"] == "2026-09-17"
+
+
+def test_base_factors_ending_on_the_spec_date_are_unchanged() -> None:
+    """Regression guard: nothing to set aside means no byte and no identity change."""
+
+    factors = _BASE_FACTORS.rsplit(b"2026-09-18", 1)[0]
+    spec = _base_spec(factors)
+    policy = spec["factor_source"]["interval_policy"]  # type: ignore[index]
+    policy["available_through_anchor"] = "2026-09-17"
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    assert projected == factors
+    assert derived == spec
+
+
+def _factor_spec_namespace(date_column: str, as_of: str) -> Any:
+    """The four attributes the real ``_read_factors`` reads from a specification."""
+
+    return SimpleNamespace(
+        factor_date_column=date_column,
+        risk_free_column="RF",
+        factors=[SimpleNamespace(column="SPY_XS", factor_id="spy")],
+        as_of_date=date.fromisoformat(as_of),
+    )
+
+
+# One factor file in each shape a provider can publish a date: bare, quoted cell, every
+# cell quoted, CRLF records and a byte-order mark.  The closed factor contract puts
+# the date first.
+_FACTOR_SHAPES = {
+    "unquoted": (b"", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\n"),
+    "quoted_date": (b"", b"date,RF,SPY_XS", b'"{0}",0.0001,0.01', b"\n"),
+    "all_quoted": (
+        b"",
+        b'"date","RF","SPY_XS"',
+        b'"{0}","0.0001","0.01"',
+        b"\n",
+    ),
+    "crlf": (b"", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\r\n"),
+    "bom": (b"\xef\xbb\xbf", b"date,RF,SPY_XS", b"{0},0.0001,0.01", b"\n"),
+}
+
+
+def _shaped_factors(shape: str, days: list[str]) -> tuple[bytes, str]:
+    bom, header, row, eol = _FACTOR_SHAPES[shape]
+    body = b"".join(row.replace(b"{0}", day.encode()) + eol for day in days)
+    return bom + header + eol + body, "date"
+
+
+@pytest.mark.parametrize("shape", sorted(_FACTOR_SHAPES))
+def test_base_factor_projection_reads_the_date_the_decomposition_reads(
+    shape: str, tmp_path: Path
+) -> None:
+    """A valid date is compared as a date, however the CSV quotes it.
+
+    The decomposition producer parses the date cell and refuses an observation after
+    its ``as_of_date``.  The projection must drop exactly those rows: comparing the raw
+    first token would sort a quoted date before the cutoff (the quote character) and
+    leave the later rows for the producer to refuse.
+    """
+
+    factors, column = _shaped_factors(
+        shape, ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21"]
+    )
+    spec = _base_spec(factors)
+    namespace = _factor_spec_namespace(column, "2026-09-17")
+    original = tmp_path / "original.csv"
+    original.write_bytes(factors)
+    with pytest.raises(Exception, match="follows as_of_date"):
+        decomposition._read_factors(original, namespace)
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    kept = tmp_path / "projected.csv"
+    kept.write_bytes(projected)
+    rows, _headers = decomposition._read_factors(kept, namespace)
+    assert sorted(day.isoformat() for day in rows) == ["2026-09-16", "2026-09-17"]
+    # Whole records survive byte for byte, with their own quoting and line endings.
+    assert projected == factors[: len(projected)]
+    assert b"2026-09-18" not in projected and b"2026-09-21" not in projected
+    assert derived["factor_source"]["expected_sha256"] == (  # type: ignore[index]
+        hashlib.sha256(projected).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(_FACTOR_SHAPES))
+def test_base_factor_projection_leaves_a_file_ending_on_the_date_unchanged(
+    shape: str,
+) -> None:
+    factors, column = _shaped_factors(shape, ["2026-09-16", "2026-09-17"])
+    spec = _base_spec(factors)
+    spec["factor_source"]["interval_policy"]["available_through_anchor"] = (  # type: ignore[index]
+        "2026-09-17"
+    )
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    assert projected == factors
+    assert derived == spec
+
+
+def test_base_factor_projection_keeps_a_row_the_producer_must_refuse() -> None:
+    """A date cell that is not an ISO date is the producer's refusal, not ours."""
+
+    factors = b"date,RF,SPY_XS\n2026-09-16,0.0001,0.01\nnot-a-date,0.0001,0.02\n"
+    spec = _base_spec(factors, as_of="2026-09-17")
+
+    derived, projected = builder._project_base_factors(spec, factors)
+
+    assert projected == factors
+    assert derived == spec
+
+
+def test_base_factors_of_a_spec_without_a_date_are_unchanged() -> None:
+    """The decomposition producer refuses a spec with no date; nothing is projected."""
+
+    spec = _base_spec(_BASE_FACTORS)
+    del spec["as_of_date"]
+
+    derived, projected = builder._project_base_factors(spec, _BASE_FACTORS)
+
+    assert projected == _BASE_FACTORS
+    assert derived == spec
+
+
+def test_current_base_analytics_reads_factors_projected_to_the_spec_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / ("a" * 64)
+    governance = bundle / "inputs" / "governance"
+    history = bundle / "inputs" / "history"
+    (bundle / "inputs" / "base" / "provenance").mkdir(parents=True)
+    governance.mkdir(parents=True)
+    history.mkdir(parents=True)
+    targets = b"series_id,date,return\n"
+    (history / "selected-targets.csv").write_bytes(targets)
+    spec = _base_spec(_BASE_FACTORS)
+    spec["target_source"] = {"artifact_id": "legacy", "relative_path": "legacy.csv"}
+    spec["provenance_sources"] = [
+        {
+            "relative_path": "provenance/p.json",
+            "expected_sha256": hashlib.sha256(b"{}\n").hexdigest(),
+            "expected_size_bytes": 3,
+        }
+    ]
+    (bundle / "inputs" / "base" / "provenance" / "p.json").write_bytes(b"{}\n")
+    (governance / "base-decomposition-spec.json").write_bytes(
+        canonical_json_bytes(spec)
+    )
+    plan = {
+        "inputs": [
+            {
+                "path": "inputs/history/selected-targets.csv",
+                "sha256": hashlib.sha256(targets).hexdigest(),
+                "size_bytes": len(targets),
+            }
+        ],
+        "policies": {"strategy_evidence_mode": "LIVE_ONLY"},
+    }
+    retained = tmp_path / "factors.csv"
+    retained.write_bytes(_BASE_FACTORS)
+    monkeypatch.setattr(
+        builder, "_tool", lambda *args, **kwargs: {"generation_id": "b" * 64}
+    )
+
+    base_spec, base_source, generation_id = builder._build_base_analytics(
+        bundle,
+        plan,
+        retained,
+        tmp_path / "out",
+        tmp_path / "decomposition",
+        current_plan=True,
+        retained_cache_root=None,
+        producer_operations=[],
+    )
+
+    emitted = json.loads(base_spec.read_text(encoding="utf-8"))
+    read = (base_source / "factors.csv").read_bytes()
+    assert generation_id == "b" * 64
+    assert emitted["as_of_date"] == "2026-09-17"
+    assert b"2026-09-18" not in read
+    assert (
+        emitted["factor_source"]["expected_sha256"] == hashlib.sha256(read).hexdigest()
+    )
+    assert emitted["factor_source"]["interval_policy"]["available_through_anchor"] == (
+        "2026-09-17"
+    )
+    # The retained input is untouched.
+    assert retained.read_bytes() == _BASE_FACTORS

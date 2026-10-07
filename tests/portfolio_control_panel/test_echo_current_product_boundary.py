@@ -689,6 +689,10 @@ def test_mismatched_ledger_lineage_suppresses_strategy_eligibility_inputs() -> N
             "after_tax_annual_cost_rate": "0.02",
             "after_tax_status": "AVAILABLE",
             "fees_status": "AVAILABLE",
+            "mwr_xirr": "0.05",
+            "mwr_opening_date": "2026-01-02",
+            "mwr_terminal_date": "2026-08-13",
+            "mwr_member_account_ids": ["account-a"],
             "strategy_id": strategy_id,
             "systematic_weight": "0.14",
         }
@@ -698,6 +702,10 @@ def test_mismatched_ledger_lineage_suppresses_strategy_eligibility_inputs() -> N
     suppressed = panel._suppress_unmatched_strategy_performance(strategies)
 
     unavailable_fields = {
+        "mwr_xirr",
+        "mwr_opening_date",
+        "mwr_terminal_date",
+        "mwr_member_account_ids",
         "account_live_cagr",
         "account_live_cumulative_return",
         "account_live_max_drawdown",

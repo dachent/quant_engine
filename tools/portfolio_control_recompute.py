@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 from quant_engine.core import hash_file, read_current, read_generation
 from quant_engine.core.authority import FreshnessPolicy, ManifestValidationError
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.pipeline import (
+    PipelineValidationError,
+    freshness_catalog_cutoff,
+    require_freshness_cutoff,
+)
 
 
 SCHEMA_VERSION = 2
@@ -158,25 +163,55 @@ def _provider_ledger_identity(root: Path, generation_id: str) -> dict[str, objec
     }
 
 
+def _bind_freshness_cutoff(catalog_path: Path, data_clock: str) -> None:
+    """Hold a schema-4 artifact to the cutoff its hash-verified ledger catalog states.
+
+    This is the pipeline gate's own rule, so a payload re-dated to agree with itself is
+    refused here as it is at the release.
+    """
+
+    try:
+        require_freshness_cutoff(
+            date.fromisoformat(data_clock), freshness_catalog_cutoff(catalog_path)
+        )
+    except PipelineValidationError as exc:
+        raise ControlRecomputeError(str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise ControlRecomputeError(
+            "freshness data date cannot be bound to the ledger"
+        ) from exc
+
+
 def _validate_freshness(
     freshness_path: Path,
     evaluation_date: date,
     provider_ledger: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, object]]:
     freshness = _load(freshness_path.resolve(), "freshness health")
+    schema_version = freshness.get("assessment_schema_version")
+    if schema_version not in {3, 4}:
+        raise ControlRecomputeError("freshness health schema must be 3 or 4")
     expected_bundle_keys = {
         "assessment_schema_version",
         "as_of_date",
         "assessments",
         "policies",
         "provider_ledger",
+        *(("evaluated_on",) if schema_version == 4 else ()),
     }
     if set(freshness) != expected_bundle_keys:
         raise ControlRecomputeError("freshness health fields differ")
-    if freshness.get("assessment_schema_version") != 3:
-        raise ControlRecomputeError("freshness health schema must be 3")
-    if freshness.get("as_of_date") != evaluation_date.isoformat():
-        raise ControlRecomputeError("freshness evaluation date differs")
+    # Schema 4 is dated at the data cutoff and names the evaluation date separately.
+    if schema_version == 4:
+        if freshness.get("evaluated_on") != evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness evaluation date differs")
+        data_clock = freshness.get("as_of_date")
+        if not isinstance(data_clock, str) or data_clock > evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness data date follows the evaluation")
+    else:
+        if freshness.get("as_of_date") != evaluation_date.isoformat():
+            raise ControlRecomputeError("freshness evaluation date differs")
+        data_clock = evaluation_date.isoformat()
     ledger = _strict_object(
         freshness.get("provider_ledger"),
         "freshness provider ledger",
@@ -208,6 +243,8 @@ def _validate_freshness(
         or ledger.get("manifest_size_bytes") != manifest.get("size_bytes")
     ):
         raise ControlRecomputeError("freshness provider ledger identity differs")
+    if schema_version == 4:
+        _bind_freshness_cutoff(Path(str(catalog.get("path"))), data_clock)
     policies: dict[str, FreshnessPolicy] = {}
     for raw_policy in _objects(freshness.get("policies"), "freshness policies"):
         try:
@@ -243,7 +280,7 @@ def _validate_freshness(
     ):
         if set(assessment) != assessment_keys:
             raise ControlRecomputeError("freshness assessment fields differ")
-        if assessment.get("evaluated_on") != evaluation_date.isoformat():
+        if assessment.get("evaluated_on") != data_clock:
             raise ControlRecomputeError("freshness assessment date differs")
         for field in (
             "blocks_current_consumers",
@@ -433,7 +470,7 @@ def build_receipt(
         "panel_correlation_matches_current": panel_meta.get("correlation_generation_id")
         == correlation_identity["generation_id"],
         "panel_freshness_matches_selected": (
-            panel_meta.get("freshness_evaluated_on") == evaluation_date.isoformat()
+            panel_meta.get("freshness_evaluated_on") == _freshness.get("as_of_date")
             and panel_identity["freshness"]
             == {
                 "path": panel_identity["freshness"]["path"],

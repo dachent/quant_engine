@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -238,10 +238,19 @@ def _freshness_gate_with_optional_gap(path: Path, evaluated_on: date) -> Path:
 
 def _provider_ledger_generation(
     tmp_path: Path,
+    *,
+    catalog_as_of: date | str | None = None,
 ) -> tuple[Path, GenerationManifest, dict[str, object]]:
     root = tmp_path / "provider-ledger"
     source = tmp_path / "provider-ledger.json"
-    source.write_bytes(canonical_json_bytes({"reconciliation_checks": []}))
+    catalog: dict[str, object] = {"reconciliation_checks": []}
+    if catalog_as_of is not None:
+        catalog["as_of_date"] = (
+            catalog_as_of
+            if isinstance(catalog_as_of, str)
+            else catalog_as_of.isoformat()
+        )
+    source.write_bytes(canonical_json_bytes(catalog))
     manifest = GenerationManifest.build(
         as_of_date=AS_OF,
         adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
@@ -1219,3 +1228,352 @@ def test_execute_pipeline_release_validation_succeeds_with_clean_findings(
 
     assert committed["release_state"] == "COMMITTED"
     assert read_current(target).generation_id == proposed.generation_id
+
+
+def _freshness_gate_v4(path: Path, cutoff: date, evaluated_on: date) -> Path:
+    """Schema 4: every assessment is judged at the cutoff; the run date is carried."""
+
+    policy = FreshnessPolicy(
+        policy_id="daily-current-strategy",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=2,
+        stale_after_days=5,
+    )
+    assessment = policy.assess(cutoff - timedelta(days=1), cutoff).to_dict()
+    assessment.update(
+        {
+            "coverage_status": "AVAILABLE",
+            "fact_type": "strategy-returns",
+            "lane": "ACCOUNT",
+            "provider_id": "synthetic-provider",
+            "required_for_current": True,
+            "subject_id": "synthetic-strategy",
+            "subject_type": "STRATEGY",
+        }
+    )
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 4,
+                "as_of_date": cutoff.isoformat(),
+                "assessments": [assessment],
+                "evaluated_on": evaluated_on.isoformat(),
+                "policies": [policy.to_dict()],
+            }
+        )
+    )
+    return path
+
+
+def _spec_with_freshness_gate(
+    tmp_path: Path,
+    gate: Path,
+    *,
+    catalog_as_of: date | str | None = None,
+    catalog_dated: bool = True,
+    bind_ledger: bool = True,
+) -> tuple[dict[str, object], GenerationManifest, Path]:
+    """Release spec carrying the gate; a schema-4 gate is bound to a provider ledger.
+
+    The ledger catalog's own date is the financial cutoff the gate must agree with.
+    Its generation manifest is dated at the operational date, as the producer's is
+    when the catalog sources are dated after the cutoff.
+    """
+
+    raw, previous, _, target = _spec_dict(tmp_path)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    if bind_ledger and payload.get("assessment_schema_version") == 4:
+        cutoff = catalog_as_of or date.fromisoformat(payload["as_of_date"])
+        ledger_root, ledger, identity = _provider_ledger_generation(
+            tmp_path, catalog_as_of=cutoff if catalog_dated else None
+        )
+        inventory = inventory_generation(
+            ledger_root / "generations" / ledger.generation_id
+        )
+        raw["roots"]["provider-ledger"] = str(ledger_root)
+        raw["nodes"].append(
+            {
+                "depends_on": [],
+                "files": inventory["files"],
+                "generation_id": ledger.generation_id,
+                "kind": "GENERATION",
+                "manifest_sha256": inventory["manifest_sha256"],
+                "node_id": "provider-ledger",
+                "release_target": True,
+                "root_id": "provider-ledger",
+                "source_dir": None,
+            }
+        )
+        payload["provider_ledger"] = identity
+        gate.write_bytes(canonical_json_bytes(payload))
+    raw["gates"].append(
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+    return raw, previous, target
+
+
+def test_schema_four_freshness_gate_is_judged_at_the_cutoff_and_aged_by_run_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the gate checks the run date it names, and re-assesses at the data date.
+
+    The assessment was judged at the cutoff (one day before the operational date) and
+    is FRESH there.  Re-assessing it at the operational date would call it LATE; the
+    gate must hold it to the date the artifact says it was judged on, while still
+    refusing an artifact that was not produced on the day of the release.
+    """
+
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "freshness.json", cutoff, AS_OF)
+    raw, previous, target = _spec_with_freshness_gate(tmp_path, gate)
+    spec = _parse(raw)
+
+    prepared = execute_pipeline(spec, evaluation_date=AS_OF)
+
+    assert prepared["release_state"] == "PREPARED"
+    with pytest.raises(PipelineValidationError, match="operational date"):
+        execute_pipeline(spec, commit=True, evaluation_date=date(2026, 8, 4))
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_rejects_a_forged_cutoff_state(
+    tmp_path: Path,
+) -> None:
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "freshness.json", cutoff, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["assessments"][0]["state"] = "STALE"
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, previous, target = _spec_with_freshness_gate(tmp_path, gate)
+
+    with pytest.raises(PipelineValidationError, match="assessment is stale"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_requires_the_run_date_and_orders_the_clocks(
+    tmp_path: Path,
+) -> None:
+    cutoff = AS_OF - timedelta(days=1)
+    gate = _freshness_gate_v4(tmp_path / "missing.json", cutoff, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    del payload["evaluated_on"]
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, _, _ = _spec_with_freshness_gate(tmp_path, gate)
+    with pytest.raises(PipelineValidationError, match="schema differs"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+    early = tmp_path / "early"
+    early.mkdir()
+    gate = _freshness_gate_v4(early / "freshness.json", AS_OF, AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["evaluated_on"] = (AS_OF - timedelta(days=1)).isoformat()
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw, _, _ = _spec_with_freshness_gate(early, gate)
+    with pytest.raises(PipelineValidationError, match="follows its evaluation date"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF - timedelta(days=1))
+
+
+def _stale_observation_gate_v4(
+    path: Path, assessed_on: date, evaluated_on: date
+) -> Path:
+    """A required lane last observed 07-17, assessed at ``assessed_on``."""
+
+    policy = FreshnessPolicy(
+        policy_id="daily-current-strategy",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=2,
+        stale_after_days=5,
+    )
+    assessment = policy.assess(date(2026, 7, 17), assessed_on).to_dict()
+    assessment.update(
+        {
+            "coverage_status": "AVAILABLE",
+            "fact_type": "strategy-returns",
+            "lane": "ACCOUNT",
+            "provider_id": "synthetic-provider",
+            "required_for_current": True,
+            "subject_id": "synthetic-strategy",
+            "subject_type": "STRATEGY",
+        }
+    )
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 4,
+                "as_of_date": assessed_on.isoformat(),
+                "assessments": [assessment],
+                "evaluated_on": evaluated_on.isoformat(),
+                "policies": [policy.to_dict()],
+            }
+        )
+    )
+    return path
+
+
+CATALOG_CUTOFF = date(2026, 7, 31)
+
+
+def test_schema_four_freshness_gate_refuses_an_as_of_date_before_the_ledger_cutoff(
+    tmp_path: Path,
+) -> None:
+    """Rulings round 1, item 3: the assessment date is bound to the release's cutoff.
+
+    Every ledger identity is exact and the catalog is dated 2026-07-31, but the payload
+    was re-dated to 2026-07-20, which turns a 2026-07-17 observation from STALE into
+    FRESH.  The payload agrees with itself and not with the release.
+    """
+
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", date(2026, 7, 20), AS_OF
+    )
+    assert json.loads(gate.read_text(encoding="utf-8"))["assessments"][0]["state"] != (
+        "STALE"
+    )
+    raw, previous, target = _spec_with_freshness_gate(
+        tmp_path, gate, catalog_as_of=CATALOG_CUTOFF
+    )
+
+    with pytest.raises(PipelineValidationError, match="provider-ledger cutoff"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_requires_the_provider_ledger(
+    tmp_path: Path,
+) -> None:
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", CATALOG_CUTOFF, AS_OF
+    )
+    raw, previous, target = _spec_with_freshness_gate(tmp_path, gate, bind_ledger=False)
+    assert "provider_ledger" not in json.loads(gate.read_text(encoding="utf-8"))
+
+    with pytest.raises(PipelineValidationError, match="requires the provider ledger"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_schema_four_freshness_gate_binds_to_the_catalog_date_not_the_manifest_date(
+    tmp_path: Path,
+) -> None:
+    """The ledger identity is dated 2026-08-02 (provenance); the cutoff is 2026-07-31."""
+
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", CATALOG_CUTOFF, AS_OF
+    )
+    raw, _, target = _spec_with_freshness_gate(tmp_path, gate)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    assert payload["provider_ledger"]["as_of_date"] == AS_OF.isoformat()
+    assert payload["as_of_date"] == CATALOG_CUTOFF.isoformat()
+    assert payload["assessments"][0]["state"] == "STALE"
+
+    prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+    assert prepared["release_state"] == "PREPARED"
+
+
+def test_schema_four_freshness_gate_refuses_a_catalog_without_a_cutoff(
+    tmp_path: Path,
+) -> None:
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", CATALOG_CUTOFF, AS_OF
+    )
+    raw, _, _ = _spec_with_freshness_gate(tmp_path, gate, catalog_dated=False)
+    ledger_root = Path(raw["roots"]["provider-ledger"])  # type: ignore[arg-type]
+    (catalog_path,) = ledger_root.glob("generations/*/provider-ledger.json")
+    assert "as_of_date" not in json.loads(catalog_path.read_text(encoding="utf-8"))
+
+    with pytest.raises(PipelineValidationError, match="provider-ledger cutoff"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+
+def test_schema_four_freshness_gate_refuses_a_malformed_catalog_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A catalog whose own date is not a date is a refusal, not a bare ValueError."""
+
+    gate = _stale_observation_gate_v4(
+        tmp_path / "freshness.json", CATALOG_CUTOFF, AS_OF
+    )
+    raw, previous, target = _spec_with_freshness_gate(
+        tmp_path, gate, catalog_as_of="31 July 2026"
+    )
+
+    with pytest.raises(
+        PipelineValidationError, match="provider-ledger catalog date is not a date"
+    ) as raised:
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert type(raised.value) is PipelineValidationError
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def _gate_from_the_freshness_producer(
+    tmp_path: Path, run_date: date
+) -> tuple[dict[str, object], GenerationManifest, Path, Path, Path]:
+    """A release spec whose freshness gate is written by ``write_health``.
+
+    The provider ledger is a real accepted generation read by the producer, so the
+    gate's cutoff, execution date and ledger identity are all emitted, not authored.
+    """
+
+    import runpy
+
+    namespace = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[1]
+            / "portfolio_control_panel"
+            / "test_portfolio_freshness.py"
+        )
+    )
+    root = tmp_path / "freshness-provider-ledger"
+    generation_id = namespace["_provider_ledger"](root)
+    gate = tmp_path / "freshness-health.json"
+    namespace["freshness"].write_health(root, generation_id, gate, run_date)
+    raw, previous, _, target = _spec_dict(tmp_path)
+    inventory = inventory_generation(root / "generations" / generation_id)
+    raw["roots"]["provider-ledger"] = str(root)  # type: ignore[index]
+    raw["nodes"].append(  # type: ignore[attr-defined]
+        {
+            "depends_on": [],
+            "files": inventory["files"],
+            "generation_id": generation_id,
+            "kind": "GENERATION",
+            "manifest_sha256": inventory["manifest_sha256"],
+            "node_id": "provider-ledger",
+            "release_target": True,
+            "root_id": "provider-ledger",
+            "source_dir": None,
+        }
+    )
+    raw["gates"].append(  # type: ignore[attr-defined]
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+    return raw, previous, target, gate, root
+
+
+def test_the_gate_the_freshness_producer_writes_passes_the_pipeline_gate(
+    tmp_path: Path,
+) -> None:
+    run_date = date(2026, 10, 4)
+    raw, _previous, _target, gate, _root = _gate_from_the_freshness_producer(
+        tmp_path, run_date
+    )
+    bundle = json.loads(gate.read_bytes())
+    assert bundle["assessment_schema_version"] == 4
+    assert bundle["as_of_date"] != bundle["evaluated_on"]
+
+    prepared = execute_pipeline(_parse(raw), evaluation_date=run_date)
+
+    assert prepared["release_state"] == "PREPARED"
+    with pytest.raises(PipelineValidationError, match="operational date"):
+        execute_pipeline(_parse(raw), evaluation_date=date(2026, 10, 5))

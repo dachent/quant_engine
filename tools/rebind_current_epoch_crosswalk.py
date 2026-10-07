@@ -211,10 +211,10 @@ def _baseline_binding(
         )
     artifact = matches[0]
     schema = artifact.get("schema")
-    if not isinstance(schema, dict) or schema != {
-        "name": "portfolio-baseline-catalog",
-        "version": "1",
-    }:
+    if not isinstance(schema, dict) or schema not in (
+        {"name": "portfolio-baseline-catalog", "version": "1"},
+        {"name": "portfolio-baseline-catalog", "version": "2"},
+    ):
         raise CurrentEpochCrosswalkRebindError("baseline catalog schema differs")
     baseline_path = baseline_generation_dir / "portfolio-baseline.json"
     try:
@@ -237,7 +237,7 @@ def _baseline_binding(
     if not isinstance(baseline, dict):
         raise CurrentEpochCrosswalkRebindError("baseline catalog must be an object")
     as_of_date = _canonical_date(baseline.get("as_of_date"), "baseline as_of_date")
-    if baseline.get("baseline_schema_version") != 1:
+    if baseline.get("baseline_schema_version") not in {1, 2}:
         raise CurrentEpochCrosswalkRebindError("baseline catalog schema differs")
     assert as_of_date is not None
     binding = {
@@ -247,7 +247,7 @@ def _baseline_binding(
         "size_bytes": len(baseline_bytes),
         "as_of_date": as_of_date,
         "schema_name": "portfolio-baseline-catalog",
-        "schema_version": "1",
+        "schema_version": str(baseline["baseline_schema_version"]),
     }
     return baseline, binding
 

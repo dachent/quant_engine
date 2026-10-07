@@ -143,6 +143,12 @@ _PATH_STAGES = {
     # top-level `acceptance/validate/`; it reads published outputs and imports no
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
+    # Rollforward-cycle verifiers (docs/data-rollforward.md). They re-read the freshness
+    # artifact and a staged panel candidate to write a local cycle receipt; no producer
+    # imports them and they write no delivery artifact, so a change affects no stage.
+    # Declared because an omitted `tools/` path is an unmapped production change.
+    "tools/portfolio_control_recompute.py": [],
+    "tools/portfolio_rollforward_cycle.py": [],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
@@ -372,8 +378,17 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
     },
     {
         "id": "provider-ledger-freshness-health",
-        "source_paths": (_RELEASE, _FRESHNESS, _REPORT, _PANEL),
-        "contracts": ("schemas/portfolio/provider-ledger.schema.json",),
+        "source_paths": (
+            _RELEASE,
+            _FRESHNESS,
+            _REPORT,
+            _PANEL,
+            "schemas/core/freshness-assessment.schema.json",
+        ),
+        "contracts": (
+            "schemas/core/freshness-assessment.schema.json",
+            "schemas/portfolio/provider-ledger.schema.json",
+        ),
         "producer": (_FRESHNESS, "build_health"),
         "artifacts": ("freshness-health.json",),
         "consumers": (
@@ -439,6 +454,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _PREPARATION,
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
+            "schemas/portfolio/account-strategy-current-epoch-crosswalk.schema.json",
         ),
         "contracts": (
             "schemas/portfolio/account-strategy-manifest.schema.json",

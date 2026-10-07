@@ -828,6 +828,60 @@ def mwr_cashflows(
     return tuple((day, amount) for day, amount in sorted(totals.items()) if amount)
 
 
+def _sign_changes(values: Sequence[Decimal]) -> int:
+    changes = 0
+    previous = 0
+    for value in values:
+        sign = (value > 0) - (value < 0)
+        if sign == 0:
+            continue
+        if previous and sign != previous:
+            changes += 1
+        previous = sign
+    return changes
+
+
+def _partial_sums(amounts: Sequence[Decimal]) -> list[Decimal]:
+    sums: list[Decimal] = []
+    running = Decimal(0)
+    with localcontext() as context:
+        context.prec = 100
+        for amount in amounts:
+            running += amount
+            sums.append(running)
+    return sums
+
+
+def _irr_root_bound(amounts: Sequence[Decimal]) -> int:
+    """Upper bound on the number of IRRs in ``(-1, inf)`` (Laguerre/Norstrom).
+
+    The NPV is a Dirichlet polynomial in ``(1 + r)^-t`` with real exponents.
+    The sign changes of the chronological partial sums bound its roots with
+    ``r > 0``, those of the reverse-chronological partial sums its roots with
+    ``-1 < r < 0``, and ``r = 0`` is a root exactly when the total is zero.
+    """
+
+    return (
+        _sign_changes(_partial_sums(amounts))
+        + _sign_changes(_partial_sums(list(reversed(amounts))))
+        + (1 if sum(amounts, Decimal(0)) == 0 else 0)
+    )
+
+
+def _has_unique_root(amounts: Sequence[Decimal]) -> bool:
+    """True when exactly one root is proved to exist.
+
+    One root at most by the bound, and the NPV changes sign over ``(-1, inf)``
+    because the first and last cash flows differ in sign.
+    """
+
+    return (
+        len(amounts) >= 2
+        and _irr_root_bound(amounts) == 1
+        and (amounts[0] > 0) != (amounts[-1] > 0)
+    )
+
+
 @_isolated_decimal_context
 def xirr(cashflows: Sequence[tuple[date, Decimal]]) -> Decimal | None:
     """Unique-root bisection XIRR; None when uniqueness or convergence fails."""
@@ -835,11 +889,9 @@ def xirr(cashflows: Sequence[tuple[date, Decimal]]) -> Decimal | None:
     for cashflow_date, amount in cashflows:
         by_date[cashflow_date] += amount
     ordered = [(day, amount) for day, amount in sorted(by_date.items()) if amount]
-    signs = [amount > 0 for _, amount in ordered]
-    sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
-    # More than one chronological sign change can produce multiple valid IRRs.
+    # A stream whose roots are not proved unique can have several valid IRRs.
     # A diagnostic must fail closed rather than select an arbitrary root.
-    if len(ordered) < 2 or sign_changes != 1:
+    if not _has_unique_root([amount for _, amount in ordered]):
         return None
     t0 = ordered[0][0]
 
@@ -919,15 +971,21 @@ def classify_xirr(cashflows: Sequence[tuple[date, Decimal]]) -> dict[str, object
             "reason": "ALL_CASHFLOWS_ZERO",
             "rate": None,
         }
-    signs = [amount > 0 for _, amount in ordered]
-    sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
-    if sign_changes == 0:
+    amounts = [amount for _, amount in ordered]
+    if _sign_changes(amounts) == 0:
         return {
             "status": "NO_ROOT",
             "reason": "NO_CHRONOLOGICAL_SIGN_CHANGE",
             "rate": None,
         }
-    if sign_changes > 1:
+    bound = _irr_root_bound(amounts)
+    if bound == 0 or (bound == 1 and (amounts[0] > 0) == (amounts[-1] > 0)):
+        return {
+            "status": "NO_ROOT",
+            "reason": "NO_PARTIAL_SUM_SIGN_CHANGE",
+            "rate": None,
+        }
+    if bound > 1:
         return {
             "status": "UNIQUENESS_NOT_PROVED",
             "reason": "MULTIPLE_CHRONOLOGICAL_SIGN_CHANGES",

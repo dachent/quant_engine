@@ -63,8 +63,10 @@ def test_n56_a_systematic_total_dated_before_its_valuation_blocks(
     findings = _generation_findings(
         tmp_path, Spec(report=[_custody("2025-12-05")]), CAPITAL_AS_OF
     )
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("current_capital:systematic", checks.BLOCKER_AUTHORITY)
+    # N56 rule 3 now also applies: the total's label is not the oldest of its rows.
+    assert sorted((f.entity, f.klass) for f in findings) == [
+        ("current_capital:systematic", checks.BLOCKER_AUTHORITY),
+        ("current_capital:systematic", checks.BLOCKER_INVARIANT),
     ]
 
 
@@ -73,8 +75,10 @@ def test_n56_a_systematic_strategy_dated_before_the_cutoff_blocks(
 ) -> None:
     spec = Spec(report=[_custody(CUTOFF, strategy_as_of="2026-01-15")])
     findings = _generation_findings(tmp_path, spec, CAPITAL_AS_OF)
-    assert [(f.entity, f.klass) for f in findings] == [
-        ("current_capital:beta", checks.BLOCKER_AUTHORITY)
+    # Rule 3 also applies: the total is labelled the cutoff above a row dated 2026-01-15.
+    assert sorted((f.entity, f.klass) for f in findings) == [
+        ("current_capital:beta", checks.BLOCKER_AUTHORITY),
+        ("current_capital:systematic", checks.BLOCKER_INVARIANT),
     ]
 
 

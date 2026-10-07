@@ -89,6 +89,9 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 
 
 PANEL_SCHEMA_VERSION: Final = 22
+# A panel built from a version-3 report (custody cash dated by its admission coverage)
+# is version 23; every other panel stays 22.
+CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 23
 BUILDER_VERSION: Final = "2.12.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
@@ -775,13 +778,39 @@ def _freshness_health(
         "assessments",
         "policy" if schema_version == 2 else "policies",
     }
-    accepted_bundle_keys = {frozenset(expected_bundle_keys)}
-    if schema_version == 3:
-        accepted_bundle_keys.add(frozenset(expected_bundle_keys | {"provider_ledger"}))
+    if schema_version == 4:
+        # Version 4 is dated at the data cutoff and carries the execution date.
+        expected_bundle_keys.add("evaluated_on")
+    with_ledger = frozenset(expected_bundle_keys | {"provider_ledger"})
+    if schema_version == 4:
+        # Version 4 is bound to the ledger it was judged against: the identity is
+        # required, not optional, as in the formal schema and the pipeline gate.
+        accepted_bundle_keys = {with_ledger}
+    elif schema_version == 3:
+        accepted_bundle_keys = {frozenset(expected_bundle_keys), with_ledger}
+    else:
+        accepted_bundle_keys = {frozenset(expected_bundle_keys)}
     if frozenset(payload) not in accepted_bundle_keys:
         raise ControlPanelValidationError("freshness health keys differ")
-    if schema_version not in {2, 3}:
+    if schema_version not in {2, 3, 4}:
         raise ControlPanelValidationError("freshness health schema is unsupported")
+    if schema_version == 4:
+        execution_date = date.fromisoformat(
+            _text(payload.get("evaluated_on"), "freshness health evaluated_on")
+        )
+        data_date = date.fromisoformat(
+            _text(payload.get("as_of_date"), "freshness health as_of_date")
+        )
+        if data_date != date.fromisoformat(portfolio_as_of):
+            raise ControlPanelValidationError(
+                "freshness health is not dated at the portfolio data cutoff"
+            )
+        if execution_date < data_date:
+            raise ControlPanelValidationError(
+                "freshness health was evaluated before its data date"
+            )
+    else:
+        execution_date = None
     if "provider_ledger" in payload:
         provider_ledger = payload.get("provider_ledger")
         ledger_identity = _object(provider_ledger, "freshness provider ledger")
@@ -797,7 +826,7 @@ def _freshness_health(
         ledger_as_of = date.fromisoformat(
             _text(ledger_identity.get("as_of_date"), "freshness ledger as_of_date")
         )
-        freshness_as_of = date.fromisoformat(
+        freshness_as_of = execution_date or date.fromisoformat(
             _text(payload.get("as_of_date"), "freshness health as_of_date")
         )
         if ledger_as_of > freshness_as_of:
@@ -854,7 +883,7 @@ def _freshness_health(
         "state",
         "subject_id",
     }
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         expected |= {
             "coverage_status",
             "lane",
@@ -928,7 +957,7 @@ def _freshness_health(
             None if last is None else date.fromisoformat(last),
             date.fromisoformat(as_of),
         ).to_dict()
-        if schema_version == 3 and not required_for_current:
+        if schema_version in {3, 4} and not required_for_current:
             expected_assessment["blocks_current_consumers"] = False
             expected_assessment["escalation_required"] = False
         for field in (
@@ -982,7 +1011,7 @@ def _freshness_health(
                         "required_for_current": required_for_current,
                         "subject_type": subject_type,
                     }
-                    if schema_version == 3
+                    if schema_version in {3, 4}
                     else {}
                 ),
             }
@@ -1044,7 +1073,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2}:
+    ) not in {1, 2, 3}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1126,7 +1155,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2}:
+    ) not in {1, 2, 3}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -1408,7 +1437,7 @@ def _baseline_catalog_snapshot_for_report(
         raise ControlPanelValidationError(
             "baseline catalog is not readable JSON"
         ) from exc
-    if catalog.get("baseline_schema_version") != 1:
+    if catalog.get("baseline_schema_version") not in {1, 2}:
         raise ControlPanelValidationError("baseline schema version is unsupported")
     return catalog, {
         "catalog": (catalog_path, catalog_sha256),
@@ -2632,7 +2661,7 @@ def _current_epoch_crosswalk_included_tuples(
     if (
         selected_baseline.get("artifact_id") != "normalized/portfolio-baseline.json"
         or selected_baseline.get("schema_name") != "portfolio-baseline-catalog"
-        or selected_baseline.get("schema_version") != "1"
+        or selected_baseline.get("schema_version") not in {"1", "2"}
         or not isinstance(selected_baseline.get("generation_id"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", selected_baseline["generation_id"])
         or not isinstance(selected_baseline.get("sha256"), str)
@@ -3242,6 +3271,10 @@ def _suppress_unmatched_strategy_performance(
             "account_live_source_provider",
             "account_live_source_sha256",
             "available_twr_segments",
+            "mwr_xirr",
+            "mwr_opening_date",
+            "mwr_terminal_date",
+            "mwr_member_account_ids",
             "current_value_usd",
             "hwm_current_drawdown",
             "hwm_freshness_status",
@@ -5914,16 +5947,36 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
     for row in strategies:
         history_status = row.get("history_compatibility_status")
         if history_status is not None:
+            # The gate reports the report's own version registry status; it never
+            # relabels accepted history as PROVEN_COMPATIBLE. History accepted
+            # beside an unbound registry stays blocked and shows that status.
+            registry_status = str(
+                row.get("version_compatibility_status") or "UNRESOLVED"
+            )
             accepted = (
                 history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
                 and row.get("live_plus_backtest_status") == "ELIGIBLE_ACCEPTED_HISTORY"
+                and registry_status == "PROVEN_COMPATIBLE"
             )
-            compatibility = "PROVEN_COMPATIBLE" if accepted else str(history_status)
+            compatibility = (
+                registry_status
+                if history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                else str(history_status)
+            )
             reason = str(
                 row.get("live_plus_backtest_reason")
                 or row.get("history_compatibility_reason")
                 or "No accepted strategy history is recorded."
             )
+            if (
+                history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                and registry_status != "PROVEN_COMPATIBLE"
+            ):
+                reason = (
+                    "Accepted history is not bound to a compatible version "
+                    f"registry row ({registry_status}): "
+                    f"{row.get('version_compatibility_reason') or 'no reason recorded'}"
+                )
             version_ref = row.get("history_version_ref")
         else:
             compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")
@@ -8273,6 +8326,17 @@ def _strategy_underwriting(
     )
 
 
+def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
+    """How many reconciliation checks passed: every status that starts with ``PASS``.
+
+    ``PASS_WITH_EXPLICIT_RECONCILIATION`` is a pass with its reconciliation stated; the
+    shell paints it as accepted and the coverage verification accepts it, so the counter
+    counts it too (B11).
+    """
+
+    return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
@@ -9187,7 +9251,7 @@ def _panel_data(
     position_count = sum(
         str(row.get("status", "")).startswith("AVAILABLE") for row in positions
     )
-    reconciliation_passed = sum(row.get("status") == "PASS" for row in reconciliations)
+    reconciliation_passed = _reconciliation_passed(reconciliations)
     source_contract = _object(source.get("contract"), "source.contract")
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
     baseline = _object(report.get("baseline"), "baseline")
@@ -9598,7 +9662,11 @@ def _panel_data(
             ),
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
-        "panel_schema_version": PANEL_SCHEMA_VERSION,
+        "panel_schema_version": (
+            CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
+            if report.get("report_schema_version") == 3
+            else PANEL_SCHEMA_VERSION
+        ),
         "performance": normalized_performance,
         "positions": normalized_positions,
         "provenance": provenance,
@@ -11237,7 +11305,7 @@ def _candidate_record(
             for name, content in sorted(files.items())
         },
         "panel_id": panel_id,
-        "panel_schema_version": PANEL_SCHEMA_VERSION,
+        "panel_schema_version": data["panel_schema_version"],
         "portfolio_as_of": data["meta"]["portfolio_as_of"],
         "correlation_generation_id": data["meta"]["correlation_generation_id"],
         "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
@@ -12714,6 +12782,31 @@ def _replace_exact(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_NON_AVAILABLE_FACT_STATUSES: Final = frozenset({"FAILED", "PARTIAL", "UNAVAILABLE"})
+
+
+def _coverage_boundary(fact_status: object) -> str:
+    """Seal the payload's own non-available facts into the manifest boundary.
+
+    A publishable manifest must be COMPLETE_WITHIN_DECLARED_BOUNDARY with no
+    known_gaps, so the gaps the payload declares are named in the boundary text.
+    """
+
+    if not isinstance(fact_status, Mapping):
+        raise ControlPanelValidationError("panel fact_status must be an object")
+    declared = ", ".join(
+        f"{key}={value}"
+        for key, value in sorted(fact_status.items())
+        if value in _NON_AVAILABLE_FACT_STATUSES
+    )
+    return (
+        "accepted portfolio, factor/alpha, dynamic replication, dependence, "
+        "weekly-return, governed-HWM, governed invested-capital when supplied, "
+        "and candidate driver-map evidence rendered read-only with explicit gaps; "
+        f"declared non-available facts: {declared or 'none'}"
+    )
+
+
 def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
     """Atomically update the stable local entry point after pointer publication."""
     if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
@@ -13000,7 +13093,15 @@ def publish_panel(
             "freshness health artifact as_of_date",
         )
     )
-    publication_as_of = max(portfolio_as_of, freshness_as_of)
+    # The manifest has one date field and downstream readers take it as the data date
+    # (weekly anchor, retained cutoff, provider ledger), so it is the data cutoff the
+    # panel carries, never the later date the run executes on.  The execution date is
+    # recorded inside the freshness artifact as ``evaluated_on``.
+    if freshness_as_of > portfolio_as_of:
+        raise ControlPanelValidationError(
+            "freshness health is dated after the portfolio data cutoff"
+        )
+    publication_as_of = portfolio_as_of
     try:
         retained_report = _object(
             json.loads(input_snapshots["report"].decode("utf-8")),
@@ -13013,7 +13114,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2}:
+    ) or retained_report_schema_version not in {1, 2, 3}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )
@@ -13215,6 +13316,14 @@ def publish_panel(
                 size_bytes=len(content),
             )
         )
+    after_cutoff = sorted(
+        item.artifact_id for item in artifacts if item.as_of_date > publication_as_of
+    )
+    if after_cutoff:
+        raise ControlPanelValidationError(
+            "bound inputs are dated after the portfolio data cutoff: "
+            + ", ".join(after_cutoff)
+        )
     qa, qa_snapshots = _validated_qa_snapshots(
         candidate_dir, published_panel_bytes, qa_dir, output_root
     )
@@ -13245,11 +13354,7 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary=(
-                "accepted portfolio, factor/alpha, dynamic replication, dependence, "
-                "weekly-return, governed-HWM, governed invested-capital when supplied, "
-                "and candidate driver-map evidence rendered read-only with explicit gaps"
-            ),
+            boundary=_coverage_boundary(data["fact_status"]),
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",

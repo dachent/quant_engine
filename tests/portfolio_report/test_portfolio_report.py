@@ -333,6 +333,44 @@ def test_report_projects_only_accepted_exact_version_prehistory(
     assert reporter._accepted_pre_live_observations(history, "synthetic-v1") == 0
 
 
+@pytest.mark.parametrize(
+    ("live_starts", "backtest_end", "expected"),
+    [
+        (["2025-01-02"], "2024-12-31", "2025-01-02"),
+        (["2025-03-01", "2025-01-02"], "2024-12-31", "2025-01-02"),
+        # No admitted prehistory means no live start is carried.
+        (["2025-01-02"], "2025-01-02", None),
+        ([], "2024-12-31", None),
+    ],
+)
+def test_report_carries_the_account_live_start_of_admitted_prehistory(
+    live_starts: list[str], backtest_end: str, expected: str | None
+) -> None:
+    history = {
+        "segments": [
+            *(
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "mode_admission": "INCLUDE_SELECTED_LIVE",
+                    "observed_start": start,
+                    "strategy_version": "synthetic-v1",
+                }
+                for start in live_starts
+            ),
+            {
+                "evidence_layer": "BACKTEST",
+                "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                "observed_end": backtest_end,
+                "return_observations": 3,
+                "strategy_version": "synthetic-v1",
+            },
+        ]
+    }
+    assert reporter._accepted_pre_live_account_live_start(history, "synthetic-v1") == (
+        expected
+    )
+
+
 def test_report_history_requires_actual_packaged_coverage_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -919,6 +957,122 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
             "value": "ACCOUNT_LIVE",
         }
     ]
+
+
+# The Schwab generation retained in the real run states, unscoped, that "current account
+# balances remain unavailable"; the baseline copies a provider's known gaps into the
+# positions fact, so the positions gate note repeated it as a portfolio-wide claim while
+# the report showed cutoff balances from accepted NAV (E9).
+LEGACY_SCHWAB_BALANCE_GAP = "current account balances remain unavailable"
+
+
+def _fact_and_provider_coverage(gaps: list[str]) -> dict[str, Any]:
+    import portfolio_baseline as baseline_tool
+
+    claims, _exceptions = baseline_tool._fact_coverage(
+        [], [], [], [], [{"position_id": "p"}], gaps, 0, date(2026, 9, 17)
+    )
+    return {
+        "calendar_coverage": [],
+        "fact_coverage": claims,
+        "provider_coverage": [
+            {
+                "coverage": {
+                    "known_gaps": [
+                        "Investor Checking is outside the accepted brokerage boundary",
+                        LEGACY_SCHWAB_BALANCE_GAP,
+                    ],
+                    "out_of_boundary": [],
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+                "generation_as_of_date": "2026-09-18",
+                "provider_id": "schwab",
+                "qualification": "STAGED_COMPLETE",
+            }
+        ],
+        "reconciliation_exceptions": [],
+    }
+
+
+def _positions_gap(rows: list[dict[str, Any]]) -> str:
+    row = next(
+        item
+        for item in rows
+        if item["category"] == "FACT_COVERAGE" and item["item"] == "positions"
+    )
+    return str(row["known_gap"])
+
+
+def test_provider_known_gaps_in_the_positions_fact_name_their_provider_and_date() -> (
+    None
+):
+    """E9: a clause that only a provider declared keeps that provider and the date of
+    its generation, so a snapshot limitation cannot read as a portfolio-wide claim."""
+
+    catalog = _fact_and_provider_coverage(
+        [
+            "Investor Checking is outside the accepted brokerage boundary",
+            LEGACY_SCHWAB_BALANCE_GAP,
+        ]
+    )
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        "schwab (as of 2026-09-18): Investor Checking is outside the accepted "
+        "brokerage boundary; "
+        f"schwab (as of 2026-09-18): {LEGACY_SCHWAB_BALANCE_GAP}"
+    )
+
+
+def test_a_gap_no_provider_declared_stays_unscoped() -> None:
+    catalog = _fact_and_provider_coverage(["a gap the baseline itself states"])
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        "a gap the baseline itself states"
+    )
+
+
+def _provider_row(provider_id: str, day: str) -> dict[str, Any]:
+    return {
+        "coverage": {
+            "known_gaps": [LEGACY_SCHWAB_BALANCE_GAP],
+            "out_of_boundary": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        "generation_as_of_date": day,
+        "provider_id": provider_id,
+        "qualification": "STAGED_COMPLETE",
+    }
+
+
+def test_each_provider_declaring_one_clause_is_scoped_at_its_own_generation_date() -> (
+    None
+):
+    """E9: two providers that declare the same text get one clause each; the older
+    provider's snapshot is never dated at the newer provider's generation."""
+
+    catalog = _fact_and_provider_coverage([LEGACY_SCHWAB_BALANCE_GAP])
+    catalog["provider_coverage"] = [
+        _provider_row("schwab", "2026-09-18"),
+        _provider_row("ibkr", "2026-09-10"),
+    ]
+
+    assert _positions_gap(reporter._coverage(catalog)) == (
+        f"ibkr (as of 2026-09-10): {LEGACY_SCHWAB_BALANCE_GAP}; "
+        f"schwab (as of 2026-09-18): {LEGACY_SCHWAB_BALANCE_GAP}"
+    )
+
+
+def test_a_provider_listed_in_two_coverage_rows_is_refused() -> None:
+    """E9: last-seen-wins would silently pick one of two generations for a provider."""
+
+    catalog = _fact_and_provider_coverage([LEGACY_SCHWAB_BALANCE_GAP])
+    catalog["provider_coverage"] = [
+        _provider_row("schwab", "2026-09-18"),
+        _provider_row("schwab", "2026-09-10"),
+    ]
+
+    with pytest.raises(reporter.ReportValidationError, match="schwab"):
+        reporter._coverage(catalog)
 
 
 def test_positions_preserve_history_and_mark_latest_snapshot_per_account() -> None:
@@ -2353,7 +2507,11 @@ def _staged_selector_fixture(
 
     history_path = tmp_path / "history" / "dependence-source.json"
     history_path.parent.mkdir()
-    history_path.write_bytes(canonical_json_bytes({"synthetic": True}))
+    # The dependence source declares its schema version, which publish_report now seals;
+    # a bare synthetic object was never the shape of the real artifact.
+    history_path.write_bytes(
+        canonical_json_bytes({"synthetic": True, "schema_version": 1})
+    )
     monkeypatch.setattr(
         reporter,
         "_history_contract",
@@ -2839,9 +2997,13 @@ def test_missing_strategy_evidence_is_unavailable_not_inferred(tmp_path: Path) -
     assert strategy["nav_status"] == "UNAVAILABLE"
 
 
-def test_effective_dated_strategy_version_registry_projects_into_report(
-    tmp_path: Path,
-) -> None:
+def _unresolved_version_catalog() -> dict[str, Any]:
+    """Baseline whose pinned version registry is the stale default.
+
+    Every strategy has backtest UNAVAILABLE, version UNRESOLVED and compatibility
+    UNRESOLVED; strategy-1 additionally carries a hash-pinned live boundary.
+    """
+
     catalog = _baseline_catalog()
     unavailable = {
         "source_ids": ["synthetic-source"],
@@ -2895,6 +3057,13 @@ def test_effective_dated_strategy_version_registry_projects_into_report(
             for index in range(1, 10)
         ],
     }
+    return catalog
+
+
+def test_effective_dated_strategy_version_registry_projects_into_report(
+    tmp_path: Path,
+) -> None:
+    catalog = _unresolved_version_catalog()
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(baseline_root)
@@ -2914,6 +3083,752 @@ def test_effective_dated_strategy_version_registry_projects_into_report(
     )
     assert first["live_plus_backtest_reason"].startswith("UNRESOLVED:")
     assert first["strategy_evidence_layers"][0]["evidence_layer"] == "ACCOUNT_LIVE"
+
+
+ADMITTED_VERSION_REF = "accepted-live-path:" + "a" * 64
+
+
+def _history_rows(
+    accepted: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """History contract rows keyed by strategy name, accepted ones as supplied."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    for index in range(1, 10):
+        name = f"Synthetic Strategy {index}"
+        rows[name] = dict(
+            accepted.get(
+                name,
+                {
+                    "backtest_observations": 0,
+                    "history_disposition_reason": "No version-matched prehistory.",
+                    "history_status": "UNAVAILABLE_NO_MATCHED_BACKTEST_PREHISTORY",
+                    "implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE",
+                    "series_id": name,
+                    "strategy_version": f"unmatched-v{index}",
+                },
+            )
+        )
+    return rows, {
+        "as_of_date": "2026-01-03",
+        "evaluated_on": "2026-01-03",
+        "evidence_mode_policy": {},
+        "returns_sha256": "b" * 64,
+        "returns_size_bytes": 100,
+        "schema": "portfolio-current-dependence-source/1",
+        "series_count": 9,
+        "sha256": "c" * 64,
+        "size_bytes": 100,
+    }
+
+
+def _accepted_history_row(
+    name: str,
+    version: str = ADMITTED_VERSION_REF,
+    account_live_start: str | None = None,
+) -> dict:
+    return {
+        **(
+            {"account_live_start": account_live_start}
+            if account_live_start is not None
+            else {}
+        ),
+        "backtest_observations": 3912,
+        "compatibility_basis": (
+            "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
+        ),
+        "history_disposition_reason": "Version-matched prehistory is admitted.",
+        "history_status": "ACCEPTED_VERSION_COMPATIBLE_PREHISTORY",
+        "implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE",
+        "series_id": name,
+        "strategy_version": version,
+    }
+
+
+def _report_with_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog: dict[str, Any],
+    accepted: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    baseline_root = _published_baseline(tmp_path, catalog)
+    monkeypatch.setattr(
+        reporter,
+        "_history_contract",
+        lambda *_args, **_kwargs: _history_rows(accepted),
+    )
+    report, _, _ = reporter.build_report_data(
+        baseline_root, history_contract_path=tmp_path / "dependence-source.json"
+    )
+    return {item["strategy_id"]: item for item in report["strategy_summary"]}
+
+
+def test_backtest_status_follows_the_admitted_prehistory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: the stale catalog default must not call admitted backtest UNAVAILABLE."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _unresolved_version_catalog(),
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "EVIDENCED"
+    assert first["backtest_version_ref"] == ADMITTED_VERSION_REF
+    # Regression guard: no admitted prehistory keeps the catalog's declaration.
+    second = rows["strategy-2"]
+    assert second["history_compatibility_status"] == "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+    assert second["backtest_status"] == "UNAVAILABLE"
+    assert second["backtest_version_ref"] is None
+
+
+def test_version_registry_binds_to_the_hash_bound_exact_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: history acceptance and the version registry name one exact version."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _unresolved_version_catalog(),
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_ref"] == ADMITTED_VERSION_REF
+    assert first["history_version_ref"] == ADMITTED_VERSION_REF
+    assert first["version_disposition"] == "EVIDENCED"
+    assert "history contract" in first["version_disposition_reason"]
+    assert "HASH_BOUND_EXACT_VERSION" in first["version_compatibility_reason"]
+    # Ruling 1: the pinned live-boundary identity window is not re-pinned.
+    assert first["live_boundary_status"] == "EVIDENCED"
+    assert first["live_boundary_observed_start"] == "2026-01-01"
+    assert first["live_boundary_observed_end"] == "2026-01-03"
+    # Registry window fields are the catalog's and are not rewritten.
+    assert first["version_effective_start"] == "2026-01-01"
+    assert first["version_effective_end"] is None
+    # Regression guard: an unaccepted strategy stays UNRESOLVED.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["version_disposition"] == "UNRESOLVED"
+    assert second["version_ref"] is None
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+
+
+def test_version_registry_is_not_bound_over_a_different_catalog_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog version that differs from the history's version stays visible."""
+
+    catalog = _unresolved_version_catalog()
+    first_version = catalog["strategy_version_catalog"]["strategies"][0]
+    first_version["disposition"] = "EVIDENCED"
+    first_version["version_ref"] = "catalog-v1"
+    first_version["disposition_reason"] = "SYNTHETIC catalog version."
+    first_version["gaps"] = []
+    baseline_catalog_strategies = catalog["strategies"]
+    baseline_catalog_strategies[0]["version_ref"] = "catalog-v1"
+    # Analytics already put the backtest into the sealed hybrid lenses, so a
+    # registry that neither binds nor is proven contradicts the accepted history
+    # and the report refuses instead of publishing a row with no honest label.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="accepted exact-version prehistory is not bound to the version registry",
+    ):
+        _report_with_history(
+            tmp_path,
+            monkeypatch,
+            catalog,
+            {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+        )
+
+
+GRIZZLY_VERSION = "grizzlybears-vtma-current-model:" + "3" * 64
+GRIZZLY_LIVE_REF = "accepted-live-path:" + "5" * 64
+GRIZZLY_DESIGN_GAP = "Vendor design and configuration are not admitted."
+GRIZZLY_LIVE_ONLY_GAP = (
+    "No compatible backtest prehistory is admitted; LIVE_ONLY remains mandatory."
+)
+
+
+def _real_shape_catalog(
+    *, live_start: str = "2026-01-01", compatibility: str = "UNRESOLVED"
+) -> dict[str, Any]:
+    """The registry shape the pinned baseline carries for real accepted strategies.
+
+    version_ref is the hash-pinned accepted-live-path identity of the live
+    window, the compatibility is the stale UNRESOLVED default and the
+    disposition is REFERENCE_ONLY. The history version is a model identity that
+    can never equal that ref.
+    """
+
+    catalog = _unresolved_version_catalog()
+    row = catalog["strategy_version_catalog"]["strategies"][0]
+    row["version_ref"] = GRIZZLY_LIVE_REF
+    row["compatibility_status"] = compatibility
+    row["compatibility_reason"] = "The live path is hash-bound; no backtest identity."
+    row["disposition"] = "REFERENCE_ONLY"
+    row["disposition_reason"] = "Vendor design/configuration not admitted."
+    row["gaps"] = [GRIZZLY_DESIGN_GAP, GRIZZLY_LIVE_ONLY_GAP]
+    row["live_boundary"] = {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "observed_end": "2026-01-03",
+        "observed_start": live_start,
+        "source_ids": ["synthetic-source"],
+        "status": "EVIDENCED",
+        "version_ref": GRIZZLY_LIVE_REF,
+    }
+    catalog["strategies"][0]["version_ref"] = GRIZZLY_LIVE_REF
+    return catalog
+
+
+def test_accepted_live_path_registry_ref_binds_to_the_history_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GrizzlyBears shape: ref in the live-path namespace, history a model id."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _real_shape_catalog(),
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+            )
+        },
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    # The hash-pinned live identity is never re-pinned.
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["history_version_ref"] == GRIZZLY_VERSION
+    # REFERENCE_ONLY (design not admitted) is still true and is not upgraded.
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert (
+        first["version_disposition_reason"]
+        == "Vendor design/configuration not admitted."
+    )
+    for fragment in (
+        GRIZZLY_VERSION,
+        GRIZZLY_LIVE_REF,
+        "2026-01-01",
+        "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE",
+    ):
+        assert fragment in first["version_compatibility_reason"]
+    assert first["version_gaps"] == [GRIZZLY_DESIGN_GAP]
+    assert first["backtest_status"] == "EVIDENCED"
+    assert first["backtest_version_ref"] == GRIZZLY_VERSION
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    # Control (Volatis shape): no accepted history stays blocked and unresolved.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+    assert second["backtest_status"] == "UNAVAILABLE"
+
+
+def test_report_to_panel_gate_admits_the_real_registry_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer rows drive the panel gate: eligible, bound to the history version."""
+
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _real_shape_catalog(),
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+            )
+        },
+    )
+    panel_spec = importlib.util.spec_from_file_location(
+        "portfolio_control_panel_for_report_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py",
+    )
+    assert panel_spec is not None and panel_spec.loader is not None
+    panel = importlib.util.module_from_spec(panel_spec)
+    sys.modules[panel_spec.name] = panel
+    try:
+        panel_spec.loader.exec_module(panel)
+        gate = panel._hybrid_mode_gate(
+            [rows[key] for key in sorted(rows) if key in {"strategy-1", "strategy-2"}]
+        )
+    finally:
+        sys.modules.pop(panel_spec.name, None)
+
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (item["strategy_id"], item["compatibility_status"], item["version_ref"])
+        for item in gate["eligible_strategies"]
+    ] == [("strategy-1", "PROVEN_COMPATIBLE", GRIZZLY_VERSION)]
+    assert [item["strategy_id"] for item in gate["blocked_strategies"]] == [
+        "strategy-2"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("catalog", "history_live_start", "label"),
+    [
+        # The registry's live window starts on another date than the history's.
+        (_real_shape_catalog(live_start="2026-01-02"), "2026-01-01", "UNRESOLVED"),
+        # The history carries no live start to compare.
+        (_real_shape_catalog(), None, "UNRESOLVED"),
+        # A catalog mismatch is never overridden.
+        (
+            _real_shape_catalog(compatibility="VERSION_MISMATCH"),
+            "2026-01-01",
+            "VERSION_MISMATCH",
+        ),
+    ],
+)
+def test_accepted_history_that_cannot_bind_the_registry_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog: dict[str, Any],
+    history_live_start: str | None,
+    label: str,
+) -> None:
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=(
+            "accepted exact-version prehistory is not bound to the version "
+            f"registry: strategy-1 \\({label}\\)"
+        ),
+    ):
+        _report_with_history(
+            tmp_path,
+            monkeypatch,
+            catalog,
+            {
+                "Synthetic Strategy 1": _accepted_history_row(
+                    "Synthetic Strategy 1", GRIZZLY_VERSION, history_live_start
+                )
+            },
+        )
+
+
+def test_live_path_ref_requires_an_evidenced_account_live_boundary_with_that_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for field, value in (
+        ("status", "UNAVAILABLE"),
+        ("evidence_layer", "PROVIDER_LIVE"),
+        ("version_ref", "accepted-live-path:" + "6" * 64),
+    ):
+        catalog = _real_shape_catalog()
+        catalog["strategy_version_catalog"]["strategies"][0]["live_boundary"][field] = (
+            value
+        )
+        with pytest.raises(
+            reporter.ReportValidationError, match="not bound to the version registry"
+        ):
+            _report_with_history(
+                tmp_path / field,
+                monkeypatch,
+                catalog,
+                {
+                    "Synthetic Strategy 1": _accepted_history_row(
+                        "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-01"
+                    )
+                },
+            )
+
+
+def test_proven_registry_row_is_not_rewritten_by_accepted_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI Factor shape: already PROVEN_COMPATIBLE with its own live-path ref."""
+
+    catalog = _real_shape_catalog(compatibility="PROVEN_COMPATIBLE")
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        catalog,
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION, "2026-01-02"
+            )
+        },
+    )
+    first = rows["strategy-1"]
+
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_compatibility_reason"] == (
+        "The live path is hash-bound; no backtest identity."
+    )
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert first["version_gaps"] == [GRIZZLY_DESIGN_GAP, GRIZZLY_LIVE_ONLY_GAP]
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+
+
+def test_equal_registry_ref_binds_without_a_live_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _real_shape_catalog()
+    catalog["strategy_version_catalog"]["strategies"][0]["version_ref"] = (
+        GRIZZLY_VERSION
+    )
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        catalog,
+        {
+            "Synthetic Strategy 1": _accepted_history_row(
+                "Synthetic Strategy 1", GRIZZLY_VERSION
+            )
+        },
+    )
+
+    assert rows["strategy-1"]["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert rows["strategy-1"]["version_ref"] == GRIZZLY_VERSION
+    assert rows["strategy-1"]["version_disposition"] == "REFERENCE_ONLY"
+
+
+# --- the real history-contract path (no mock of ``_history_contract``) ------------
+#
+# The tests above replace ``_history_contract`` with hand-written rows, so a producer
+# that stopped emitting a field the registry bind consumes (``account_live_start``)
+# left them green.  These build a packaged dependence source through the real
+# builders, with history coverage in the shape the layered-history builder emits, and
+# let the real ``_history_contract`` read it.
+
+REAL_PATH_STRATEGY_ID = "grizzlybears-vtma"
+REAL_PATH_SERIES_ID = "GrizzlyBears VTMA"
+
+
+def _real_path_contracts() -> tuple[dict[str, Any], str]:
+    policy = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-dependence-policy-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    live_version = next(
+        row["strategy_version"]
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["strategy_id"] == REAL_PATH_STRATEGY_ID
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    )
+    return policy, live_version
+
+
+def _real_path_coverage(
+    live_version: str,
+    *,
+    live_start: str = "2026-01-01",
+    prehistory_end: str | None = "2025-12-31",
+    prehistory_version: str | None = None,
+) -> list[dict[str, Any]]:
+    def segment(
+        layer: str, admission: str, start: str, end: str, version: str
+    ) -> dict[str, Any]:
+        return {
+            "calendar": "WEEKDAY_SESSION",
+            "evidence_layer": layer,
+            "frequency": "DAILY",
+            "gap_disposition": "NO_UNEXPLAINED_GAP",
+            "mode_admission": admission,
+            "observed_end": end,
+            "observed_start": start,
+            "return_observations": 3912 if layer == "BACKTEST" else 2,
+            "segment_id": f"{layer.lower()}-{start}",
+            "sha256": "d" * 64,
+            "source_generation_id": "e" * 64,
+            "source_id": f"synthetic-{layer.lower()}",
+            "strategy_version": version,
+        }
+
+    segments = [
+        segment(
+            "ACCOUNT_LIVE",
+            "INCLUDE_SELECTED_LIVE",
+            live_start,
+            "2026-01-02",
+            live_version,
+        )
+    ]
+    if prehistory_end is not None:
+        segments.append(
+            segment(
+                "BACKTEST",
+                "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                "2009-04-20",
+                prehistory_end,
+                prehistory_version or live_version,
+            )
+        )
+    return [
+        {
+            "series_id": REAL_PATH_SERIES_ID,
+            "strategy_id": REAL_PATH_STRATEGY_ID,
+            "segments": segments,
+        }
+    ]
+
+
+def _real_path_history_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coverage: list[dict[str, Any]],
+) -> tuple[Path, Any, dict[str, Any]]:
+    namespace = runpy.run_path(
+        str(
+            REPOSITORY_ROOT
+            / "tests/portfolio_analytics/test_portfolio_current_dependence.py"
+        )
+    )
+    current = namespace["current"]
+    selected = namespace["_unmocked_fixture"](
+        tmp_path / "dependence", monkeypatch, coverage_strategies=coverage
+    )
+    built = current.build_source(
+        contract_path=selected["contract_path"],
+        policy_path=selected["policy_path"],
+        history_generation_root=selected["history_root"],
+        allocation_generation_root=selected["allocation_root"],
+        evaluated_on=date(2026, 1, 3),
+    )
+    source = tmp_path / "dependence" / built["receipt"]["bundle_id"]
+    source.mkdir(parents=True)
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "returns.csv",
+        "segments.csv",
+        "spec.json",
+    ):
+        (source / name).write_bytes(built[name])
+    helpers = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests/core/mvp2_consumers_fixture.py")
+    )
+    helpers["_install_dynamic_dependence_loader"](monkeypatch, reporter, current)
+    return source / "dependence-source.json", current, selected
+
+
+def _real_path_names() -> list[str]:
+    policy, _ = _real_path_contracts()
+    others = [
+        str(row["series_id"])
+        for row in policy["series"]
+        if row["series_id"] != REAL_PATH_SERIES_ID
+    ]
+    return [
+        REAL_PATH_SERIES_ID,
+        *others,
+        "Synthetic Strategy 8",
+        "Synthetic Strategy 9",
+    ]
+
+
+def _real_path_catalog(*, live_start: str = "2026-01-01") -> dict[str, Any]:
+    catalog = _real_shape_catalog(live_start=live_start)
+    for strategy, name in zip(catalog["strategies"], _real_path_names(), strict=True):
+        strategy["name"] = name
+    return catalog
+
+
+def _real_path_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    coverage: list[dict[str, Any]],
+    catalog: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build the report through the real ``_history_contract`` and ``_strategies``."""
+
+    source_path, _current, selected = _real_path_history_source(
+        tmp_path, monkeypatch, coverage
+    )
+    baseline_root = _published_baseline(
+        tmp_path, _real_path_catalog() if catalog is None else catalog
+    )
+    real_history_contract = reporter._history_contract
+
+    def bound_history_contract(*args: Any, **kwargs: Any) -> Any:
+        # Pass-through: the product contract and policy the packaged source was
+        # built against are bound only for the duration of the real call, because
+        # the synthetic baseline binds its own product contract for the rest of the
+        # report.  The producer's output is not substituted.
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", selected["contract_path"]
+            )
+            scoped.setattr(reporter, "DEPENDENCE_POLICY", selected["policy_path"])
+            return real_history_contract(*args, **kwargs)
+
+    monkeypatch.setattr(reporter, "_history_contract", bound_history_contract)
+    report, _, _ = reporter.build_report_data(
+        baseline_root, history_contract_path=source_path
+    )
+    return {item["strategy_id"]: item for item in report["strategy_summary"]}, report
+
+
+def test_real_history_contract_emits_the_live_start_the_registry_bind_consumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, live_version = _real_path_contracts()
+    source_path, _current, selected = _real_path_history_source(
+        tmp_path,
+        monkeypatch,
+        _real_path_coverage(live_version),
+    )
+    monkeypatch.setattr(
+        reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", selected["contract_path"]
+    )
+    monkeypatch.setattr(reporter, "DEPENDENCE_POLICY", selected["policy_path"])
+
+    rows, _identity = reporter._history_contract(
+        source_path,
+        portfolio_as_of="2026-01-03",
+        strategy_names=set(_real_path_names()),
+    )
+
+    row = rows[REAL_PATH_SERIES_ID]
+    assert row["history_status"] == "ACCEPTED_VERSION_COMPATIBLE_PREHISTORY"
+    assert row["strategy_version"] == live_version
+    assert row["backtest_observations"] == 3912
+    assert row["account_live_start"] == "2026-01-01"
+
+
+def test_real_history_to_report_binds_the_live_path_registry_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GrizzlyBears chain: coverage -> history contract -> registry bind."""
+
+    _, live_version = _real_path_contracts()
+    rows, _report = _real_path_report(
+        tmp_path, monkeypatch, coverage=_real_path_coverage(live_version)
+    )
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+    assert first["history_version_ref"] == live_version
+    assert first["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert first["version_ref"] == GRIZZLY_LIVE_REF
+    assert first["version_disposition"] == "REFERENCE_ONLY"
+    assert first["live_plus_backtest_status"] == "ELIGIBLE_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "EVIDENCED"
+    # The reason names what the producer emitted: the model identity, the pinned
+    # live-path ref, the live start and the compatibility basis.
+    for fragment in (
+        live_version,
+        GRIZZLY_LIVE_REF,
+        "2026-01-01",
+        "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE",
+    ):
+        assert fragment in first["version_compatibility_reason"], fragment
+    # The strategies the history does not admit stay live-only and unresolved.
+    second = rows["strategy-2"]
+    assert second["version_compatibility_status"] == "UNRESOLVED"
+    assert second["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+
+
+def test_real_history_whose_live_start_differs_from_the_registry_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, live_version = _real_path_contracts()
+    # The registry's live window starts on 2026-01-02, the history's on 2026-01-01.
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"not bound to the version registry: strategy-1 \(UNRESOLVED\)",
+    ):
+        _real_path_report(
+            tmp_path,
+            monkeypatch,
+            coverage=_real_path_coverage(live_version),
+            catalog=_real_path_catalog(live_start="2026-01-02"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "UNAVAILABLE"),
+        ("evidence_layer", "PROVIDER_LIVE"),
+        ("version_ref", "accepted-live-path:" + "6" * 64),
+    ],
+)
+def test_real_history_needs_an_evidenced_account_live_boundary_carrying_the_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    _, live_version = _real_path_contracts()
+    catalog = _real_path_catalog()
+    catalog["strategy_version_catalog"]["strategies"][0]["live_boundary"][field] = value
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"not bound to the version registry: strategy-1 \(UNRESOLVED\)",
+    ):
+        _real_path_report(
+            tmp_path,
+            monkeypatch,
+            coverage=_real_path_coverage(live_version),
+            catalog=catalog,
+        )
+
+
+@pytest.mark.parametrize("case", ["no-prehistory-before-live", "other-version"])
+def test_real_history_without_admitted_prehistory_stays_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _, live_version = _real_path_contracts()
+    coverage = (
+        _real_path_coverage(live_version, prehistory_end="2026-01-01")
+        if case == "no-prehistory-before-live"
+        else _real_path_coverage(
+            live_version, prehistory_version="grizzlybears-vtma-other-model:" + "9" * 64
+        )
+    )
+    rows, _report = _real_path_report(tmp_path, monkeypatch, coverage=coverage)
+    first = rows["strategy-1"]
+
+    assert first["history_compatibility_status"] == "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+    assert first["live_plus_backtest_status"] == "BLOCKED_NO_ACCEPTED_HISTORY"
+    assert first["backtest_status"] == "UNAVAILABLE"
+
+
+def test_real_history_report_rows_drive_the_panel_hybrid_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer rows from the real history path, not hand-built, reach the panel gate."""
+
+    _, live_version = _real_path_contracts()
+    rows, _report = _real_path_report(
+        tmp_path, monkeypatch, coverage=_real_path_coverage(live_version)
+    )
+    panel_spec = importlib.util.spec_from_file_location(
+        "portfolio_control_panel_for_real_history_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py",
+    )
+    assert panel_spec is not None and panel_spec.loader is not None
+    panel = importlib.util.module_from_spec(panel_spec)
+    sys.modules[panel_spec.name] = panel
+    try:
+        panel_spec.loader.exec_module(panel)
+        gate = panel._hybrid_mode_gate(
+            [rows[key] for key in sorted(rows) if key.startswith("strategy-")]
+        )
+    finally:
+        sys.modules.pop(panel_spec.name, None)
+
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (item["strategy_id"], item["compatibility_status"], item["version_ref"])
+        for item in gate["eligible_strategies"]
+    ] == [("strategy-1", "PROVEN_COMPATIBLE", live_version)]
 
 
 def test_transaction_without_amount_remains_explicitly_unavailable(
@@ -4700,6 +5615,7 @@ def test_product_report_output_obeys_current_allocation_schema(tmp_path: Path) -
 
 def _published_provider_ledger(
     tmp_path: Path,
+    generation_date: date = date(2026, 8, 3),
 ) -> tuple[Path, dict[str, object]]:
     root = tmp_path / "provider-ledger"
     content = canonical_json_bytes({"reconciliation_checks": []})
@@ -4707,12 +5623,12 @@ def _published_provider_ledger(
         artifact_id="normalized/provider-ledger.json",
         sha256=hashlib.sha256(content).hexdigest(),
         size_bytes=len(content),
-        as_of_date=date(2026, 8, 3),
+        as_of_date=generation_date,
         schema_name="provider-ledger-catalog",
         schema_version="1",
     )
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 8, 3),
+        as_of_date=generation_date,
         adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -4729,7 +5645,7 @@ def _published_provider_ledger(
     publish_generation(root, manifest.generation_id)
     manifest_sha256, manifest_size = reporter.hash_file(manifest_path)
     return root, {
-        "as_of_date": "2026-08-03",
+        "as_of_date": generation_date.isoformat(),
         "catalog_sha256": artifact.sha256,
         "catalog_size_bytes": artifact.size_bytes,
         "generation_id": manifest.generation_id,
@@ -6001,6 +6917,125 @@ def test_report_projects_hash_bound_leverage_disclosures_to_report(
         match="hash-bound provider-ledger catalog is missing or ambiguous",
     ):
         reporter.build_report_data(baseline_root, provider_ledger_root=provider_root)
+
+
+def _coverage_detail(account_id: str, fact_type: str) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "admission_effective_end": None,
+        "admission_effective_start": None,
+        "authority": "LEGACY_ACCEPTED_FACTS",
+        "boundary_basis": "OBSERVED_RECORDS_ONLY",
+        "cadence": "EVENT_STREAM",
+        "declared_end": None,
+        "declared_start": None,
+        "disposition": "RETAINED_ACCEPTED_REPORTED_FACTS_ONLY",
+        "fact_type": fact_type,
+        "missing_interval_end": None,
+        "missing_interval_reason": "synthetic",
+        "missing_interval_start": None,
+        "missing_intervals": [],
+        "observed_end": "2026-01-03",
+        "observed_start": "2026-01-01",
+        "provider_id": "SYNTHETIC",
+        "record_count": 1,
+        "status": "OBSERVED_NOT_COMPLETENESS_PROOF",
+        "unavailable_amount_count": 0,
+    }
+
+
+def test_report_labels_non_product_coverage_and_leverage_rows_with_their_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: a reserve component and a history-only account are never unlabelled.
+
+    `account-b` is the current product account, `reserve` the custody reserve
+    component, `account-stray` has no current assignment and is not a reserve
+    component (the real 2d0a shape: history only, last NAV zero).
+    """
+
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        _bind_synthetic_product_contract(tmp_path / "report-contract"),
+    )
+    provider_generation = "a" * 64
+
+    def financing(account_id: str, index: int) -> dict[str, Any]:
+        return {
+            "account_id": account_id,
+            "accounting_date": "2026-01-03",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+            "classification": "BROKER_DEBIT_INTEREST",
+            "generation_id": "b" * 64,
+            "included_in_nav": None,
+            "measurement_basis": "VALUE_DATE_INTEREST_DETAIL",
+            "native_source_record_id": f"native-{index}",
+            "provider_id": "ibkr",
+            "record_id": f"ibkr:tier-{index}",
+            "source_amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1"},
+            "source_artifact_id": "selected/ibkr.xml",
+            "source_record_id": f"catalog-{index}",
+            "strategy_id": None,
+            "value_date": "2026-01-02",
+        }
+
+    accounts = ("account-b", "reserve", "account-stray")
+    provider_bytes = canonical_json_bytes(
+        {
+            "financing_cost_observations": [
+                financing(account, index) for index, account in enumerate(accounts)
+            ],
+            "financing_liability_observations": [],
+            "leverage_exposure_observations": [],
+            "provider_generations": [{"provider_id": "ibkr"}],
+            "reconciliation_checks": [],
+        }
+    )
+    provider_root = tmp_path / "provider-ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "2",
+            "sha256": hashlib.sha256(provider_bytes).hexdigest(),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    catalog["fact_coverage_matrix"] = [
+        _coverage_detail(account, "flows") for account in accounts
+    ]
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+
+    expected = {
+        "account-b": "PRODUCT",
+        "reserve": "RESERVE",
+        "account-stray": "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT",
+    }
+    assert {
+        row["account_id"]: row["account_role"] for row in report["fact_coverage_matrix"]
+    } == expected
+    leverage = {
+        row["account_id"]: row["account_role"]
+        for row in report["leverage_disclosures"]
+        if row["account_id"] is not None
+    }
+    assert leverage == expected
+    # Provider-level rows name no account, so they carry no account role.
+    assert {
+        row["account_role"]
+        for row in report["leverage_disclosures"]
+        if row["account_id"] is None
+    } <= {None}
 
 
 def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
@@ -7501,15 +8536,156 @@ def test_workbook_parity_accepts_report_schema1_and2(tmp_path: Path) -> None:
     workbook_path = tmp_path / "compatibility.xlsx"
     reporter._workbook(report, workbook_path)
     workbook_bytes = workbook_path.read_bytes()
-    for version in (1, 2):
+    for version in (1, 2, 3):
         compatible = json.loads(json.dumps(report))
         compatible["report_schema_version"] = version
         reporter._workbook_parity_receipt(
             canonical_json_bytes(compatible), workbook_bytes
         )
     unsupported = json.loads(json.dumps(report))
-    unsupported["report_schema_version"] = 3
+    unsupported["report_schema_version"] = 4
     with pytest.raises(reporter.ReportValidationError, match="contract differs"):
         reporter._workbook_parity_receipt(
             canonical_json_bytes(unsupported), workbook_bytes
         )
+
+
+def _schema_four_freshness_payload(
+    identity: dict[str, object], *, as_of: str, evaluated_on: str
+) -> dict[str, object]:
+    return {
+        "assessment_schema_version": 4,
+        "as_of_date": as_of,
+        "assessments": [{"evaluated_on": as_of}],
+        "evaluated_on": evaluated_on,
+        "policies": [],
+        "provider_ledger": identity,
+    }
+
+
+def test_freshness_assessments_schema_four_is_dated_at_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """R2-3: HWM staleness and the evaluation date use the data cutoff.
+
+    The run executes on 2026-08-07 and the ledger generation is dated 2026-08-04, one
+    day past the 2026-08-03 cutoff.  The returned evaluation date, which drives the HWM
+    policy and the report provenance, is the cutoff, not the run date.
+    """
+
+    provider_root, identity = _published_provider_ledger(
+        tmp_path, generation_date=date(2026, 8, 4)
+    )
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(
+        json.dumps(
+            _schema_four_freshness_payload(
+                identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+            )
+        ),
+        encoding="utf-8",
+    )
+    baseline_catalog = {
+        "source_artifacts": [
+            {
+                "schema_name": "provider-ledger-catalog",
+                "sha256": identity["catalog_sha256"],
+                "source_key": "provider-ledger-generation",
+            },
+            {
+                "schema_name": "generation-manifest",
+                "sha256": identity["manifest_sha256"],
+                "source_key": "provider-ledger-generation",
+            },
+        ]
+    }
+    assessments, as_of, _sha256 = reporter._freshness_assessments(
+        freshness, date(2026, 8, 3), provider_root, baseline_catalog
+    )
+
+    assert assessments == [{"evaluated_on": "2026-08-03"}]
+    assert as_of == date(2026, 8, 3)
+
+
+@pytest.mark.parametrize(
+    ("as_of", "evaluated_on", "ledger_as_of", "message"),
+    (
+        ("2026-08-04", "2026-08-07", "2026-08-03", "not dated at the portfolio data"),
+        ("2026-08-03", "2026-08-02", "2026-08-02", "evaluated before its data date"),
+        ("2026-08-03", "2026-08-07", "2026-08-08", "ledger postdates the evaluation"),
+    ),
+)
+def test_freshness_assessments_schema_four_orders_the_clocks(
+    tmp_path: Path, as_of: str, evaluated_on: str, ledger_as_of: str, message: str
+) -> None:
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    identity = {**identity, "as_of_date": ledger_as_of}
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(
+        json.dumps(
+            _schema_four_freshness_payload(
+                identity, as_of=as_of, evaluated_on=evaluated_on
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match=message):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_four_requires_the_run_date_key(
+    tmp_path: Path,
+) -> None:
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    payload = _schema_four_freshness_payload(
+        identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+    )
+    del payload["evaluated_on"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="freshness health contract differs"
+    ):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_four_requires_the_provider_ledger_identity(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: a schema-4 bundle with the identity deleted skipped every source check.
+
+    The formal schema and the pipeline gate require ``provider_ledger`` at version 4; the
+    reader accepted the key set without it, so deleting the identity bypassed the report's
+    source binding.
+    """
+
+    _provider_root, identity = _published_provider_ledger(tmp_path)
+    payload = _schema_four_freshness_payload(
+        identity, as_of="2026-08-03", evaluated_on="2026-08-07"
+    )
+    del payload["provider_ledger"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="freshness health contract differs"
+    ):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
+
+
+def test_freshness_assessments_schema_three_still_accepts_an_absent_identity(
+    tmp_path: Path,
+) -> None:
+    payload = _bound_freshness_payload({})
+    del payload["provider_ledger"]
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    assessments, as_of, _sha256 = reporter._freshness_assessments(
+        freshness, date(2026, 8, 7)
+    )
+
+    assert assessments == [{"evaluated_on": "2026-08-07"}]
+    assert as_of == date(2026, 8, 7)

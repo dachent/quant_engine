@@ -250,6 +250,17 @@ def parse_membership_status(data: bytes) -> dict[tuple[str, str, str, str], set[
 
 
 @dataclass(frozen=True)
+class Admission:
+    """One AUTHORITATIVE ACCOUNT_LIVE provider-ledger admission window."""
+
+    provider_id: str
+    account_id: str
+    fact_type: str
+    start: dt.date
+    end: dt.date
+
+
+@dataclass(frozen=True)
 class Ledger:
     as_of_date: dt.date | None
     nav: Mapping[str, Mapping[dt.date, Decimal]]
@@ -263,6 +274,13 @@ class Ledger:
     nav_mapping: Mapping[str, tuple[tuple[dt.date | None, str], ...]] = field(
         default_factory=dict
     )
+    # The pinned ledger's AUTHORITATIVE ACCOUNT_LIVE admission windows: the only
+    # admissions that attest a custody cash line.
+    admissions: tuple[Admission, ...] = ()
+    # Per provider, the date of the provider generation the ledger states (its
+    # ``provider_generations[*].generation_as_of_date``): the latest day an admission of
+    # that provider can have observed.  A provider that states none has no entry.
+    generation_dates: Mapping[str, dt.date] = field(default_factory=dict)
 
 
 def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
@@ -366,6 +384,34 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         str(item.get("provider_id")): str(item.get("generation_id"))
         for item in document.get("provider_generations", [])
     }
+    generation_dates: dict[str, dt.date] = {}
+    for item in document.get("provider_generations", []):
+        generation_day = iso_date(item.get("generation_as_of_date"))
+        if generation_day is not None:
+            generation_dates[str(item.get("provider_id"))] = generation_day
+    admissions: list[Admission] = []
+    for row in document.get("admissions", []):
+        if (
+            row.get("disposition") != "AUTHORITATIVE"
+            or row.get("evidence_layer") != "ACCOUNT_LIVE"
+        ):
+            continue
+        start = iso_date(row.get("effective_start"))
+        end = iso_date(row.get("effective_end"))
+        if start is None or end is None or start > end:
+            raise InputError(
+                f"provider-ledger admission window of {row.get('provider_id')} "
+                f"{row.get('fact_type')} is malformed"
+            )
+        admissions.append(
+            Admission(
+                provider_id=str(row.get("provider_id")),
+                account_id=str(row.get("account_id")),
+                fact_type=str(row.get("fact_type")),
+                start=start,
+                end=end,
+            )
+        )
     return Ledger(
         as_of_date=iso_date(document.get("as_of_date")),
         nav=nav,
@@ -375,6 +421,8 @@ def parse_ledger(data: bytes, policy: FlowPolicy) -> Ledger:
         anchors=anchors,
         generations=generations,
         nav_mapping={account: tuple(found) for account, found in mapping.items()},
+        admissions=tuple(admissions),
+        generation_dates=generation_dates,
     )
 
 

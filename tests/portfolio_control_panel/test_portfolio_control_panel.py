@@ -569,6 +569,11 @@ def _frozen_financial_receipt(
     return _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa_dir)
 
 
+# Strategy versions a test binds to the real producer's identities (see
+# ``real_history_versions``); the default is the synthetic ``synthetic-version:<id>``.
+_STRATEGY_VERSION_OVERRIDES: dict[str, str] = {}
+
+
 def _canonical_return_series_fixture() -> dict[str, Any]:
     """Bind the seven active test strategies to one canonical live window.
 
@@ -587,7 +592,9 @@ def _canonical_return_series_fixture() -> dict[str, Any]:
     by_series_id: dict[str, dict[str, Any]] = {}
     for index, series_id in enumerate(ACTIVE_STRATEGY_NAMES):
         strategy_id = ACTIVE_STRATEGY_IDS[index]
-        strategy_version = f"synthetic-version:{strategy_id}"
+        strategy_version = _STRATEGY_VERSION_OVERRIDES.get(
+            strategy_id, f"synthetic-version:{strategy_id}"
+        )
         rows = [
             {
                 "date": observed_start,
@@ -4385,6 +4392,253 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 7
 
 
+_PRODUCER_HYBRID_FIELDS = (
+    "backtest_version_ref",
+    "history_compatibility_reason",
+    "history_compatibility_status",
+    "history_version_ref",
+    "live_plus_backtest_reason",
+    "live_plus_backtest_status",
+    "version_compatibility_reason",
+    "version_compatibility_status",
+    "version_disposition",
+    "version_ref",
+)
+
+
+def _real_shape_partial_hybrid_report(
+    inputs: dict[str, Path],
+    registry_status: str,
+    *,
+    second_eligible: bool = False,
+    producer_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Report rows in the real registry shape: live-path ref, history model id.
+
+    ``producer_row`` is a strategy row the real report builder emitted; its hybrid
+    fields replace the hand-written ones, so the panel reads what the producer wrote.
+    """
+
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    if producer_row is not None:
+        report["strategy_summary"][0].update(
+            {field: producer_row[field] for field in _PRODUCER_HYBRID_FIELDS}
+        )
+    else:
+        report["strategy_summary"][0].update(
+            {
+                "backtest_version_ref": "synthetic-version:p123-ai-factor",
+                "history_compatibility_reason": "HASH_BOUND_EXACT_VERSION",
+                "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+                "history_version_ref": "synthetic-version:p123-ai-factor",
+                "live_plus_backtest_reason": "History is accepted for inference.",
+                "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+                "version_compatibility_reason": "Registry live path is bound.",
+                "version_compatibility_status": registry_status,
+                "version_disposition": "REFERENCE_ONLY",
+                "version_ref": "accepted-live-path:" + "5" * 64,
+            }
+        )
+    if second_eligible:
+        # A separately proven strategy keeps the hybrid mode published, so the
+        # per-strategy backtest checks run for the strategy under test, which
+        # moves to the second row.
+        first, second = report["strategy_summary"][:2]
+        second.update({key: first[key] for key in first if key.startswith(("hist",))})
+        second.update(
+            {
+                key: first[key]
+                for key in (
+                    "live_plus_backtest_reason",
+                    "live_plus_backtest_status",
+                    "version_compatibility_reason",
+                    "version_compatibility_status",
+                    "version_disposition",
+                    "version_ref",
+                )
+            }
+        )
+        first.update(
+            {
+                "history_compatibility_status": None,
+                "live_plus_backtest_reason": "Registry proves the version compatible.",
+                "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+                "version_compatibility_reason": "Synthetic compatibility is proven.",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "version_ref": "synthetic-version:strategy-0",
+            }
+        )
+    return report
+
+
+def _publish_real_shape_partial_hybrid(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    registry_status: str,
+    *,
+    second_eligible: bool = False,
+    producer_row: dict[str, Any] | None = None,
+) -> Path:
+    report_root = tmp_path / "real-shape-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "real-shape-portfolio-report-data.json",
+        _with_hwm_summary(
+            _real_shape_partial_hybrid_report(
+                inputs,
+                registry_status,
+                second_eligible=second_eligible,
+                producer_row=producer_row,
+            ),
+            inputs["freshness"],
+            _panel_baseline_catalog(),
+        ),
+    )
+    correlation = _correlation_v2()
+    composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ]
+    for strategy_name in ACTIVE_STRATEGY_NAMES[2 if second_eligible else 1 :]:
+        row = composition[strategy_name]
+        row["backtest_observations_used"] = 0
+        row["observed_start"] = row["live_inception"]
+        row["status"] = "AVAILABLE_LIVE_ONLY_NO_COMPATIBLE_BACKTEST"
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-v2-real-shape",
+    )
+    return report_root
+
+
+def test_real_registry_shape_completes_the_panel_with_hybrid_eligibility(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Accepted history beside a bound live-path registry row is hybrid eligible."""
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "PROVEN_COMPATIBLE"
+    )
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = data["hybrid_mode_gate"]
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (row["strategy_name"], row["compatibility_status"], row["version_ref"])
+        for row in gate["eligible_strategies"]
+    ] == [(STRATEGY_NAMES[0], "PROVEN_COMPATIBLE", "synthetic-version:p123-ai-factor")]
+    assert len(gate["blocked_strategies"]) == 6
+    assert "LIVE_PLUS_BACKTEST" in data["dependence_modes"]
+
+
+@pytest.fixture
+def real_history_versions(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Version the weekly and evidence surfaces carry for the strategy under test.
+
+    Requested before ``inputs`` so those fixtures are built with the model identity
+    the real history contract emits instead of ``synthetic-version:<id>``.
+    """
+
+    namespace = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py")
+    )
+    live_version = str(namespace["_real_path_contracts"]()[1])
+    monkeypatch.setitem(_STRATEGY_VERSION_OVERRIDES, "p123-ai-factor", live_version)
+    return live_version
+
+
+def test_real_report_producer_rows_complete_the_panel_with_hybrid_eligibility(
+    real_history_versions: str,
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report builder's own rows, from the real history-contract path, feed the panel.
+
+    The hybrid fields are not written here: the real report builder reads a packaged
+    dependence source whose history coverage admits exact-version prehistory, binds
+    the live-path registry row, and the panel candidate build consumes its row.
+    """
+
+    namespace = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py")
+    )
+    rows, _report_data = namespace["_real_path_report"](
+        tmp_path / "producer",
+        monkeypatch,
+        coverage=namespace["_real_path_coverage"](
+            namespace["_real_path_contracts"]()[1]
+        ),
+    )
+    producer_row = rows["strategy-1"]
+    assert producer_row["version_compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert producer_row["history_version_ref"] == real_history_versions
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "PROVEN_COMPATIBLE", producer_row=producer_row
+    )
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = data["hybrid_mode_gate"]
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [
+        (row["strategy_name"], row["compatibility_status"], row["version_ref"])
+        for row in gate["eligible_strategies"]
+    ] == [
+        (
+            STRATEGY_NAMES[0],
+            "PROVEN_COMPATIBLE",
+            producer_row["history_version_ref"],
+        )
+    ]
+
+
+def test_unbound_registry_beside_accepted_history_still_refuses_the_panel(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The panel stays the fail-closed backstop for the contradiction."""
+
+    report_root = _publish_real_shape_partial_hybrid(
+        inputs, tmp_path, "UNRESOLVED", second_eligible=True
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="unresolved strategy uses backtest history in hybrid dependence",
+    ):
+        panel.build_candidate(
+            report_root,
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            weekly_returns_root=inputs["weekly"],
+        )
+
+
 def test_current_analytics_walks_a_long_finalized_generation(
     tmp_path: Path,
 ) -> None:
@@ -4731,6 +4985,9 @@ def test_partial_hybrid_coverage_still_publishes_the_hybrid_mode() -> None:
             ),
             "strategy_id": strategy_id,
             "strategy_name": name,
+            "version_compatibility_status": (
+                "PROVEN_COMPATIBLE" if accepted else "UNRESOLVED"
+            ),
         }
 
     gate = panel._hybrid_mode_gate(
@@ -4756,6 +5013,110 @@ def test_partial_hybrid_coverage_still_publishes_the_hybrid_mode() -> None:
         "ELIGIBLE_PROVEN_COMPATIBLE",
         "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
     }
+
+
+def test_hybrid_gate_reports_registry_status_instead_of_relabeling_history() -> None:
+    """D4: accepted history never turns an unbound registry into PROVEN_COMPATIBLE."""
+
+    def row(strategy_id: str, registry: dict[str, str]) -> dict[str, Any]:
+        return {
+            "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+            "history_version_ref": f"{strategy_id}:backtest",
+            "live_plus_backtest_reason": "History is accepted.",
+            "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_id.upper(),
+            **registry,
+        }
+
+    gate = panel._hybrid_mode_gate(
+        [
+            row("bound", {"version_compatibility_status": "PROVEN_COMPATIBLE"}),
+            row(
+                "unbound",
+                {
+                    "version_compatibility_reason": "No effective-dated row.",
+                    "version_compatibility_status": "UNRESOLVED",
+                },
+            ),
+            row("missing", {}),
+        ]
+    )
+
+    assert [item["strategy_id"] for item in gate["eligible_strategies"]] == ["bound"]
+    assert gate["eligible_strategies"][0]["compatibility_status"] == "PROVEN_COMPATIBLE"
+    assert [
+        (item["strategy_id"], item["compatibility_status"])
+        for item in gate["blocked_strategies"]
+    ] == [("unbound", "UNRESOLVED"), ("missing", "UNRESOLVED")]
+    assert (
+        "not bound to a compatible version registry row"
+        in (gate["blocked_strategies"][0]["reason"])
+    )
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+
+
+def test_manifest_boundary_names_every_non_available_fact(tmp_path: Path) -> None:
+    """N6: gaps are sealed in the boundary; the claim stays publishable."""
+
+    fact_status = {
+        "assignments": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        "costs": "PARTIAL",
+        "flows": "PARTIAL",
+        "fx": "FAILED",
+        "nav": "UNAVAILABLE",
+        "positions": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+    boundary = panel._coverage_boundary(fact_status)
+
+    assert boundary.endswith(
+        "; declared non-available facts: costs=PARTIAL, flows=PARTIAL, fx=FAILED, "
+        "nav=UNAVAILABLE"
+    )
+    assert "assignments=" not in boundary and "positions=" not in boundary
+    assert boundary.startswith("accepted portfolio, factor/alpha")
+    assert panel._coverage_boundary(
+        {"assignments": "COMPLETE_WITHIN_DECLARED_BOUNDARY"}
+    ).endswith("; declared non-available facts: none")
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._coverage_boundary(None)
+
+    # The claim with gaps in its boundary still passes the publish gates:
+    # COMPLETE status and empty known_gaps (publication.py, release.py and
+    # pipeline.py all test exactly that predicate).
+    claim = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary=boundary,
+        fact_types=("portfolio control panel",),
+        observed_start=date(2026, 7, 30),
+        observed_end=date(2026, 7, 30),
+    )
+    assert claim.known_gaps == ()
+    root = tmp_path / "panel"
+    content = b"{}"
+    source = tmp_path / "x.json"
+    source.write_bytes(content)
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-panel", "1.0.0"),
+        coverage=claim,
+        artifacts=(
+            SourceArtifact.from_path(
+                source,
+                artifact_id="panel/x.json",
+                as_of_date=date(2026, 7, 30),
+                schema_name="synthetic",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "x.json").write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+    sealed = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    assert sealed.coverage.boundary == boundary
+    assert read_current(root).generation_id == manifest.generation_id
 
 
 def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:
@@ -5220,6 +5581,187 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
         panel._freshness_health(invalid, "2026-08-03")
 
 
+def _schema_v4_health(
+    tmp_path: Path, *, as_of: str, evaluated_on: str, ledger_as_of: str
+) -> dict[str, object]:
+    policy = {
+        "calendar": "CALENDAR_DAY",
+        "expected_interval_days": 1,
+        "grace_days": 2,
+        "mode": "RECURRING",
+        "policy_id": "daily-calendar-24x7",
+        "stale_after_days": 5,
+    }
+    computed = (
+        panel.FreshnessPolicy.from_dict(policy)
+        .assess(date(2026, 7, 20), date.fromisoformat(as_of))
+        .to_dict()
+    )
+    return {
+        "assessment_schema_version": 4,
+        "as_of_date": as_of,
+        "evaluated_on": evaluated_on,
+        "assessments": [
+            {
+                **computed,
+                "acquired_at": None,
+                "coverage_status": "AVAILABLE",
+                "fact_type": "strategy-returns",
+                "lane": "ACCOUNT",
+                "provider_id": "synthetic",
+                "required_for_current": True,
+                "revision_state": "ORIGINAL",
+                "subject_id": "strategy-one",
+                "subject_type": "STRATEGY",
+            }
+        ],
+        "policies": [policy],
+        "provider_ledger": {
+            "as_of_date": ledger_as_of,
+            "catalog_sha256": "a" * 64,
+            "catalog_size_bytes": 100,
+            "generation_id": "b" * 64,
+            "manifest_sha256": "c" * 64,
+            "manifest_size_bytes": 200,
+        },
+    }
+
+
+def test_schema_v4_freshness_is_dated_at_the_cutoff_and_names_the_execution_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the freshness artifact is dated at the data cutoff.
+
+    The ledger generation is dated one day past the cutoff by design and the run
+    executes much later; neither may move the freshness data date.
+    """
+
+    health = tmp_path / "freshness-v4.json"
+    _write_json(
+        health,
+        _schema_v4_health(
+            tmp_path,
+            as_of="2026-08-03",
+            evaluated_on="2026-10-04",
+            ledger_as_of="2026-08-04",
+        ),
+    )
+
+    rows = panel._freshness_health(health, "2026-08-03")
+
+    assert rows[0]["evaluated_on"] == "2026-08-03"
+    assert rows[0]["reconciled_on"] == "2026-08-03"
+    assert rows[0]["required_for_current"] is True
+
+    for label, payload, message, portfolio_as_of in (
+        (
+            "other-data-date",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-10-04",
+                ledger_as_of="2026-08-03",
+            ),
+            "not dated at the portfolio data cutoff",
+            "2026-08-04",
+        ),
+        (
+            "early-evaluation",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-08-02",
+                ledger_as_of="2026-08-02",
+            ),
+            "evaluated before its data date",
+            "2026-08-03",
+        ),
+        (
+            "future-ledger",
+            _schema_v4_health(
+                tmp_path,
+                as_of="2026-08-03",
+                evaluated_on="2026-10-04",
+                ledger_as_of="2026-10-05",
+            ),
+            "ledger postdates the evaluation",
+            "2026-08-03",
+        ),
+    ):
+        path = tmp_path / f"freshness-v4-{label}.json"
+        _write_json(path, payload)
+        with pytest.raises(panel.ControlPanelValidationError, match=message):
+            panel._freshness_health(path, portfolio_as_of)
+
+
+def test_schema_v4_freshness_requires_the_execution_date_key(tmp_path: Path) -> None:
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-10-04",
+        ledger_as_of="2026-08-03",
+    )
+    del payload["evaluated_on"]
+    health = tmp_path / "freshness-v4-missing.json"
+    _write_json(health, payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="freshness health keys differ"
+    ):
+        panel._freshness_health(health, "2026-08-03")
+
+
+def test_schema_v4_freshness_requires_the_provider_ledger_identity(
+    tmp_path: Path,
+) -> None:
+    """Astra rg3: the panel accepted a schema-4 bundle with the identity deleted."""
+
+    good = tmp_path / "freshness-v4-good.json"
+    _write_json(
+        good,
+        _schema_v4_health(
+            tmp_path,
+            as_of="2026-08-03",
+            evaluated_on="2026-10-04",
+            ledger_as_of="2026-08-03",
+        ),
+    )
+    assert panel._freshness_health(good, "2026-08-03")
+
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-10-04",
+        ledger_as_of="2026-08-03",
+    )
+    del payload["provider_ledger"]
+    bad = tmp_path / "freshness-v4-no-ledger.json"
+    _write_json(bad, payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="freshness health keys differ"
+    ):
+        panel._freshness_health(bad, "2026-08-03")
+
+
+def test_schema_v3_freshness_still_accepts_an_absent_provider_ledger(
+    tmp_path: Path,
+) -> None:
+    payload = _schema_v4_health(
+        tmp_path,
+        as_of="2026-08-03",
+        evaluated_on="2026-08-03",
+        ledger_as_of="2026-08-03",
+    )
+    payload["assessment_schema_version"] = 3
+    del payload["evaluated_on"]
+    del payload["provider_ledger"]
+    health = tmp_path / "freshness-v3-no-ledger.json"
+    _write_json(health, payload)
+
+    assert panel._freshness_health(health, "2026-08-03")
+
+
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
     with pytest.raises(
         panel.ControlPanelValidationError, match="freshness health is mandatory"
@@ -5525,13 +6067,9 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         )
 
 
-def test_publication_manifest_uses_later_operational_freshness_date(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
-    freshness["as_of_date"] = "2026-07-31"
-    for assessment in freshness["assessments"]:
-        assessment["evaluated_on"] = "2026-07-31"
+def _publish_with_freshness(
+    inputs: dict[str, Path], tmp_path: Path, freshness: dict[str, object]
+) -> dict[str, object]:
     _write_json(inputs["freshness"], freshness)
     financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
@@ -5545,8 +6083,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
-
-    published = panel.publish_panel(
+    return panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
         candidate,
@@ -5560,6 +6097,47 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         **financial,
     )
 
+
+def test_publication_manifest_is_dated_at_the_data_cutoff_not_the_execution_date(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """R2-3: replaces the test that pinned the execution date as the manifest date.
+
+    The manifest has one date field and the weekly anchor, retained cutoff and
+    provider ledger read it as the data date.  Freshness is dated at the cutoff and
+    carries the later execution date inside it, so the manifest stays at the cutoff.
+    """
+
+    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    policy = {**freshness.pop("policy"), "calendar": "CALENDAR_DAY"}
+    freshness.update(
+        {
+            "assessment_schema_version": 4,
+            "evaluated_on": "2026-08-04",
+            "policies": [policy],
+            # Schema 4 names the ledger it was judged against.
+            "provider_ledger": {
+                "as_of_date": "2026-07-30",
+                "catalog_sha256": "a" * 64,
+                "catalog_size_bytes": 100,
+                "generation_id": "b" * 64,
+                "manifest_sha256": "c" * 64,
+                "manifest_size_bytes": 200,
+            },
+        }
+    )
+    for assessment in freshness["assessments"]:
+        assessment.update(
+            {
+                "coverage_status": "AVAILABLE",
+                "lane": "ACCOUNT",
+                "required_for_current": True,
+                "subject_type": "STRATEGY",
+            }
+        )
+
+    published = _publish_with_freshness(inputs, tmp_path, freshness)
+
     generation = inputs["output"] / "generations" / str(published["generation_id"])
     manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
     freshness_artifact = next(
@@ -5567,10 +6145,123 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         for item in manifest["artifacts"]
         if item["artifact_id"] == "input/freshness-health.json"
     )
-    assert manifest["as_of_date"] == "2026-07-31"
+    assert manifest["as_of_date"] == "2026-07-30"
     assert manifest["coverage"]["observed_start"] == "2026-07-30"
-    assert manifest["coverage"]["observed_end"] == "2026-07-31"
-    assert freshness_artifact["as_of_date"] == "2026-07-31"
+    assert manifest["coverage"]["observed_end"] == "2026-07-30"
+    assert freshness_artifact["as_of_date"] == "2026-07-30"
+    assert freshness_artifact["schema"]["version"] == "4"
+    assert {item["as_of_date"] for item in manifest["artifacts"]} <= {
+        "2026-07-30",
+        "2026-07-17",
+    }
+    shipped = json.loads(
+        (generation / "data" / "freshness-health.json").read_text(encoding="utf-8")
+    )
+    assert shipped["evaluated_on"] == "2026-08-04"
+    assert shipped["as_of_date"] == "2026-07-30"
+
+
+def test_publication_refuses_freshness_dated_after_the_data_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A freshness artifact dated at the execution clock must not date the manifest."""
+
+    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    freshness["as_of_date"] = "2026-07-31"
+    for assessment in freshness["assessments"]:
+        assessment["evaluated_on"] = "2026-07-31"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="freshness health is dated after the portfolio data cutoff",
+    ):
+        _publish_with_freshness(inputs, tmp_path, freshness)
+
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_publication_refuses_a_bound_input_dated_after_the_data_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A bound input dated at the execution clock must not reach the sealed manifest.
+
+    The manifest has one date field.  Weekly returns whose own ``as_of_date`` is after
+    the portfolio data cutoff would be sealed as an artifact newer than the manifest;
+    the publication refuses it by name, and nothing is published.
+    """
+
+    weekly_current = read_current(inputs["weekly"])
+    weekly_file = (
+        inputs["weekly"]
+        / "generations"
+        / weekly_current.generation_id
+        / "weekly-returns.json"
+    )
+    # Move the whole weekly source, week grid included, one week later so that it
+    # stays internally consistent and only its date disagrees with the cutoff.
+    weekly = json.loads(weekly_file.read_text(encoding="utf-8"))
+    old_week, new_week = "2026-07-27", "2026-08-03"
+    weekly["as_of_date"] = "2026-08-06"
+    weekly["current_week"].update(
+        data_through_date="2026-08-06", week_start=new_week, week_end="2026-08-09"
+    )
+    weekly["weeks"] = [new_week]
+    for series in weekly["series"]:
+        for field in (
+            "values",
+            "observation_meta",
+            "values_by_mode",
+            "observation_meta_by_mode",
+        ):
+            if field not in series:
+                continue
+            holder = series[field]
+            if field.endswith("_by_mode"):
+                for mode_rows in holder.values():
+                    mode_rows[new_week] = mode_rows.pop(old_week)
+            else:
+                holder[new_week] = holder.pop(old_week)
+    _publish_analytics(
+        inputs["weekly"], "weekly-returns.json", weekly, "synthetic-weekly-late"
+    )
+
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+        "weekly_returns_root": inputs["weekly"],
+        **financial,
+    }
+    built = panel.build_candidate(
+        inputs["report"], inputs["legacy"], inputs["output"], **kwargs
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    # Freeze the semantic QA over the same bound inputs the publication will use.
+    verification = panel.verify_candidate(
+        inputs["report"], inputs["legacy"], candidate, **kwargs
+    )
+    (qa / "semantic-validation.json").write_bytes(canonical_json_bytes(verification))
+    panel.validate_qa(candidate, qa)
+    receipt = _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="bound inputs are dated after the portfolio data cutoff: "
+        "input/portfolio-weekly-returns.json",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
+            coordinated_release_receipt=receipt,
+            **kwargs,
+        )
+
+    assert not (inputs["output"] / "CURRENT.json").exists()
 
 
 def test_launcher_failure_restores_prior_pointer_and_launcher(
@@ -5960,7 +6651,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -12476,8 +13167,10 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
     )
 
 
-def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
-    for version in (1, 2):
+def test_report_readers_accept_versions_one_to_three_and_reject_four(
+    tmp_path: Path,
+) -> None:
+    for version in (1, 2, 3):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"published-{version}"
@@ -12496,7 +13189,7 @@ def test_report_readers_accept_versions_one_and_two(tmp_path: Path) -> None:
         assert candidate_value["report_schema_version"] == version
         assert candidate_identity["sha256"] == identity["sha256"]
         assert candidate_path == payload
-    for version in (3, True, "2"):
+    for version in (4, True, "2"):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"rejected-{version!s}"
@@ -12640,7 +13333,7 @@ def test_panel_schema22_publication_records_input_report_version(
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_and22(
+def test_renderer_accepts_panel_schema21_22_and23(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -12660,7 +13353,7 @@ def test_renderer_accepts_panel_schema21_and22(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23):
+    for version in (21, 22, 23, 24):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -12688,7 +13381,7 @@ def test_renderer_accepts_panel_schema21_and22(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23]) {
+          for (const version of [21, 22, 23, 24]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -12726,12 +13419,12 @@ def test_renderer_accepts_panel_schema21_and22(
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23]
-    for item in evidence[:2]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24]
+    for item in evidence[:3]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[2]
+    unsupported = evidence[3]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])

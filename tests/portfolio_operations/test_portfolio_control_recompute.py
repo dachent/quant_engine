@@ -73,8 +73,18 @@ def _publish(root: Path, filename: str, payload: dict[str, object], name: str) -
     return manifest.generation_id
 
 
-def _ledger(root: Path, marker: str) -> tuple[str, dict[str, object]]:
-    source = canonical_json_bytes({"catalog": marker})
+def _ledger(
+    root: Path, marker: str, catalog_as_of: date | None = None
+) -> tuple[str, dict[str, object]]:
+    """A selected ledger whose catalog states ``catalog_as_of`` as its financial cutoff.
+
+    The identity's own ``as_of_date`` is the generation manifest's date (provenance).
+    """
+
+    catalog: dict[str, object] = {"catalog": marker}
+    if catalog_as_of is not None:
+        catalog["as_of_date"] = catalog_as_of.isoformat()
+    source = canonical_json_bytes(catalog)
     manifest = GenerationManifest.build(
         as_of_date=PREVIOUS,
         adapter=AdapterIdentity(f"synthetic-ledger-{marker}", "1.0.0"),
@@ -164,12 +174,13 @@ def _candidate(
     correlation_generation: str,
     report_generation: str,
     freshness: dict[str, object],
+    freshness_evaluated_on: date = AS_OF,
 ) -> tuple[Path, Path]:
     dashboard = {
         "advisory": {"correlation_one_stress": "0.3"},
         "meta": {
             "correlation_generation_id": correlation_generation,
-            "freshness_evaluated_on": AS_OF.isoformat(),
+            "freshness_evaluated_on": freshness_evaluated_on.isoformat(),
             "report_generation_id": report_generation,
         },
     }
@@ -198,7 +209,9 @@ def _candidate(
     return candidate, candidate / "data" / "freshness-health.json"
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, str]:
+def _inputs(
+    tmp_path: Path, catalog_as_of: date | None = None
+) -> tuple[Path, Path, Path, Path, Path, str]:
     correlation_root = tmp_path / "correlation"
     correlation_generation = _publish(
         correlation_root,
@@ -234,7 +247,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, str]:
         "synthetic-report",
     )
     ledger_root = tmp_path / "provider-ledger-one"
-    ledger_generation, ledger_identity = _ledger(ledger_root, "one")
+    ledger_generation, ledger_identity = _ledger(ledger_root, "one", catalog_as_of)
     candidate, candidate_freshness = _candidate(
         tmp_path,
         correlation_generation,
@@ -302,6 +315,151 @@ def test_independently_recomputes_panel_freshness_and_selected_ledger(
         == receipt["inputs"]["freshness"]["sha256"]
     )
     assert receipt["inputs"]["provider_ledger"]["generation_id"] == ledger_generation
+
+
+def _schema_four(ledger_identity: dict[str, object]) -> dict[str, object]:
+    """Judged at the data cutoff (PREVIOUS); the recompute date (AS_OF) is carried."""
+
+    payload = _freshness(ledger_identity)
+    payload["assessment_schema_version"] = 4
+    payload["as_of_date"] = PREVIOUS.isoformat()
+    payload["evaluated_on"] = AS_OF.isoformat()
+    for row in payload["assessments"]:  # type: ignore[attr-defined]
+        row["evaluated_on"] = PREVIOUS.isoformat()
+        row["last_accepted_date"] = PREVIOUS.isoformat()
+        row["next_expected_date"] = PREVIOUS.isoformat()
+    return payload
+
+
+def _schema_four_inputs(
+    tmp_path: Path, mutate: object = None, catalog_as_of: date | None = PREVIOUS
+) -> tuple[Path, Path, Path, Path, Path, str]:
+    (
+        correlation_root,
+        report_root,
+        _candidate_v3,
+        _freshness_v3,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path, catalog_as_of)
+    v3 = json.loads(
+        next((tmp_path / "candidates").glob("*/data/freshness-health.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    payload = _schema_four(v3["provider_ledger"])
+    if callable(mutate):
+        mutate(payload)
+    correlation_generation = next((correlation_root / "generations").iterdir()).name
+    report_generation = next((report_root / "generations").iterdir()).name
+    shutil.rmtree(tmp_path / "candidates")
+    candidate, candidate_freshness = _candidate(
+        tmp_path,
+        correlation_generation,
+        report_generation,
+        payload,
+        freshness_evaluated_on=date.fromisoformat(str(payload["as_of_date"])),
+    )
+    return (
+        correlation_root,
+        report_root,
+        candidate,
+        candidate_freshness,
+        ledger_root,
+        ledger_generation,
+    )
+
+
+def test_schema_four_freshness_is_dated_at_the_cutoff_and_names_the_recompute_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3: the recomputation accepts freshness judged at the data cutoff.
+
+    The panel's ``freshness_evaluated_on`` is the date its assessments were judged on,
+    which is the cutoff; the recompute date is carried by the freshness artifact.
+    """
+
+    inputs = _schema_four_inputs(tmp_path)
+
+    receipt = _recompute(*inputs)
+
+    assert receipt["status"] == "PASS"
+    assert all(receipt["generation_checks"].values())
+    assert receipt["inputs"]["freshness"]["as_of_date"] == AS_OF.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ({"evaluated_on": "2026-08-05"}, "freshness evaluation date differs"),
+        ({"as_of_date": "2026-08-07"}, "freshness data date follows the evaluation"),
+        ({"evaluated_on": None}, "freshness health fields differ"),
+    ),
+)
+def test_schema_four_freshness_clocks_are_bound(
+    tmp_path: Path, mutation: dict[str, str | None], message: str
+) -> None:
+    def mutate(payload: dict[str, object]) -> None:
+        for key, value in mutation.items():
+            if value is None:
+                payload.pop(key)
+            else:
+                payload[key] = value
+
+    inputs = _schema_four_inputs(tmp_path, mutate)
+
+    with pytest.raises(recompute.ControlRecomputeError, match=message):
+        _recompute(*inputs)
+
+
+def _backdate(payload: dict[str, object]) -> None:
+    """Re-date a schema-four payload so it agrees with itself and not the release."""
+
+    earlier = date(2026, 8, 1).isoformat()
+    payload["as_of_date"] = earlier
+    for row in payload["assessments"]:  # type: ignore[attr-defined]
+        row["evaluated_on"] = earlier
+        row["last_accepted_date"] = earlier
+        row["next_expected_date"] = earlier
+
+
+def test_schema_four_freshness_refuses_an_as_of_date_other_than_the_ledger_cutoff(
+    tmp_path: Path,
+) -> None:
+    """Rulings round 1, item 3: the standalone consumer binds the date like the gate.
+
+    The selected ledger identity is exact and its catalog is dated PREVIOUS, but the
+    payload and every row were re-dated earlier.  Self-consistency is not agreement
+    with the release.
+    """
+
+    inputs = _schema_four_inputs(tmp_path, _backdate)
+
+    with pytest.raises(recompute.ControlRecomputeError, match="provider-ledger cutoff"):
+        _recompute(*inputs)
+
+
+def test_schema_four_freshness_refuses_a_catalog_that_states_no_cutoff(
+    tmp_path: Path,
+) -> None:
+    inputs = _schema_four_inputs(tmp_path, catalog_as_of=None)
+
+    with pytest.raises(recompute.ControlRecomputeError, match="provider-ledger cutoff"):
+        _recompute(*inputs)
+
+
+def test_schema_four_freshness_names_the_ledger_it_was_judged_against(
+    tmp_path: Path,
+) -> None:
+    def mutate(payload: dict[str, object]) -> None:
+        del payload["provider_ledger"]
+
+    inputs = _schema_four_inputs(tmp_path, mutate)
+
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="freshness health fields"
+    ):
+        _recompute(*inputs)
 
 
 def test_same_date_cross_pair_is_rejected(tmp_path: Path) -> None:

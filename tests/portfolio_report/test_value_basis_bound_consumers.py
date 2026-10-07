@@ -1619,6 +1619,82 @@ def test_disclosure_states_every_date_that_the_bound_explains() -> None:
     assert len(block["bounded_sections"]) == 10
 
 
+def _custody_report() -> dict[str, Any]:
+    """The shadow report plus a custody capital block labelled the way N56 recomputes."""
+
+    report = _shadow_report()
+    bounded, current = "2026-09-03", "2026-09-17"
+    report["custody_current_capital"] = {
+        "systematic": {"as_of_date": bounded, "status": "AVAILABLE"},
+        "strategies": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "scope": "SYSTEMATIC",
+                "as_of_date": bounded,
+                "members": [{"account_id": SHADOW_ACCOUNT, "as_of_date": bounded}],
+                "derived_cash": [{"account_id": "cash-1", "as_of_date": bounded}],
+            },
+            {
+                "strategy_id": "qsi",
+                "scope": "SYSTEMATIC",
+                "as_of_date": current,
+                "members": [{"account_id": "account-38b6", "as_of_date": current}],
+                "derived_cash": [],
+            },
+            {
+                "strategy_id": "echotrade",
+                "scope": "RETAINED_EXCLUDED",
+                "as_of_date": bounded,
+                "members": [],
+                "derived_cash": [],
+            },
+        ],
+    }
+    return report
+
+
+def test_disclosure_states_the_custody_capital_dates_the_bound_explains() -> None:
+    """N56 (fail-before): the native producer emits ``current_capital`` entries.
+
+    The validator recomputes the custody labels and downgrades a pre-cutoff one to
+    NOT_READY only when ``bounded_sections`` carries ``current_capital`` entries for
+    the member, the cash line, the strategy row and the Systematic total; the
+    producer emitted none, so the path was reachable only with a handwritten block.
+    """
+
+    block = _disclosure(_custody_report())
+    assert block is not None
+    entries = [
+        (row["entity"], row["field"], row["date"], row["bounded_by"])
+        for row in block["bounded_sections"]
+        if row["section"] == "current_capital"
+    ]
+    assert entries == [
+        (entity, "as_of_date", "2026-09-03", ["robuxio-crypto"])
+        for entity in (
+            "robuxio-crypto",
+            f"robuxio-crypto:{SHADOW_ACCOUNT}",
+            "robuxio-crypto:cash-1",
+            "systematic",
+        )
+    ]
+
+
+def test_disclosure_adds_no_custody_entry_for_a_date_no_bound_explains() -> None:
+    report = _custody_report()
+    cash = report["custody_current_capital"]["strategies"][0]["derived_cash"][0]
+    cash["as_of_date"] = "2026-08-01"
+    report["custody_current_capital"]["systematic"]["as_of_date"] = "2026-08-01"
+    block = _disclosure(report)
+    assert block is not None
+    entities = [
+        row["entity"]
+        for row in block["bounded_sections"]
+        if row["section"] == "current_capital"
+    ]
+    assert entities == ["robuxio-crypto", f"robuxio-crypto:{SHADOW_ACCOUNT}"]
+
+
 def _lens_entries(block: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         row
@@ -1980,14 +2056,16 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     previous = content.replace(
         _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
     )
-    assert len(previous) == 34412
+    # D6/D1/N29 added the strategy MWR fields (36036 - 34412 = 1624 bytes); the
+    # paired test below undoes them and reproduces cfb1ab00....
+    assert len(previous) == 36036
     assert hashlib.sha256(previous).hexdigest() == (
-        "be07aae5f33b896f4b541af5b6c53b3cca3373770bcbb4a4ca952827f4e4e2f3"
+        "f5a865e31e434e6ae28f3c51afcd94a2b63f660b14e1c9fc37c2a9fcf6924912"
     )
-    assert len(content) == 34457
+    assert len(content) == 36081
     assert (
         hashlib.sha256(content).hexdigest()
-        == "32f2364a2d9891250e984678f160a1dcc822dddd69731f66832740931feb7679"
+        == "b1f6682dcbf87d81c9f12050c0170627b19d675f242422fdf4287e7ce6c3334d"
     )
 
 
@@ -2007,6 +2085,20 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     for row in undone["strategy_summary"]:
         for key in ("capital_as_of_date", "capital_status", "weight_basis"):
             del row[key]
+        # N29: the pooled strategy MWR fields did not exist in v1 either.
+        for key in (
+            "mwr_basis",
+            "mwr_member_account_ids",
+            "mwr_opening_date",
+            "mwr_reason",
+            "mwr_status",
+            "mwr_terminal_date",
+            "mwr_xirr",
+        ):
+            del row[key]
+    for row in undone["twr_mwr"]:
+        # D1/D2: the flow-path status of each MWR row is new since v1.
+        del row["mwr_flow_path_status"]
     for row in undone["allocation_history"]:
         del row["weight_basis"]
         if row["scope"] == "SYSTEMATIC":

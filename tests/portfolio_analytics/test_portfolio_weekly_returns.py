@@ -45,6 +45,7 @@ sys.modules[PANEL_SPEC.name] = panel
 PANEL_SPEC.loader.exec_module(panel)
 
 STRATEGIES = tuple(f"Strategy {index}" for index in range(9))
+EXECUTION_DATE = date(2026, 8, 4)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -124,6 +125,7 @@ def _correlation_fixture(
         }
     correlation = {
         "analytics_schema_version": 2,
+        "complete_through": "2026-07-31",
         "default_evidence_mode": "LIVE_ONLY",
         "dependence_modes": {
             "LIVE_ONLY": {"series_composition": live},
@@ -138,28 +140,30 @@ def _correlation_fixture(
     correlation_source = tmp_path / "correlation.json"
     _write_json(correlation_source, correlation)
     correlation_root = tmp_path / "correlation-root"
+    # The generation is dated at the execution clock (2026-08-04) while its data and
+    # declared coverage end at the 2026-07-31 cutoff, as a real correlation run does.
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 31),
+        as_of_date=EXECUTION_DATE,
         adapter=AdapterIdentity("synthetic-correlation", "1.0.0"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic layered strategy evidence",
             fact_types=("layered strategy returns",),
             observed_start=date(2026, 7, 20),
-            observed_end=date(2026, 7, 28),
+            observed_end=date(2026, 7, 31),
         ),
         artifacts=(
             SourceArtifact.from_path(
                 strategy_returns,
                 artifact_id=source_artifact_id,
-                as_of_date=date(2026, 7, 31),
+                as_of_date=EXECUTION_DATE,
                 schema_name="portfolio-layered-strategy-returns",
                 schema_version="2",
             ),
             SourceArtifact.from_path(
                 correlation_source,
                 artifact_id="normalized/correlation.json",
-                as_of_date=date(2026, 7, 31),
+                as_of_date=EXECUTION_DATE,
                 schema_name="portfolio-correlation-analytics",
                 schema_version="2",
             ),
@@ -494,6 +498,68 @@ def test_weekly_rejects_public_observation_after_correlation_as_of(
         weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
 
 
+def test_weekly_current_week_is_anchored_to_the_data_cutoff_not_the_manifest_date(
+    tmp_path: Path,
+) -> None:
+    """R2-3 / NEW-L1: the correlation manifest is dated at the execution clock.
+
+    The weekly artifact must not claim data through the later execution date: the
+    current week is the one that holds the cutoff, partial, with data through it.
+    """
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path, observation_dates=("2026-07-31",))
+    manifest = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    assert manifest.as_of_date == EXECUTION_DATE
+
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    assert payload["as_of_date"] == "2026-07-31"
+    assert payload["current_week"] == {
+        "data_through_date": "2026-07-31",
+        "default_visible": True,
+        "is_partial": True,
+        "week_end": "2026-08-02",
+        "week_start": "2026-07-27",
+    }
+    assert "2026-08-03" not in payload["weeks"]
+
+
+def test_weekly_rejects_a_declared_cutoff_that_differs_from_the_coverage_end(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    current = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    path = correlation_root / "generations" / current.generation_id / "correlation.json"
+    correlation = json.loads(path.read_text(encoding="utf-8"))
+    correlation["complete_through"] = "2026-07-30"
+    declared = SourceArtifact(
+        artifact_id="normalized/correlation.json",
+        sha256=hashlib.sha256(canonical_json_bytes(correlation)).hexdigest(),
+        size_bytes=len(canonical_json_bytes(correlation)),
+        as_of_date=current.as_of_date,
+        schema_name="portfolio-correlation-analytics",
+        schema_version="2",
+    )
+    _publish_correlation_generation(
+        correlation_root,
+        correlation_bytes=canonical_json_bytes(correlation),
+        declared_correlation=declared,
+    )
+
+    with pytest.raises(
+        weekly.WeeklyReturnError, match="correlation cutoff differs from its coverage"
+    ):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
 def test_weekly_accepts_public_observation_exactly_at_correlation_as_of(
     tmp_path: Path,
 ) -> None:
@@ -751,3 +817,43 @@ def test_weekly_rejects_duplicate_dates_and_total_loss_or_worse() -> None:
     for invalid in ("-1", "-1.01"):
         with pytest.raises(weekly.WeeklyReturnError, match="greater than -1"):
             weekly._decimal(invalid, "synthetic return")
+
+
+def test_weekly_compounding_error_is_bounded_well_below_the_consumers_resolution() -> (
+    None
+):
+    """Class sweep (Astra rg4): the weekly return is compounded at the ambient 28 digits.
+
+    Inputs are daily returns with 34 significant digits.  Seven daily factors round at
+    most seven times at 0.5e-27 relative, so the published weekly value is within
+    4e-27 of the exact compounded return.  Every consumer reads it as a float64
+    (resolution 1.1e-16, see ``portfolio_control_panel._weekly_values``), which is
+    eleven orders wider, and the value is a return, not money: it is never compared
+    for equality or summed.  The bound is pinned here so a change that widens it, for
+    example a coarser context, fails.
+    """
+
+    from datetime import timedelta
+    from decimal import localcontext
+
+    returns = [
+        Decimal("0.0123456789012345678901234567890123"),
+        Decimal("-0.0098765432109876543210987654321098"),
+        Decimal("0.0045678901234567890123456789012345"),
+        Decimal("0.0011111111111111111111111111111111"),
+        Decimal("-0.0077777777777777777777777777777777"),
+        Decimal("0.0033333333333333333333333333333333"),
+        Decimal("0.0022222222222222222222222222222222"),
+    ]
+    days = [date(2026, 7, 6) + timedelta(days=offset) for offset in range(7)]
+
+    published = weekly._weekly_values(list(zip(days, returns, strict=True)))
+
+    with localcontext() as context:
+        context.prec = 100
+        exact = Decimal(1)
+        for value in returns:
+            exact *= 1 + value
+        exact -= 1
+    assert len(published) == 1
+    assert abs(Decimal(next(iter(published.values()))) - exact) < Decimal("4e-27")

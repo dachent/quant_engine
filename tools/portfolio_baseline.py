@@ -12,7 +12,7 @@ import argparse
 from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import json
@@ -58,6 +58,9 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION: Final = 3
 SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2, 3})
 CATALOG_SCHEMA_VERSION: Final = 1
+# A catalog that carries custody-derived cash publishes version 2: each cash line is dated
+# by the coverage that proves it and names its last event and its coverage end.
+CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
 BUILDER_VERSION: Final = "1.3.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 # The provenance registry binds nine strategy identities (including the retained
@@ -1386,11 +1389,16 @@ def _normalize_transactions(
             "security_id": security_id,
             "symbol": symbol,
         }
-        signed_amount = (
-            quantity
-            * price
-            * (Decimal("-1") if row["type"] == "buy_fill" else Decimal("1"))
-        )
+        # The published transaction amount is part of the sealed catalog: a retained
+        # baseline was written with the product rounded to 28 digits.
+        with localcontext() as context:
+            context.prec = _SNAPSHOT_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            signed_amount = (
+                quantity
+                * price
+                * (Decimal("-1") if row["type"] == "buy_fill" else Decimal("1"))
+            )
         mapping_status, strategy_id = _strategy_for_date(
             assignments, account_id, event_date
         )
@@ -1542,16 +1550,13 @@ def _schwab_facts(
     mapped_position_count = sum(
         item.get("mapping_status") == MappingStatus.MAPPED.value for item in positions
     )
-    position_market_value = sum(
-        (
-            _decimal(
-                _object(item.get("market_value"), "position.market_value").get("value"),
-                "position.market_value.value",
-            )
-            or Decimal("0")
-            for item in positions
-        ),
-        Decimal("0"),
+    position_market_value = _snapshot_sum(
+        _decimal(
+            _object(item.get("market_value"), "position.market_value").get("value"),
+            "position.market_value.value",
+        )
+        or Decimal("0")
+        for item in positions
     )
     position_reconciliation = {
         "check_id": "current-position-strategy-attribution",
@@ -2050,7 +2055,7 @@ def _allocations_and_coverage(
         )
 
     coverage: list[dict[str, Any]] = []
-    nav_covered = Decimal("0")
+    nav_covered_values: list[Decimal] = []
     for row in _read_csv(paths["data-coverage-matrix"], "data-coverage-matrix"):
         strategy_id = _resolve_strategy(strategy_aliases, row["component"])
         value = _decimal(row["current_value"], "coverage.current_value")
@@ -2063,7 +2068,7 @@ def _allocations_and_coverage(
         if daily not in {"yes", "no"}:
             raise BaselineValidationError("daily-series coverage must be yes or no")
         if daily == "yes":
-            nav_covered += value
+            nav_covered_values.append(value)
         coverage.append(
             {
                 "current_value_usd": decimal_text(value),
@@ -2091,7 +2096,11 @@ def _allocations_and_coverage(
                 "strategy_id": strategy_id,
             }
         )
-    systematic_total = sum((item[0] for item in by_strategy.values()), Decimal("0"))
+    # The audit snapshot is sealed: these totals are compared with the audit's reported
+    # total and with the materializer's own sum, so they are added as the audit added
+    # them (see ``_snapshot_sum``), never exactly.
+    systematic_total = _snapshot_sum(item[0] for item in by_strategy.values())
+    nav_covered = _snapshot_sum(nav_covered_values)
     return (
         sorted(allocations, key=lambda item: str(item["strategy_id"])),
         sorted(coverage, key=lambda item: str(item["strategy_id"])),
@@ -2240,7 +2249,7 @@ def _replay(
             "allocation total does not reconcile to audit systematic total"
         )
     nav_ratio = nav_covered / systematic_total
-    total = systematic_total + reserve
+    total = _snapshot_sum([systematic_total, reserve])
 
     actuals: dict[str, Decimal | str] = {
         "correlation_one_stress": stress,
@@ -2321,6 +2330,28 @@ def _capital_amount(value: Decimal | None) -> dict[str, Any]:
     if value is None:
         return {"currency": "USD", "status": "UNAVAILABLE", "value": None}
     return {"currency": "USD", "status": "AVAILABLE", "value": decimal_text(value)}
+
+
+# The audit snapshot (the 2026-08-16 audit) is a sealed, retained artifact: its totals
+# were fixed by summing the allocation table in the default 28-digit context, and every
+# retained baseline generation replays and verifies against those figures.  A sum that is
+# replayed against, or compared with, sealed bytes keeps that arithmetic.  Exact money
+# arithmetic (``_exact_sum``) belongs to current capital, whose outputs are not compared
+# with a previously sealed generation.
+_SNAPSHOT_PRECISION: Final = 28
+
+
+def _snapshot_sum(values: Iterable[Decimal]) -> Decimal:
+    """Add as the sealed audit snapshot did: sequentially at 28 digits, half-even.
+
+    The context is pinned, so the sum no longer follows the caller's precision, and for
+    the default context it is the historical ``sum(values, Decimal(0))`` exactly.
+    """
+
+    with localcontext() as context:
+        context.prec = _SNAPSHOT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return sum(values, Decimal(0))
 
 
 def _exact_sum(values: Iterable[Decimal]) -> Decimal:
@@ -2519,11 +2550,45 @@ def _strategy_members(
     return members
 
 
+def _contiguous_coverage_end(
+    windows: Sequence[tuple[date, date]], earliest_event: date | None
+) -> date:
+    """End of the merged window segment that holds the earliest event of one fact type.
+
+    Windows join when ``next.start <= previous.end + 1 day``; a day between two
+    disjoint windows is attested by nothing, so the larger end is not bridged to.  A
+    fact type with no event uses the earliest segment.
+    """
+
+    segments: list[list[date]] = []
+    for start, end in sorted(windows):
+        if segments and start <= segments[-1][1] + timedelta(days=1):
+            segments[-1][1] = max(segments[-1][1], end)
+        else:
+            segments.append([start, end])
+    if earliest_event is None:
+        return segments[0][1]
+    for start, end in segments:
+        if start <= earliest_event <= end:
+            return end
+    raise BaselineValidationError("custody event lacks authoritative account admission")
+
+
 def _derived_custody_cash(
     provider_catalog: Mapping[str, Any],
     valuation_date: date,
+    *,
+    legacy: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Derive separate cash components from the selected raw admitted events."""
+    """Derive separate cash components from the selected raw admitted events.
+
+    A cash line is true through the earlier of the cutoff and the end of every
+    AUTHORITATIVE account-live admission it is derived from: the flows it adds and the
+    sleeve allocations it subtracts.  Its ``as_of_date`` is that proven-through date, not
+    the date of its last event; ``last_event_date`` and the unclamped ``coverage_end`` are
+    carried beside it.  ``legacy`` reproduces the version-1 label (the last event date)
+    for a catalog sealed before the proof was recorded.
+    """
     from portfolio_invested_capital import _source_effect_usd
 
     flows = _objects(provider_catalog.get("flows"), "custody flows")
@@ -2583,7 +2648,9 @@ def _derived_custody_cash(
                 "custody ambiguous internal cash movement lacks admitted sleeve semantics"
             )
         movements: dict[date, list[Decimal]] = defaultdict(list)
-        events = []
+        fact_days: dict[str, list[date]] = defaultdict(list)
+        event_values: list[tuple[date, Decimal]] = []
+        events: list[dict[str, Any]] = []
         for row, fact_type, sign in selected:
             day = _date(row.get("event_date"), "custody event date")
             if day > valuation_date:
@@ -2633,6 +2700,8 @@ def _derived_custody_cash(
             except (RuntimeError, ValueError) as exc:
                 raise BaselineValidationError(f"custody event FX: {exc}") from exc
             movements[day].append(value)
+            fact_days[fact_type].append(day)
+            event_values.append((day, value))
             events.append(
                 {
                     "event_date": day.isoformat(),
@@ -2653,17 +2722,62 @@ def _derived_custody_cash(
                 raise BaselineValidationError(
                     f"custody negative dated closing cash: {account_id} {day}"
                 )
+        last_event = max(movements)
+        coverage_fields: dict[str, str] = {}
+        proven_through = last_event
+        if not legacy:
+            window_ends = []
+            for fact_type in ("flows", "capital_anchors"):
+                windows = [
+                    (item.effective_start, item.effective_end)
+                    for item in admissions
+                    if item.provider_id == provider_id
+                    and item.account_id == account_id
+                    and item.fact_type == fact_type
+                    and item.disposition is AdmissionDisposition.AUTHORITATIVE
+                    and item.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
+                ]
+                if not windows:
+                    raise BaselineValidationError(
+                        "custody cash lacks an authoritative admission window"
+                    )
+                window_ends.append(
+                    _contiguous_coverage_end(
+                        windows, min(fact_days[fact_type], default=None)
+                    )
+                )
+            coverage_end = min(window_ends)
+            proven_through = min(valuation_date, coverage_end)
+            # The value is the balance as it stood on the label: an event dated after
+            # ``proven_through`` is not attested by every admission, so it is not counted.
+            counted = [
+                (day, value) for day, value in event_values if day <= proven_through
+            ]
+            if not counted:
+                raise BaselineValidationError(
+                    "custody cash has no event inside its proven coverage"
+                )
+            events = [
+                row for row in events if row["event_date"] <= proven_through.isoformat()
+            ]
+            balance = _exact_sum(value for _, value in counted)
+            last_event = max(day for day, _ in counted)
+            coverage_fields = {
+                "coverage_end": coverage_end.isoformat(),
+                "last_event_date": last_event.isoformat(),
+            }
         components[strategy_id].append(
             {
                 "account_id": account_id,
                 "provider_id": provider_id,
-                "as_of_date": max(movements).isoformat(),
+                "as_of_date": proven_through.isoformat(),
                 "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
                 "status": _CAPITAL_AVAILABLE,
                 "current_value": _capital_amount(balance),
                 "events": sorted(
                     events, key=lambda row: (row["event_date"], row["record_id"])
                 ),
+                **coverage_fields,
             }
         )
     return dict(components)
@@ -3225,7 +3339,14 @@ def _reconcile_current_capital(
             raise BaselineValidationError(
                 "custody reconciliation lacks raw provider catalog"
             )
-        cash = _derived_custody_cash(provider_catalog, valuation_date)
+        legacy_cash = any(
+            "coverage_end" not in line
+            for row in rows
+            for line in _objects(row.get("derived_cash", []), "derived cash")
+        )
+        cash = _derived_custody_cash(
+            provider_catalog, valuation_date, legacy=legacy_cash
+        )
         for row in rows:
             strategy_id = str(row["strategy_id"])
             expected = cash.get(strategy_id, [])
@@ -3323,7 +3444,18 @@ def _strategy_capital_check(
                     "strategy_id": strategy_id,
                 }
             )
-        if value is None and scopes[strategy_id] == _SCOPE_SYSTEMATIC:
+        if scopes[strategy_id] == _SCOPE_SYSTEMATIC and (
+            value is None
+            or any(
+                "coverage_end" in line
+                and _date(line.get("as_of_date"), "derived_cash.as_of_date")
+                < valuation_date
+                for line in _objects(row.get("derived_cash", []), "derived cash")
+            )
+        ):
+            # A cash line proven only to an earlier date states the row at that date, not
+            # at the cutoff; this check recomputes with the producer's own logic, so it
+            # must not echo the row as a cutoff-dated PASS (N56 rule 4: never passes).
             not_ready_ids.append(strategy_id)
     check: dict[str, Any] = {
         "check_id": _CAPITAL_STRATEGY_CHECK_ID,
@@ -3339,7 +3471,7 @@ def _strategy_capital_check(
         for strategy_id in recomputed
         if scopes[strategy_id] == _SCOPE_SYSTEMATIC
     ]
-    if check["status"] == "PASS" and required:
+    if check["status"] == "PASS" and required:  # no row is dated before the cutoff
         check["systematic_total_usd"] = decimal_text(
             _exact_sum(value for value in required if value is not None)
         )
@@ -5219,7 +5351,11 @@ def build_catalog(
         ),
         "assumptions": provenance.get("assumptions", []),
         "audit_snapshot": audit_snapshot,
-        "baseline_schema_version": CATALOG_SCHEMA_VERSION,
+        "baseline_schema_version": (
+            CUSTODY_CASH_CATALOG_SCHEMA_VERSION
+            if custody_authority
+            else CATALOG_SCHEMA_VERSION
+        ),
         "calendar_coverage": calendar,
         "capital_pools": provenance.get("capital_pools")
         or [
@@ -5312,7 +5448,7 @@ def build_catalog(
         size_bytes=len(catalog_bytes),
         as_of_date=as_of,
         schema_name="portfolio-baseline-catalog",
-        schema_version=str(CATALOG_SCHEMA_VERSION),
+        schema_version=str(catalog["baseline_schema_version"]),
     )
     # Physical root bindings are runtime locators, not financial evidence.  The
     # same hash-identified inputs must therefore produce the same generation

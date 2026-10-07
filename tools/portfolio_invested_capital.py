@@ -765,7 +765,7 @@ def _account_flow_dispositions(
             if other["record_id"] != record_id
             and other["account_id"] != source["account_id"]
             and other["event_date"] == source["event_date"]
-            and other_native == -native
+            and other_native == native.copy_negate()
             and "counterparty_rule" in other_rule
         ]
         if len(candidates) > 1:
@@ -998,12 +998,18 @@ def _verify_account_ledger_opening(
             "account ledger opening omits selected capital facts"
         )
     selected_sources = []
-    effect = Decimal(0)
-    for evidence in components:
-        source = source_rows[evidence]
-        effect += _source_effect_usd(source)
-        if source.get("flow_type") is not None:
-            selected_sources.append(source)
+    # The constructor adds these components at ``_capital_precision`` and publishes
+    # the exact amount, so the verifier adds them the same way: the ambient 28 digits
+    # round a wide component and reject the producer's own opening amount.
+    with localcontext() as context:
+        context.prec = _capital_precision([source_rows[item] for item in components])
+        context.rounding = ROUND_HALF_EVEN
+        effect = Decimal(0)
+        for evidence in components:
+            source = source_rows[evidence]
+            effect += _source_effect_usd(source)
+            if source.get("flow_type") is not None:
+                selected_sources.append(source)
     dispositions = _account_flow_dispositions(
         list(source_rows.values()), classification_rules, required_account_ids
     )
@@ -1192,11 +1198,11 @@ def _verify_selected_facts(
                                 and _decimal(
                                     other_amount.get("value"), "counterparty amount"
                                 )
-                                == -native
+                                == native.copy_negate()
                             ):
                                 classification_context[other["record_id"]] = {
                                     **other,
-                                    "amount": -native,
+                                    "amount": native.copy_negate(),
                                 }
                     try:
                         dispositions, _ = _expected_flow_dispositions(

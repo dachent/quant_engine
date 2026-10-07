@@ -223,6 +223,18 @@ def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> lis
     return argv
 
 
+def _capital_inputs(root: Path) -> dict[str, Path]:
+    """The governed invested-capital family every attended run now carries."""
+
+    paths = {
+        "--invested-capital-result": root / "capital-result.json",
+        "--invested-capital-input-generation": root / "capital-generation.json",
+    }
+    for path in paths.values():
+        path.write_text("{}", encoding="utf-8")
+    return paths
+
+
 def test_resumed_preparation_handoff_starts_first_downstream_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -235,9 +247,10 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
     source_run.write_bytes(canonical_json_bytes({"attended": {"data_clock": clock}}))
     recipe = tmp_path / "recipe.json"
     recipe.write_text("{}", encoding="utf-8")
+    capital = _capital_inputs(tmp_path)
     preflight: dict[str, object] = {
         "financial_inputs": {},
-        "financial_stage_inputs": {},
+        "financial_stage_inputs": capital,
         "portfolio_root": tmp_path / "workspace" / "dataPortfolio",
         "python": Path(sys.executable),
         "qa_dir": None,
@@ -254,7 +267,10 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
         canonical_json_bytes(
             {
                 "data_clock": clock,
-                "financial_stage_inputs": {},
+                "financial_stage_inputs": {
+                    flag: materializer._file_definition(path)
+                    for flag, path in capital.items()
+                },
                 "schema_version": 1,
                 "source_phase": {"status": "PASS"},
                 "source_run": materializer._file_definition(source_run),
@@ -270,7 +286,7 @@ def test_resumed_preparation_handoff_starts_first_downstream_execution(
 
     def prepared(**kwargs: object) -> dict[str, object]:
         assert kwargs["resume"] is True
-        return {"financial_stage_inputs": {}, "source_run": source_run}
+        return {"financial_stage_inputs": capital, "source_run": source_run}
 
     calls: list[str] = []
 

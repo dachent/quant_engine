@@ -2160,7 +2160,11 @@ def test_rejects_policy_return_basis_drift(tmp_path: Path) -> None:
 
 
 def _ordinary_source(
-    tmp_path: Path, field: str, *, bundle_report: bool = False
+    tmp_path: Path,
+    field: str,
+    *,
+    bundle_report: bool = False,
+    baseline_version: str = "1",
 ) -> tuple[Path, GenerationManifest, dict[str, bytes]]:
     provider = field == "provider-ledger"
     catalog_name = "provider-ledger.json" if provider else "portfolio-baseline.json"
@@ -2170,7 +2174,7 @@ def _ordinary_source(
             f"normalized/{catalog_name}",
             payloads[f"normalized/{catalog_name}"],
             "provider-ledger-catalog" if provider else "portfolio-baseline-catalog",
-            "2" if provider else "1",
+            "2" if provider else baseline_version,
         )
     ]
     if provider:
@@ -2234,6 +2238,36 @@ def test_reads_ordinary_source_producer_layouts(tmp_path: Path, field: str) -> N
     assert actual_manifest == manifest
     assert actual_payloads == payloads
     assert actual_bytes == manifest.to_json_bytes()
+
+
+def test_reads_an_ordinary_baseline_that_carries_custody_cash_as_schema_2(
+    tmp_path: Path,
+) -> None:
+    """A baseline with custody cash is catalog schema 2; the layout names schema 1.
+
+    The reader accepts the second version for the baseline only: this fails if the
+    version-2 alternative is removed, and the controls pin what stays refused.
+    """
+
+    path, manifest, payloads = _ordinary_source(
+        tmp_path / "v2", "baseline", baseline_version="2"
+    )
+    actual_manifest, actual_payloads, _ = selected_hwm._source_generation_from_path(
+        path, "baseline"
+    )
+    assert actual_manifest == manifest
+    assert actual_payloads == payloads
+
+
+@pytest.mark.parametrize("version", ["0", "3", "24"])
+def test_rejects_an_unsupported_ordinary_baseline_schema_version(
+    tmp_path: Path, version: str
+) -> None:
+    path, _, _ = _ordinary_source(
+        tmp_path / f"v{version}", "baseline", baseline_version=version
+    )
+    with pytest.raises(SelectedHwmInputError, match="source artifact schema differs"):
+        selected_hwm._source_generation_from_path(path, "baseline")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows path limit")
