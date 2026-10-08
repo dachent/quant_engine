@@ -481,7 +481,8 @@ def test_provider_anchor_rows_say_sleeve_allocation_basis_and_pinned_texts_hold(
     assert all("sleeve allocation basis" in title.lower() for title in labelled)
     legend = dom["#account-manifest-legend"]["innerHTML"]
     assert "Calculations through 2026-09-17." in legend
-    assert "Artifact/provider capture date: 2026-09-19." in legend
+    assert "Ledger as-of: 2026-09-19." in legend
+    assert "Artifact/provider capture date" not in legend
     assert "sleeve allocation basis" in legend
 
 

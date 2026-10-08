@@ -11622,7 +11622,8 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert rendered_rows[0]["label"] == "Authority label •6907"
     assert rendered_rows[0]["label"] != "wrong-summary-provider account 1"
     assert evidence["legend"].find("Calculations through 2026-08-13") >= 0
-    assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
+    assert evidence["legend"].find("Ledger as-of: 2026-08-16") >= 0
+    assert evidence["legend"].find("Artifact/provider capture date") < 0
 
 
 def test_interaction_qa_checks_the_rendered_source_clock_handoff(
@@ -11766,7 +11767,8 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     artifact["as_of_date"] = "2026-08-17"
     _write_dashboard_data_script(candidate, data)
     changed = _run_rendered_epoch_manifest_probe(candidate / "index.html")
-    assert "Artifact/provider capture date: 2026-08-17." in changed["legend"]
+    assert "Ledger as-of: 2026-08-17." in changed["legend"]
+    assert "Artifact/provider capture date" not in changed["legend"]
     result, qa = _run_interaction_qa(
         candidate, tmp_path / "interaction-changed-capture.json"
     )
@@ -11806,7 +11808,7 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     _write_dashboard_data_script(candidate, data)
 
     evidence = _run_rendered_epoch_manifest_probe(candidate / "index.html")
-    assert "Artifact/provider capture date: unavailable." in evidence["legend"]
+    assert "Ledger as-of: unavailable." in evidence["legend"]
     assert "UNAUTHORIZED-LEGACY-DATE" not in evidence["legend"]
     result, qa = _run_interaction_qa(
         candidate, tmp_path / "interaction-missing-capture.json"

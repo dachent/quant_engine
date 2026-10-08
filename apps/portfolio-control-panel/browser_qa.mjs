@@ -310,7 +310,9 @@ try {
         || !isCalendarDate(captureDate)
         || expectedCalculationCutoff > captureDate
         || !legend.includes(`Calculations through ${manifest.calculation_cutoff_date}.`)
-        || !legend.includes(`Artifact/provider capture date: ${captureDate}.`)
+        || !legend.includes(`Ledger as-of: ${captureDate}.`)
+        || legend.includes("Artifact/provider capture date")
+        || !legend.includes("Provider capture date not recorded in this manifest.")
         || calculationFactsAfterAcceptedCutoff.length > 0) {
         throw new Error("schema-9 epoch manifest temporal acceptance boundary is missing, divergent, or exceeded");
       }
