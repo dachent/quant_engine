@@ -980,31 +980,51 @@ def test_a_confirmed_blocked_epoch_does_not_stop_the_twr_recompute(
     assert _expected_findings(findings) == []
 
 
-def test_the_strategy_level_recompute_is_still_declined_beside_a_confirmed_blocked_row(
+def test_the_strategy_level_mwr_recompute_skips_a_confirmed_blocked_row(
     tmp_path: Path,
 ) -> None:
-    """Boundary (green on main): the skip is for account-level metrics only.
+    """N29 (reverses the L6a boundary): the strategy MWR leaves a confirmed blocked epoch out.
 
-    A strategy's MWR is recomputed from every epoch of that strategy, and the blocked
-    epoch has no cash flows, so the recompute still declines (l0-design 5.1 skips
-    account-level views only).  Mutation MY-2 (the skip applied to strategy-level
-    recomputes too) turns this red.
+    A strategy's MWR pools its funded epochs and the oracle excludes the assignment-only
+    epochs (R2), so the blocked epoch, which publishes no cash flows, no longer makes
+    the recompute decline (it did, l0-design 5.1, and the smoke9 tt-portfolio row stayed
+    NOT_READY).  The recomputed pooled value agrees with itself and a wrong oracle value
+    is a regression.  Mutation: the skip removed from ``mwr.strategy`` turns the first
+    assertion red.  The real six-row tt-portfolio shape is in
+    test_n36_n29_strategy_expected_views.py.
     """
 
     repo = tmp_path / "repo"
     repo.mkdir()
     sha = _write_census(repo, [[_assignment(ONLY)]])
     gen_dir = build(tmp_path / "gen", _blocked_epochs(["A1"]))
-    row = {
-        "metric_id": "mwr.strategy",
-        "entity": "beta",
-        "window": "ITD",
-        "as_of": CUTOFF,
-        "expected": "0.09",
-        "authority_pointer": [{"path": CENSUS_CONTRACT, "sha256": sha}],
-    }
-    assert _expected_findings(_run(gen_dir, [row], repo)) == [
-        ("expected.mwr.strategy", checks.NOT_READY, "beta|ITD")
+    pointer = [{"path": CENSUS_CONTRACT, "sha256": sha}]
+
+    def row(value: str) -> dict[str, Any]:
+        return {
+            "metric_id": "mwr.strategy",
+            "entity": "beta",
+            "window": "ITD",
+            "as_of": CUTOFF,
+            "expected": value,
+            "authority_pointer": pointer,
+        }
+
+    context = checks.Context(
+        gen=load_generation(gen_dir),
+        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
+        cutoff_source="test",
+        expected=[row("0.09")],
+    )
+    context.repo_root = _policy_fixture(repo)
+    recomputed = checks.recompute_metric(
+        context, "mwr.strategy", "beta", (None, checks.to_date(CUTOFF)), None
+    )
+    assert len(recomputed) == 1
+    pooled = str(recomputed[0].value)
+    assert _expected_findings(_run(gen_dir, [row(pooled)], repo)) == []
+    assert _expected_findings(_run(gen_dir, [row("0.09")], repo)) == [
+        ("expected.mwr.strategy", checks.BLOCKER_REGRESSION, "beta|ITD")
     ]
 
 
