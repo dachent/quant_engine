@@ -6405,7 +6405,9 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
             env=env,
             timeout=900,
         )
-        assert completed.returncode == 0, (completed.stderr or completed.stdout or "")[-3000:]
+        assert completed.returncode == 0, (completed.stderr or completed.stdout or "")[
+            -3000:
+        ]
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
