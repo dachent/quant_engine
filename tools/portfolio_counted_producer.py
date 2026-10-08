@@ -204,6 +204,12 @@ def run_counted(
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] in (["-h"], ["--help"]):
+        print(
+            "usage: portfolio_counted_producer.py "
+            f"{{{'|'.join(sorted(COUNTED_PRODUCERS))}}} <producer arguments>"
+        )
+        return 0
     if not arguments or arguments[0] not in COUNTED_PRODUCERS:
         print(
             "usage: portfolio_counted_producer.py "
