@@ -7315,7 +7315,8 @@ def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
     )
 
     assert ".topbar-meta {\n    display: grid;" in css
-    assert ".validation-card { grid-template-columns: 1fr; }" in css
+    assert (".validation-card," + chr(10) + "  .binding-card {") in css
+    assert "grid-template-columns: 1fr;" in css
     assert ".metric-block .metric-note" in css
     assert "overflow-wrap: anywhere;" in css
     assert "Mobile header retains portfolio date, freshness date, and coverage" in qa

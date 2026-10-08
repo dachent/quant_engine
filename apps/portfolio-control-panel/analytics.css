@@ -92,6 +92,7 @@ th {
 
 .kpi-value,
 .validation-score,
+.binding-note,
 .section-intro h2 {
   overflow-wrap: anywhere;
 }
@@ -648,8 +649,10 @@ section[data-view="capital"] .callout-neutral {
     overflow-wrap: anywhere;
   }
   .topbar-meta .ghost-button { display: none; }
-  .validation-card { grid-template-columns: 1fr; }
-  .validation-score {
+  .validation-card,
+  .binding-card { grid-template-columns: 1fr; }
+  .validation-score,
+  .binding-note {
     max-width: none !important;
     text-align: left !important;
   }
@@ -1031,6 +1034,7 @@ section[data-view="capital"] .callout-neutral {
 .gate-name small,
 #hwm-status,
 .callout,
-.validation-card {
+.validation-card,
+.binding-card {
   overflow-wrap: anywhere;
 }

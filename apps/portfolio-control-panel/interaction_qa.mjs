@@ -467,6 +467,43 @@ checks.push(check(
     disclosure: epochDisclosure,
   },
 ));
+const D8_STATUS_WORDS = /(PUBLISHED|PUBLICATION_READY|VERIFIED|READY|RELEASED|ACCEPTED|AVAILABLE|APPROVED|CERTIFIED|CLEARED|PASSED)/;
+const D8_BINDING_NOTE = "stage input, hash-bound at build";
+const D8_MANIFEST_FIRST_NOTE = "Recorded when this panel was built, before release. These are the epoch manifest's authority fields, not the release state; the release state is in the coordinated release record, not in this panel.";
+const inputBindingsText = await page.locator("#input-bindings").innerText();
+const inputBindingsScoreCount = await page.locator("#input-bindings .validation-score").count();
+const inputBindingsGenerationIds = [
+  dashboardData.meta.report_generation_id,
+  dashboardData.meta.decomposition_generation_id,
+  dashboardData.meta.correlation_generation_id,
+];
+const inputBindingsStatusWordMatch = D8_STATUS_WORDS.exec(inputBindingsText);
+const inputBindingsNoteCount = inputBindingsText.split(D8_BINDING_NOTE).length - 1;
+checks.push(check(
+  "D8 build inputs carry no status word",
+  inputBindingsText.length > 0
+    && inputBindingsStatusWordMatch === null
+    && inputBindingsScoreCount === 0
+    && inputBindingsNoteCount === 3
+    && inputBindingsGenerationIds.every((id) => typeof id === "string" && inputBindingsText.includes(id.slice(0, 12))),
+  {
+    generation_prefixes_present: inputBindingsGenerationIds.map((id) => inputBindingsText.includes(String(id).slice(0, 12))),
+    note_count: inputBindingsNoteCount,
+    score_elements: inputBindingsScoreCount,
+    status_word: inputBindingsStatusWordMatch?.[1] ?? null,
+    text: inputBindingsText,
+  },
+));
+const manifestNotes = await page.locator("#account-manifest-disclosure-list li").evaluateAll((nodes) => nodes.map((node) => node.textContent.trim()));
+const manifestStaleLabels = manifestNotes.filter((note) => /^(Panel verification:|Producer readiness:|Manifest self-declared readiness:)/.test(note));
+const manifestUnscopedReadiness = manifestNotes.filter((note) => /NOT_READY|NOT_PERFORMED|READY/.test(note) && !note.startsWith("Epoch manifest "));
+checks.push(check(
+  "D8 manifest readiness is scoped to build",
+  manifestNotes[0] === D8_MANIFEST_FIRST_NOTE
+    && manifestStaleLabels.length === 0
+    && manifestUnscopedReadiness.length === 0,
+  { first_note: manifestNotes[0] ?? null, notes: manifestNotes, stale_labels: manifestStaleLabels, unscoped_readiness: manifestUnscopedReadiness },
+));
 checks.push(check(
   "Epoch manifest DOM matches exact source values and blockers",
   epochValuesMatch,

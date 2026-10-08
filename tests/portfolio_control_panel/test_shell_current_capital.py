@@ -220,7 +220,7 @@ def test_the_capital_legend_renders_the_payload_status_never_a_literal() -> None
 
     found = hard_coded_statuses("app.js", text)
 
-    assert {item.literal for item in found} <= {"PUBLISHED"}, found
+    assert found == [], found
 
 
 def _underwriting_payload(fit: dict[str, Any]) -> dict[str, Any]:
