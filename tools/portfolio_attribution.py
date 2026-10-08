@@ -67,6 +67,64 @@ class AttributionValidationError(ValueError):
     """Raised when attribution inputs or identities are unsafe or ambiguous."""
 
 
+# An annualized comparison figure scales per-period statistics by the periods a year
+# the comparison declares.  The common dates must carry that frequency: fewer than
+# this share of the periods a year implies over the window means the declared
+# frequency is not the one the dates have (weekly-sparse dates declared daily), and
+# the scaled figure would be an artefact of the declaration.  A window shorter than a
+# year at a consistent frequency is a correct short-window annualization and is not
+# refused here (the report labels it).
+ANNUALIZATION_MIN_FREQUENCY_SHARE: Final = Decimal("0.8")
+ANNUALIZATION_FREQUENCY_INCONSISTENT: Final = "ANNUALIZATION_FREQUENCY_INCONSISTENT"
+UNAVAILABLE_STATUS: Final = "UNAVAILABLE"
+
+
+class AnnualizationFrequencyError(AttributionValidationError):
+    """The declared periods a year is not the frequency of the common dates."""
+
+    def __init__(
+        self,
+        *,
+        periods_per_year: int,
+        observations: int,
+        observed_start: str,
+        observed_end: str,
+        minimum_observations: int,
+    ) -> None:
+        super().__init__(
+            f"{observations} observations over {observed_start}..{observed_end} "
+            f"are fewer than the {minimum_observations} that {periods_per_year} "
+            "periods a year implies"
+        )
+        self.detail = {
+            "minimum_observations": minimum_observations,
+            "observations": observations,
+            "observed_end": observed_end,
+            "observed_start": observed_start,
+            "periods_per_year": periods_per_year,
+        }
+
+
+def _check_annualization_frequency(
+    common: Sequence[date], periods_per_year: int
+) -> None:
+    """Refuse a declared frequency the common dates do not carry."""
+
+    span_days = (common[-1] - common[0]).days
+    # observations < share * periods_per_year * span_days / 365, in exact arithmetic.
+    required = ANNUALIZATION_MIN_FREQUENCY_SHARE * periods_per_year * span_days / 365
+    if Decimal(len(common)) < required:
+        raise AnnualizationFrequencyError(
+            periods_per_year=periods_per_year,
+            observations=len(common),
+            observed_start=common[0].isoformat(),
+            observed_end=common[-1].isoformat(),
+            minimum_observations=int(
+                required.to_integral_value(rounding="ROUND_CEILING")
+            ),
+        )
+
+
 def _epoch_receipts(
     baseline: Mapping[str, Any],
     baseline_path: Path,
@@ -610,6 +668,7 @@ def _comparison_metrics(
     common = sorted(set(account) & set(reference))
     if len(common) < 2:
         raise AttributionValidationError("comparison lacks two exact common dates")
+    _check_annualization_frequency(common, periods_per_year)
     reference_dec = [reference[day] for day in common]
     account_values = [float(account[day]) for day in common]
     reference_values = [float(value) for value in reference_dec]
@@ -681,6 +740,40 @@ def _comparison_metrics(
         "relative_drawdown": _decimal_text(relative_drawdown),
         "tracking_error_annualized": _decimal_text(tracking_error),
         "upside_capture": _decimal_text(upside_capture),
+    }
+
+
+def _frequency_refused_comparison(
+    accepted: Mapping[str, Any], refusal: AnnualizationFrequencyError
+) -> dict[str, Any]:
+    """An UNAVAILABLE row: no figure, no series or window named, the refusal disclosed.
+
+    The shape of every other UNAVAILABLE comparison (series and window null) with the
+    reason and the refused window beside it, so the panel and the validator read it
+    as an honest unavailable state and the owner can see why.
+    """
+
+    return {
+        **accepted,
+        "account_series_id": None,
+        "account_series_source": None,
+        "annualization_refusal": refusal.detail,
+        "disposition": (
+            "Annualized figures are unavailable: the comparison declares "
+            f"{refusal.detail['periods_per_year']} periods a year but its "
+            f"{refusal.detail['observations']} common observations over "
+            f"{refusal.detail['observed_start']}..{refusal.detail['observed_end']} "
+            f"are fewer than the {refusal.detail['minimum_observations']} that "
+            "frequency implies."
+        ),
+        "legacy_baseline_delta": None,
+        "legacy_baseline_disposition": "NOT_APPLICABLE",
+        "metrics": None,
+        "not_ready_reason": ANNUALIZATION_FREQUENCY_INCONSISTENT,
+        "observed_end": None,
+        "observed_start": None,
+        "reference_series_id": None,
+        "status": UNAVAILABLE_STATUS,
     }
 
 
@@ -828,12 +921,15 @@ def _accepted_comparison(
                 raise AttributionValidationError(
                     "receipt-bound comparison interval is invalid"
                 ) from exc
-        metrics = _comparison_metrics(
-            account_window,
-            reference_window,
-            periods_per_year,
-            complete_cumulative=complete_cumulative,
-        )
+        try:
+            metrics = _comparison_metrics(
+                account_window,
+                reference_window,
+                periods_per_year,
+                complete_cumulative=complete_cumulative,
+            )
+        except AnnualizationFrequencyError as refusal:
+            return _frequency_refused_comparison(accepted, refusal)
         expected_gap = accepted.get("expected_legacy_cumulative_gap")
         if expected_gap is not None:
             legacy_delta_value = _decimal(

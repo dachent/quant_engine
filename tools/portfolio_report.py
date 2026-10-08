@@ -1684,6 +1684,299 @@ def _cutoff_cost_rate(
     return result
 
 
+# ---- QC1-R N55: the contract's benchmark assignment, and A5: annualization labels ----
+
+RETAINED_UNAVAILABLE_ASSIGNMENT: Final = "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"
+ASSIGNMENT_AUTHORITY_OWNER_POLICY: Final = "OWNER_POLICY_DECISION"
+ASSIGNMENT_AUTHORITY_RETAINED_SPEC: Final = "RETAINED_ATTRIBUTION_SPEC"
+COMPARISON_SELECTED_GENERATION_UNAVAILABLE: Final = "SELECTED_GENERATION_UNAVAILABLE"
+_BENCHMARK_DECISION_DATE = re.compile(r"benchmark is effective (\d{4}-\d{2}-\d{2})")
+_BENCHMARK_BOUND_REF = re.compile(r"\bbound as ([A-Za-z0-9:._-]+?);")
+_BENCHMARK_SELECTED_GENERATION = re.compile(r"selected generation ([0-9a-f]{64})")
+_SENTENCE_BREAK = re.compile(r"(?<=\.)\s+")
+
+
+def _contract_benchmark_assignments(
+    contract: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Each strategy's benchmark assignment that the source contract decides.
+
+    The contract's ``STRATEGY_BENCHMARK`` segment records the owner's benchmark
+    selection in its ``owner_policy_decision`` text; it has no structured field for it.
+    The decision is the sentence that says the benchmark "is effective <date>", read
+    with the sentence before it (which names the strategy) and the same text's
+    "bound as <reference>;" and "selected generation <sha256>".  A decision that names
+    no strategy of its segment, or lacks its bound reference or its selected
+    generation, is refused rather than guessed; a segment with no such sentence
+    assigns nothing.
+    """
+
+    payload = (
+        contract
+        if contract is not None
+        else _load_json(_PORTABLE_HWM_PRODUCT_CONTRACT, "financial MVP contract")
+    )
+    assignments: dict[str, dict[str, Any]] = {}
+    for segment in _objects(payload.get("source_segments"), "contract source_segments"):
+        if "STRATEGY_BENCHMARK" not in segment.get("data_classes", []):
+            continue
+        text = _text(segment.get("owner_policy_decision"), "owner_policy_decision")
+        sentences = _SENTENCE_BREAK.split(text)
+        for position, sentence in enumerate(sentences):
+            effective = _BENCHMARK_DECISION_DATE.search(sentence)
+            if effective is None:
+                continue
+            source_id = _text(segment.get("source_id"), "contract source_id")
+            bound = _BENCHMARK_BOUND_REF.search(sentence)
+            generation = _BENCHMARK_SELECTED_GENERATION.search(sentence)
+            if bound is None or generation is None:
+                raise ReportValidationError(
+                    f"benchmark decision of {source_id} lacks its bound reference "
+                    "or selected generation"
+                )
+            context = " ".join(sentences[max(position - 1, 0) : position + 1])
+            subjects = _object(segment.get("subjects"), "contract subjects")
+            named = [
+                strategy_id
+                for strategy_id in _objects_or_text(subjects.get("strategy_ids"))
+                if re.search(
+                    rf"\b{re.escape(strategy_id.split('-')[0])}\b",
+                    context,
+                    re.IGNORECASE,
+                )
+            ]
+            if not named:
+                raise ReportValidationError(
+                    f"benchmark decision of {source_id} names no strategy of its segment"
+                )
+            reference = bound.group(1)
+            head, _, tail = reference.rpartition(":")
+            identifier = head if re.fullmatch(r"[0-9a-f]{64}", tail) else reference
+            for strategy_id in named:
+                assignments[strategy_id] = {
+                    "benchmark_id": identifier,
+                    "benchmark_version_ref": reference,
+                    "effective_start": effective.group(1),
+                    "rationale": context,
+                    "selected_generation_id": generation.group(1),
+                    "source_id": source_id,
+                }
+    return assignments
+
+
+def _objects_or_text(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ReportValidationError("contract strategy_ids must be a list of text")
+    return list(value)
+
+
+def _with_contract_benchmark_assignments(
+    attribution: Mapping[str, Any],
+    assignments: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish the contract's assignment where the retained spec says there is none.
+
+    The retained attribution spec was written before the owner's selection and still
+    reads "no authoritative assignment" for Robuxio.  A strategy whose contract carries
+    a decision, whose retained row says UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT and
+    whose retained comparison has no figures is published EVIDENCED, with the decision's
+    text, effective date and bound reference.  The comparison stays UNAVAILABLE in the
+    catalog's own shape (no series, no window, no figures) and says NOT_READY with the
+    selected generation named, so no number stands in for a generation that is not
+    there.  A strategy the retained catalog already compares, or one the contract does
+    not assign, is untouched.
+    """
+
+    comparisons = {
+        str(row.get("strategy_id")): row
+        for row in _objects(
+            attribution.get("benchmark_comparisons", []),
+            "attribution.benchmark_comparisons",
+        )
+    }
+    assignment_rows: list[dict[str, Any]] = []
+    overridden: set[str] = set()
+    for row in _objects(
+        attribution.get("benchmark_assignments"), "attribution.benchmark_assignments"
+    ):
+        strategy_id = str(row.get("strategy_id"))
+        decision = assignments.get(strategy_id)
+        comparison = comparisons.get(strategy_id)
+        if (
+            decision is None
+            or row.get("status") != RETAINED_UNAVAILABLE_ASSIGNMENT
+            or (comparison is not None and comparison.get("metrics") is not None)
+        ):
+            assignment_rows.append(dict(row))
+            continue
+        overridden.add(strategy_id)
+        assignment_rows.append(
+            {
+                "assignment_authority": ASSIGNMENT_AUTHORITY_OWNER_POLICY,
+                "assignment_source_id": decision["source_id"],
+                "benchmark_id": decision["benchmark_id"],
+                "effective_end": None,
+                "effective_start": decision["effective_start"],
+                "rationale": decision["rationale"],
+                "retained_spec_status": row.get("status"),
+                "selected_generation_id": decision["selected_generation_id"],
+                "status": "EVIDENCED",
+                "strategy_id": strategy_id,
+                "version_ref": decision["benchmark_version_ref"],
+            }
+        )
+    comparison_rows: list[dict[str, Any]] = []
+    for row in _objects(
+        attribution.get("benchmark_comparisons", []),
+        "attribution.benchmark_comparisons",
+    ):
+        strategy_id = str(row.get("strategy_id"))
+        if strategy_id not in overridden:
+            comparison_rows.append(dict(row))
+            continue
+        generation = str(assignments[strategy_id]["selected_generation_id"])
+        reason = f"selected generation {generation[:8]} unavailable"
+        comparison_rows.append(
+            {
+                **row,
+                "disposition": (
+                    f"NOT_READY: {reason}; no benchmark-relative comparison is "
+                    "computed against the owner-selected benchmark."
+                ),
+                "not_ready_detail": reason,
+                "not_ready_reason": COMPARISON_SELECTED_GENERATION_UNAVAILABLE,
+                "selected_generation_id": generation,
+            }
+        )
+    return {
+        **attribution,
+        "benchmark_assignments": assignment_rows,
+        "benchmark_comparisons": comparison_rows,
+    }
+
+
+_ONE_YEAR_DAYS: Final = 365
+ANNUALIZATION_BASIS_CAGR: Final = "CALENDAR_DAYS_COMPOUNDED_OVER_365"
+ANNUALIZATION_BASIS_SOURCE_REPORTED: Final = "SOURCE_REPORTED"
+ANNUALIZATION_BASIS_XIRR: Final = "XIRR_ACT_365"
+ANNUALIZATION_BASIS_PERIODS_SCALED: Final = "PERIODS_PER_YEAR_SCALED"
+_FREQUENCY_BY_PERIODS_PER_YEAR: Final = {
+    252: ("DAILY_TRADING", "daily"),
+    365: ("DAILY_CALENDAR", "daily"),
+    366: ("DAILY_CALENDAR", "daily"),
+    52: ("WEEKLY", "weekly"),
+    12: ("MONTHLY", "monthly"),
+    4: ("QUARTERLY", "quarterly"),
+    1: ("ANNUAL", "annual"),
+}
+_FREQUENCY_WORDS: Final = {
+    "DAILY": "daily",
+    **{name: word for name, word in _FREQUENCY_BY_PERIODS_PER_YEAR.values()},
+}
+
+
+def _annualization_label(
+    *,
+    basis: str,
+    start: object,
+    end: object,
+    observations: object = None,
+    periods_per_year: object = None,
+    frequency: str | None = None,
+) -> dict[str, Any] | None:
+    """The basis and window an annualized figure stands on, or None without a window.
+
+    A window under 365 days is a short-window annualization: ``short_window`` is true
+    and the label says so beside the dates.  The label names the observation count
+    and the frequency of the series the figure was scaled from; for a figure scaled
+    from cash flows (XIRR) it names the cash-flow window.
+    """
+
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    window_days = (
+        _date(end, "annualization end") - _date(start, "annualization start")
+    ).days
+    count = observations if isinstance(observations, int) else None
+    periods = periods_per_year if isinstance(periods_per_year, int) else None
+    if frequency is None and periods is not None:
+        frequency = _FREQUENCY_BY_PERIODS_PER_YEAR.get(
+            periods, (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year")
+        )[0]
+    word = (
+        None
+        if frequency is None
+        else _FREQUENCY_WORDS.get(frequency, f"{periods}-per-year")
+    )
+    short = window_days < _ONE_YEAR_DAYS
+    if frequency == "CASH_FLOW_DATES":
+        text = f"annualized from cash flows, {start}..{end}"
+    elif count is not None and word is not None:
+        text = f"annualized from {count} {word} observations, {start}..{end}"
+    else:
+        text = f"annualized over {start}..{end}"
+    return {
+        "basis": basis,
+        "frequency": frequency,
+        "label": text + (" (<1 year)" if short else ""),
+        "observations": count,
+        "periods_per_year": periods,
+        "short_window": short,
+        "window_days": window_days,
+        "window_end": end,
+        "window_start": start,
+    }
+
+
+def _comparison_annualization(
+    comparison: Mapping[str, Any], metrics: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The label of a comparison's annualized figures (active return, tracking error)."""
+
+    if not metrics:
+        return None
+    return _annualization_label(
+        basis=ANNUALIZATION_BASIS_PERIODS_SCALED,
+        start=metrics.get("observed_start"),
+        end=metrics.get("observed_end"),
+        observations=metrics.get("observations"),
+        periods_per_year=comparison.get("periods_per_year"),
+    )
+
+
+def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The CAGR and MWR labels of one strategy summary row (version 4)."""
+
+    cagr = None
+    if row.get("account_live_cagr") is not None:
+        derived = row.get("account_live_cagr_status") == (
+            "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
+        )
+        cagr = _annualization_label(
+            basis=(
+                ANNUALIZATION_BASIS_CAGR
+                if derived
+                else ANNUALIZATION_BASIS_SOURCE_REPORTED
+            ),
+            start=row.get("account_live_observed_start"),
+            end=row.get("account_live_observed_end"),
+            observations=row.get("account_live_return_observations"),
+            frequency="DAILY",
+        )
+    mwr = None
+    if row.get("mwr_xirr") is not None:
+        mwr = _annualization_label(
+            basis=ANNUALIZATION_BASIS_XIRR,
+            start=row.get("mwr_opening_date"),
+            end=row.get("mwr_terminal_date"),
+            frequency="CASH_FLOW_DATES",
+        )
+    return {
+        "account_live_cagr_annualization": cagr,
+        "mwr_annualization": mwr,
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]],
     attribution: Mapping[str, Any],
@@ -1851,7 +2144,25 @@ def _merge_attribution(
                 **(
                     {}
                     if cost_rate_at_cutoff is None
-                    else _cutoff_cost_rate(item, cost, cost_rate_at_cutoff)
+                    else {
+                        **_cutoff_cost_rate(item, cost, cost_rate_at_cutoff),
+                        **_account_annualization_labels(item),
+                        "benchmark_annualization": _comparison_annualization(
+                            benchmark_comparison, benchmark_metrics
+                        ),
+                        "benchmark_assignment_authority": benchmark.get(
+                            "assignment_authority", ASSIGNMENT_AUTHORITY_RETAINED_SPEC
+                        ),
+                        "benchmark_comparison_reason": benchmark_comparison.get(
+                            "not_ready_detail"
+                        )
+                        or benchmark_comparison.get("not_ready_reason"),
+                        "provider_annualization": _comparison_annualization(
+                            comparison, metrics
+                        ),
+                        "provider_comparison_reason": comparison.get("not_ready_detail")
+                        or comparison.get("not_ready_reason"),
+                    }
                 ),
             }
         )
@@ -8308,6 +8619,12 @@ def build_report_data(
             attribution_generation_id=attribution_generation_id,
         )
         cutoff_basis = _uses_cutoff_basis(catalog)
+        if cutoff_basis:
+            # Version 4 publishes the benchmark assignment the source contract
+            # decides where the retained spec still says there is none (N55).
+            attribution_catalog = _with_contract_benchmark_assignments(
+                attribution_catalog, _contract_benchmark_assignments()
+            )
         strategy_summary = _merge_attribution(
             strategy_summary,
             attribution_catalog,
@@ -8323,6 +8640,10 @@ def build_report_data(
                 else None
             ),
         )
+    if _uses_cutoff_basis(catalog):
+        strategy_summary = [
+            {**row, **_account_annualization_labels(row)} for row in strategy_summary
+        ]
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
