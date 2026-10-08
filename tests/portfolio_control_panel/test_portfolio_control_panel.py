@@ -7752,7 +7752,7 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert 'request_failures_path: "request-failures.json"' in browser_qa
     assert 'pdf_path: capture.pdf ? "page.pdf" : null' in browser_qa
     assert "final_url: finalUrl" in browser_qa
-    assert 'path.join(folder, "console-events.json"),' not in browser_qa
+    assert "console_events_path: path.join" not in browser_qa
     assert "final_url: page.url()" not in browser_qa
     assert 'options["exclude-candidates"] !== "true"' in interaction_qa
     assert 'scope: includeCandidates ? "FULL" : "NON_CANDIDATE"' in interaction_qa
