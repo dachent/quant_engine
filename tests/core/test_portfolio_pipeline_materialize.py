@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -3657,6 +3658,77 @@ def test_current_lens_generation_bindings_reject_drift(
         materializer._production_lens_nodes(tmp_path, contract)
 
 
+WORK_COUNTER_KEYS = (
+    "correlation_build_calls",
+    "full_rederivation_count",
+    "grid_search_calls",
+    "model_fit_calls",
+    "receipt_reuse_count",
+)
+
+
+def _stub_financial_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    counters: dict[str, int] | None = None,
+) -> list[str]:
+    """Local stand-in for the numerical verifier, with the ruled call interface.
+
+    The real verifier is exercised without stubs by test_portfolio_mvp2_vertical and
+    by the verifier's own tests. This stand-in only records which caller label each
+    call carried and returns a proof shaped like the real one: `work_counters` with
+    exactly the five keys.
+    """
+
+    import portfolio_financial_outcomes
+
+    calls: list[str] = []
+    reported = counters or {key: 0 for key in WORK_COUNTER_KEYS}
+
+    def validate(
+        _spec: object, *, allow_synthetic: bool = False, caller: str = "unattributed"
+    ) -> dict[str, object]:
+        assert allow_synthetic is False
+        calls.append(caller)
+        return {"status": "PASS", "work_counters": dict(reported)}
+
+    monkeypatch.setattr(
+        portfolio_financial_outcomes, "validate_financial_outcomes", validate
+    )
+    return calls
+
+
+def _bind_attended_run(prepared_root: Path, retained_cache_root: Path) -> None:
+    """Write the attended-run receipt a real attended run leaves in its root.
+
+    The request identity is produced by the materializer's own function, so the
+    receipt has the shape `--execute` writes, with `retained_cache_root` set to the
+    given root (an overlay root when a retained cache base is used).
+    """
+
+    retained_cache_root.mkdir(parents=True, exist_ok=True)
+    python = prepared_root.parent / "attended-python.exe"
+    python.write_bytes(b"python")
+    source_run = prepared_root.parent / "attended-source-run.json"
+    source_run.write_bytes(b"{}")
+    identity = materializer._attended_request_identity(
+        repo_root=Path(materializer.__file__).resolve().parents[1],
+        python=python,
+        workspace_root=prepared_root.parent / "workspace",
+        output_root=prepared_root,
+        retained_cache_root=retained_cache_root,
+        requested_as_of="2026-09-17",
+        evaluated_on=None,
+        source_run=source_run,
+        financial_stage_inputs={},
+        source_phase={"status": "PASS"},
+        runtime={"identity": {"runtime": "test"}},
+    )
+    receipt = materializer._attended_run_receipt(prepared_root)
+    receipt.write_bytes(
+        canonical_json_bytes({"schema_version": 1, "request_identity": identity})
+    )
+
+
 @pytest.mark.parametrize("current_surfaces", [False, True])
 def test_production_spec_binds_stable_twenty_root_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current_surfaces: bool
@@ -3788,13 +3860,9 @@ def test_production_spec_binds_stable_twenty_root_authority(
 
     # This test isolates the established root/recovery mapping. Numerical
     # completion is exercised without stubs by test_portfolio_mvp2_vertical.
-    import portfolio_financial_outcomes
-
-    monkeypatch.setattr(
-        portfolio_financial_outcomes,
-        "validate_financial_outcomes",
-        lambda _spec: {"status": "PASS"},
-    )
+    _stub_financial_outcomes(monkeypatch)
+    state_root = tmp_path / "retained-cache"
+    _bind_attended_run(prepared_root, state_root)
     financial_artifacts = tmp_path / "financial-artifacts.json"
     supplied_lenses = []
     if current_surfaces:
@@ -3856,7 +3924,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
         prepared_root,
         prepared_root / "evidence" / "post-build-semantic.json",
         production_root,
-        tmp_path / "production-state",
+        state_root,
         spec_path,
         financial_artifacts_path=financial_artifacts,
         predecessor_repair_gate_path=repair_gate_path,
@@ -3883,7 +3951,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
         prepared_root,
         prepared_root / "evidence" / "post-build-semantic.json",
         production_root,
-        tmp_path / "production-state-no-repair",
+        state_root,
         plain_spec_path,
         financial_artifacts_path=financial_artifacts,
     )
@@ -4045,10 +4113,17 @@ def test_production_spec_binds_stable_twenty_root_authority(
         pipeline_status(stripped_spec)
 
 
-def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Schema-v9 five-input producer evidence survives the production rebind seam."""
+def _production_spec_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    counters: dict[str, int] | None = None,
+) -> SimpleNamespace:
+    """A prepared attended run whose production specification is ready to build.
+
+    The numerical verifier is the local stand-in of `_stub_financial_outcomes`; the
+    prepared root carries a real attended-run receipt that names the retained cache
+    root, which is the only state root `production-spec` accepts.
+    """
 
     short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
     analytics_root_ids = [
@@ -4221,14 +4296,8 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
 
     # This fixture proves epoch/root rebinding only. The complete production
     # vertical supplies and verifies the actual four numerical outcomes.
-    import portfolio_financial_outcomes
-
     monkeypatch.setattr(materializer, "_production_lens_nodes", lambda *_args: {})
-    monkeypatch.setattr(
-        portfolio_financial_outcomes,
-        "validate_financial_outcomes",
-        lambda _spec: {"status": "PASS"},
-    )
+    verifier_calls = _stub_financial_outcomes(monkeypatch, counters)
     financial_artifacts = tmp_path / "epoch-rebind-source-artifacts.json"
     _write_json(
         financial_artifacts,
@@ -4241,14 +4310,40 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
             }
         ],
     )
+    state_root = tmp_path / "retained-cache"
+    _bind_attended_run(prepared_root, state_root)
+    return SimpleNamespace(
+        recipe_path=recipe_path,
+        prepared_root=prepared_root,
+        semantic_gate=prepared_root / "evidence" / "post-build-semantic.json",
+        production_root=production_root,
+        state_root=state_root,
+        spec_path=spec_path,
+        financial_artifacts=financial_artifacts,
+        accepted_recipe=accepted_recipe,
+        prepared_proof=prepared_proof,
+        verifier_calls=verifier_calls,
+    )
+
+
+def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema-v9 five-input producer evidence survives the production rebind seam."""
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    recipe_path = inputs.recipe_path
+    prepared_root = inputs.prepared_root
+    spec_path = inputs.spec_path
+    accepted_recipe = inputs.accepted_recipe
+    prepared_proof = inputs.prepared_proof
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
-        prepared_root / "evidence" / "post-build-semantic.json",
-        production_root,
-        tmp_path / "production-state",
+        inputs.semantic_gate,
+        inputs.production_root,
+        inputs.state_root,
         spec_path,
-        financial_artifacts_path=financial_artifacts,
+        financial_artifacts_path=inputs.financial_artifacts,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
@@ -4294,6 +4389,210 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
             PipelineSpec.from_json_bytes(canonical_json_bytes(forged))
         )
     Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
+
+
+def _production_spec_argv(inputs: SimpleNamespace, state_root: Path) -> list[str]:
+    return [
+        "production-spec",
+        "--recipe",
+        str(inputs.recipe_path),
+        "--prepared-root",
+        str(inputs.prepared_root),
+        "--semantic-gate",
+        str(inputs.semantic_gate),
+        "--portfolio-root",
+        str(inputs.production_root),
+        "--state-root",
+        str(state_root),
+        "--spec",
+        str(inputs.spec_path),
+        "--financial-artifacts",
+        str(inputs.financial_artifacts),
+    ]
+
+
+def _build_production_spec(inputs: SimpleNamespace, state_root: Path) -> dict[str, Any]:
+    return materializer.build_production_spec(
+        inputs.recipe_path,
+        inputs.prepared_root,
+        inputs.semantic_gate,
+        inputs.production_root,
+        state_root,
+        inputs.spec_path,
+        financial_artifacts_path=inputs.financial_artifacts,
+    )
+
+
+COLD_WORK_COUNTERS = {
+    "correlation_build_calls": 2,
+    "full_rederivation_count": 3,
+    "grid_search_calls": 5,
+    "model_fit_calls": 7,
+    "receipt_reuse_count": 11,
+}
+WARM_WORK_COUNTERS = {
+    "correlation_build_calls": 0,
+    "full_rederivation_count": 0,
+    "grid_search_calls": 0,
+    "model_fit_calls": 0,
+    "receipt_reuse_count": 13,
+}
+
+
+def test_production_spec_stdout_carries_the_verifier_work_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Z1/M8: the counters of the verifier call reach the command's own stdout."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+
+    assert materializer.main(_production_spec_argv(inputs, inputs.state_root)) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert set(result) == {"contract", "nodes", "root_count", "spec", "work_counters"}
+    assert tuple(sorted(result["work_counters"])) == WORK_COUNTER_KEYS
+    assert result["work_counters"] == COLD_WORK_COUNTERS
+    # The one verifier call this command makes names itself, so the verifier's own
+    # ledger can attribute it.
+    assert inputs.verifier_calls == ["production-spec"]
+
+
+def _hashed_outputs(spec_path: Path) -> dict[str, bytes]:
+    """Every file the command wrote beside its specification.
+
+    The specification carries a wall-clock `created_at`, which no input determines, so
+    it is compared without that one field.
+    """
+
+    files = {
+        path.relative_to(spec_path.parent).as_posix(): path.read_bytes()
+        for path in sorted(spec_path.parent.rglob("*"))
+        if path.is_file()
+    }
+    spec = json.loads(files[spec_path.name])
+    del spec["created_at"]
+    files[spec_path.name] = canonical_json_bytes(spec)
+    return files
+
+
+def test_production_spec_gate_contract_and_spec_do_not_depend_on_the_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z1 control: cold and warm counters give byte-identical hashed outputs.
+
+    Mutation check: putting the counters into the semantic payload makes the two
+    semantic gates, and so the contract and the specification that bind their hash,
+    differ.
+    """
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+    cold = _build_production_spec(inputs, inputs.state_root)
+    cold_outputs = _hashed_outputs(inputs.spec_path)
+    assert {"production-post-build-semantic.json", "production-spec.json"} <= set(
+        cold_outputs
+    )
+    assert "portfolio-production-rebind-contract.json" in cold_outputs
+    shutil.rmtree(inputs.spec_path.parent)
+
+    _stub_financial_outcomes(monkeypatch, WARM_WORK_COUNTERS)
+    warm = _build_production_spec(inputs, inputs.state_root)
+
+    assert cold["work_counters"] == COLD_WORK_COUNTERS
+    assert warm["work_counters"] == WARM_WORK_COUNTERS
+    assert _hashed_outputs(inputs.spec_path) == cold_outputs
+
+
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"model_fit_calls": 0},
+        {**COLD_WORK_COUNTERS, "extra_calls": 0},
+        {**COLD_WORK_COUNTERS, "model_fit_calls": -1},
+        {**COLD_WORK_COUNTERS, "model_fit_calls": True},
+    ],
+    ids=["missing-keys", "extra-key", "negative", "boolean"],
+)
+def test_production_spec_refuses_a_proof_without_the_five_work_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, counters: dict[str, int]
+) -> None:
+    """Z1: a verifier proof that lost its counters cannot be emitted as evidence."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, counters)
+
+    with pytest.raises(materializer.MaterializationError, match="work counters"):
+        _build_production_spec(inputs, inputs.state_root)
+
+
+def test_production_spec_state_root_must_be_the_prepared_retained_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z2: receipts live in the retained cache, so no other state root is accepted."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    other = tmp_path / "per-cycle-production-state"
+    other.mkdir()
+    assert inputs.verifier_calls == []
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="production state root must be the prepared run's retained cache root",
+    ):
+        _build_production_spec(inputs, other)
+
+    # The refusal comes before the verifier, so nothing was verified or written.
+    assert inputs.verifier_calls == []
+    assert not inputs.spec_path.exists()
+
+    # The retained cache root, spelled through a parent hop, is the same root.
+    spelled = inputs.state_root / ".." / inputs.state_root.name
+    result = _build_production_spec(inputs, spelled)
+    assert inputs.verifier_calls == ["production-spec"]
+    spec = PipelineSpec.from_json_bytes(Path(result["spec"]).read_bytes())
+    assert spec.state_root == inputs.state_root.resolve()
+
+
+def test_production_spec_state_root_follows_the_overlay_of_a_shared_cache_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z2: with a retained cache base the run's overlay is its retained cache root."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    overlay = tmp_path / "overlay-cache"
+    _bind_attended_run(inputs.prepared_root, overlay)
+
+    with pytest.raises(materializer.MaterializationError, match="retained cache root"):
+        _build_production_spec(inputs, inputs.state_root)
+    assert inputs.verifier_calls == []
+
+    result = _build_production_spec(inputs, overlay)
+    spec = PipelineSpec.from_json_bytes(Path(result["spec"]).read_bytes())
+    assert spec.state_root == overlay.resolve()
+
+
+@pytest.mark.parametrize("damage", ["missing", "not-json", "no-identity", "no-root"])
+def test_production_spec_refuses_a_prepared_root_without_a_readable_run_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """Z2: the retained cache root is read from the receipt, never assumed."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    receipt = materializer._attended_run_receipt(inputs.prepared_root)
+    if damage == "missing":
+        receipt.unlink()
+    elif damage == "not-json":
+        receipt.write_bytes(b"not-json")
+    elif damage == "no-identity":
+        receipt.write_bytes(canonical_json_bytes({"schema_version": 1}))
+    else:
+        receipt.write_bytes(
+            canonical_json_bytes(
+                {"schema_version": 1, "request_identity": {"output_root": "x"}}
+            )
+        )
+
+    with pytest.raises(materializer.MaterializationError, match="attended run receipt"):
+        _build_production_spec(inputs, inputs.state_root)
+    assert inputs.verifier_calls == []
 
 
 def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
