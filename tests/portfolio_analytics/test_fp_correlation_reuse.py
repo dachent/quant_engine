@@ -126,17 +126,9 @@ def test_rejected_reuse_builds_nothing_and_preserves_index_and_generation(
     assert not output.exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING FP:179: a corrupt retained correlation.json is not rejected before "
-        "the build; _indexed_generation returns None on the hash mismatch "
-        "(tools/portfolio_correlation.py:1896-1903) and stage_candidate rebuilds "
-        "(:1972) before _stage_candidate/_verify_candidate rejects it"
-    ),
-)
+@pytest.mark.parametrize("corrupted", ["correlation.json", "generation.json"])
 def test_corrupt_retained_result_is_rejected_before_any_build(
-    tmp_path: Path, work: Work
+    tmp_path: Path, work: Work, corrupted: str
 ) -> None:
     source_root, spec, retained, staged = _staged(tmp_path)
     (Path(str(staged["candidate"])) / "correlation.json").write_bytes(b"{}\n")
@@ -145,6 +137,10 @@ def test_corrupt_retained_result_is_rejected_before_any_build(
 
     with pytest.raises(correlation.CorrelationError):
         correlation.stage_candidate(
+            spec, source_root, tmp_path / "out", retained_cache_root=retained
+        )
+    with pytest.raises(correlation.CorrelationError, match="exact build"):
+        correlation.publish(
             spec, source_root, tmp_path / "out", retained_cache_root=retained
         )
 

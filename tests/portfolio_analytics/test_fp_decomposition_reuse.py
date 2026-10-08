@@ -446,17 +446,9 @@ def test_rejected_reuse_builds_nothing_and_preserves_index_and_generation(
     assert not output.exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING FP:179: a corrupt retained decomposition.json is not rejected "
-        "before fitting; _indexed_generation returns None on the hash mismatch and "
-        "stage_candidate re-solves (tools/portfolio_decomposition.py:4487-4495 then "
-        ":4541-4546) before _verify_candidate rejects it"
-    ),
-)
+@pytest.mark.parametrize("corrupted", ["decomposition.json", "generation.json"])
 def test_corrupt_retained_result_is_rejected_before_any_fitting(
-    tmp_path: Path, work: Work
+    tmp_path: Path, work: Work, corrupted: str
 ) -> None:
     source_root, spec, retained, staged = _staged_static(tmp_path)
     (Path(str(staged["candidate"])) / "decomposition.json").write_bytes(b"{}\n")
@@ -465,6 +457,10 @@ def test_corrupt_retained_result_is_rejected_before_any_fitting(
 
     with pytest.raises(decomposition.DecompositionError):
         decomposition.stage_candidate(
+            spec, source_root, tmp_path / "out", retained_cache_root=retained
+        )
+    with pytest.raises(decomposition.DecompositionError, match="exact build"):
+        decomposition.publish(
             spec, source_root, tmp_path / "out", retained_cache_root=retained
         )
 
