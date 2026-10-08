@@ -167,9 +167,15 @@
     // status on the Portfolio view; this column is the provider comparison (K11).
     const status = row.provider_comparison_status || "UNAVAILABLE";
     if (!String(status || "").startsWith("DESCRIPTIVE_EXACT_DATE")) {
-      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "No accepted exact-date provider/model comparison")}</span>`;
+      // N55 (general): `provider_comparison_reason` is the not-ready reason surface for
+      // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
+      // disposition whenever the report publishes one.
+      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "No accepted exact-date provider/model comparison")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
-    return `${statusText(status)}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.provider_comparison_observed_start)}–${formatDateHtml(row.provider_comparison_observed_end)} · ${integer.format(row.provider_comparison_observations || 0)} observations</span><span class="cell-secondary">Account ${pct(row.provider_account_cumulative_return)} · reference ${pct(row.provider_reference_cumulative_return)} · cumulative gap ${pct(row.provider_cumulative_gap)} · active annualized ${pct(row.provider_active_return_annualized)}</span><span class="cell-secondary">Tracking error ${pct(row.provider_tracking_error_annualized)} · information ratio ${decimal(row.provider_information_ratio)} · beta ${decimal(row.provider_beta)} · correlation ${decimal(row.provider_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.provider_upside_capture)} · down capture ${pct(row.provider_downside_capture)} · relative drawdown ${pct(row.provider_relative_drawdown)} · cash drag ${statusText(row.cash_drag_status)} · ${safe(row.cash_drag_reason)}</span><span class="cell-secondary">${safe(row.provider_comparison_disposition)}</span>`;
+    // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
+    // when short); render it beside the annualized figure it describes.
+    const providerAnnualizedLabel = row.provider_annualization?.label;
+    return `${statusText(status)}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.provider_comparison_observed_start)}–${formatDateHtml(row.provider_comparison_observed_end)} · ${integer.format(row.provider_comparison_observations || 0)} observations</span><span class="cell-secondary">Account ${pct(row.provider_account_cumulative_return)} · reference ${pct(row.provider_reference_cumulative_return)} · cumulative gap ${pct(row.provider_cumulative_gap)} · active annualized ${pct(row.provider_active_return_annualized)}${providerAnnualizedLabel ? ` (${safe(providerAnnualizedLabel)})` : ""}</span><span class="cell-secondary">Tracking error ${pct(row.provider_tracking_error_annualized)} · information ratio ${decimal(row.provider_information_ratio)} · beta ${decimal(row.provider_beta)} · correlation ${decimal(row.provider_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.provider_upside_capture)} · down capture ${pct(row.provider_downside_capture)} · relative drawdown ${pct(row.provider_relative_drawdown)} · cash drag ${statusText(row.cash_drag_status)} · ${safe(row.cash_drag_reason)}</span><span class="cell-secondary">${safe(row.provider_comparison_disposition)}</span>`;
   };
   const costDisclosure = (row) => {
     const amount = number(row.annual_external_cost_usd) == null ? "Pre-tax cost unavailable" : `${currencyExact(row.annual_external_cost_usd)} annually`;
@@ -188,11 +194,27 @@
     }
     return `<span class="cell-primary">${safe(row.cost_status)}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
+  // N55: who authorized the current benchmark assignment.  An owner-made override is
+  // named explicitly; a row that has never been overridden retains the prior status quo
+  // label rather than implying a decision was made.
+  const BENCHMARK_ASSIGNMENT_AUTHORITY_LABELS = {
+    OWNER_POLICY_DECISION: "Owner policy decision",
+    RETAINED_ATTRIBUTION_SPEC: "Retained attribution spec",
+  };
   const benchmarkDisclosure = (row) => {
     if (performanceLineageMismatch) return `<span class="cell-secondary">— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
-    const assignment = `<span class="cell-primary">Benchmark ${statusText(row.benchmark_assignment_status)}</span><span class="cell-secondary">Effective ${formatDateHtml(row.benchmark_effective_start)}–${formatDateHtml(row.benchmark_effective_end)} · ${safe(row.benchmark_id || "No admitted benchmark")}</span><span class="cell-secondary">${safe(row.benchmark_rationale || "No benchmark rationale recorded")}</span>`;
-    if (!String(row.benchmark_comparison_status || "").startsWith("DESCRIPTIVE_EXACT_DATE")) return `${assignment}<span class="cell-secondary">${statusText(row.benchmark_comparison_status || "UNAVAILABLE")} · ${safe(row.benchmark_comparison_disposition || "No exact-date benchmark-relative comparison is admitted")}</span>`;
-    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${pct(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>`;
+    const authority = row.benchmark_assignment_authority
+      ? `<span class="cell-secondary">Assignment authority: ${safe(BENCHMARK_ASSIGNMENT_AUTHORITY_LABELS[row.benchmark_assignment_authority] || humanStatus(row.benchmark_assignment_authority))}</span>`
+      : "";
+    const assignment = `<span class="cell-primary">Benchmark ${statusText(row.benchmark_assignment_status)}</span><span class="cell-secondary">Effective ${formatDateHtml(row.benchmark_effective_start)}–${formatDateHtml(row.benchmark_effective_end)} · ${safe(row.benchmark_id || "No admitted benchmark")}</span><span class="cell-secondary">${safe(row.benchmark_rationale || "No benchmark rationale recorded")}</span>${authority}`;
+    // N55 (general): `benchmark_comparison_reason` is the not-ready reason surface for the
+    // benchmark comparison path; render it beside the disposition whenever published.
+    const reason = row.benchmark_comparison_reason ? `<span class="cell-secondary">${safe(row.benchmark_comparison_reason)}</span>` : "";
+    if (!String(row.benchmark_comparison_status || "").startsWith("DESCRIPTIVE_EXACT_DATE")) return `${assignment}<span class="cell-secondary">${statusText(row.benchmark_comparison_status || "UNAVAILABLE")} · ${safe(row.benchmark_comparison_disposition || "No exact-date benchmark-relative comparison is admitted")}</span>${reason}`;
+    // A5: `benchmark_annualization.label` already encodes basis/window (and "(<1 year)"
+    // when short); render it beside the annualized figure it describes.
+    const benchmarkAnnualizedLabel = row.benchmark_annualization?.label;
+    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${pct(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${benchmarkAnnualizedLabel ? ` (${safe(benchmarkAnnualizedLabel)})` : ""}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
   };
   const hwmQualification = (row) => {
     if (performanceLineageMismatch) return { status: "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH", note: performanceLineageReason };
@@ -953,9 +975,19 @@
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
       ["Automated action", "NONE", "Read-only advisory surface", "reserve"],
     ]);
+    // A5: the account-live CAGR and strategy-level MWR each carry an annualization label
+    // (basis/window, already marked "(<1 year)" when short) that must render beside the
+    // figure it describes; there is no existing cell for strategy-level MWR, so it joins
+    // the account-cumulative cell rather than being silently dropped.
     const implementationRows = data.strategies.map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_cumulative_return)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown)}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${formatDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      const cagrLabel = row.account_live_cagr_annualization?.label;
+      const mwrLabel = row.mwr_annualization?.label;
+      const cumulativeCell = performanceLineageMismatch
+        ? withheld
+        : `${pct(row.account_live_cumulative_return)}${cagrLabel ? `<span class="cell-secondary">${safe(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${mwrLabel ? ` (${safe(mwrLabel)})` : ""}</span>` : ""}`;
+      const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${formatDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows);
     const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : (row.value_usd || row.value || "—"))}</td></tr>`);
