@@ -1646,3 +1646,86 @@ def test_executable_product_check_labels_its_hidden_verifier_call(
     assert _verification_callers(spec.state_root) == [
         "pipeline.require-executable-product"
     ]
+
+
+def _command_node(
+    node_id: str,
+    effect: str,
+    depends_on: list[str],
+    tmp_path: Path,
+    *,
+    declared_writes: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "argv": ["synthetic", node_id],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": declared_writes or [],
+        "depends_on": depends_on,
+        "effect": effect,
+        "kind": "COMMAND",
+        "node_id": node_id,
+        "request_identity": "e" * 64 if effect == "READ_ONLY_EXTERNAL" else None,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+
+
+def _receipt_bytes(spec: PipelineSpec, node_id: str) -> bytes:
+    (path,) = [
+        item
+        for item in spec.state_root.rglob(f"{node_id}.json")
+        if item.parent.name == "receipts"
+    ]
+    return path.read_bytes()
+
+
+def test_failed_external_read_stops_only_its_dependents(tmp_path: Path) -> None:
+    """M4: a failed provider stops its dependents and nothing finished is disturbed."""
+
+    declared = tmp_path / "provider-output.csv"
+    independent = _command_node("a-independent", "LOCAL_ONLY", [], tmp_path)
+    raw, previous, proposed, target = _spec_dict(tmp_path, command=independent)
+    nodes = raw["nodes"]
+    assert isinstance(nodes, list)
+    nodes.extend(
+        [
+            _command_node(
+                "b-provider",
+                "READ_ONLY_EXTERNAL",
+                [],
+                tmp_path,
+                declared_writes=[str(declared)],
+            ),
+            _command_node("c-dependent", "LOCAL_ONLY", ["b-provider"], tmp_path),
+        ]
+    )
+    spec = _parse(raw)
+    calls: list[str] = []
+
+    def runner(node: object) -> tuple[int, bytes, bytes]:
+        node_id = getattr(node, "node_id")
+        calls.append(node_id)
+        return (
+            (3, b"", b"provider failed") if node_id == "b-provider" else (0, b"ok", b"")
+        )
+
+    with pytest.raises(PipelineExecutionError, match="b-provider"):
+        execute_pipeline(spec, allow_external_read=True, command_runner=runner)
+
+    assert calls == ["a-independent", "b-provider"]
+    finished = _receipt_bytes(spec, "a-independent")
+    assert json.loads(finished)["state"] == "COMPLETED"
+    assert json.loads(_receipt_bytes(spec, "b-provider"))["state"] != "COMPLETED"
+    assert not list(spec.state_root.rglob("c-dependent.json"))
+    assert not declared.exists()
+    assert read_current(target).generation_id == previous.generation_id
+    assert not (target / "generations" / proposed.generation_id).exists()
+
+    with pytest.raises((PipelineExecutionError, PipelineUnknownOutcomeError)):
+        execute_pipeline(spec, allow_external_read=True, command_runner=runner)
+
+    assert calls == ["a-independent", "b-provider"]
+    assert _receipt_bytes(spec, "a-independent") == finished
+    assert not list(spec.state_root.rglob("c-dependent.json"))
+    assert read_current(target).generation_id == previous.generation_id
