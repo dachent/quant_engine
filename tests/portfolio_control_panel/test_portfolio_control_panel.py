@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 import runpy
 import sys
@@ -6079,6 +6080,386 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         )
 
 
+def _capture_view(name: str) -> str:
+    return "" if name == "direct-file" else name.split("-", 1)[1]
+
+
+def _qa_v2(candidate: Path, root: Path) -> Path:
+    """Reshape the synthetic QA directory into the version-2 relative form."""
+
+    qa = _qa(candidate, root)
+    for name in panel.CAPTURES:
+        manifest_path = qa / name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        target = "index.html" + (
+            f"#{_capture_view(name)}" if _capture_view(name) else ""
+        )
+        manifest.update(
+            console_events_path="console-events.json",
+            final_url=target,
+            html_directory_name=candidate.name,
+            pdf_path="page.pdf" if name == "desktop-command" else None,
+            qa_manifest_version=2,
+            request_failures_path="request-failures.json",
+            screenshot_path="screenshot.png",
+            target=target,
+        )
+        _write_json(manifest_path, manifest)
+        if name in panel.LINT_CAPTURES:
+            lint_path = qa / name / "visual-lint.json"
+            lint = json.loads(lint_path.read_text(encoding="utf-8"))
+            lint.update(qa_manifest_version=2, target=target)
+            _write_json(lint_path, lint)
+    return qa
+
+
+def _edit_manifest(qa: Path, name: str, **changes: object) -> None:
+    path = qa / name / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(changes)
+    _write_json(path, manifest)
+
+
+@pytest.fixture
+def candidate_v2(inputs: dict[str, Path]) -> Path:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    return Path(built["candidate_dir"])
+
+
+def test_qa_v2_relative_manifests_validate(candidate_v2: Path, tmp_path: Path) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    result = panel.validate_qa(candidate_v2, qa)
+    assert result["all_passed"] is True
+    names = {row["check"] for row in result["checks"]}
+    assert "QA evidence carries no absolute locator" in names
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "absolute_screenshot_path",
+        "file_url_target",
+        "escaping_final_url",
+        "other_candidate",
+        "wrong_version",
+        "mixed_versions",
+        "absolute_text_elsewhere",
+        "absolute_pdf_link",
+        "drive_in_final_url",
+    ],
+)
+def test_qa_v2_refuses_absolute_or_inconsistent_evidence(
+    candidate_v2: Path, tmp_path: Path, mutation: str
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    if mutation == "absolute_screenshot_path":
+        _edit_manifest(
+            qa, "desktop-command", screenshot_path=str(qa / "desktop-command" / "x.png")
+        )
+    elif mutation == "file_url_target":
+        _edit_manifest(
+            qa, "desktop-command", target=f"file:///C:/x/{candidate_v2.name}/index.html"
+        )
+    elif mutation == "escaping_final_url":
+        _edit_manifest(qa, "desktop-command", final_url="../x/index.html#command")
+    elif mutation == "drive_in_final_url":
+        _edit_manifest(qa, "desktop-command", final_url="C:/x/index.html#command")
+    elif mutation == "other_candidate":
+        _edit_manifest(qa, "desktop-command", html_directory_name="0" * 64)
+    elif mutation == "wrong_version":
+        for name in panel.CAPTURES:
+            _edit_manifest(qa, name, qa_manifest_version=3)
+    elif mutation == "mixed_versions":
+        manifest = json.loads(
+            (qa / "mobile-data" / "manifest.json").read_text(encoding="utf-8")
+        )
+        manifest.pop("qa_manifest_version")
+        _write_json(qa / "mobile-data" / "manifest.json", manifest)
+    elif mutation == "absolute_text_elsewhere":
+        _edit_manifest(qa, "desktop-command", note="see C:\\Users\\x\\y")
+    elif mutation == "absolute_pdf_link":
+        stream = zlib.compress(b"<< /URI (file:///C:/x/index.html) >>")
+        (qa / "desktop-command" / "page.pdf").write_bytes(
+            b"%PDF-1.4\nstream\n" + stream + b"\nendstream\n"
+        )
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel.validate_qa(candidate_v2, qa)
+
+
+def test_qa_v1_manifests_keep_verifying(candidate_v2: Path, tmp_path: Path) -> None:
+    qa = _qa(candidate_v2, tmp_path)
+    assert panel.validate_qa(candidate_v2, qa)["all_passed"] is True
+
+
+def test_qa_locator_predicate() -> None:
+    hits = panel.qa_absolute_locator_offsets
+    for text in (
+        b'"C:\\\\Users\\\\x"',
+        b"C:/Users/x",
+        b"file:///C:/x/index.html",
+        b"file:///home/x",
+        b'"\\\\\\\\server\\\\share"',
+        b"\\\\server\\share",
+    ):
+        assert hits(text), text
+    for text in (
+        b"https://example.com/a",
+        b"index.html#command",
+        b"generations/abc/index.html#risk",
+        b"Source file: ledger",
+        b"ratio 3:1 and 12:30",
+        b'"a\\\\b"',
+    ):
+        assert not hits(text), text
+
+
+def test_native_qa_receipt_is_written_outside_the_qa_directory(
+    candidate_v2: Path, tmp_path: Path
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    receipt = tmp_path / "logs" / "native-qa-receipt.json"
+    result = panel.validate_qa(candidate_v2, qa, receipt_path=receipt)
+    assert receipt.read_bytes() == canonical_json_bytes(result)
+    assert not (qa / "qa-validation.json").exists()
+    with pytest.raises(panel.ControlPanelValidationError, match="outside the QA"):
+        panel.validate_qa(candidate_v2, qa, receipt_path=qa / "receipt.json")
+    assert panel.qa_evidence_inventory_findings(qa) == []
+    (qa / "native-qa-receipt.json").write_text("{}", encoding="utf-8")
+    assert any(
+        "native QA receipt" in finding
+        for finding in panel.qa_evidence_inventory_findings(qa)
+    )
+
+
+def test_qa_inventory_flags_external_manifest_path_and_pdf_locators(
+    candidate_v2: Path, tmp_path: Path
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    interaction = json.loads((qa / "interaction-results.json").read_text("utf-8"))
+    interaction["checks"][1]["evidence"] = {"external_manifest_path": "x.json"}
+    _write_json(qa / "interaction-results.json", interaction)
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert findings == ["interaction-results.json: external_manifest_path key present"]
+    (qa / "desktop-command" / "page.pdf").write_bytes(
+        b"%PDF-1.4\nstream\n" + zlib.compress(b"(D:\\x\\y)") + b"\nendstream\n"
+    )
+    assert any(
+        finding.startswith("desktop-command/page.pdf")
+        for finding in panel.qa_evidence_inventory_findings(qa)
+    )
+
+
+def _launcher_v2_fixture(
+    inputs: dict[str, Path], tmp_path: Path
+) -> tuple[Path, Path, str]:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa_v2(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
+    )
+    generation_id = str(published["generation_id"])
+    launcher_qa = _qa_v2(candidate, tmp_path / "launcher")
+    for name in panel.CAPTURES:
+        view = _capture_view(name)
+        fragment = f"#{view}" if view else ""
+        _edit_manifest(
+            launcher_qa,
+            name,
+            final_url=f"generations/{generation_id}/index.html{fragment}",
+            html_directory_name=inputs["output"].name,
+            target=f"index.html{fragment}",
+        )
+        if name in panel.LINT_CAPTURES:
+            lint_path = launcher_qa / name / "visual-lint.json"
+            lint = json.loads(lint_path.read_text(encoding="utf-8"))
+            lint["target"] = f"index.html{fragment}"
+            _write_json(lint_path, lint)
+    return inputs["output"] / "index.html", launcher_qa, generation_id
+
+
+def test_stable_launcher_qa_v2_relative_form_and_refusals(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    launcher, launcher_qa, generation_id = _launcher_v2_fixture(inputs, tmp_path)
+    result = panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+    assert result["all_passed"] is True
+    assert result["checks_total"] == 6
+    # A re-run is idempotent: the receipt it wrote beside the evidence is not scanned.
+    assert panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+
+    def refused(**changes: object) -> None:
+        _edit_manifest(launcher_qa, "mobile-risk", **changes)
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+
+    good = json.loads(
+        (launcher_qa / "mobile-risk" / "manifest.json").read_text("utf-8")
+    )
+    refused(final_url=f"generations/{'0' * 64}/index.html#risk")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(final_url=f"generations/{generation_id}/index.html")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(target=launcher.resolve().as_uri() + "#risk")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(
+        final_url=str(launcher.parent / "generations" / generation_id / "index.html")
+    )
+
+
+def _real_harness_candidate_args(candidate: Path) -> tuple[str, list[str]]:
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    cutoff = data["meta"]["portfolio_as_of"]
+    clock = data["meta"].get("source_clock")
+    extra = (
+        ["--expected-common-eod", clock["latest_common_eod"]]
+        if isinstance(clock, dict) and clock.get("latest_common_eod")
+        else []
+    )
+    return cutoff, extra
+
+
+def test_real_qa_harness_output_validates_and_publishes_without_locators(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F6 seam: the real browser_qa.mjs and interaction_qa.mjs write what validate_qa reads."""
+
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    cutoff, extra = _real_harness_candidate_args(candidate)
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = playwright_module
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    qa = tmp_path / "real-qa"
+    commands = [
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "browser_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(qa),
+            "--expected-calculation-cutoff",
+            cutoff,
+            *extra,
+        ],
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(qa / "interaction-results.json"),
+            "--exclude-candidates",
+            "true",
+            "--epoch-only",
+            "true",
+            "--expected-calculation-cutoff",
+            cutoff,
+            *extra,
+        ],
+    ]
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=900,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    manifests = sorted(qa.glob("*/manifest.json"))
+    lints = sorted(qa.glob("*/visual-lint.json"))
+    assert len(manifests) == 28
+    assert len(lints) == 27
+    for path in (*manifests, *lints):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert record["qa_manifest_version"] == 2
+        assert record["target"] == "index.html" + (
+            f"#{path.parent.name.split('-', 1)[1]}"
+            if path.parent.name != "direct-file"
+            else ""
+        )
+    assert panel.qa_evidence_inventory_findings(qa) == []
+
+    # The minimal fixture panel renders with visual-lint findings that have nothing to do
+    # with locators. Only the lint counts are cleared, on a copy; every locator field,
+    # PDF, screenshot and the interaction result stay exactly as the harness wrote them.
+    sealed = tmp_path / "sealed-qa"
+    shutil.copytree(qa, sealed)
+    for path in sealed.glob("*/visual-lint.json"):
+        lint = json.loads(path.read_text(encoding="utf-8"))
+        lint.update(finding_count=0, findings=[])
+        _write_json(path, lint)
+    qa = sealed
+
+    receipt = tmp_path / "logs" / "native-qa-receipt.json"
+    assert panel.validate_qa(candidate, qa, receipt_path=receipt)["all_passed"] is True
+    panel.validate_qa(candidate, qa)
+
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=_frozen_financial_receipt(
+            tmp_path, inputs, candidate, qa, financial
+        ),
+        **financial,
+    )
+    generation = inputs["output"] / "generations" / str(published["generation_id"])
+    assert panel.qa_evidence_inventory_findings(generation / "qa") == []
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    for sealed_file in (generation / "qa").rglob("*"):
+        if sealed_file.is_file() and sealed_file.suffix in {".json", ".txt", ".csv"}:
+            assert absolute_locator_offsets(sealed_file.read_bytes()) == [], sealed_file
+
+
 def _publish_with_freshness(
     inputs: dict[str, Path], tmp_path: Path, freshness: dict[str, object]
 ) -> dict[str, object]:
@@ -7363,6 +7744,16 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert renderer.count("prepareScrollableTableRegions();") >= 4
     assert 'options["exclude-candidates"] === "true"' in browser_qa
     assert 'scope: excludeCandidates ? "NON_CANDIDATE" : "FULL"' in browser_qa
+    assert "const QA_MANIFEST_VERSION = 2;" in browser_qa
+    assert "qa_manifest_version: QA_MANIFEST_VERSION" in browser_qa
+    assert "html_directory_name: path.basename(htmlDirectory)" in browser_qa
+    assert 'screenshot_path: "screenshot.png"' in browser_qa
+    assert 'console_events_path: "console-events.json"' in browser_qa
+    assert 'request_failures_path: "request-failures.json"' in browser_qa
+    assert 'pdf_path: capture.pdf ? "page.pdf" : null' in browser_qa
+    assert "final_url: finalUrl" in browser_qa
+    assert 'path.join(folder, "console-events.json"),' not in browser_qa
+    assert "final_url: page.url()" not in browser_qa
     assert 'options["exclude-candidates"] !== "true"' in interaction_qa
     assert 'scope: includeCandidates ? "FULL" : "NON_CANDIDATE"' in interaction_qa
     assert (

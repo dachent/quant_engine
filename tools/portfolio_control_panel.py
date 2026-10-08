@@ -21,6 +21,7 @@ import re
 import stat
 import sys
 import tempfile
+import zlib
 from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
@@ -13029,7 +13030,177 @@ def _png_dimensions(path: Path) -> tuple[int, int] | None:
     return (width, height) if width > 0 and height > 0 else None
 
 
-def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
+# QA evidence manifests: version 2 carries relative locators only (F6).
+
+QA_MANIFEST_VERSION: Final = 2
+_QA_CAPTURE_FILES: Final = {
+    "console_events_path": "console-events.json",
+    "request_failures_path": "request-failures.json",
+    "screenshot_path": "screenshot.png",
+}
+_QA_RECEIPT_NAMES: Final = frozenset(
+    {"qa-validation.json", "stable-launcher-validation.json"}
+)
+_QA_TEXT_SUFFIXES: Final = frozenset(
+    {".json", ".js", ".html", ".htm", ".css", ".txt", ".md", ".svg", ".csv"}
+)
+_QA_UNC_LOCATOR: Final = re.compile(rb"(?<![A-Za-z0-9_\\])(?:\\\\){1,2}[A-Za-z0-9_.$-]")
+_QA_FILE_SCHEME: Final = re.compile(rb"(?<![A-Za-z0-9_])file:[/\\]", re.IGNORECASE)
+_QA_SCHEME_OR_ROOT: Final = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|[/\\])")
+
+
+def _is_ascii_letter(value: int) -> bool:
+    return 65 <= value <= 90 or 97 <= value <= 122
+
+
+def _is_ascii_word(value: int) -> bool:
+    return _is_ascii_letter(value) or 48 <= value <= 57 or value == 95
+
+
+def qa_absolute_locator_offsets(data: bytes, *, unc: bool = True) -> list[int]:
+    r"""Offsets of physical locators in QA bytes.
+
+    Refuses a drive locator (``X:\`` or ``X:/``, including inside ``file:///X:/``), a
+    ``file:`` URL (``file:`` followed by a slash) and a UNC path that starts a token
+    (raw ``\\host`` or JSON-escaped). The drive letter must start a token, so
+    ``https://`` is not a hit. The producer owns this predicate and does not import the
+    acceptance validator.
+    """
+
+    offsets: set[int] = set()
+    for needle in (b":\\", b":/"):
+        start = 0
+        while True:
+            index = data.find(needle, start)
+            if index < 0:
+                break
+            start = index + 1
+            if index < 1 or not _is_ascii_letter(data[index - 1]):
+                continue
+            if index >= 2 and _is_ascii_word(data[index - 2]):
+                continue
+            if needle == b":/" and data[index + 2 : index + 3] == b"/":
+                continue
+            offsets.add(index - 1)
+    patterns = (_QA_FILE_SCHEME, _QA_UNC_LOCATOR) if unc else (_QA_FILE_SCHEME,)
+    for pattern in patterns:
+        offsets.update(match.start() for match in pattern.finditer(data))
+    return sorted(offsets)
+
+
+def _qa_pdf_streams(data: bytes) -> list[bytes]:
+    streams: list[bytes] = []
+    for match in re.finditer(rb"stream\r?\n", data):
+        end = data.find(b"endstream", match.end())
+        if end < 0:
+            continue
+        try:
+            streams.append(zlib.decompressobj().decompress(data[match.end() : end]))
+        except zlib.error:
+            continue
+    return streams
+
+
+def qa_evidence_inventory_findings(qa_dir: Path) -> list[str]:
+    """Name every absolute locator and misplaced receipt in one QA directory.
+
+    This is the producer-side scan. It covers the text files the validator scans, the
+    raw bytes and inflated streams of every PDF, the interaction result's retired
+    ``external_manifest_path`` key, and any native-QA receipt stored inside ``qa/``.
+    """
+
+    findings: list[str] = []
+    for path in sorted(qa_dir.rglob("*")):
+        relative = path.relative_to(qa_dir).as_posix()
+        if path.is_symlink():
+            findings.append(f"{relative}: is a link")
+            continue
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in _QA_TEXT_SUFFIXES or suffix == ".pdf":
+            data = path.read_bytes()
+            is_pdf = suffix == ".pdf"
+            # A UNC pattern is meaningless inside compressed binary, so PDFs get the
+            # drive and file: rules only.
+            hits = qa_absolute_locator_offsets(data, unc=not is_pdf)
+            if is_pdf:
+                for stream in _qa_pdf_streams(data):
+                    hits.extend(qa_absolute_locator_offsets(stream, unc=False))
+            if hits:
+                findings.append(f"{relative}: {len(hits)} absolute locator(s)")
+        if "/" not in relative and path.name.lower().startswith("native-qa"):
+            findings.append(f"{relative}: native QA receipt stored inside qa/")
+    interaction = qa_dir / "interaction-results.json"
+    if interaction.is_file() and not interaction.is_symlink():
+        try:
+            parsed = json.loads(interaction.read_bytes())
+        except ValueError:
+            parsed = None
+        checks = parsed.get("checks") if isinstance(parsed, dict) else None
+        for check in checks if isinstance(checks, list) else []:
+            evidence = check.get("evidence") if isinstance(check, dict) else None
+            if isinstance(evidence, dict) and "external_manifest_path" in evidence:
+                findings.append(
+                    "interaction-results.json: external_manifest_path key present"
+                )
+    return findings
+
+
+def _qa_scan_check(qa_dir: Path) -> dict[str, Any]:
+    findings = [
+        finding
+        for finding in qa_evidence_inventory_findings(qa_dir)
+        if finding.split(":", 1)[0] not in _QA_RECEIPT_NAMES
+    ]
+    return _check("QA evidence carries no absolute locator", not findings, findings)
+
+
+def _qa_record_version(record: Mapping[str, Any], label: str) -> int:
+    version = record.get("qa_manifest_version", 1)
+    if isinstance(version, bool) or version not in (1, QA_MANIFEST_VERSION):
+        raise ControlPanelValidationError(f"{label} has an unknown QA manifest version")
+    return int(version)
+
+
+def _qa_uniform_version(
+    manifests: Mapping[str, Mapping[str, Any]], lints: Mapping[str, Mapping[str, Any]]
+) -> int:
+    versions = {
+        _qa_record_version(record, f"{name} manifest")
+        for name, record in manifests.items()
+    } | {
+        _qa_record_version(record, f"{name} visual lint")
+        for name, record in lints.items()
+    }
+    if len(versions) != 1:
+        raise ControlPanelValidationError(
+            "QA evidence mixes manifest versions: "
+            + ", ".join(str(version) for version in sorted(versions))
+        )
+    return next(iter(versions))
+
+
+def _qa_capture_view(name: str) -> str:
+    return "" if name == "direct-file" else name.split("-", 1)[1]
+
+
+def _qa_relative_target(name: str) -> str:
+    view = _qa_capture_view(name)
+    return "index.html" + (f"#{view}" if view else "")
+
+
+def _qa_paths_are_fixed(name: str, manifest: Mapping[str, Any]) -> bool:
+    expected_pdf = "page.pdf" if name == "desktop-command" else None
+    return (
+        all(manifest.get(key) == value for key, value in _QA_CAPTURE_FILES.items())
+        and manifest.get("pdf_path") == expected_pdf
+    )
+
+
+def validate_qa(
+    candidate_dir: Path, qa_dir: Path, *, receipt_path: Path | None = None
+) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     candidate_record_path = candidate_dir / "candidate.json"
     candidate_record = _load_json(candidate_record_path, "candidate record")
@@ -13042,6 +13213,15 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
     request_counts: dict[str, int] = {}
     target_matches: dict[str, bool] = {}
     candidate_bindings: dict[str, bool] = {}
+    manifests = {
+        name: _load_json(qa_dir / name / "manifest.json", f"{name} manifest")
+        for name in CAPTURES
+    }
+    lints = {
+        name: _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
+        for name in LINT_CAPTURES
+    }
+    qa_version = _qa_uniform_version(manifests, lints)
     for name in CAPTURES:
         capture = qa_dir / name
         screenshot = capture / "screenshot.png"
@@ -13052,8 +13232,19 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
         request_counts[name] = len(
             _json_array(capture / "request-failures.json", f"{name} request evidence")
         )
-        manifest = _load_json(capture / "manifest.json", f"{name} manifest")
-        target_matches[name] = candidate_dir.name in str(manifest.get("target", ""))
+        manifest = manifests[name]
+        if qa_version == 1:
+            target_matches[name] = candidate_dir.name in str(manifest.get("target", ""))
+        else:
+            relative_target = _qa_relative_target(name)
+            target_matches[name] = (
+                manifest.get("html_directory_name") == candidate_dir.name
+                and manifest.get("target") == relative_target
+                and manifest.get("final_url") == relative_target
+                and lints.get(name, {"target": relative_target}).get("target")
+                == relative_target
+                and _qa_paths_are_fixed(name, manifest)
+            )
         candidate_bindings[name] = (
             manifest.get("candidate_record_sha256") == candidate_record_sha256
             and manifest.get("artifact_sha256") == candidate_artifact_sha256
@@ -13087,10 +13278,11 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
             ),
         ]
     )
+    if qa_version == QA_MANIFEST_VERSION:
+        checks.append(_qa_scan_check(qa_dir))
     lint_counts: dict[str, int] = {}
     for name in LINT_CAPTURES:
-        lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
-        count = lint.get("finding_count")
+        count = lints[name].get("finding_count")
         if not isinstance(count, int):
             raise ControlPanelValidationError(f"{name} visual lint count is invalid")
         lint_counts[name] = count
@@ -13139,7 +13331,7 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
             console_counts["direct-file"] == 0
             and request_counts["direct-file"] == 0
             and screenshot_dimensions["direct-file"] is not None,
-            "file:// evidence",
+            "direct-file capture evidence",
         )
     )
     pdf = qa_dir / "desktop-command" / "page.pdf"
@@ -13163,7 +13355,16 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
     }
     if not result["all_passed"]:
         raise ControlPanelValidationError("browser QA failed")
-    _write_exact(qa_dir / "qa-validation.json", canonical_json_bytes(result))
+    if receipt_path is None:
+        _write_exact(qa_dir / "qa-validation.json", canonical_json_bytes(result))
+    else:
+        resolved_qa = qa_dir.resolve()
+        resolved_receipt = receipt_path.resolve()
+        if resolved_qa in (resolved_receipt, *resolved_receipt.parents):
+            raise ControlPanelValidationError(
+                "the native QA receipt must be written outside the QA directory"
+            )
+        _write_exact(receipt_path, canonical_json_bytes(result))
     return result
 
 
@@ -13192,17 +13393,52 @@ def validate_stable_launcher_qa(
     console_counts: dict[str, int] = {}
     request_counts: dict[str, int] = {}
     screenshot_sizes: dict[str, int] = {}
+    launcher_manifests = {
+        name: _load_json(qa_dir / name / "manifest.json", f"{name} manifest")
+        for name in CAPTURES
+    }
+    launcher_lints = {
+        name: _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
+        for name in LINT_CAPTURES
+    }
+    qa_version = _qa_uniform_version(launcher_manifests, launcher_lints)
+    if qa_version == QA_MANIFEST_VERSION:
+        checks.append(_qa_scan_check(qa_dir))
     for name in CAPTURES:
         capture = qa_dir / name
-        manifest = _load_json(capture / "manifest.json", f"{name} manifest")
+        manifest = launcher_manifests[name]
         target = str(manifest.get("target", ""))
         final_url = str(manifest.get("final_url", ""))
-        targets[name] = target.split("#", 1)[0] == launcher_url
         target_fragment = target.split("#", 1)[1] if "#" in target else ""
         final_fragment = final_url.split("#", 1)[1] if "#" in final_url else ""
-        resolutions[name] = (
-            expected_final_fragment in final_url and target_fragment == final_fragment
-        )
+        if qa_version == 1:
+            targets[name] = target.split("#", 1)[0] == launcher_url
+            resolutions[name] = (
+                expected_final_fragment in final_url
+                and target_fragment == final_fragment
+            )
+        else:
+            target_path = target.split("#", 1)[0]
+            final_path = final_url.split("#", 1)[0]
+            relative_only = not any(
+                _QA_SCHEME_OR_ROOT.match(value) for value in (target_path, final_path)
+            )
+            directory_name = manifest.get("html_directory_name")
+            targets[name] = (
+                relative_only
+                and target_path != ""
+                and (launcher_path.parent / target_path).resolve().as_uri()
+                == launcher_url
+                and target_fragment == _qa_capture_view(name)
+                and isinstance(directory_name, str)
+                and directory_name != ""
+                and _qa_paths_are_fixed(name, manifest)
+            )
+            resolutions[name] = (
+                relative_only
+                and final_path == f"generations/{expected_generation_id}/index.html"
+                and target_fragment == final_fragment
+            )
         console_counts[name] = len(
             _json_array(capture / "console-events.json", f"{name} console evidence")
         )
@@ -13240,8 +13476,7 @@ def validate_stable_launcher_qa(
     )
     lint_counts: dict[str, int] = {}
     for name in LINT_CAPTURES:
-        lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
-        count = lint.get("finding_count")
+        count = launcher_lints[name].get("finding_count")
         if not isinstance(count, int):
             raise ControlPanelValidationError(f"{name} visual lint count is invalid")
         lint_counts[name] = count
@@ -14117,6 +14352,13 @@ def _parser() -> argparse.ArgumentParser:
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
+    qa.add_argument(
+        "--receipt",
+        type=Path,
+        help="write the native QA receipt here, outside --qa-dir (default: inside it)",
+    )
+    qa_inventory = commands.add_parser("qa-inventory")
+    qa_inventory.add_argument("--qa-dir", type=Path, required=True)
     launcher_qa = commands.add_parser("launcher-qa")
     launcher_qa.add_argument("--launcher", type=Path, required=True)
     launcher_qa.add_argument("--qa-dir", type=Path, required=True)
@@ -14271,7 +14513,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "qa":
-            result = validate_qa(args.candidate_dir, args.qa_dir)
+            result = validate_qa(
+                args.candidate_dir, args.qa_dir, receipt_path=args.receipt
+            )
+        elif args.command == "qa-inventory":
+            findings = qa_evidence_inventory_findings(args.qa_dir)
+            result = {"all_passed": not findings, "findings": findings}
+            if findings:
+                raise ControlPanelValidationError(
+                    "QA inventory scan failed: " + "; ".join(findings)
+                )
         elif args.command == "launcher-qa":
             result = validate_stable_launcher_qa(
                 args.launcher, args.qa_dir, args.expected_generation_id

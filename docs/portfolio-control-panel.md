@@ -320,6 +320,15 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
+Version-2 capture manifests (`qa_manifest_version: 2`, also stamped on each
+`visual-lint.json`) are relative to `--html`: `target` and `final_url` are
+`index.html#<view>` (or `generations/<id>/index.html#<view>` through the stable
+launcher), the four `*_path` fields are bare file names inside the capture folder,
+and `html_directory_name` names the directory that held `--html`. No sealed QA file
+may carry a drive letter, `file:` URL or UNC path; `portfolio_control_panel.py qa`
+refuses it, writes its receipt where `--receipt` says (outside `--qa-dir`), and
+`qa-inventory --qa-dir` repeats the scan, including PDF streams, on a sealed tree.
+
 Acceptance requires all nine views at 1440×900, 1024×768, and 390×844 plus a
 direct-file capture; no console or request failures; clean visual lint across
 all 27 viewport/view combinations; PDF export; nine-view navigation; factor
