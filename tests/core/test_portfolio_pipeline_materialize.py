@@ -4595,6 +4595,70 @@ def test_production_spec_refuses_a_prepared_root_without_a_readable_run_receipt(
     assert inputs.verifier_calls == []
 
 
+def _ledger_callers(state_root: Path) -> list[str]:
+    """The caller of every entry in the verifier's own per-call ledger."""
+
+    ledger = state_root / "financial-verification-ledger"
+    if not ledger.is_dir():
+        return []
+    return [
+        json.loads(entry.read_bytes())["caller"] for entry in sorted(ledger.iterdir())
+    ]
+
+
+def test_production_spec_verifier_call_is_recorded_under_its_own_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real verifier, not the stand-in, records the production-spec caller.
+
+    The fixture holds no real financial artifacts, so the real verifier refuses it; its
+    ledger is written on failure too, which is what makes a refused call countable.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real = outcomes.validate_financial_outcomes
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    monkeypatch.setattr(outcomes, "validate_financial_outcomes", real)
+
+    with pytest.raises(outcomes.FinancialOutcomeError):
+        _build_production_spec(inputs, inputs.state_root)
+
+    assert _ledger_callers(inputs.state_root) == ["production-spec"]
+
+
+def test_semantic_verifier_call_is_recorded_under_its_own_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`semantic --financial-spec` names itself in the verifier's per-call ledger.
+
+    The epoch-rebind fixture's own prepared root carries no panel QA artifacts (it
+    exists only to prove epoch/root rebinding), so the semantic reconciliation itself
+    is exercised against the ordinary `_fixture` output, which does carry them; the
+    financial spec handed to it is the real completed production spec, naming the
+    same retained-cache `state_root` the production-spec call above already wrote to.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real = outcomes.validate_financial_outcomes
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    built = _build_production_spec(inputs, inputs.state_root)
+    assert _ledger_callers(inputs.state_root) == []
+
+    recipe, output_root = _fixture(tmp_path / "semantic-check")
+    monkeypatch.setattr(outcomes, "validate_financial_outcomes", real)
+
+    with pytest.raises(outcomes.FinancialOutcomeError):
+        materializer.semantic(
+            recipe,
+            output_root / "evidence" / "label-check.json",
+            Path(built["spec"]),
+        )
+
+    assert _ledger_callers(inputs.state_root) == ["materialize.semantic"]
+
+
 def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
     """The gate must read the evaluation date, not the financial cutoff, as the release date.
 
