@@ -20,7 +20,16 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import sys
-from typing import Any, Callable, Final, Iterable, Mapping, NamedTuple, Sequence
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Final,
+    Iterable,
+    Mapping,
+    NamedTuple,
+    Sequence,
+)
 from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
@@ -1771,6 +1780,72 @@ def _capital_anchor_flow(anchor: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _usd_nav_value(item: Mapping[str, Any]) -> Decimal | None:
+    amount = item.get("nav")
+    if (
+        not isinstance(amount, Mapping)
+        or amount.get("status") != "AVAILABLE"
+        or amount.get("currency") != "USD"
+    ):
+        return None
+    return _decimal(amount.get("value"), "nav.value")
+
+
+def _last_admitted_observation_of_value(
+    catalog: Mapping[str, Any],
+    account_id: str,
+    nav: Sequence[Mapping[str, Any]],
+    authoritative_intervals: Mapping[tuple[str, str, str], Sequence[tuple[date, date]]],
+    baseline_as_of: date,
+) -> Mapping[str, Any] | None:
+    """N59: the ledger's last admitted observation of an account's current NAV value.
+
+    A retained-excluded account whose current NAV is a legacy CSV point is dated by
+    the frozen ledger's own observations of that value: the ledger rows after the
+    legacy date that carry the same USD value without a different value between them
+    and fall in an AUTHORITATIVE account-live NAV admission window.  The ledger's
+    rows are account-level and may be unmapped to a strategy (the assignment ended),
+    so the strategy mapping is not required.  The value is the legacy value; only its
+    date moves to the last such observation.  No qualifying row means no change.
+    """
+
+    points = [
+        item
+        for item in nav
+        if item.get("account_id") == account_id
+        and _usd_nav_value(item) is not None
+        and _date(item["as_of_date"], "nav.as_of_date") <= baseline_as_of
+    ]
+    if not points:
+        return None
+    current = max(points, key=lambda item: _date(item["as_of_date"], "nav.as_of_date"))
+    if current.get("source_key") == "provider-ledger":
+        return None
+    current_day = _date(current["as_of_date"], "nav.as_of_date")
+    current_value = _usd_nav_value(current)
+    by_day: dict[date, list[Mapping[str, Any]]] = defaultdict(list)
+    for item in _objects(catalog.get("nav_observations"), "provider-ledger.nav"):
+        if item.get("account_id") != account_id or _usd_nav_value(item) is None:
+            continue
+        day = _date(item.get("as_of_date"), "nav_observations.as_of_date")
+        provider_id = _text(item.get("provider_id"), "nav_observations.provider_id")
+        if not current_day < day <= baseline_as_of or not any(
+            start <= day <= end
+            for start, end in authoritative_intervals.get(
+                (provider_id, "nav_observations", account_id), ()
+            )
+        ):
+            continue
+        by_day[day].append(item)
+    carried: Mapping[str, Any] | None = None
+    for day in sorted(by_day):
+        values = {_usd_nav_value(item) for item in by_day[day]}
+        if values != {current_value}:
+            break
+        carried = by_day[day][0]
+    return carried
+
+
 def _provider_ledger_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
@@ -1779,6 +1854,7 @@ def _provider_ledger_facts(
     legacy_transactions: Sequence[Mapping[str, Any]],
     legacy_securities: Sequence[Mapping[str, Any]],
     baseline_as_of: date,
+    retained_excluded_accounts: Collection[str] = (),
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -1922,6 +1998,26 @@ def _provider_ledger_facts(
         if prior is not None and prior.get("nav") != item.get("nav"):
             conflicts += 1
         nav_by_key[key] = item
+    for account_id in sorted(retained_excluded_accounts):
+        carried = _last_admitted_observation_of_value(
+            catalog,
+            account_id,
+            list(nav_by_key.values()),
+            authoritative_intervals,
+            baseline_as_of,
+        )
+        if carried is not None:
+            record = dict(carried)
+            record.update(
+                {
+                    "provider": _text(
+                        record.get("provider_id"), "nav_observations.provider_id"
+                    ).upper(),
+                    "source_key": "provider-ledger",
+                }
+            )
+            nav_by_key[(account_id, str(record["as_of_date"]))] = record
+            provider_nav.append(record)
 
     def replace_accounts(
         legacy: Sequence[Mapping[str, Any]], provider: Sequence[Mapping[str, Any]]
@@ -4273,6 +4369,30 @@ def _hwm_policy_exclusions() -> dict[str, date]:
         raise BaselineValidationError(str(exc)) from exc
 
 
+def _retained_excluded_accounts(
+    assignments: Sequence[Mapping[str, Any]], valuation_date: date
+) -> set[str]:
+    """Accounts a retained-excluded strategy keeps, as ``_strategy_members`` selects."""
+
+    excluded = {
+        strategy_id
+        for strategy_id, effective in _hwm_policy_exclusions().items()
+        if effective <= valuation_date
+    }
+    memberships = _mapped_memberships(assignments)
+    owned_elsewhere = {
+        item.account_id
+        for item in memberships
+        if item.strategy_id not in excluded
+        and _in_window(valuation_date, item.start, item.end)
+    }
+    return {
+        item.account_id
+        for item in memberships
+        if item.strategy_id in excluded and item.account_id not in owned_elsewhere
+    }
+
+
 def _hwm_expected_keyspace(
     allocations: Sequence[Mapping[str, Any]],
     anchor: date,
@@ -5148,6 +5268,7 @@ def build_catalog(
             transactions,
             securities,
             as_of,
+            retained_excluded_accounts=_retained_excluded_accounts(assignments, as_of),
         )
         provider_admissions = _objects(
             provider_catalog.get("admissions"), "provider-ledger.admissions"
