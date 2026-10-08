@@ -4413,8 +4413,10 @@ def _indexed_generation(
 ) -> Path | None:
     """The generation a previous run produced from these inputs, if it survives.
 
-    Returns the directory only when it still verifies against itself, so a
-    partially written or edited artifact re-solves rather than being served.
+    Returns the directory only when it verifies against itself. An absent
+    generation is a miss and is solved; a present but invalid one (an edited
+    result or generation.json) is refused before any build. Candidates are
+    renamed into place, so a partial candidate never exists to re-solve.
     """
 
     pointer = cache_root / ".decomposition-index" / f"{key}.json"
@@ -4437,6 +4439,10 @@ def _indexed_generation(
     candidate = (root / generation_id).resolve()
     if not candidate.is_relative_to(root):
         return None
+    # An absent generation is a miss. Anything present but invalid is refused
+    # here, before any numerical work, and is left in place for diagnosis.
+    if not os.path.lexists(candidate):
+        return None
     result = candidate / "decomposition.json"
     manifest_path = candidate / "generation.json"
     if (
@@ -4447,13 +4453,19 @@ def _indexed_generation(
         or manifest_path.is_symlink()
         or not manifest_path.is_file()
     ):
-        return None
+        raise DecompositionError(
+            "retained generation differs from the exact build its index records"
+        )
     try:
         manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise DecompositionError(
+            "retained generation.json differs from the exact build its index records"
+        ) from exc
     if manifest.generation_id != generation_id:
-        return None
+        raise DecompositionError(
+            "retained generation.json differs from the exact build its index records"
+        )
     requested_spec = [
         item
         for item in manifest.artifacts
@@ -4491,7 +4503,9 @@ def _indexed_generation(
         or index["result_sha256"] != declared.sha256
         or index["result_size_bytes"] != declared.size_bytes
     ):
-        return None
+        raise DecompositionError(
+            "retained decomposition.json differs from the exact build its index records"
+        )
     return candidate
 
 

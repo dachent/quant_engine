@@ -1827,7 +1827,11 @@ def _verify_candidate(
 def _indexed_generation(
     cache_root: Path, key: str, requested_spec_bytes: bytes
 ) -> Path | None:
-    """Return only a manifest- and result-verified retained candidate."""
+    """Return only a manifest- and result-verified retained candidate.
+
+    An absent generation is a miss; a present but invalid one is refused before
+    any build.
+    """
 
     pointer = cache_root / ".correlation-index" / f"{key}.json"
     if pointer.is_symlink() or not pointer.is_file():
@@ -1849,6 +1853,10 @@ def _indexed_generation(
     candidate = (root / generation_id).resolve()
     if not candidate.is_relative_to(root):
         return None
+    # An absent generation is a miss. Anything present but invalid is refused
+    # here, before any numerical work, and is left in place for diagnosis.
+    if not os.path.lexists(candidate):
+        return None
     result = candidate / "correlation.json"
     manifest_path = candidate / "generation.json"
     if (
@@ -1859,13 +1867,19 @@ def _indexed_generation(
         or manifest_path.is_symlink()
         or not manifest_path.is_file()
     ):
-        return None
+        raise CorrelationError(
+            "retained generation differs from the exact build its index records"
+        )
     try:
         manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise CorrelationError(
+            "retained generation.json differs from the exact build its index records"
+        ) from exc
     if manifest.generation_id != generation_id:
-        return None
+        raise CorrelationError(
+            "retained generation.json differs from the exact build its index records"
+        )
     requested_spec = [
         item
         for item in manifest.artifacts
@@ -1900,7 +1914,9 @@ def _indexed_generation(
         or index["result_sha256"] != declared.sha256
         or index["result_size_bytes"] != declared.size_bytes
     ):
-        return None
+        raise CorrelationError(
+            "retained correlation.json differs from the exact build its index records"
+        )
     return candidate
 
 
