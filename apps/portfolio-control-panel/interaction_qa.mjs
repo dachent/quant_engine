@@ -470,7 +470,8 @@ checks.push(check(
 const D8_STATUS_WORDS = /(PUBLISHED|PUBLICATION_READY|VERIFIED|READY|RELEASED|ACCEPTED|AVAILABLE|APPROVED|CERTIFIED|CLEARED|PASSED)/;
 const D8_BINDING_NOTE = "stage input, hash-bound at build";
 const D8_MANIFEST_FIRST_NOTE = "Recorded when this panel was built, before release. These are the epoch manifest's authority fields, not the release state; the release state is in the coordinated release record, not in this panel.";
-await page.locator('[data-nav="data"]').click();
+const dataNav = page.locator('[data-nav="data"]').first();
+if (await dataNav.count()) await dataNav.click();
 const inputBindingsText = await page.locator("#input-bindings").innerText();
 const inputBindingsScoreCount = await page.locator("#input-bindings .validation-score").count();
 const inputBindingsGenerationIds = [
