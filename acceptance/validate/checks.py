@@ -8438,6 +8438,7 @@ _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
     "twr.strategy": ("B2", "B3"),
     "mwr.account": (),
     "mwr.strategy": (),
+    "invested_capital.strategy.cutoff": ("B7", "N36"),
     "date.source_last_observation": ("C5",),
     COVERAGE_END_METRIC: ("N56",),
 }
@@ -8446,7 +8447,9 @@ _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
 def metric_unit(metric_id: str, declared: Any) -> str:
     if isinstance(declared, str) and declared:
         return declared
-    if metric_id.startswith("capital.") or metric_id == "flows.account.net":
+    if metric_id.startswith(("capital.", "invested_capital.")) or (
+        metric_id == "flows.account.net"
+    ):
         return "USD"
     if metric_id.startswith(("twr.", "mwr.", "weight.")):
         return "ratio"
@@ -8588,6 +8591,28 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         row.get("end"),
                         PANEL,
                         f"$.account_manifest.rows[{position}].current_value",
+                    )
+                )
+    elif metric_id == "invested_capital.strategy.cutoff":
+        # N36/B7: the report's governed invested capital of one strategy. An unpublished
+        # amount is no view (NOT_READY), never a value that differs from the oracle.
+        for position, row in enumerate(
+            rows(node(report, "invested_capital"), "current_by_strategy")
+        ):
+            if (
+                row.get("strategy_id") == entity
+                and to_decimal(row.get("invested_capital_usd")) is not None
+            ):
+                out.append(
+                    Observed(
+                        "report:invested_capital.current_by_strategy.invested_capital_usd",
+                        row.get("invested_capital_usd"),
+                        None,
+                        None,
+                        None,
+                        REPORT,
+                        f"$.invested_capital.current_by_strategy[{position}]"
+                        ".invested_capital_usd",
                     )
                 )
     elif metric_id == "weight.strategy.cutoff":
@@ -9229,15 +9254,17 @@ def recompute_metric(
     strategy_level = metric_id in ("twr.strategy", "mwr.strategy")
     # L6a: a blocked epoch the census confirms is outside the account's TWR and MWR
     # (R2) and publishes no dates or cash flows, so it would only make the account
-    # recompute decline. The strategy-level recompute is not changed (l0-design 5.1
-    # skips account-level views only).
+    # recompute decline. N29: a strategy's MWR pools the same funded epochs and the
+    # oracle leaves the same blocked epochs out (R2), so ``mwr.strategy`` skips them
+    # too. ``twr.strategy`` reads only ``strategy_returns``, so it needs no skip.
     blocked = blocked_epochs(ctx)
+    skip_blocked = metric_id != "twr.strategy"
     epochs = sorted(
         (
             (position, row)
             for position, row in twr_rows(ctx)
             if str(row.get("strategy_id" if strategy_level else "account_id")) == entity
-            and (strategy_level or not blocked.skips_report_row(row))
+            and not (skip_blocked and blocked.skips_report_row(row))
         ),
         key=lambda item: str(item[1].get("effective_start")),
     )
