@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 function args(argv) {
   const parsed = {};
@@ -123,6 +123,32 @@ const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const baseUrl = pathToFileURL(html).href;
+const htmlDirectory = path.dirname(html);
+const QA_MANIFEST_VERSION = 2;
+
+// Sealed QA evidence carries no physical locator (F6). Every path a manifest records is
+// relative to the capture folder or to the directory of --html; the absolute file:/// URL
+// exists only as the navigation target handed to the browser and in the unsealed run log.
+function relativeLocator(absolutePath) {
+  const relative = path.relative(htmlDirectory, absolutePath).split(path.sep).join("/");
+  if (
+    relative === ""
+    || relative === ".."
+    || relative.startsWith("../")
+    || path.isAbsolute(relative)
+    || path.win32.isAbsolute(relative)
+    || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(relative)
+  ) {
+    throw new Error(`QA locator escapes the --html directory: ${relative}`);
+  }
+  return relative;
+}
+
+function sealedFinalUrl(rawUrl) {
+  const url = new URL(rawUrl);
+  if (url.protocol !== "file:") throw new Error(`QA final_url is not a file: URL: ${url.protocol}`);
+  return `${relativeLocator(fileURLToPath(url))}${url.hash}`;
+}
 const candidateRecordBytes = await readFile(path.join(path.dirname(html), "candidate.json"));
 const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
 const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
@@ -244,8 +270,10 @@ try {
     page.on("console", (message) => consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }));
     page.on("pageerror", (error) => consoleEvents.push({ type: "pageerror", text: error.message, location: {} }));
     page.on("requestfailed", (request) => requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
-    const target = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
-    await page.goto(target, { waitUntil: "load", timeout: QA_PAGE_TIMEOUT_MS });
+    const navigationUrl = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
+    const target = `${path.basename(html)}${capture.view ? `#${capture.view}` : ""}`;
+    console.log(`QA capture ${capture.name}: ${navigationUrl}`);
+    await page.goto(navigationUrl, { waitUntil: "load", timeout: QA_PAGE_TIMEOUT_MS });
     await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
     const sourceClockDisplay = sourceClockEvidence(
       dashboardData.meta?.source_clock,
@@ -317,19 +345,22 @@ try {
     }
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
     if (capture.pdf) await page.pdf({ path: path.join(folder, "page.pdf"), printBackground: true, preferCSSPageSize: true });
+    const finalUrl = sealedFinalUrl(page.url());
     const manifest = {
       artifact_sha256: candidateRecord.artifact_sha256,
       candidate_record_sha256: candidateRecordSha256,
       console_event_count: consoleEvents.length,
-      console_events_path: path.join(folder, "console-events.json"),
+      console_events_path: "console-events.json",
       device_scale_factor: 1,
       generated_at: new Date().toISOString(),
-      pdf_path: capture.pdf ? path.join(folder, "page.pdf") : null,
+      html_directory_name: path.basename(htmlDirectory),
+      pdf_path: capture.pdf ? "page.pdf" : null,
+      qa_manifest_version: QA_MANIFEST_VERSION,
       request_failure_count: requestFailures.length,
-      request_failures_path: path.join(folder, "request-failures.json"),
-      screenshot_path: path.join(folder, "screenshot.png"),
+      request_failures_path: "request-failures.json",
+      screenshot_path: "screenshot.png",
       target,
-      final_url: page.url(),
+      final_url: finalUrl,
       epoch_display: epochDisplay,
       source_clock_display: sourceClockDisplay,
       title: await page.title(),
@@ -342,7 +373,7 @@ try {
     await writeFile(path.join(folder, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     if (capture.lint) {
       const findings = await visualLint(page);
-      const lint = { finding_count: findings.length, findings, generated_at: new Date().toISOString(), target, tool: "visual_lint", viewport: capture.viewport };
+      const lint = { finding_count: findings.length, findings, generated_at: new Date().toISOString(), qa_manifest_version: QA_MANIFEST_VERSION, target, tool: "visual_lint", viewport: capture.viewport };
       await writeFile(path.join(folder, "visual-lint.json"), `${JSON.stringify(lint, null, 2)}\n`, "utf8");
     }
     await page.close();
