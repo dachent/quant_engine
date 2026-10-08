@@ -1577,3 +1577,72 @@ def test_the_gate_the_freshness_producer_writes_passes_the_pipeline_gate(
     assert prepared["release_state"] == "PREPARED"
     with pytest.raises(PipelineValidationError, match="operational date"):
         execute_pipeline(_parse(raw), evaluation_date=date(2026, 10, 5))
+
+
+def _verification_callers(state_root: Path) -> list[str]:
+    ledger = state_root / "financial-verification-ledger"
+    return sorted(
+        json.loads(path.read_bytes())["caller"] for path in ledger.glob("*.json")
+    )
+
+
+def test_post_build_semantic_gate_labels_its_hidden_verifier_call(
+    tmp_path: Path,
+) -> None:
+    """M7b: the verifier call inside the gate is counted where it happens."""
+
+    raw, _, _, _ = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    gate = tmp_path / "post-build-semantic.json"
+    gate.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": AS_OF.isoformat(),
+                "checks": {},
+                "evaluated_on": AS_OF.isoformat(),
+                "financial_outcomes_sha256": "0" * 64,
+                "release_commit": COMMIT,
+                "release_generations": {},
+                "schema_version": 1,
+                "unwaived_blocking_exceptions": [],
+                "verdict": "PASS",
+            }
+        )
+    )
+
+    with pytest.raises(PipelineValidationError, match="financial outcomes failed"):
+        pipeline_module._verify_post_build_semantic_gate(spec, gate)
+
+    assert _verification_callers(spec.state_root) == [
+        "pipeline.post-build-semantic-gate"
+    ]
+
+
+def test_executable_product_check_labels_its_hidden_verifier_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M7b: the second hidden verifier call is counted under its own label."""
+
+    raw, _, _, _ = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    authority = {"hwm_input_authority": {"state": "AVAILABLE"}, "raw": {}}
+    # The upstream authority readers are replaced; the verifier call under test is not.
+    monkeypatch.setattr(
+        pipeline_module, "_financial_mvp_product_authority", lambda _spec: authority
+    )
+    monkeypatch.setattr(pipeline_module, "_current_product_authority", lambda _a: True)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_financial_mvp_summary",
+        lambda _a, _s=None: {"ready_for_execution": True},
+    )
+    monkeypatch.setattr(
+        pipeline_module, "_requires_production_product", lambda _s: True
+    )
+
+    with pytest.raises(PipelineValidationError, match="financial outcomes failed"):
+        pipeline_module._require_executable_product(spec)
+
+    assert _verification_callers(spec.state_root) == [
+        "pipeline.require-executable-product"
+    ]

@@ -6,12 +6,15 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date
+from collections.abc import Iterator, Mapping
+import contextlib
+from datetime import UTC, date, datetime
 import hashlib
 from itertools import product
 import json
+import os
 from pathlib import Path
+import re
 from typing import Any, cast
 
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
@@ -575,6 +578,118 @@ def verify_selected_hwm_generation(
     return {"portfolio-calendars", "portfolio-fx-rates", "portfolio-security-master"}
 
 
+_VERIFICATION_LEDGER_DIRECTORY = "financial-verification-ledger"
+_CALLER_LABEL = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_WORK_COUNTER_KEYS = (
+    "model_fit_calls",
+    "grid_search_calls",
+    "correlation_build_calls",
+    "full_rederivation_count",
+    "receipt_reuse_count",
+)
+
+
+def _call_record(
+    kind: str, node_ids: list[str], calculation_identity: str, outcome: str
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "node_ids": node_ids,
+        "calculation_identity": calculation_identity,
+        "outcome": outcome,
+        "model_fit_calls_static": 0,
+        "model_fit_calls_dynamic": 0,
+        "grid_search_calls": 0,
+        "correlation_build_calls": 0,
+    }
+
+
+def _spec_identity(spec: Any) -> str:
+    """Name the verified specification, falling back to its bound node digests."""
+
+    declared = getattr(spec, "spec_sha256", None)
+    if isinstance(declared, str) and re.fullmatch(r"[0-9a-f]{64}", declared):
+        return declared
+    rows = sorted(
+        (
+            str(getattr(node, "node_id", "")),
+            str(
+                getattr(node, "sha256", None)
+                or getattr(node, "manifest_sha256", None)
+                or ""
+            ),
+        )
+        for node in getattr(spec, "nodes", ())
+    )
+    return hashlib.sha256(canonical_json_bytes([list(row) for row in rows])).hexdigest()
+
+
+def _write_verification_ledger(
+    spec: Any,
+    caller: str,
+    work_counters: Mapping[str, int],
+    calls: list[dict[str, Any]],
+) -> None:
+    """Record one verifier invocation where it happens; one create-only file each."""
+
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(state_root, Path):
+        return
+    spec_sha256 = _spec_identity(spec)
+    now = datetime.now(UTC)
+    entry = {
+        "schema_version": 1,
+        "caller": caller,
+        "spec_sha256": spec_sha256,
+        "recorded_at": now.isoformat(),
+        "pid": os.getpid(),
+        "work_counters": {key: work_counters[key] for key in _WORK_COUNTER_KEYS},
+        "model_fit_calls_by_estimator": {
+            "static": sum(row["model_fit_calls_static"] for row in calls),
+            "dynamic": sum(row["model_fit_calls_dynamic"] for row in calls),
+        },
+        "calls": [
+            {**row, "node_ids": sorted(row["node_ids"])}
+            for row in sorted(calls, key=lambda row: row["calculation_identity"])
+        ],
+    }
+    directory = state_root.resolve() / _VERIFICATION_LEDGER_DIRECTORY
+    if directory.is_symlink():
+        raise FinancialOutcomeError("financial verification ledger is linked")
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = (
+        f"{now.strftime('%Y%m%dT%H%M%S%f')}-{os.getpid()}-{caller}-{spec_sha256[:16]}"
+    )
+    content = canonical_json_bytes(entry)
+    for attempt in range(1000):
+        path = directory / (
+            f"{stem}.json" if attempt == 0 else f"{stem}-{attempt}.json"
+        )
+        try:
+            with path.open("xb") as handle:
+                handle.write(content)
+            return
+        except FileExistsError:
+            continue
+    raise FinancialOutcomeError("financial verification ledger name is exhausted")
+
+
+@contextlib.contextmanager
+def _verification_ledger(
+    spec: Any, caller: str
+) -> Iterator[tuple[dict[str, int], list[dict[str, Any]]]]:
+    """Yield live counters and call records; the ledger is written even on failure."""
+
+    if _CALLER_LABEL.fullmatch(caller) is None:
+        raise FinancialOutcomeError("financial verification caller label is invalid")
+    work_counters = {key: 0 for key in _WORK_COUNTER_KEYS}
+    calls: list[dict[str, Any]] = []
+    try:
+        yield work_counters, calls
+    finally:
+        _write_verification_ledger(spec, caller, work_counters, calls)
+
+
 def _replay_receipt_path(spec: Any, calculation_identity: str) -> Path | None:
     """Locate the existing retained state surface without coupling to run roots."""
 
@@ -656,6 +771,7 @@ def _replay_model(
     *,
     source_root: Path | None = None,
     work_counters: dict[str, int] | None = None,
+    calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Delegate numerical replay to the existing domain producer, once per file."""
     artifact_bytes = _verified_file(artifact.path, artifact.sha256, artifact.size_bytes)
@@ -770,22 +886,37 @@ def _replay_model(
     if _read_replay_receipt(receipt_path, receipt):
         if work_counters is not None:
             work_counters["receipt_reuse_count"] += 1
+        if calls is not None:
+            calls.append(
+                _call_record(
+                    kind, [artifact.node_id], calculation_identity, "RECEIPT_REUSED"
+                )
+            )
         return cast(dict[str, Any], json.loads(artifact_bytes.decode("utf-8")))
+    record = _call_record(kind, [artifact.node_id], calculation_identity, "REDERIVED")
+    if calls is not None:
+        calls.append(record)
     if work_counters is not None:
         work_counters["full_rederivation_count"] += 1
-    if kind == "DECOMPOSITION" and work_counters is not None:
+    if kind == "DECOMPOSITION":
         original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
         original_fit: Any = portfolio_decomposition._fit
 
         def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
-            work_counters["model_fit_calls"] += 1
+            record["model_fit_calls_dynamic"] += 1
+            if work_counters is not None:
+                work_counters["model_fit_calls"] += 1
             return original_dynamic_fit(*args, **kwargs)
 
         def counted_fit(*args: object, **kwargs: object) -> Any:
-            work_counters["model_fit_calls"] += 1
+            record["model_fit_calls_static"] += 1
+            if work_counters is not None:
+                work_counters["model_fit_calls"] += 1
             return original_fit(*args, **kwargs)
 
-        work_counters["grid_search_calls"] += len(parsed.models)
+        record["grid_search_calls"] += len(parsed.models)
+        if work_counters is not None:
+            work_counters["grid_search_calls"] += len(parsed.models)
         portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
         portfolio_decomposition._fit = cast(Any, counted_fit)
         try:
@@ -796,7 +927,8 @@ def _replay_model(
             portfolio_decomposition._dynamic_fit = original_dynamic_fit
             portfolio_decomposition._fit = original_fit
     else:
-        if kind == "DEPENDENCE" and work_counters is not None:
+        record["correlation_build_calls"] += 1
+        if work_counters is not None:
             work_counters["correlation_build_calls"] += 1
         result, rebuilt_manifest, result_bytes = build(
             specification.path, next(iter(roots))
@@ -1522,13 +1654,25 @@ def _verify_consumers(
 
 
 def validate_financial_outcomes(
-    spec: Any, *, allow_synthetic: bool = False
+    spec: Any, *, allow_synthetic: bool = False, caller: str = "unattributed"
 ) -> dict[str, Any]:
     """Establish all four numerical outcomes from the supplied immutable spec.
 
     Used by final semantic generation, consumer validation, and shared commit.
     It does not accept readiness text as a financial result or create authority.
+    Every invocation writes one ledger file into ``spec.state_root`` naming the
+    ``caller``, so a call that drops the returned counters is still counted.
     """
+    with _verification_ledger(spec, caller) as (work_counters, calls):
+        return _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+
+
+def _validate_financial_outcomes(
+    spec: Any,
+    allow_synthetic: bool,
+    work_counters: dict[str, int],
+    calls: list[dict[str, Any]],
+) -> dict[str, Any]:
     from portfolio_financial_mvp_contract import load_contract
     from portfolio_invested_capital import verify_governed_capital_result
     from quant_engine.portfolio_ledger.hwm_governed_execution import (
@@ -1641,14 +1785,8 @@ def validate_financial_outcomes(
         not allow_synthetic and capital.get("authority_profile") != "ACCEPTED_GOVERNED"
     ):
         raise FinancialOutcomeError("capital result is unavailable or synthetic")
-    work_counters = {
-        "model_fit_calls": 0,
-        "grid_search_calls": 0,
-        "correlation_build_calls": 0,
-        "full_rederivation_count": 0,
-        "receipt_reuse_count": 0,
-    }
     replays: dict[tuple[str, Path], dict[str, Any]] = {}
+    replay_records: dict[tuple[str, Path], dict[str, Any]] = {}
     plan_bindings = {}
     plan_artifacts: dict[tuple[str, str, str], tuple[Path, str, int]] = {}
     selected_cells = {}
@@ -1664,7 +1802,11 @@ def validate_financial_outcomes(
                 key[0],
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
                 work_counters=work_counters,
+                calls=calls,
             )
+            replay_records[cache_key] = calls[-1]
+        elif node_id not in replay_records[cache_key]["node_ids"]:
+            replay_records[cache_key]["node_ids"].append(node_id)
         value = replays[cache_key]
         if key[0] == "DECOMPOSITION":
             _, strategy, source_key, lens, surface, mode = key
