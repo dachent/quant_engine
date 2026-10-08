@@ -90,14 +90,16 @@ def _run_checked(
     return completed.stdout
 
 
-def _load_and_validate_spec(path: Path) -> tuple[Any, dict[str, Any]]:
+def _load_and_validate_spec(path: Path, *, profile: str) -> tuple[Any, dict[str, Any]]:
     _regular_file(path, "pipeline spec")
     try:
         from quant_engine.core.pipeline import PipelineSpec
         from portfolio_financial_outcomes import validate_financial_outcomes
 
         spec = PipelineSpec.from_json_bytes(path.read_bytes())
-        proof = validate_financial_outcomes(spec, allow_synthetic=False)
+        proof = validate_financial_outcomes(
+            spec, allow_synthetic=False, caller=f"portfolio_qc.{profile}"
+        )
     except (ImportError, ModuleNotFoundError) as exc:
         raise PrerequisiteUnavailable("financial outcome validator") from exc
     except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -535,7 +537,7 @@ def _retired_workstation(args: argparse.Namespace) -> Path:
         raise PrerequisiteUnavailable("pipeline spec")
     if args.candidate_dir is None:
         raise PrerequisiteUnavailable("complete candidate directory")
-    spec, proof = _load_and_validate_spec(args.spec)
+    spec, proof = _load_and_validate_spec(args.spec, profile="workbook-only")
     evidence_dir = _evidence_directory(args.evidence_dir)
     candidate = _regular_directory(
         args.candidate_dir, "complete candidate directory"
@@ -621,7 +623,7 @@ def _retired_workstation(args: argparse.Namespace) -> Path:
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
-    spec, proof = _load_and_validate_spec(args.spec)
+    spec, proof = _load_and_validate_spec(args.spec, profile="release-preflight")
     evidence_dir = _evidence_directory(args.evidence_dir)
     before = _production_snapshot(spec)
     qa, plan = _candidate_qa(spec, proof), _expected_plan(spec)
@@ -701,7 +703,7 @@ def _post_release(args: argparse.Namespace) -> Path:
         raise PrerequisiteUnavailable("pipeline spec")
     if args.preflight_receipt is None:
         raise PrerequisiteUnavailable("accepted preflight receipt")
-    spec, proof = _load_and_validate_spec(args.spec)
+    spec, proof = _load_and_validate_spec(args.spec, profile="post-release-verify")
     evidence_dir = _evidence_directory(args.evidence_dir)
     preflight = _read_preflight(args.preflight_receipt, spec)
     if preflight.get("plan") != _expected_plan(spec):

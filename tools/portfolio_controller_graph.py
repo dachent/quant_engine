@@ -109,6 +109,7 @@ _PATH_STAGES = {
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
+    "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the
     # two hash-bound contracts the report reads, and the report imports the
     # reconciliation module for the P123 policy evidence.  A change to either
