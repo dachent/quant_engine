@@ -707,6 +707,7 @@ def _provider_ledger_generation(
     nav_observations: list[dict[str, Any]] | None = None,
     flows: list[dict[str, Any]] | None = None,
     admissions: list[dict[str, Any]] | None = None,
+    extra_catalog: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, str]]:
     provider_ids = (
         "alpaca",
@@ -798,6 +799,9 @@ def _provider_ledger_generation(
             ).read_text(encoding="utf-8")
         )
         Draft202012Validator(schema).validate(catalog)
+    # Keys the schema does not list (portfolio_fx_generation, which the producer
+    # emits) are added after validation.
+    catalog.update(extra_catalog or {})
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
     artifact = SourceArtifact(
@@ -5160,3 +5164,203 @@ def test_n56_catalog_version_two_only_when_custody_cash_is_present() -> None:
     assert schema["properties"]["baseline_schema_version"] == {"enum": [1, 2]}
     assert baseline.CUSTODY_CASH_CATALOG_SCHEMA_VERSION == 2
     assert baseline.CATALOG_SCHEMA_VERSION == 1
+
+
+# ---------------------------------------------------------------- E3: fact_status.fx
+#
+# The FX fact was the literal FAILED while the financial contract's portfolio-fx-rates
+# segment is READY with an admitted generation.  Every fixture here is built through
+# the production path (spec v3 + a schema-2 provider ledger + build_catalog) over the
+# repository's real contract bytes; only the custody admission gate, which needs a
+# published admission receipt, is replaced by a gate that returns the real contract.
+
+_FX_GENERATION = "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+
+
+def _e3_real_contract() -> dict[str, Any]:
+    return json.loads(
+        (
+            REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+def _e3_install_gate(monkeypatch: pytest.MonkeyPatch, contract: dict[str, Any]) -> None:
+    policy = copy.deepcopy(
+        next(
+            row["calculation_contract"]
+            for row in contract["financial_outcomes"]
+            if row["outcome_id"] == "INVESTED_CAPITAL"
+        )
+    )
+    policy.pop("provider_custody_perimeter", None)
+    authority = {"contract": contract}
+    admission = {"receipt_sha256": "0" * 64}
+    monkeypatch.setattr(
+        baseline,
+        "_selected_custody_authority",
+        lambda ref, generation_root: (authority, admission, policy),
+    )
+
+
+def _e3_flow(currency: str, index: int) -> dict[str, Any]:
+    return {
+        "account_id": "account-ibkr",
+        "amount": {"currency": currency, "status": "AVAILABLE", "value": "5"},
+        "event_date": "2026-07-10",
+        "flow_type": "DEPOSIT",
+        "mapping_status": "MAPPED",
+        "provider_id": "ibkr",
+        "record_id": f"ibkr:flow-{currency}-{index}",
+    }
+
+
+def _e3_fx_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    contract_bound: bool = True,
+    ledger_fx_generation: str | None = _FX_GENERATION,
+    non_usd_flows: int = 0,
+    contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    spec_path, spec = _spec(tmp_path)
+    flows_admission = {
+        **_ledger_admission("account-ibkr", "ibkr", "AUTHORITATIVE"),
+        "fact_type": "flows",
+    }
+    extra: dict[str, Any] = {}
+    if ledger_fx_generation is not None:
+        extra["portfolio_fx_generation"] = {
+            "generation_id": ledger_fx_generation,
+            "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+        }
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=[
+            _ledger_nav("account-ibkr", "ibkr", "2026-07-29", "22"),
+        ],
+        flows=[_e3_flow("EUR", index) for index in range(non_usd_flows)],
+        admissions=[
+            _ledger_admission("account-ibkr", "ibkr", "AUTHORITATIVE"),
+            flows_admission,
+        ],
+        extra_catalog=extra,
+    )
+    if contract_bound:
+        ref["financial_mvp"] = _cr2_custody_financial_ref()
+        (
+            root
+            / "generations"
+            / ref["generation_id"]
+            / "admit-or-declare-receipt.json"
+        ).write_bytes(b"{}")
+        _e3_install_gate(monkeypatch, contract or _e3_real_contract())
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    return next(row for row in catalog["fact_coverage"] if row["fact_type"] == "fx")
+
+
+def test_e3_an_admitted_fx_generation_with_unconverted_rows_is_partial_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _e3_fx_row(tmp_path, monkeypatch, non_usd_flows=3)
+
+    assert row["status"] == "PARTIAL"
+    assert len(row["known_gaps"]) == 1
+    assert "3 non-USD" in row["known_gaps"][0]
+    assert "EUR" in row["known_gaps"][0]
+    disposition = row["disposition"]
+    assert disposition["fx_affected_record_count"] == 3
+    assert disposition["generation_id"] == _FX_GENERATION
+    assert disposition["admitted_start"] == "2025-01-01"
+    assert disposition["admitted_end"] == "2026-09-17"
+    assert disposition["currencies"] == ["EUR"]
+
+
+def test_e3_an_admitted_fx_generation_with_no_unconverted_rows_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _e3_fx_row(tmp_path, monkeypatch, non_usd_flows=0)
+
+    assert row["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert row["known_gaps"] == []
+
+
+def test_e3_no_contract_bound_generation_stays_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _e3_fx_row(tmp_path, monkeypatch, contract_bound=False, non_usd_flows=3)
+
+    assert row["status"] == "FAILED"
+    assert row["disposition"]["code"] == "RETAINED_NO_ACCEPTED_FX_SOURCE"
+    assert "3 non-USD" in row["known_gaps"][0]
+
+
+def test_e3_a_ledger_that_did_not_use_the_admitted_generation_stays_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for other in (None, "b" * 64):
+        row = _e3_fx_row(
+            tmp_path / f"case-{other is None}",
+            monkeypatch,
+            ledger_fx_generation=other,
+            non_usd_flows=1,
+        )
+        assert row["status"] == "FAILED"
+
+
+def test_e3_a_segment_that_is_not_ready_is_not_an_admitted_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = _e3_real_contract()
+    segment = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] == "portfolio-fx-rates"
+    )
+    segment["readiness"] = "REQUIRED_NOT_READY"
+
+    row = _e3_fx_row(tmp_path, monkeypatch, non_usd_flows=1, contract=contract)
+
+    assert row["status"] == "FAILED"
+
+
+def test_e3_a_generation_that_ends_before_the_cutoff_is_partial_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = _e3_real_contract()
+    segment = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] == "portfolio-fx-rates"
+    )
+    segment["interval"]["observed_end"] = "2026-07-20"
+    segment["current_generation"]["as_of"] = "2026-07-20"
+
+    row = _e3_fx_row(tmp_path, monkeypatch, non_usd_flows=0, contract=contract)
+
+    assert row["status"] == "PARTIAL"
+    assert any("2026-07-20" in gap for gap in row["known_gaps"])
+
+
+def test_e3_a_generation_that_ends_before_the_window_starts_is_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = _e3_real_contract()
+    segment = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] == "portfolio-fx-rates"
+    )
+    segment["interval"]["observed_end"] = "2026-07-05"
+    segment["current_generation"]["as_of"] = "2026-07-05"
+
+    row = _e3_fx_row(tmp_path, monkeypatch, non_usd_flows=1, contract=contract)
+
+    assert row["status"] == "FAILED"
+

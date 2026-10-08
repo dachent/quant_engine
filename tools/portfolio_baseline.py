@@ -609,6 +609,7 @@ def _provider_ledger(
     baseline_as_of: date,
     *,
     custody_authority: dict[str, Any] | None = None,
+    fx_authority: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
     ref = _object(value, "provider_ledger")
     _strict_keys(
@@ -716,6 +717,10 @@ def _provider_ledger(
     )
     if "financial_mvp" in ref:
         authority, admission, policy = _selected_custody_authority(ref, generation_root)
+        if fx_authority is not None:
+            admitted_fx = _fx_admission(authority["contract"], catalog)
+            if admitted_fx is not None:
+                fx_authority.update(admitted_fx)
         approved_dates = [
             _date(row["approved_on"], "owner receipt approved_on")
             for row in policy["owner_decision_receipts"].values()
@@ -780,6 +785,55 @@ def _provider_ledger(
         for item in artifacts
     ]
     return catalog, artifacts, links
+
+
+_FX_SOURCE_ID: Final = "portfolio-fx-rates"
+
+
+def _fx_admission(
+    contract: Mapping[str, Any], provider_catalog: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The FX generation the admitted contract selects, when the ledger used it.
+
+    The contract's one ``portfolio-fx-rates`` segment must be READY, hold a
+    current generation and a dated observed interval, and the selected ledger must
+    record that same generation as the one it converted with.  Anything else is
+    no admitted FX generation (``None``), which keeps the FX fact FAILED.
+    """
+
+    segments = [
+        item
+        for item in contract.get("source_segments", ())
+        if isinstance(item, Mapping) and item.get("source_id") == _FX_SOURCE_ID
+    ]
+    if len(segments) != 1:
+        return None
+    segment = segments[0]
+    generation = segment.get("current_generation")
+    interval = segment.get("interval")
+    ledger_fx = provider_catalog.get("portfolio_fx_generation")
+    if (
+        segment.get("readiness") != "READY"
+        or not isinstance(generation, Mapping)
+        or not isinstance(interval, Mapping)
+        or not isinstance(ledger_fx, Mapping)
+    ):
+        return None
+    generation_id = generation.get("generation_id")
+    if (
+        not isinstance(generation_id, str)
+        or _SHA256.fullmatch(generation_id) is None
+        or ledger_fx.get("generation_id") != generation_id
+    ):
+        return None
+    try:
+        start = _date(interval.get("observed_start"), "fx observed_start")
+        end = _date(interval.get("observed_end"), "fx observed_end")
+    except BaselineValidationError:
+        return None
+    if end < start:
+        return None
+    return {"generation_id": generation_id, "start": start, "end": end}
 
 
 def _selected_custody_authority(
@@ -3808,6 +3862,7 @@ def _fact_coverage(
     *,
     nav: Sequence[Mapping[str, Any]] = (),
     costs: Sequence[Mapping[str, Any]] = (),
+    fx_admission: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     unmapped = [
@@ -4013,21 +4068,85 @@ def _fact_coverage(
         }
     )
     fx_claim = next(item for item in claims if item["fact_type"] == "fx")
-    fx_claim["known_gaps"] = [
-        "no accepted independent FX observation source exists; "
+    affected_text = (
         f"{len(non_usd_records)} non-USD transaction/flow records "
         f"({', '.join(non_usd_currencies) or 'no currencies'}) are FX-affected, "
-        f"including {len(unavailable_non_usd)} with unavailable accepted USD amounts; "
-        "account NAV, current positions, allocations, and HWM current values remain provider-reported USD authority"
-    ]
-    fx_claim["disposition"] = {
-        "authority": "provider-reported USD account facts; no independent FX series",
-        "code": "RETAINED_NO_ACCEPTED_FX_SOURCE",
-        "effect": "Independent non-USD transaction/flow recomputation is unavailable; provider-reported USD current values are not retranslated.",
+        f"including {len(unavailable_non_usd)} with unavailable accepted USD amounts"
+    )
+    affected_counts = {
         "fx_affected_record_count": len(non_usd_records),
         "unavailable_usd_amount_count": len(unavailable_non_usd),
         "currencies": non_usd_currencies,
     }
+    fx_dates = [
+        _date(item.get("event_date"), "fx affected event_date")
+        for item in non_usd_records
+        if item.get("event_date") is not None
+    ]
+    admitted_start: date | None = fx_admission["start"] if fx_admission else None
+    admitted_end: date | None = fx_admission["end"] if fx_admission else None
+    window_start = min(fx_dates) if fx_dates else admitted_start
+    # An admitted generation covers the window when it overlaps it; FX is FAILED
+    # only when no admitted generation does.  The rest of the window, and every
+    # record the generation has no series for, is a disclosed gap.
+    if (
+        fx_admission is not None
+        and admitted_start is not None
+        and admitted_end is not None
+        and window_start is not None
+        and admitted_start <= as_of_date
+        and admitted_end >= window_start
+    ):
+        generation = str(fx_admission["generation_id"])[:8]
+        fx_gaps: list[str] = []
+        if non_usd_records:
+            fx_gaps.append(
+                "no independent FX series covers the unconverted records in the "
+                f"admitted generation {generation}; {affected_text}; "
+                "account NAV, current positions, allocations, and HWM current "
+                "values remain provider-reported USD authority"
+            )
+        if window_start < admitted_start:
+            fx_gaps.append(
+                f"admitted FX generation {generation} starts "
+                f"{admitted_start.isoformat()}; FX-affected records from "
+                f"{window_start.isoformat()} precede it"
+            )
+        if admitted_end < as_of_date:
+            fx_gaps.append(
+                f"admitted FX generation {generation} ends "
+                f"{admitted_end.isoformat()}; dates through "
+                f"{as_of_date.isoformat()} after it carry no FX rate"
+            )
+        fx_claim["status"] = (
+            "PARTIAL" if fx_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        )
+        fx_claim["known_gaps"] = fx_gaps
+        fx_claim["disposition"] = {
+            "authority": "contract-admitted portfolio-fx-rates generation",
+            "code": (
+                "ADMITTED_FX_GENERATION_PARTIAL_COVERAGE"
+                if fx_gaps
+                else "ADMITTED_FX_GENERATION_COVERS_WINDOW"
+            ),
+            "effect": "Records the generation covers are converted at their own event date; unconverted records and dates outside the generation stay unavailable.",
+            "generation_id": fx_admission["generation_id"],
+            "admitted_start": admitted_start.isoformat(),
+            "admitted_end": admitted_end.isoformat(),
+            **affected_counts,
+        }
+    else:
+        fx_claim["known_gaps"] = [
+            f"no accepted independent FX observation source exists; {affected_text}; "
+            "account NAV, current positions, allocations, and HWM current values "
+            "remain provider-reported USD authority"
+        ]
+        fx_claim["disposition"] = {
+            "authority": "provider-reported USD account facts; no independent FX series",
+            "code": "RETAINED_NO_ACCEPTED_FX_SOURCE",
+            "effect": "Independent non-USD transaction/flow recomputation is unavailable; provider-reported USD current values are not retranslated.",
+            **affected_counts,
+        }
     fx_claim["record_count"] = 0
     exceptions: list[dict[str, Any]] = [
         {
@@ -5217,6 +5336,7 @@ def build_catalog(
     # audit reserve with what moved after it was observed, never as a capital fact.
     reference_flows: list[dict[str, Any]] = []
     custody_authority: dict[str, Any] = {}
+    fx_authority: dict[str, Any] = {}
     if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
@@ -5249,7 +5369,11 @@ def build_catalog(
         )
     elif spec["schema_version"] == SPEC_SCHEMA_VERSION:
         provider_catalog, provider_artifacts, provider_links = _provider_ledger(
-            spec["provider_ledger"], roots, as_of, custody_authority=custody_authority
+            spec["provider_ledger"],
+            roots,
+            as_of,
+            custody_authority=custody_authority,
+            fx_authority=fx_authority,
         )
         (
             nav,
@@ -5430,6 +5554,7 @@ def build_catalog(
         as_of,
         nav=nav,
         costs=costs,
+        fx_admission=fx_authority or None,
     )
     fact_coverage_matrix, observation_windows, attribution_dispositions = (
         _coverage_evidence(
