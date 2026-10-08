@@ -1028,6 +1028,102 @@ def test_the_strategy_level_mwr_recompute_skips_a_confirmed_blocked_row(
     ]
 
 
+def test_the_strategy_level_twr_recompute_does_not_skip_a_confirmed_blocked_row(
+    tmp_path: Path,
+) -> None:
+    """M5: the blocked-epoch skip is scoped to ``mwr.strategy`` exactly, not ``twr.strategy``.
+
+    ``twr.strategy`` reads only ``strategy_returns`` (the daily series) via
+    ``splice_window``, which has no dependency on ``twr_rows``/census state at all; the
+    only place ``epochs``/``skip_blocked`` can matter for ``twr.strategy`` is computing
+    the ITD boundary from ``min(epoch_starts)``.  An ordinary ``BLOCKED_ADMISSION`` row
+    always publishes a null ``observed_start`` (L6a), so it is excluded from
+    ``epoch_starts`` regardless of ``skip_blocked`` — the naively-suggested mutation
+    (``skip_blocked = True`` unconditionally) is a verified no-op against every existing
+    fixture, this test included, unless the blocked row itself carries a non-null
+    ``observed_start`` earlier than the real epoch's.  This fixture gives it one
+    (2025-01-01, before beta's real 2025-09-10 start) plus an extra daily return
+    (2025-03-01) that only enters the compound if that earlier date is honored as the
+    boundary, so a wrongly-applied skip changes the recomputed *value*, not just its
+    absence/presence.
+
+    Mutation: ``skip_blocked = metric_id != "twr.strategy"`` weakened to
+    ``skip_blocked = True`` turns this red (boundary jumps from 2025-01-01 to
+    2025-09-10, value from 0.155 to 0.1, verified directly against
+    ``recompute_metric`` on the real 70ff9a3 code vs. the mutated code before writing
+    this test).
+
+    The good fixture's ``strategy_summary`` carries beta's direct
+    ``account_live_cumulative_return`` view, which ``resolve_metric`` returns before
+    ``recompute_metric`` is ever reached; beta's entry is dropped here so the expected-
+    row check path actually exercises the recompute (and its ``skip_blocked`` guard).
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _write_census(repo, [[_assignment(ONLY)]])
+    early_observed_start = "2025-01-01"
+    extra_return_day = "2025-03-01"
+
+    def report(document: dict[str, Any]) -> None:
+        document["strategy_summary"] = [
+            row for row in document["strategy_summary"] if row["strategy_id"] != "beta"
+        ]
+        row = _blocked_twr_row("A1")
+        row["observed_start"] = early_observed_start
+        row["observed_end"] = BLOCKED_END
+        document["twr_mwr"].append(row)
+        document["strategy_returns"].append(
+            {
+                "strategy_id": "beta",
+                "date": extra_return_day,
+                "return": "0.05",
+                "evidence_layer": "ACCOUNT_LIVE",
+            }
+        )
+
+    def panel(document: dict[str, Any]) -> None:
+        document["account_manifest"]["rows"].append(_blocked_manifest_row("A1"))
+        document["counts"]["twr_rows"] += 1
+
+    gen_dir = build(tmp_path / "gen", Spec(report=[report], panel=[panel]))
+    pointer = [{"path": CENSUS_CONTRACT, "sha256": sha}]
+
+    blocked_row = _blocked_twr_row("A1")
+    blocked_row["observed_start"] = early_observed_start
+    blocked_row["observed_end"] = BLOCKED_END
+
+    def row(value: str) -> dict[str, Any]:
+        return {
+            "metric_id": "twr.strategy",
+            "entity": "beta",
+            "window": "ITD",
+            "as_of": CUTOFF,
+            "expected": value,
+            "authority_pointer": pointer,
+        }
+
+    context = checks.Context(
+        gen=load_generation(gen_dir),
+        cutoff=checks.to_date(CUTOFF) or checks.date.today(),
+        cutoff_source="test",
+        expected=[row("0.1")],
+    )
+    context.repo_root = _policy_fixture(repo)
+    assert checks.blocked_epochs(context).skips_report_row(blocked_row)
+    recomputed = checks.recompute_metric(
+        context, "twr.strategy", "beta", (None, checks.to_date(CUTOFF)), None
+    )
+    assert len(recomputed) == 1
+    assert recomputed[0].start == checks.to_date(early_observed_start)
+    value = str(recomputed[0].value)
+    assert value == "0.155"
+    assert _expected_findings(_run(gen_dir, [row(value)], repo)) == []
+    assert _expected_findings(_run(gen_dir, [row("0.1")], repo)) == [
+        ("expected.twr.strategy", checks.BLOCKER_REGRESSION, "beta|ITD")
+    ]
+
+
 def test_the_flow_recompute_never_counts_the_trace_of_a_skipped_blocked_row(
     tmp_path: Path,
 ) -> None:
