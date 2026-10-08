@@ -4219,7 +4219,9 @@ def semantic(
         from portfolio_financial_outcomes import validate_financial_outcomes
 
         financial_spec = PipelineSpec.from_json_bytes(financial_spec_path.read_bytes())
-        financial_proof = validate_financial_outcomes(financial_spec)
+        financial_proof = validate_financial_outcomes(
+            financial_spec, caller="materialize.semantic"
+        )
     _write_exact(
         output_path,
         canonical_json_bytes(
@@ -4894,6 +4896,51 @@ def _verify_panel_lens_nodes(
         raise MaterializationError("prepared panel lens authority differs")
 
 
+FINANCIAL_WORK_COUNTER_KEYS: Final = (
+    "correlation_build_calls",
+    "full_rederivation_count",
+    "grid_search_calls",
+    "model_fit_calls",
+    "receipt_reuse_count",
+)
+
+
+def _financial_work_counters(proof: Mapping[str, Any]) -> dict[str, int]:
+    """The five per-invocation counters of one verifier proof, exactly as reported.
+
+    The key set is the one the QC receipt carries. A proof without it is refused here:
+    an emitted set of counters that silently lost a key would read as "no work".
+    """
+
+    counters = proof.get("work_counters")
+    if (
+        not isinstance(counters, Mapping)
+        or set(counters) != set(FINANCIAL_WORK_COUNTER_KEYS)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in counters.values()
+        )
+    ):
+        raise MaterializationError(
+            "financial outcomes proof does not carry exactly the five work counters: "
+            + ", ".join(FINANCIAL_WORK_COUNTER_KEYS)
+        )
+    return {key: int(counters[key]) for key in FINANCIAL_WORK_COUNTER_KEYS}
+
+
+def _prepared_retained_cache_root(prepared_root: Path) -> Path:
+    """The retained cache root a prepared attended run recorded in its run receipt."""
+
+    receipt = _load(_attended_run_receipt(prepared_root), "attended run receipt")
+    identity = receipt.get("request_identity")
+    root = identity.get("retained_cache_root") if isinstance(identity, dict) else None
+    if not isinstance(root, str) or not root.strip():
+        raise MaterializationError(
+            "attended run receipt does not name a retained cache root"
+        )
+    return Path(root).resolve()
+
+
 def build_production_spec(
     recipe_path: Path,
     prepared_root: Path,
@@ -4952,6 +4999,16 @@ def build_production_spec(
     semantic_path = semantic_path.resolve()
     portfolio_root = portfolio_root.resolve()
     state_root = state_root.resolve()
+    # The calculation-scoped verification receipts live under the state root. They are
+    # written during the cold verification of the candidate, so the only state root
+    # that can later reuse them is the prepared run's own retained cache root.
+    retained_cache_root = _prepared_retained_cache_root(prepared_root)
+    if state_root != retained_cache_root:
+        raise MaterializationError(
+            "production state root must be the prepared run's retained cache root: "
+            "calculation-scoped verification receipts are retained there "
+            f"(state root {state_root}, retained cache root {retained_cache_root})"
+        )
     if portfolio_root == repo or repo in portfolio_root.parents:
         raise MaterializationError("production portfolio root must be outside Git")
 
@@ -5292,7 +5349,8 @@ def build_production_spec(
     from portfolio_financial_outcomes import validate_financial_outcomes
 
     completed_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
-    proof = validate_financial_outcomes(completed_spec)
+    proof = validate_financial_outcomes(completed_spec, caller="production-spec")
+    work_counters = _financial_work_counters(proof)
     production_semantic = canonical_json_bytes(
         _semantic_gate_payload(
             recipe,
@@ -5315,6 +5373,9 @@ def build_production_spec(
         "nodes": len(spec["nodes"]),
         "root_count": len(PRODUCTION_ROOTS),
         "spec": str(spec_path),
+        # Per-invocation work evidence. It is not part of the semantic gate, the
+        # contract or the specification, so reporting it moves no pin.
+        "work_counters": work_counters,
     }
 
 
@@ -6151,10 +6212,42 @@ def longest_generated_tail() -> tuple[str, str]:
     return max(generated_tails(), key=lambda item: len(item[1]))
 
 
+# The production chain keeps its calculation-scoped verification receipts and its
+# pipeline run state in the retained cache (the production specification's state root
+# is that root). `pipelines/<pipeline_id>-<16 hex>/receipts/<node_id>.json` carries a
+# recipe-chosen pipeline id; real recipes use 21 characters plus "-production", and this
+# budget allows 48. ACCEPTED RESIDUAL: a longer pipeline id, or an operator-chosen
+# financial-artifact node id longer than the longest `publish-<root>-dynamic-fls` node,
+# is not measured here.
+PRODUCTION_PIPELINE_ID_BUDGET: Final = 48
+_PIPELINE_RUN_KEY_HASH_LENGTH: Final = 16
+
+
+def _production_receipt_tail() -> str:
+    node_id = max(
+        (f"publish-{root_id}-dynamic-fls" for root_id in PRODUCTION_ROOTS), key=len
+    )
+    return _backslash(
+        "pipelines",
+        "p" * PRODUCTION_PIPELINE_ID_BUDGET + "-" + "0" * _PIPELINE_RUN_KEY_HASH_LENGTH,
+        "receipts",
+        f"{node_id}.json",
+    )
+
+
 def _cache_tails() -> list[tuple[str, str]]:
-    """The retained cache layouts of portfolio_decomposition and portfolio_correlation."""
+    """The layouts written under the retained cache.
+
+    Besides the decomposition and correlation caches, the production chain writes its
+    calculation-scoped replay receipts and its run-state receipts here.
+    """
 
     return [
+        (
+            "financial replay receipt",
+            _backslash("financial-replay-receipts", _CACHE_HASH_FILE),
+        ),
+        ("production run receipt", _production_receipt_tail()),
         (
             "training evidence",
             _backslash(".decomposition-training-evidence", _CACHE_HASH_FILE),
