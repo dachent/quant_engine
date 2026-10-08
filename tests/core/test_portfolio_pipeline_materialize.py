@@ -6048,6 +6048,272 @@ def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
     assert calls == ["ledger", "baseline", "baseline"]
 
 
+PANEL_SIDE_ROLES = ("panel-candidate", "panel")
+ANALYTICS_SIDE_ROLES = ("analytics", "report")
+
+
+def _stage_digest(root: Path) -> str:
+    """One digest over the names and bytes of every file below a stage root."""
+
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _stage_snapshot(output_root: Path) -> dict[str, object]:
+    """Bytes and write times of everything the analytics and report stages own."""
+
+    files = {}
+    for role in ANALYTICS_SIDE_ROLES:
+        owned = [
+            output_root / "stage-results" / f"{role}.json",
+            *sorted(
+                item
+                for item in (output_root / "stages" / role).rglob("*")
+                if item.is_file()
+            ),
+        ]
+        for path in owned:
+            files[path.relative_to(output_root).as_posix()] = (
+                path.read_bytes(),
+                path.stat().st_mtime_ns,
+            )
+    return files
+
+
+class _PanelFailureRun:
+    """A four-stage attended run whose panel child can be made to fail.
+
+    The children are real files written under the real stage roots. The two native
+    readers that need a published analytics or report generation are replaced by a
+    reader that binds each stage's receipt to the digest of the bytes below its root,
+    so a changed or rewritten stage is still refused or detected. Everything under
+    test, the resume ordering and the failed-stage preservation, is the real code.
+    """
+
+    def __init__(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, panel_fails: bool
+    ) -> None:
+        self.preflight = _attended_preflight_fixture(tmp_path)
+        self.preflight["required_stages"] = (
+            *ANALYTICS_SIDE_ROLES,
+            *PANEL_SIDE_ROLES,
+        )
+        self.output_root = tmp_path / "output"
+        self.panel_fails = panel_fails
+        self.calls: list[str] = []
+
+        def verify_bytes(
+            receipt: dict[str, object], stage_root: Path, role: str
+        ) -> None:
+            if receipt.get("stage_sha256") != _stage_digest(stage_root):
+                raise materializer.MaterializationError(
+                    f"attended completed {role} artifact identity differs"
+                )
+
+        def verify_candidate(_receipt: dict[str, object], stage_root: Path) -> None:
+            if not (stage_root / "panel-candidate.bin").is_file():
+                raise materializer.MaterializationError(
+                    "attended completed panel-candidate artifact identity differs"
+                )
+
+        monkeypatch.setattr(
+            materializer, "_attended_completed_stage_root", verify_bytes
+        )
+        monkeypatch.setattr(
+            materializer, "_attended_completed_panel_candidate", verify_candidate
+        )
+        monkeypatch.setattr(
+            materializer, "_attended_preflight", lambda _args: self.preflight
+        )
+        monkeypatch.setattr(materializer.subprocess, "run", self.child)
+
+    def child(
+        self, argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        self.calls.append(role)
+        root = materializer._attended_stage_root(self.output_root, role)
+        root.mkdir(parents=True, exist_ok=True)
+        if role == "panel" and self.panel_fails:
+            (root / "partial.bin").write_bytes(b"partial panel")
+            return subprocess.CompletedProcess(argv, 71, "", "panel failed")
+        (root / f"{role}.bin").write_bytes(f"bytes of {role}".encode() * 4)
+        _write_json(
+            self.output_root / "stage-results" / f"{role}.json",
+            {"role": role, "stage_sha256": _stage_digest(root)},
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def execute(self, *, resume: bool = False) -> int:
+        return materializer.main(
+            _attended_argv(
+                self.preflight, self.output_root, execute=True, resume=resume
+            )
+        )
+
+
+def test_a_panel_stage_failure_resumes_without_rerunning_analytics_or_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M9: a presentation-stage failure does not regenerate the financial stages."""
+
+    run = _PanelFailureRun(tmp_path, monkeypatch, panel_fails=True)
+    assert run.execute() == 71
+    assert run.calls == ["analytics", "report", "panel-candidate", "panel"]
+    before = _stage_snapshot(run.output_root)
+    assert len(before) == 4
+
+    run.calls.clear()
+    run.panel_fails = False
+    assert run.execute(resume=True) == 0
+
+    # Only the panel side ran again. `panel-candidate` is included because it shares
+    # `stages/panel` with the failed `panel`, so its outputs went aside with it.
+    assert run.calls == list(PANEL_SIDE_ROLES)
+    assert _stage_snapshot(run.output_root) == before
+    # The failed attempt's bytes are kept for diagnosis, and both panel receipts are
+    # present again for the final view.
+    preserved = run.output_root / "failed-stage-evidence" / "panel" / "attempt-1"
+    assert (preserved / "stage-root" / "partial.bin").read_bytes() == b"partial panel"
+    view = materializer._attended_view(
+        run.output_root, run.preflight["required_stages"], {"fixture": "view"}
+    )
+    assert view["verified_completed_stages"] == list(run.preflight["required_stages"])
+
+
+def test_a_changed_financial_stage_blocks_the_panel_resume_before_any_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M9 control: the unchanged-bytes claim is real, because a change is detected."""
+
+    run = _PanelFailureRun(tmp_path, monkeypatch, panel_fails=True)
+    assert run.execute() == 71
+    analytics = run.output_root / "stages" / "analytics" / "analytics.bin"
+    analytics.write_bytes(analytics.read_bytes() + b"x")
+
+    run.calls.clear()
+    run.panel_fails = False
+    assert run.execute(resume=True) == 1
+    assert run.calls == []
+    assert not (run.output_root / "stage-results" / "panel.json").exists()
+
+
+TOOLS_DIRECTORY = Path(materializer.__file__).resolve().parent
+ENTRYPOINT_PROBE_SECONDS = 180
+
+
+def _attended_child_entrypoints() -> list[str]:
+    """The scripts an attended run launches as children, read from the launcher itself.
+
+    The attended runner starts `portfolio_release_builder.py`, and that builder starts
+    each numerical, report and panel producer it names. Reading the names from the
+    builder's source keeps the list from drifting when a producer is added.
+    """
+
+    builder = TOOLS_DIRECTORY / "portfolio_release_builder.py"
+    named = set(re.findall(r'"(portfolio_[a-z_]+\.py)"', builder.read_text("utf-8")))
+    return sorted(
+        {"portfolio_release_builder.py", "portfolio_pipeline_materialize.py"}
+        | {name for name in named if (TOOLS_DIRECTORY / name).is_file()}
+    )
+
+
+def _probe_entrypoint(
+    script: Path, cwd: Path
+) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+    """Launch one script as a child would be: a fresh interpreter, no PYTHONPATH."""
+
+    environment = {
+        name: value for name, value in os.environ.items() if name != "PYTHONPATH"
+    }
+
+    def launch(argument: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(script), argument],
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=ENTRYPOINT_PROBE_SECONDS,
+            check=False,
+        )
+
+    return launch("--help"), launch("--not-an-argument-of-any-entrypoint")
+
+
+def _entrypoint_violations(
+    helped: subprocess.CompletedProcess[str],
+    refused: subprocess.CompletedProcess[str],
+) -> list[str]:
+    violations = []
+    if helped.returncode != 0 or "Error" in helped.stderr:
+        violations.append(f"--help exits {helped.returncode}: {helped.stderr[-200:]}")
+    elif not helped.stdout.strip():
+        violations.append("--help prints no usage")
+    if refused.returncode == 0:
+        violations.append("an invalid argument exits 0")
+    elif not refused.stderr.strip():
+        violations.append("an invalid argument exits nonzero without a message")
+    elif "ModuleNotFoundError" in refused.stderr or "ImportError" in refused.stderr:
+        violations.append(f"import failure: {refused.stderr[-200:]}")
+    return violations
+
+
+def test_attended_child_entrypoints_include_every_stage_producer() -> None:
+    entrypoints = _attended_child_entrypoints()
+
+    assert {
+        "portfolio_baseline.py",
+        "portfolio_control_panel.py",
+        "portfolio_correlation.py",
+        "portfolio_decomposition.py",
+        "portfolio_release_builder.py",
+        "portfolio_report.py",
+        "portfolio_weekly_returns.py",
+    } <= set(entrypoints)
+
+
+@pytest.mark.parametrize("entrypoint", _attended_child_entrypoints())
+def test_every_attended_child_entrypoint_launches_and_propagates_failure(
+    entrypoint: str, tmp_path: Path
+) -> None:
+    """M6: a child launched without PYTHONPATH imports, and a bad call fails loudly."""
+
+    helped, refused = _probe_entrypoint(TOOLS_DIRECTORY / entrypoint, tmp_path)
+
+    assert _entrypoint_violations(helped, refused) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import module_that_does_not_exist\n", "--help exits"),
+        ("print('usage: ignores every argument')\n", "an invalid argument exits 0"),
+        (
+            "import sys\nprint('usage')\nsys.exit(0 if '--help' in sys.argv else 3)\n",
+            "without a message",
+        ),
+    ],
+    ids=["import-failure", "swallowed-failure", "silent-failure"],
+)
+def test_entrypoint_probe_flags_a_child_that_cannot_propagate_failure(
+    source: str, expected: str, tmp_path: Path
+) -> None:
+    """M6 control: the probe fails on the shapes it exists to catch."""
+
+    script = tmp_path / "broken_child.py"
+    script.write_bytes(source.encode())
+
+    helped, refused = _probe_entrypoint(script, tmp_path)
+
+    violations = _entrypoint_violations(helped, refused)
+    assert violations
+    assert any(expected in violation for violation in violations)
+
+
 def test_attended_preserve_moves_the_receipt_sharing_the_stage_root(
     tmp_path: Path,
 ) -> None:
