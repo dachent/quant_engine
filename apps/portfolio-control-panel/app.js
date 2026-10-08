@@ -99,6 +99,19 @@
   // equal this, and a test pins the two together.
   const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 8191;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+  // F3: gate notes arrive from the producer already respelled as plain words (`note`; the
+  // verbatim original is `note_source` and is never shown).  Free `known_gap` text on the other
+  // cards, and a payload that predates the note contract, can still carry machine tokens, so the
+  // same respelling applies here: UPPER_SNAKE becomes lower-case words (acronyms stay upper
+  // case) and snake_key:value becomes "snake key: value".  Readable text passes through
+  // unchanged, so applying it to an already-respelled note changes nothing.
+  const NOTE_ACRONYMS = new Set(["API", "FX", "HWM", "IBKR", "ID", "MWR", "NAV", "TWR", "USD", "UTC"]);
+  const operatorText = (text) => String(text ?? "")
+    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, (token) => token.split("_").map((word) => (NOTE_ACRONYMS.has(word) ? word : word.toLowerCase())).join(" "))
+    .replace(/\b[a-z]+(?:_[a-z]+)+:[A-Za-z0-9_:.-]+/g, (token) => {
+      const at = token.indexOf(":");
+      return `${token.slice(0, at).replaceAll("_", " ")}: ${token.slice(at + 1).replaceAll("_", " ")}`;
+    });
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
@@ -423,8 +436,8 @@
       const summary = key.includes("position")
         ? positionGateSummary()
         : key.includes("cash flow")
-          ? (flowProviders ? `Accepted ${flowProviders} flow coverage is partial; full disposition remains in Data health.` : gate.note)
-          : gate.note;
+          ? (flowProviders ? `Accepted ${flowProviders} flow coverage is partial; full disposition remains in Data health.` : operatorText(gate.note))
+          : operatorText(gate.note);
       return `<div class="gate-row is-${toneForStatus(gate.status)}"><div class="gate-name">${safe(gate.label)}<small>${safe(summary)}</small></div><div class="gate-value">${statusText(gate.status)}</div></div>`;
     });
     $("#gate-stack").innerHTML = gateRows.join("");
@@ -458,8 +471,8 @@
       `<li><div><strong>Report performance lineage</strong><span>UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span><button type="button" class="text-action" data-open-view="risk" aria-label="Inspect withheld report evidence">Inspect withheld evidence →</button></div></li>`,
     ] : data.blocking_items.map((item) => {
       const note = item.item === "current-strategy-attribution-partial"
-        ? `${currentMapped}/${currentRows.length} current positions are strategy-mapped; other current General intervals remain valid at the systematic-pool layer only. ${item.known_gap || ""}`
-        : item.known_gap;
+        ? `${currentMapped}/${currentRows.length} current positions are strategy-mapped; other current General intervals remain valid at the systematic-pool layer only. ${operatorText(item.known_gap)}`
+        : operatorText(item.known_gap);
       const route = remediationRoute[item.item] || { view: "data", label: "Inspect data health" };
       const focus = route.view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
       return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}"${focus} aria-label="${safe(route.label)} for ${safe(humanStatus(item.item))}">${safe(route.label)} →</button></div></li>`;
@@ -524,6 +537,17 @@
     $("#lifecycle-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective start"], ["Effective end"], ["Mapping state"], ["Evidence identity"]], rows.length ? rows : [emptyRow(6, "No lifecycle intervals match the selected context")]);
   }
 
+  // E1: the producer states why a position has no symbol.  A not-ready symbol says so in
+  // words (reason as the tooltip); a row that is not an accepted position claims nothing.
+  const symbolCell = (row) => {
+    const identity = `<span class="cell-secondary">${safe(row.security_id || "—")}</span>`;
+    if (row.symbol_status === "NOT_READY") {
+      const reason = typeof row.symbol_reason === "string" && row.symbol_reason ? ` title="${safe(row.symbol_reason)}"` : "";
+      return `<span class="cell-primary symbol-not-ready"${reason}>Symbol not ready</span>${identity}`;
+    }
+    return `<span class="cell-primary">${safe(row.symbol || "—")}</span>${identity}`;
+  };
+
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();
     const accepted = currentPositionRows().filter((row) => matchesContext(row)
@@ -531,7 +555,7 @@
     const pageCount = Math.max(1, Math.ceil(accepted.length / positionPageSize));
     positionPage = Math.min(positionPage, pageCount - 1);
     const visible = accepted.slice(positionPage * positionPageSize, (positionPage + 1) * positionPageSize);
-    const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td><span class="cell-primary">${safe(row.symbol || "—")}</span><span class="cell-secondary">${safe(row.security_id || "—")}</span></td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDateHtml(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
+    const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td>${symbolCell(row)}</td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDateHtml(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
     positionTable.dataset.visibleRows = String(accepted.length);
     positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)]);
@@ -934,7 +958,7 @@
       return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_cumulative_return)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown)}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${formatDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows);
-    const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap || row.value_usd || row.value || "—")}</td></tr>`);
+    const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : (row.value_usd || row.value || "—"))}</td></tr>`);
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
 
@@ -1785,7 +1809,7 @@
       ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} carry an explicit retained disposition`, cleanFacts === factRows.length ? "positive" : "warning"],
       ["External connections", "0", "Direct-file local operation", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap || "No known gap within the declared boundary")}</td></tr>`);
+    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status / escalation"], ["Observation window / Freshness evaluated"], ["TTL / reconciled"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
     renderFactScopeTables();
     $("#input-bindings").innerHTML = `<div class="binding-card"><div><strong>Portfolio report</strong><span>generation ${safe(data.meta.report_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.report_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Factor / alpha</strong><span>generation ${safe(data.meta.decomposition_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.decomposition_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Dependence</strong><span>generation ${safe(data.meta.correlation_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.correlation_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · sha256 ${safe(data.candidate_appendix.source_sha256.slice(0, 12))}…</span></div><div class="binding-note">${statusText(data.candidate_appendix.status)}</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals. Each input was read from its stage's current pointer and refused unless its generation was verified and complete. This panel was sealed before release and records no release state.</div>`;
@@ -1802,7 +1826,7 @@
         ? ["data", `Refresh or formally disposition the required ${humanStatus(item.fact_type)} evidence under ${item.policy_id}; reconciled ${formatDate(item.reconciled_on)}`]
         : routes[item.item] || ["data", "Resolve the declared coverage exception in its producing generation"];
       const focus = view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
-      return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap || "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}"${focus} aria-label="Open ${safe(VIEW_TITLES[view])} evidence for ${safe(humanStatus(item.item))}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap ? operatorText(item.known_gap) : "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}"${focus} aria-label="Open ${safe(VIEW_TITLES[view])} evidence for ${safe(humanStatus(item.item))}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
     });
     $("#remediation-table").innerHTML = tableMarkup([["Exception"], ["State"], ["Required evidence"], ["Destination"]], remediationRows.length ? remediationRows : [emptyRow(4, "No material blocking exceptions")]);
   }

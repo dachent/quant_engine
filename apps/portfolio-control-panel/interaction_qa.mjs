@@ -271,7 +271,7 @@ if (externalManifestPath) {
     "Panel payload equals the independently supplied epoch manifest",
     payloadMatchesExternalManifest,
     {
-      external_manifest_path: externalManifestPath,
+      external_manifest_name: path.basename(externalManifestPath),
       external_manifest_sha256: externalManifestSha256,
       external_manifest_size: externalManifestBytes.byteLength,
       payload_equal: payloadMatchesExternalManifest,
@@ -586,6 +586,7 @@ if (epochOnly) {
     candidate_record_sha256: candidateRecordSha256,
     checks,
     panel_id: panelId,
+    qa_manifest_version: 2,
     scope: "EPOCH_ONLY",
   };
   await browser.close();
@@ -1279,6 +1280,7 @@ const result = {
   candidate_record_sha256: candidateRecordSha256,
   checks,
   panel_id: panelId,
+  qa_manifest_version: 2,
   scope: includeCandidates ? "FULL" : "NON_CANDIDATE",
 };
 await browser.close();
