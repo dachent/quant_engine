@@ -5364,3 +5364,146 @@ def test_e3_a_generation_that_ends_before_the_window_starts_is_failed(
 
     assert row["status"] == "FAILED"
 
+
+# ------------------------------------------- N59: retained-excluded member dating
+#
+# A retained-excluded account's current NAV came only from the legacy CSV (dated
+# 2025-11-24 in the real shape) although the frozen ledger carries the same value to a
+# later date as unmapped, account-level rows under an AUTHORITATIVE account-live NAV
+# admission.  The member is dated by the ledger's last admitted observation of that
+# value; the value does not change.  Built through the production path (spec v3 +
+# schema-2 ledger + build_catalog).
+
+
+def _n59_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ledger_rows: list[tuple[str, str]],
+    disposition: str = "AUTHORITATIVE",
+    excluded: bool = True,
+) -> dict[str, Any]:
+    spec_path, spec = _spec(tmp_path)
+    rows = []
+    for day, value in ledger_rows:
+        row = _ledger_nav("account-alpaca", "alpaca", day, value)
+        row["mapping_status"] = "UNMAPPED"
+        rows.append(row)
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        nav_observations=rows,
+        admissions=[_ledger_admission("account-alpaca", "alpaca", disposition)],
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    exclusions = {"strategy-3": date(2026, 1, 1)} if excluded else {}
+    monkeypatch.setattr(baseline, "_hwm_policy_exclusions", lambda: exclusions)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    return catalog
+
+
+def _n59_member(catalog: dict[str, Any]) -> dict[str, Any]:
+    row = _cc_rows(catalog["current_capital"])["strategy-3"]
+    (member,) = row["members"]
+    assert member["account_id"] == "account-alpaca"
+    return member
+
+
+def test_n59_a_retained_excluded_member_is_dated_by_the_ledgers_last_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(
+        tmp_path,
+        monkeypatch,
+        ledger_rows=[("2026-07-15", "30"), ("2026-07-29", "30")],
+    )
+
+    member = _n59_member(catalog)
+    assert member["as_of_date"] == "2026-07-29"
+    assert member["value"] == {"currency": "USD", "status": "AVAILABLE", "value": "30"}
+    assert member["source_key"] == "provider-ledger"
+    assert member["nav_record_id"] == "alpaca:nav-account-alpaca-2026-07-29"
+    retained = catalog["current_capital"]["retained_excluded"]
+    assert retained["status"] == "AVAILABLE"
+    assert retained["as_of_date"] == "2026-07-29"
+    accepted, evidence = _load_materializer()._current_capital_identity(catalog)
+    assert accepted is True
+    assert evidence["strategy_mismatches"] == []
+
+
+def test_n59_a_member_with_no_ledger_observation_keeps_the_csv_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(tmp_path, monkeypatch, ledger_rows=[])
+
+    member = _n59_member(catalog)
+    assert member["as_of_date"] == "2026-07-01"
+    assert member["source_key"] == "alpaca-nav"
+    assert member["value"]["value"] == "30"
+
+
+def test_n59_a_later_different_ledger_value_ends_the_carry_at_the_last_equal_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(
+        tmp_path,
+        monkeypatch,
+        ledger_rows=[("2026-07-15", "30"), ("2026-07-29", "31")],
+    )
+
+    member = _n59_member(catalog)
+    assert (member["as_of_date"], member["value"]["value"]) == ("2026-07-15", "30")
+    assert member["source_key"] == "provider-ledger"
+
+
+def test_n59_a_value_that_changes_and_returns_is_not_carried_across(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(
+        tmp_path,
+        monkeypatch,
+        ledger_rows=[("2026-07-10", "31"), ("2026-07-29", "30")],
+    )
+
+    member = _n59_member(catalog)
+    assert (member["as_of_date"], member["source_key"]) == (
+        "2026-07-01",
+        "alpaca-nav",
+    )
+
+
+def test_n59_a_reference_only_ledger_row_is_not_an_admitted_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(
+        tmp_path,
+        monkeypatch,
+        ledger_rows=[("2026-07-29", "30")],
+        disposition="REFERENCE_ONLY",
+    )
+
+    member = _n59_member(catalog)
+    assert (member["as_of_date"], member["source_key"]) == (
+        "2026-07-01",
+        "alpaca-nav",
+    )
+
+
+def test_n59_a_systematic_member_is_not_redated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _n59_catalog(
+        tmp_path,
+        monkeypatch,
+        ledger_rows=[("2026-07-29", "30")],
+        excluded=False,
+    )
+
+    member = _n59_member(catalog)
+    assert (member["as_of_date"], member["source_key"]) == (
+        "2026-07-01",
+        "alpaca-nav",
+    )
