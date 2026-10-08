@@ -2181,10 +2181,14 @@ def test_cache_root_rejects_actual_symlinks_before_resolution(tmp_path: Path) ->
             decomposition._cache_root(output_root, retained_root)
 
 
-def test_staging_re_solves_when_the_indexed_result_does_not_verify(
+def test_staging_refuses_without_solving_when_the_indexed_result_does_not_verify(
     tmp_path, monkeypatch
 ):
-    """A stored result is served only while it still hashes to its manifest."""
+    """A stored result is served only while it hashes to its manifest.
+
+    FP:179: a present but corrupt result is refused before any build; it is
+    neither served nor re-solved.
+    """
 
     source_root = tmp_path / "source"
     target_path, days = _write_sources(source_root, complete_costs=True)
@@ -2211,7 +2215,7 @@ def test_staging_re_solves_when_the_indexed_result_does_not_verify(
 
     with pytest.raises(decomposition.DecompositionError):
         decomposition.stage_candidate(spec_path, source_root, output_root)
-    assert calls["count"] == 1
+    assert calls["count"] == 0
 
 
 def test_pre_inception_factor_blanks_bound_anchor_range_and_are_disclosed(
