@@ -74,9 +74,16 @@ def _accepted_attribution(figure: float = GOVERNED_ALPHA) -> dict[str, Any]:
     }
 
 
-def _found(tmp_path: Path, **row_fields: Any) -> list[checks.Finding]:
+def _found_by_strategy(
+    tmp_path: Path, **rows_by_position: dict[str, Any]
+) -> list[checks.Finding]:
+    """Findings of the check with ``strategy_summary[i]`` updated from ``rows_by_position``."""
+
     def mutate(report: dict[str, Any]) -> None:
-        report["strategy_summary"][0].update(copy.deepcopy(row_fields))
+        for position, fields in rows_by_position.items():
+            report["strategy_summary"][int(position.removeprefix("at_"))].update(
+                copy.deepcopy(fields)
+            )
 
     return [
         finding
@@ -85,22 +92,54 @@ def _found(tmp_path: Path, **row_fields: Any) -> list[checks.Finding]:
     ]
 
 
+def _found(tmp_path: Path, **row_fields: Any) -> list[checks.Finding]:
+    return _found_by_strategy(tmp_path, at_0=row_fields)
+
+
 def test_f9_one_not_ready_finding_per_stale_row_and_no_blocker(tmp_path: Path) -> None:
+    # The F1 shape of the ruling: the Grizzly reconciliation and attribution rows
+    # (alpha) and the TT reconciliation row (beta) are stale; the TT attribution
+    # row is accepted.  That is exactly three NOT_READY findings, never a blocker.
+    beta_accepted = _accepted_attribution()
+    beta_accepted["strategy_id"] = "beta"
+    found = _found_by_strategy(
+        tmp_path,
+        at_0={
+            "implementation_reconciliation": _stale("RECONCILIATION"),
+            "implementation_return_attribution": _stale("RETURN_ATTRIBUTION"),
+        },
+        at_1={
+            "implementation_reconciliation": _stale(
+                "RECONCILIATION", strategy_id="beta"
+            ),
+            "implementation_return_attribution": beta_accepted,
+        },
+    )
+
+    assert [(f.klass, f.entity, f.defect_ids) for f in found] == [
+        (checks.NOT_READY, "alpha", ("N66-R",)),
+        (checks.NOT_READY, "alpha", ("N66-R",)),
+        (checks.NOT_READY, "beta", ("N66-R",)),
+    ]
+    assert [f.json_path for f in found] == [
+        "$.strategy_summary[0].implementation_reconciliation",
+        "$.strategy_summary[0].implementation_return_attribution",
+        "$.strategy_summary[1].implementation_reconciliation",
+    ]
+    assert not [f for f in found if f.klass in checks.BLOCKERS]
+
+
+def test_f9_one_strategy_with_both_rows_stale_is_two_findings(tmp_path: Path) -> None:
     found = _found(
         tmp_path,
         implementation_reconciliation=_stale("RECONCILIATION"),
         implementation_return_attribution=_stale("RETURN_ATTRIBUTION"),
     )
 
-    assert [(f.klass, f.entity, f.defect_ids) for f in found] == [
-        (checks.NOT_READY, "alpha", ("N66-R",)),
-        (checks.NOT_READY, "alpha", ("N66-R",)),
+    assert [(f.klass, f.entity) for f in found] == [
+        (checks.NOT_READY, "alpha"),
+        (checks.NOT_READY, "alpha"),
     ]
-    assert {f.json_path for f in found} == {
-        "$.strategy_summary[0].implementation_reconciliation",
-        "$.strategy_summary[0].implementation_return_attribution",
-    }
-    assert not [f for f in found if f.klass in checks.BLOCKERS]
 
 
 def test_accepted_rows_equal_to_the_governed_series_raise_nothing(
