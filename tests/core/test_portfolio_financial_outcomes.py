@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 import ast
+import copy
 import importlib
+import importlib.util
 import json
 import hashlib
 from pathlib import Path
@@ -1510,3 +1512,538 @@ def test_a_ledger_generation_without_a_catalog_is_absent(tmp_path, monkeypatch):
         outcomes.FinancialOutcomeError, match="catalog is absent or ambiguous"
     ):
         world.call()
+
+
+# ---------------------------------------------------------------- Defect A
+#
+# `_census_assignment_only_epochs` is the gate's census-confirmed exemption for a
+# BLOCKED_ADMISSION row whose (strategy_id, effective_start, effective_end) tuple is
+# a census ASSIGNMENT_ONLY interval, never a FUNDED_MEMBERSHIP one. `blocking_reason`
+# text is never read: it is admission-policy data, not code authority. Fixtures below
+# are named GOOD-A*/BAD-A* to match
+# repair-grouped-reviews/rulings-t0a-epochs-and-release-findings.md section A.3.
+
+_T0A_CUTOFF = date.fromisoformat("2026-09-17")
+_TT_START = "2025-11-25"
+_TT_END = "2026-01-04"
+_TT_ACCOUNT_1 = "account-38b653b91ff43a10"
+_TT_ACCOUNT_2 = "account-98f5986706ed53c5"
+
+# The real 13-row account-strategy-manifest, verbatim from the smoke9 run (panel
+# 07fe4351, report generation a839e452), read from
+# C:/Dev/q/t0a/pf/reporting/generations/a839e452.../account-strategy-manifest.json,
+# whose sha256 (86d9d9bc...) matches tests/acceptance/fixtures/smoke9_real_rows.json's
+# provenance.manifest_sha256. Only the fields `_census_assignment_only_epochs` reads
+# are kept.
+_SMOKE9_MANIFEST_ROWS = [
+    {
+        "account_id": "account-1b44c987969b9e47",
+        "strategy_id": "p123-ai-factor",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["ibkr:nav-d8fd1d081e6553ab48952401"],
+        "effective_start": "2026-01-22",
+        "effective_end": None,
+    },
+    {
+        "account_id": _TT_ACCOUNT_1,
+        "strategy_id": "tt-portfolio",
+        "status": "BLOCKED_ADMISSION",
+        "admission_status": "BLOCKED",
+        "funded_nav_record_ids": [],
+        "effective_start": _TT_START,
+        "effective_end": _TT_END,
+    },
+    {
+        "account_id": _TT_ACCOUNT_1,
+        "strategy_id": "qsi",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-353534d995f41224cc2ef445"],
+        "effective_start": "2026-01-05",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-58e75e8d952fa1b8",
+        "strategy_id": "volatis-strategy",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["quantbase:2024-10-15"],
+        "effective_start": "2024-10-15",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-61092059d066f056",
+        "strategy_id": "grizzlybears-vtma",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-ead65c79531379c539666041"],
+        "effective_start": "2026-01-02",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-702c489650e59956",
+        "strategy_id": "tt-portfolio",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-c0077bd2e183366c321a4124"],
+        "effective_start": _TT_START,
+        "effective_end": None,
+    },
+    {
+        "account_id": _TT_ACCOUNT_2,
+        "strategy_id": "tt-portfolio",
+        "status": "BLOCKED_ADMISSION",
+        "admission_status": "BLOCKED",
+        "funded_nav_record_ids": [],
+        "effective_start": _TT_START,
+        "effective_end": _TT_END,
+    },
+    {
+        "account_id": _TT_ACCOUNT_2,
+        "strategy_id": "qsi",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-2a060a7b4c1fefcbf654c7ee"],
+        "effective_start": "2026-01-05",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-a13937e26b8ae46d",
+        "strategy_id": "tt-portfolio",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-bf46a884afcee0e5dbe372ce"],
+        "effective_start": "2025-12-29",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-c63d2a487e019790",
+        "strategy_id": "tt-portfolio",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-c4c653e4cbfb37647e537136"],
+        "effective_start": _TT_START,
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-cff10c44aedcf5e8",
+        "strategy_id": "tt-portfolio",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["schwab:nav-d18d357a5826b1d5ae2932ca"],
+        "effective_start": _TT_START,
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-d2e5821e608e25f1",
+        "strategy_id": "robuxio-crypto",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["matrixport:2025-12-06"],
+        "effective_start": "2025-12-06",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-d69701da9143c430",
+        "strategy_id": "p123-eu",
+        "status": "OK",
+        "admission_status": "FUNDED",
+        "funded_nav_record_ids": ["ibkr:nav-c0c16d818189d4449387e681"],
+        "effective_start": "2025-11-20",
+        "effective_end": None,
+    },
+]
+
+
+def _smoke9_rows():
+    return copy.deepcopy(_SMOKE9_MANIFEST_ROWS)
+
+
+def test_good_a1_the_real_smoke9_rows_are_exempt_exactly_on_the_two_blocked_tt_rows():
+    """GOOD-A1 (real shape): the 13 verbatim smoke9 rows against the real contract."""
+
+    exempt = outcomes._census_assignment_only_epochs(
+        _smoke9_rows(), _contract(), _T0A_CUTOFF
+    )
+    assert exempt == [
+        {
+            "account_id": _TT_ACCOUNT_1,
+            "strategy_id": "tt-portfolio",
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+        {
+            "account_id": _TT_ACCOUNT_2,
+            "strategy_id": "tt-portfolio",
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+    ]
+
+
+def test_good_a2_an_assignment_only_row_closed_exactly_on_the_cutoff_passes():
+    """GOOD-A2 (boundary): effective_end == cutoff is still "on or before"."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] in (_TT_ACCOUNT_1, _TT_ACCOUNT_2):
+            row["effective_end"] = _T0A_CUTOFF.isoformat()
+    contract = _contract()
+    for sleeve in contract["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            if (
+                assignment["strategy_id"] == "tt-portfolio"
+                and assignment["status"] == "ASSIGNMENT_ONLY"
+            ):
+                assignment["effective_end"] = _T0A_CUTOFF.isoformat()
+    exempt = outcomes._census_assignment_only_epochs(rows, contract, _T0A_CUTOFF)
+    assert {row["account_id"] for row in exempt} == {_TT_ACCOUNT_1, _TT_ACCOUNT_2}
+
+
+def test_good_a3_the_pipeline_reexec_seam_funds_only_funded_membership_rows():
+    """GOOD-A3 (re-exec seam check): confirms the fixture this lane must not reuse.
+
+    `tests/core/mvp2_financial_fixture.py` funds every `_INCLUDED` census status
+    (FUNDED_MEMBERSHIP and ASSIGNMENT_ONLY alike -- see
+    `tests/portfolio_ledger/test_hwm_selected_inputs.py::_INCLUDED`), so it is a
+    pre-R2 normalized fixture: no row it builds is ever BLOCKED_ADMISSION for an
+    ASSIGNMENT_ONLY tuple, and it cannot exercise this predicate. This test pins
+    that fact so it fails loudly if the fixture's admission shape ever changes
+    without updating this lane's understanding of it. The real re-exec path
+    (`pipeline._verify_financial_outcomes`, pipeline.py:1252) is exercised instead,
+    directly, by the pure-function tests above against the real smoke9 bytes
+    (GOOD-A1) -- which are a verbatim capture of that exact importlib path's output.
+    """
+
+    hwm_path = (
+        Path(__file__).parents[1] / "portfolio_ledger" / "test_hwm_selected_inputs.py"
+    )
+    module_spec = importlib.util.spec_from_file_location(
+        "t0a_hwm_selected_inputs_seam", hwm_path
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    hwm = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(hwm)
+    assert hwm._INCLUDED == {"FUNDED_MEMBERSHIP", "ASSIGNMENT_ONLY"}
+
+
+def test_bad_a1_an_open_blocked_row_on_a_required_strategy_refuses():
+    """BAD-A1: the rehearsal's own BAD -- an open BLOCKED_ADMISSION row never exempts."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == _TT_ACCOUNT_1:
+            row["effective_end"] = None
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a2_a_blocked_row_on_a_funded_membership_tuple_refuses():
+    """BAD-A2: a funded epoch that failed admission is not census-confirmed exempt."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == "account-d69701da9143c430":
+            row.update(
+                status="BLOCKED_ADMISSION",
+                admission_status="BLOCKED",
+                funded_nav_record_ids=[],
+            )
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a3_a_blocked_row_whose_tuple_is_absent_from_the_census_refuses():
+    """BAD-A3: a tuple the census does not carry at all is never confirmed exempt."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == "account-d2e5821e608e25f1":
+            row.update(
+                status="BLOCKED_ADMISSION",
+                admission_status="BLOCKED",
+                funded_nav_record_ids=[],
+                effective_start="2020-01-01",
+                effective_end="2020-02-01",
+            )
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a4_three_blocked_rows_against_a_census_count_of_two_refuses():
+    """BAD-A4: more blocked rows share the tuple than the census has assignments."""
+
+    rows = _smoke9_rows()
+    extra = copy.deepcopy(
+        next(row for row in rows if row["account_id"] == _TT_ACCOUNT_1)
+    )
+    extra["account_id"] = "account-extra-tt-blocked"
+    rows.append(extra)
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a5_an_assignment_only_tuple_rebuilt_as_ok_funded_refuses():
+    """BAD-A5: the R2 violation -- the exempt multiset falls short of the census."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == _TT_ACCOUNT_1:
+            row.update(
+                status="OK",
+                admission_status="FUNDED",
+                funded_nav_record_ids=["schwab:nav-fake"],
+            )
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+@pytest.mark.parametrize(
+    "status", ["BLOCKED_MISSING_PREDECESSOR_CONTINUITY", "NO_ADMITTED_NAV"]
+)
+def test_bad_a6_an_assignment_only_tuple_rebuilt_under_another_status_refuses(status):
+    """BAD-A6: only BLOCKED_ADMISSION/BLOCKED is ever exempt -- never another status."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == _TT_ACCOUNT_1:
+            row["status"] = status
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a7_a_closed_assignment_only_row_after_the_cutoff_refuses():
+    """BAD-A7: "closed and on or before the cutoff" fails closed past the cutoff."""
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == _TT_ACCOUNT_1:
+            row["effective_end"] = "2026-09-18"
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_bad_a8_every_row_of_a_required_strategy_exempt_refuses():
+    """BAD-A8: a strategy may not be carried by exempt rows alone."""
+
+    rows = [row for row in _smoke9_rows() if row["strategy_id"] != "tt-portfolio"]
+    for row in (
+        {
+            "account_id": _TT_ACCOUNT_1,
+            "strategy_id": "tt-portfolio",
+            "status": "BLOCKED_ADMISSION",
+            "admission_status": "BLOCKED",
+            "funded_nav_record_ids": [],
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+        {
+            "account_id": _TT_ACCOUNT_2,
+            "strategy_id": "tt-portfolio",
+            "status": "BLOCKED_ADMISSION",
+            "admission_status": "BLOCKED",
+            "funded_nav_record_ids": [],
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+    ):
+        rows.append(row)
+    contract = _contract()
+    sleeves = contract["current_census"]["account_sleeves"]
+    contract["current_census"]["account_sleeves"] = [
+        sleeve
+        for sleeve in sleeves
+        if not any(
+            assignment["strategy_id"] == "tt-portfolio"
+            and assignment["status"] == "FUNDED_MEMBERSHIP"
+            for assignment in sleeve["assignments"]
+        )
+    ]
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, contract, _T0A_CUTOFF)
+
+
+def test_bad_a9_a_row_exempt_only_by_blocking_reason_text_on_a_funded_tuple_refuses():
+    """BAD-A9: proves blocking_reason text is not authority.
+
+    A BLOCKED_ADMISSION row carrying the exact exemption's reason string, on a
+    tuple the census confirms is FUNDED_MEMBERSHIP (never ASSIGNMENT_ONLY), must
+    still refuse: nothing about the predicate reads `blocking_reason`.
+    """
+
+    rows = _smoke9_rows()
+    for row in rows:
+        if row["account_id"] == "account-d69701da9143c430":
+            row.update(
+                status="BLOCKED_ADMISSION",
+                admission_status="BLOCKED",
+                funded_nav_record_ids=[],
+                blocking_reason="CENSUS_ASSIGNMENT_ONLY_NOT_FUNDED_MEMBERSHIP",
+            )
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="all required financial epochs"
+    ):
+        outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+
+
+def test_the_predicate_never_reads_blocking_reason():
+    """A row missing `blocking_reason` entirely is still exempt (AST-level proof)."""
+
+    source = (Path(outcomes.__file__)).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    (func_node,) = (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_census_assignment_only_epochs"
+    )
+    literals = {
+        node.value
+        for node in ast.walk(func_node)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "blocking_reason" not in literals
+
+
+def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
+    """Seam test: the gate's judge and the validator's N26 classifier agree.
+
+    They must stay independent code (the gate never imports `acceptance/`), but on
+    the real smoke9 rows they must classify the same two rows as the confirmed
+    blocked/exempt set. This test, in `tests/`, may import both.
+    """
+
+    from acceptance.validate import checks as acceptance_checks
+    from acceptance.validate.generation import CensusAssignment, ContractCensus
+
+    rows = _smoke9_rows()
+    exempt = outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+    gate_identities = {
+        (row["account_id"], row["strategy_id"], row["effective_start"], row["effective_end"])
+        for row in exempt
+    }
+
+    contract = _contract()
+    assignments = tuple(
+        CensusAssignment(
+            strategy_id=assignment["strategy_id"],
+            status=assignment["status"],
+            effective_start=assignment["effective_start"],
+            effective_end=assignment["effective_end"],
+        )
+        for sleeve in contract["current_census"]["account_sleeves"]
+        for assignment in sleeve["assignments"]
+    )
+    census = ContractCensus(sha256="f" * 64, assignments=assignments)
+    assignment_only: dict[tuple[str, str | None, str | None], int] = {}
+    funded: dict[tuple[str, str | None, str | None], int] = {}
+    for assignment in census.assignments:
+        key = (assignment.strategy_id, assignment.effective_start, assignment.effective_end)
+        if assignment.status == "ASSIGNMENT_ONLY":
+            assignment_only[key] = assignment_only.get(key, 0) + 1
+        elif assignment.status == "FUNDED_MEMBERSHIP":
+            funded[key] = funded.get(key, 0) + 1
+
+    # The acceptance side's equivalent predicate (checks.is_blocked_manifest_row plus
+    # the same census confirmation `_classify_blocked_epochs` applies), evaluated
+    # directly against the manifest rows rather than through its report-row Context
+    # plumbing (which expects `twr_mwr`/`account_manifest` report shapes, not bare
+    # manifest rows).
+    acceptance_identities = set()
+    for row in rows:
+        if not acceptance_checks.is_blocked_manifest_row(row):
+            continue
+        key = (row["strategy_id"], row["effective_start"], row["effective_end"])
+        if assignment_only.get(key, 0) > 0 and funded.get(key, 0) == 0:
+            acceptance_identities.add(
+                (
+                    row["account_id"],
+                    row["strategy_id"],
+                    row["effective_start"],
+                    row["effective_end"],
+                )
+            )
+
+    assert gate_identities == acceptance_identities == {
+        (_TT_ACCOUNT_1, "tt-portfolio", _TT_START, _TT_END),
+        (_TT_ACCOUNT_2, "tt-portfolio", _TT_START, _TT_END),
+    }
+
+
+def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignment_only(
+    monkeypatch, tmp_path
+):
+    """`_verify_epochs` keeps `epoch_count == len(rows)` and discloses the exempt set."""
+
+    rebuilt = {
+        "rows": _smoke9_rows(),
+        "calculation_cutoff_date": _T0A_CUTOFF.isoformat(),
+    }
+    monkeypatch.setattr(
+        outcomes, "_rebuild_selected_epochs", lambda *a, **k: rebuilt
+    )
+    panel_root = tmp_path / "panel"
+    panel_root.mkdir()
+    data_dir = panel_root / "data"
+    data_dir.mkdir()
+    dashboard = {"account_manifest": rebuilt}
+    dashboard_bytes = canonical_json_bytes(dashboard)
+    (data_dir / "dashboard_data.json").write_bytes(dashboard_bytes)
+    panel_node = pipeline.GenerationNode(
+        "control-panel",
+        (),
+        "control-panel",
+        "a" * 64,
+        "b" * 64,
+        (
+            pipeline.FileExpectation(
+                "data/dashboard_data.json",
+                hashlib.sha256(dashboard_bytes).hexdigest(),
+                len(dashboard_bytes),
+            ),
+        ),
+        panel_root,
+        False,
+    )
+    baseline_root = tmp_path / "baseline"
+    baseline_root.mkdir()
+    baseline_node = pipeline.GenerationNode(
+        "baseline", (), "baseline", "a" * 64, "b" * 64, (), baseline_root, False
+    )
+    spec = SimpleNamespace(nodes=(baseline_node, panel_node))
+    monkeypatch.setattr(
+        outcomes, "_epoch_manifest_profile", lambda _spec: {"selected_bytes": {}}
+    )
+    proof = outcomes._verify_epochs(spec, _contract())
+    assert proof["epoch_count"] == 13
+    assert proof["assignment_only_epochs"] == [
+        {
+            "account_id": _TT_ACCOUNT_1,
+            "strategy_id": "tt-portfolio",
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+        {
+            "account_id": _TT_ACCOUNT_2,
+            "strategy_id": "tt-portfolio",
+            "effective_start": _TT_START,
+            "effective_end": _TT_END,
+        },
+    ]

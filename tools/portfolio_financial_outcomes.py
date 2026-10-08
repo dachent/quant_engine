@@ -6,7 +6,8 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 import contextlib
 from datetime import UTC, date, datetime
 import hashlib
@@ -1332,6 +1333,103 @@ def _rebuild_selected_epochs(
     return cast(dict[str, Any], result)
 
 
+def _census_assignment_only_epochs(
+    rows: Sequence[Mapping[str, Any]],
+    contract: Mapping[str, Any],
+    cutoff: date,
+) -> list[dict[str, Any]]:
+    """Rows the census confirms are ASSIGNMENT_ONLY, never FUNDED_MEMBERSHIP.
+
+    A row is exempt from the "numerically OK" requirement only when the
+    producer itself refused to fund it (``BLOCKED_ADMISSION`` /
+    ``BLOCKED`` / no funded NAV records), its interval is closed on or
+    before the cutoff, and the census confirms that exact
+    ``(strategy_id, effective_start, effective_end)`` tuple is an
+    ASSIGNMENT_ONLY interval and not also a FUNDED_MEMBERSHIP interval.
+    ``blocking_reason`` text is never consulted: it is admission-policy
+    data, not code authority, and a row must not be able to exempt itself.
+    """
+
+    required = {
+        strategy["strategy_id"]
+        for strategy in contract["strategies"]
+        if strategy["product_requirement"] == "REQUIRED"
+    }
+    assignments = [
+        assignment
+        for sleeve in contract["current_census"]["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["strategy_id"] in required
+    ]
+    assignment_only = Counter(
+        (
+            assignment["strategy_id"],
+            assignment["effective_start"],
+            assignment["effective_end"],
+        )
+        for assignment in assignments
+        if assignment["status"] == "ASSIGNMENT_ONLY"
+    )
+    funded_membership = {
+        (
+            assignment["strategy_id"],
+            assignment["effective_start"],
+            assignment["effective_end"],
+        )
+        for assignment in assignments
+        if assignment["status"] == "FUNDED_MEMBERSHIP"
+    }
+
+    def is_census_assignment_only(row: Mapping[str, Any]) -> bool:
+        key = (row["strategy_id"], row["effective_start"], row["effective_end"])
+        effective_end = row["effective_end"]
+        return (
+            row.get("status") == "BLOCKED_ADMISSION"
+            and row.get("admission_status") == "BLOCKED"
+            and row.get("funded_nav_record_ids") == []
+            and effective_end is not None
+            and date.fromisoformat(effective_end) <= cutoff
+            and key in assignment_only
+            and key not in funded_membership
+        )
+
+    exempt_rows = [row for row in rows if is_census_assignment_only(row)]
+    exempt_counts = Counter(
+        (row["strategy_id"], row["effective_start"], row["effective_end"])
+        for row in exempt_rows
+    )
+    if exempt_counts != assignment_only:
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    scored_rows = [row for row in rows if not is_census_assignment_only(row)]
+    if any(row.get("status") != "OK" for row in scored_rows):
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    if {row["strategy_id"] for row in scored_rows} != required:
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    return sorted(
+        (
+            {
+                "account_id": row["account_id"],
+                "strategy_id": row["strategy_id"],
+                "effective_start": row["effective_start"],
+                "effective_end": row["effective_end"],
+            }
+            for row in exempt_rows
+        ),
+        key=lambda row: (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"] or "",
+        ),
+    )
+
+
 def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
     selected_bytes = _epoch_manifest_profile(spec)["selected_bytes"]
     baselines = [
@@ -1367,14 +1465,17 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for assignment in sleeve["assignments"]
     )
     rows = rebuilt["rows"]
-    if (
-        len(rows) != expected_count
-        or any(row.get("status") != "OK" for row in rows)
-        or {row["strategy_id"] for row in rows} != required
-    ):
+    if len(rows) != expected_count:
         raise FinancialOutcomeError(
             "all required financial epochs must be numerically OK"
         )
+    calculation_cutoff_date = rebuilt.get("calculation_cutoff_date")
+    if calculation_cutoff_date is None:
+        raise FinancialOutcomeError(
+            "finalized epoch product is missing calculation_cutoff_date"
+        )
+    cutoff = date.fromisoformat(calculation_cutoff_date)
+    assignment_only_epochs = _census_assignment_only_epochs(rows, contract, cutoff)
     dashboard_path = panel.source_dir / "data/dashboard_data.json"
     files = [
         row for row in panel.files if row.relative_path == "data/dashboard_data.json"
@@ -1390,6 +1491,7 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         "manifest": rebuilt,
         "dashboard": dashboard,
         "epoch_count": len(rows),
+        "assignment_only_epochs": assignment_only_epochs,
         "baseline_generation": baseline,
         "panel_generation": panel,
     }
@@ -1915,6 +2017,7 @@ def _validate_financial_outcomes(
         ],
         "artifact_count": len(nodes),
         "epoch_count": epochs["epoch_count"],
+        "assignment_only_epochs": epochs["assignment_only_epochs"],
         "capital_result_id": capital["result_id"],
         "selected_cells": selected_cells,
         "consumers": consumers,
