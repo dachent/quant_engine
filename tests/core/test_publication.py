@@ -298,7 +298,10 @@ def test_evaluate_release_findings_set_clean_panel_and_derived_target(
         ),
     )
 
-    targets = [_Target("portfolio-panel", "panel-gen"), _Target("correlation", "other-gen")]
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
     paths = {"portfolio-panel": panel_path, "correlation": other_path}
 
     may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
@@ -325,7 +328,10 @@ def test_evaluate_release_findings_set_refuses_a_stale_derived_target(
         ),
     )
 
-    targets = [_Target("portfolio-panel", "panel-gen"), _Target("correlation", "other-gen")]
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
     paths = {"portfolio-panel": panel_path, "correlation": other_path}
 
     may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
@@ -377,7 +383,10 @@ def test_evaluate_release_findings_set_refuses_a_blocker_on_a_derived_target(
         ),
     )
 
-    targets = [_Target("portfolio-panel", "panel-gen"), _Target("correlation", "other-gen")]
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
     paths = {"portfolio-panel": panel_path, "correlation": other_path}
 
     may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
@@ -394,7 +403,10 @@ def test_evaluate_release_findings_set_refuses_a_missing_target_file(
     panel_path = tmp_path / "panel.json"
     _write(panel_path, _document("panel-gen"))
 
-    targets = [_Target("portfolio-panel", "panel-gen"), _Target("correlation", "other-gen")]
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
     paths = {"portfolio-panel": panel_path, "correlation": tmp_path / "absent.json"}
 
     may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)

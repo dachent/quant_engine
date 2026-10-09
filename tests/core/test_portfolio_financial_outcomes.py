@@ -1936,7 +1936,12 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
     rows = _smoke9_rows()
     exempt = outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
     gate_identities = {
-        (row["account_id"], row["strategy_id"], row["effective_start"], row["effective_end"])
+        (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"],
+        )
         for row in exempt
     }
 
@@ -1955,7 +1960,11 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
     assignment_only: dict[tuple[str, str | None, str | None], int] = {}
     funded: dict[tuple[str, str | None, str | None], int] = {}
     for assignment in census.assignments:
-        key = (assignment.strategy_id, assignment.effective_start, assignment.effective_end)
+        key = (
+            assignment.strategy_id,
+            assignment.effective_start,
+            assignment.effective_end,
+        )
         if assignment.status == "ASSIGNMENT_ONLY":
             assignment_only[key] = assignment_only.get(key, 0) + 1
         elif assignment.status == "FUNDED_MEMBERSHIP":
@@ -1981,10 +1990,14 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
                 )
             )
 
-    assert gate_identities == acceptance_identities == {
-        (_TT_ACCOUNT_1, "tt-portfolio", _TT_START, _TT_END),
-        (_TT_ACCOUNT_2, "tt-portfolio", _TT_START, _TT_END),
-    }
+    assert (
+        gate_identities
+        == acceptance_identities
+        == {
+            (_TT_ACCOUNT_1, "tt-portfolio", _TT_START, _TT_END),
+            (_TT_ACCOUNT_2, "tt-portfolio", _TT_START, _TT_END),
+        }
+    )
 
 
 def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignment_only(
@@ -1996,9 +2009,7 @@ def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignm
         "rows": _smoke9_rows(),
         "calculation_cutoff_date": _T0A_CUTOFF.isoformat(),
     }
-    monkeypatch.setattr(
-        outcomes, "_rebuild_selected_epochs", lambda *a, **k: rebuilt
-    )
+    monkeypatch.setattr(outcomes, "_rebuild_selected_epochs", lambda *a, **k: rebuilt)
     panel_root = tmp_path / "panel"
     panel_root.mkdir()
     data_dir = panel_root / "data"

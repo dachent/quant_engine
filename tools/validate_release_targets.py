@@ -81,7 +81,9 @@ def load_spec(path: Path) -> tuple[Path, dict[str, Path]]:
     checked: dict[str, Path] = {}
     for root_id, value in roots.items():
         if not isinstance(root_id, str) or not isinstance(value, str) or not value:
-            raise ContractError(f"production spec root {root_id!r} is not a path string")
+            raise ContractError(
+                f"production spec root {root_id!r} is not a path string"
+            )
         checked[root_id] = Path(value)
     return Path(coordination_root), checked
 
@@ -181,9 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
     panel_findings_sha256 = hashlib.sha256(panel_findings_bytes).hexdigest()
 
-    panel_payload_path = (
-        panel_root / "generations" / panel_generation_id / PANEL
-    )
+    panel_payload_path = panel_root / "generations" / panel_generation_id / PANEL
     try:
         panel_payload = _read_json(panel_payload_path, "panel payload")
     except ContractError as exc:

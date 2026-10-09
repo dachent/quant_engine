@@ -157,9 +157,9 @@ def test_a5_benchmark_and_provider_annualization_labels_render_in_capital(
             window_start="2026-01-16",
         ),
     )
-    table = _run(
-        tmp_path, _capital_payload(strategy), "renderCapital"
-    )["#strategy-table"]["innerHTML"]
+    table = _run(tmp_path, _capital_payload(strategy), "renderCapital")[
+        "#strategy-table"
+    ]["innerHTML"]
 
     assert "annualized from 27 weekly observations, 2026-01-09..2026-07-10" in table
     assert "annualized from 26 weekly observations, 2026-01-16..2026-07-10" in table
@@ -172,9 +172,9 @@ def test_n55_owner_policy_decision_is_named_explicitly(tmp_path: Path) -> None:
     strategy = _cost_strategy(
         benchmark_assignment_authority="OWNER_POLICY_DECISION",
     )
-    table = _run(
-        tmp_path, _capital_payload(strategy), "renderCapital"
-    )["#strategy-table"]["innerHTML"]
+    table = _run(tmp_path, _capital_payload(strategy), "renderCapital")[
+        "#strategy-table"
+    ]["innerHTML"]
 
     assert "Owner policy decision" in table
 
@@ -185,9 +185,9 @@ def test_n55_retained_attribution_spec_keeps_the_old_status_quo_label(
     strategy = _cost_strategy(
         benchmark_assignment_authority="RETAINED_ATTRIBUTION_SPEC",
     )
-    table = _run(
-        tmp_path, _capital_payload(strategy), "renderCapital"
-    )["#strategy-table"]["innerHTML"]
+    table = _run(tmp_path, _capital_payload(strategy), "renderCapital")[
+        "#strategy-table"
+    ]["innerHTML"]
 
     assert "Retained attribution spec" in table
 
@@ -200,9 +200,9 @@ def test_n55_benchmark_comparison_reason_renders_beside_the_disposition(
         benchmark_comparison_disposition="No exact-date benchmark-relative comparison is admitted",
         benchmark_comparison_reason="selected generation ea9fbbbe unavailable",
     )
-    table = _run(
-        tmp_path, _capital_payload(strategy), "renderCapital"
-    )["#strategy-table"]["innerHTML"]
+    table = _run(tmp_path, _capital_payload(strategy), "renderCapital")[
+        "#strategy-table"
+    ]["innerHTML"]
 
     assert "selected generation ea9fbbbe unavailable" in table
 
@@ -226,9 +226,9 @@ def test_n55_provider_comparison_reason_renders_as_a_general_surface_not_n55_onl
 
 def test_n55_absent_reasons_render_nothing_extra(tmp_path: Path) -> None:
     strategy = _cost_strategy()
-    table = _run(
-        tmp_path, _capital_payload(strategy), "renderCapital"
-    )["#strategy-table"]["innerHTML"]
+    table = _run(tmp_path, _capital_payload(strategy), "renderCapital")[
+        "#strategy-table"
+    ]["innerHTML"]
 
     assert "Assignment authority" not in table
 

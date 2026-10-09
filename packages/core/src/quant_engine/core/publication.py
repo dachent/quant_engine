@@ -1955,7 +1955,9 @@ def _release_validation_document(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ReleaseValidationFindingsError("findings document shape differs")
     return _validated_findings_core(
-        payload, schema=_RELEASE_VALIDATION_SCHEMA, keys=_RELEASE_VALIDATION_DOCUMENT_KEYS
+        payload,
+        schema=_RELEASE_VALIDATION_SCHEMA,
+        keys=_RELEASE_VALIDATION_DOCUMENT_KEYS,
     )
 
 
@@ -2064,7 +2066,9 @@ def evaluate_release_validation_findings(
         document = _release_validation_document(payload)
     except (StrictJSONError, ReleaseValidationFindingsError) as exc:
         return False, [], str(exc)
-    return _evaluate_findings_document(document, expected_generation_id=expected_generation_id)
+    return _evaluate_findings_document(
+        document, expected_generation_id=expected_generation_id
+    )
 
 
 def evaluate_findings_document_at_path(
@@ -2100,7 +2104,9 @@ def evaluate_findings_document_at_path(
             document = _release_validation_document(payload)
     except ReleaseValidationFindingsError as exc:
         return False, [], str(exc)
-    return _evaluate_findings_document(document, expected_generation_id=expected_generation_id)
+    return _evaluate_findings_document(
+        document, expected_generation_id=expected_generation_id
+    )
 
 
 class _FindingsTarget(Protocol):
