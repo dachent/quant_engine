@@ -5346,25 +5346,47 @@ def build_production_spec(
     # The initial create-only specification contains no guessed future hashes.
     # Only this final specification binds already built numerical artifacts.
     from quant_engine.core.pipeline import PipelineSpec
-    from portfolio_financial_outcomes import validate_financial_outcomes
-
-    completed_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
-    proof = validate_financial_outcomes(completed_spec, caller="production-spec")
-    work_counters = _financial_work_counters(proof)
-    production_semantic = canonical_json_bytes(
-        _semantic_gate_payload(
-            recipe,
-            generation_ids,
-            epoch_manifest_proof=prepared_epoch_proof,
-            financial_outcomes=proof,
-        )
+    from portfolio_financial_outcomes import (
+        validate_financial_outcomes_with_deferred_ledger,
     )
-    contract["production_semantic_gate_sha256"] = hashlib.sha256(
-        production_semantic
-    ).hexdigest()
-    contract_bytes = canonical_json_bytes(contract)
-    spec["gates"][0]["sha256"] = hashlib.sha256(contract_bytes).hexdigest()
-    spec["gates"][1]["sha256"] = hashlib.sha256(production_semantic).hexdigest()
+
+    # The verifier only reads the financial-mvp contract/HWM gates (never
+    # gates[0]/gates[1] below), so this pre-finalization spec is sufficient to
+    # run the one real verification. But PipelineSpec.spec_sha256 hashes the
+    # *entire* spec, including gates[0]/gates[1], whose final hashes depend on
+    # this call's own `proof` -- so the ledger entry for that one call cannot
+    # be named until the finalized spec exists. Run the verification now and
+    # defer the ledger write until the finalized spec is built below, instead
+    # of attributing the call to a spec identity the emitted file will never
+    # match, or repeating the (expensive, numerically authoritative) call a
+    # second time against the finalized spec.
+    completed_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
+    proof, finalize_ledger = validate_financial_outcomes_with_deferred_ledger(
+        completed_spec, caller="production-spec"
+    )
+    final_spec = completed_spec
+    try:
+        work_counters = _financial_work_counters(proof)
+        production_semantic = canonical_json_bytes(
+            _semantic_gate_payload(
+                recipe,
+                generation_ids,
+                epoch_manifest_proof=prepared_epoch_proof,
+                financial_outcomes=proof,
+            )
+        )
+        contract["production_semantic_gate_sha256"] = hashlib.sha256(
+            production_semantic
+        ).hexdigest()
+        contract_bytes = canonical_json_bytes(contract)
+        spec["gates"][0]["sha256"] = hashlib.sha256(contract_bytes).hexdigest()
+        spec["gates"][1]["sha256"] = hashlib.sha256(production_semantic).hexdigest()
+        final_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
+    finally:
+        # The ledger entry names whichever spec identity is the best available:
+        # the finalized one on the ordinary path, or the pre-finalization one
+        # if building the final spec itself fails after a real verification.
+        finalize_ledger(final_spec)
     _write_exact(production_semantic_path, production_semantic)
     _write_exact(contract_path, contract_bytes)
     _write_exact(spec_path, canonical_json_bytes(spec))

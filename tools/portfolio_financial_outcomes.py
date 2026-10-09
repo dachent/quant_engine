@@ -7,7 +7,7 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
 from datetime import UTC, date, datetime
 import hashlib
@@ -1767,6 +1767,49 @@ def validate_financial_outcomes(
     """
     with _verification_ledger(spec, caller) as (work_counters, calls):
         return _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+
+
+def validate_financial_outcomes_with_deferred_ledger(
+    spec: Any, *, allow_synthetic: bool = False, caller: str = "unattributed"
+) -> tuple[dict[str, Any], Callable[[Any], None]]:
+    """Like :func:`validate_financial_outcomes`, but let the caller name the ledger spec.
+
+    Some callers (the production-spec builder) can only know their own final
+    gate hashes after this verifier returns its proof, because those hashes are
+    derived from the proof. Passing the pre-finalized spec to the ordinary
+    entry point therefore records the one real invocation under an identity
+    that never matches the spec file the caller goes on to emit.
+
+    This performs that one real verification immediately -- the returned work
+    counters and call records are the actual evidence of that call, not a
+    second warm repeat of it -- and returns a finalizer the caller must invoke
+    exactly once with the spec whose ``spec_sha256`` should be recorded in the
+    ledger. The finalizer should be invoked from a ``finally`` block so the
+    ledger is still written (under the best identity available) if the caller
+    fails before it can finalize its own spec.
+    """
+
+    if _CALLER_LABEL.fullmatch(caller) is None:
+        raise FinancialOutcomeError("financial verification caller label is invalid")
+    work_counters = {key: 0 for key in _WORK_COUNTER_KEYS}
+    calls: list[dict[str, Any]] = []
+    written = False
+
+    def finalize(final_spec: Any) -> None:
+        nonlocal written
+        if written:
+            raise FinancialOutcomeError(
+                "financial verification ledger is already finalized"
+            )
+        written = True
+        _write_verification_ledger(final_spec, caller, work_counters, calls)
+
+    try:
+        proof = _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+    except BaseException:
+        finalize(spec)
+        raise
+    return proof, finalize
 
 
 def _validate_financial_outcomes(

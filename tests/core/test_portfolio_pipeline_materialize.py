@@ -3677,6 +3677,10 @@ def _stub_financial_outcomes(
     by the verifier's own tests. This stand-in only records which caller label each
     call carried and returns a proof shaped like the real one: `work_counters` with
     exactly the five keys.
+
+    Both the ordinary and deferred-ledger entry points are stubbed, since
+    production-spec building calls the deferred one and other call sites (the
+    semantic gate, portfolio_qc) call the ordinary one.
     """
 
     import portfolio_financial_outcomes
@@ -3691,8 +3695,27 @@ def _stub_financial_outcomes(
         calls.append(caller)
         return {"status": "PASS", "work_counters": dict(reported)}
 
+    def validate_with_deferred_ledger(
+        _spec: object, *, allow_synthetic: bool = False, caller: str = "unattributed"
+    ) -> tuple[dict[str, object], Any]:
+        assert allow_synthetic is False
+        calls.append(caller)
+
+        def finalize(_final_spec: object) -> None:
+            # This stand-in never touches the real on-disk ledger (callers.append
+            # above is the only record of this call); a dedicated test exercises
+            # the real deferred-ledger writer and its on-disk identity directly.
+            return None
+
+        return {"status": "PASS", "work_counters": dict(reported)}, finalize
+
     monkeypatch.setattr(
         portfolio_financial_outcomes, "validate_financial_outcomes", validate
+    )
+    monkeypatch.setattr(
+        portfolio_financial_outcomes,
+        "validate_financial_outcomes_with_deferred_ledger",
+        validate_with_deferred_ledger,
     )
     return calls
 
@@ -4617,14 +4640,72 @@ def test_production_spec_verifier_call_is_recorded_under_its_own_label(
 
     import portfolio_financial_outcomes as outcomes
 
-    real = outcomes.validate_financial_outcomes
+    real = outcomes.validate_financial_outcomes_with_deferred_ledger
     inputs = _production_spec_inputs(tmp_path, monkeypatch)
-    monkeypatch.setattr(outcomes, "validate_financial_outcomes", real)
+    monkeypatch.setattr(
+        outcomes, "validate_financial_outcomes_with_deferred_ledger", real
+    )
 
     with pytest.raises(outcomes.FinancialOutcomeError):
         _build_production_spec(inputs, inputs.state_root)
 
     assert _ledger_callers(inputs.state_root) == ["production-spec"]
+
+
+def test_production_spec_ledger_entry_names_the_emitted_spec_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production-spec ledger entry must name the spec file actually emitted.
+
+    Astra's review (pr519-final.astra.review.md, tools/portfolio_pipeline_materialize.py:5352)
+    found the ledger entry recorded against `completed_spec` before the final
+    semantic/contract hashes replace `spec["gates"][0:2]`, so the emitted
+    production-spec.json never has the identity the ledger names: T0-d P-Z1's
+    `E_Z` caller filter (ledger entries with `spec_sha256` in the set of
+    production-spec identities) then finds nothing. Reproduce that identity
+    check directly: the one ledger entry this call writes must carry the
+    sha256 of the bytes `production-spec.json` actually holds, and must still
+    carry the real counters from the one real verifier call.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real_deferred = outcomes.validate_financial_outcomes_with_deferred_ledger
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+
+    # Exercise the real deferred-ledger entry point -- the actual ledger seam
+    # `_write_verification_ledger`/`_spec_identity` go through in production --
+    # with only the expensive numerical verification itself stubbed, since this
+    # fixture carries no real financial artifacts for it to verify.
+    monkeypatch.setattr(
+        outcomes, "validate_financial_outcomes_with_deferred_ledger", real_deferred
+    )
+
+    def fake_validate(
+        _spec: object,
+        _allow_synthetic: bool,
+        work_counters: dict[str, int],
+        _calls: list[dict[str, object]],
+    ) -> dict[str, object]:
+        work_counters.update(COLD_WORK_COUNTERS)
+        return {"status": "PASS", "work_counters": dict(COLD_WORK_COUNTERS)}
+
+    monkeypatch.setattr(outcomes, "_validate_financial_outcomes", fake_validate)
+
+    built = _build_production_spec(inputs, inputs.state_root)
+
+    spec_path = Path(built["spec"])
+    emitted_spec_sha256 = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    emitted_spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    assert emitted_spec.spec_sha256 == emitted_spec_sha256
+
+    ledger_dir = inputs.state_root / "financial-verification-ledger"
+    entries = [
+        json.loads(path.read_bytes()) for path in sorted(ledger_dir.glob("*.json"))
+    ]
+    (entry,) = [row for row in entries if row["caller"] == "production-spec"]
+    assert entry["spec_sha256"] == emitted_spec_sha256
+    assert entry["work_counters"] == COLD_WORK_COUNTERS
 
 
 def test_semantic_verifier_call_is_recorded_under_its_own_label(
