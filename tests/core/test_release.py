@@ -2001,3 +2001,149 @@ def test_commit_release_refuses_when_only_findings_file_is_missing_entirely(
 
     assert may_publish is False
     assert per_root_reason == {}
+
+
+def test_commit_release_retains_a_guard_refusal_and_never_reopens_the_path(
+    tmp_path, monkeypatch, real_verify_release_validation
+) -> None:
+    """Round-4 review probes (Astra delta-3): (a) a root whose guarded read
+    was refused (a non-resident cloud placeholder) must refuse at the commit
+    boundary WITHOUT reopening the path -- a placeholder that becomes readable
+    after the guard must not commit; (b) an override must not substitute for
+    an unreadable default (the on-disk anchor is not verifiable)."""
+    import quant_engine.core.release as release_module
+
+    monkeypatch.setattr(
+        release_module, "_verify_release_validation", real_verify_release_validation
+    )
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-guard-refusal")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    findings_path = root / "validation" / proposed.generation_id / "findings.json"
+    findings_path.parent.mkdir(parents=True, exist_ok=True)
+    findings_path.write_bytes(
+        json.dumps(
+            {
+                "schema": "qe-validate-generation/1",
+                "generation_id": proposed.generation_id,
+                "generation_dir": str(root / "generations" / proposed.generation_id),
+                "validator_commit": "c" * 40,
+                "expected_baseline_sha256": "b" * 64,
+                "summary": {
+                    "BLOCKER_INVARIANT": 0,
+                    "BLOCKER_AUTHORITY": 0,
+                    "BLOCKER_REGRESSION": 0,
+                    "NOT_READY": 0,
+                    "WARNING": 0,
+                },
+                "findings": [],
+            }
+        ).encode("utf-8")
+    )
+
+    reads: list[Path] = []
+    real_reader = release_module.read_release_validation_findings_bytes
+
+    def counting_reader(path: Path):
+        reads.append(path)
+        return real_reader(path)
+
+    monkeypatch.setattr(
+        release_module,
+        "read_release_validation_findings_bytes",
+        counting_reader,
+    )
+
+    # (a) the guarded read refuses (a non-resident placeholder): the retained
+    # reason refuses the commit and the path is read exactly once (no retry).
+    placeholder_read = (None, "not resident (cloud placeholder)")
+
+    def refusing_reader(path: Path):
+        reads.append(path)
+        return placeholder_read
+
+    monkeypatch.setattr(
+        release_module,
+        "read_release_validation_findings_bytes",
+        refusing_reader,
+    )
+    reads.clear()
+    with pytest.raises(ReleaseValidationError, match="not resident"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    assert reads == [findings_path]
+    assert read_current(root).generation_id != proposed.generation_id
+
+    # (b) a readable path is read exactly once per commit: no second read
+    # after the guard's snapshot (the check/use gap closed end to end).
+    reads.clear()
+    monkeypatch.setattr(
+        release_module,
+        "read_release_validation_findings_bytes",
+        counting_reader,
+    )
+    journal = commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+    assert journal.state is ReleaseState.COMMITTED
+    assert reads == [findings_path]
+
+
+def test_commit_release_refuses_an_override_over_an_unreadable_default(
+    tmp_path, monkeypatch, real_verify_release_validation
+) -> None:
+    """The Astra delta-3 probe: an OFFLINE default plus a stale override must
+    not COMMIT -- an override cannot substitute for an unreadable default."""
+    import quant_engine.core.release as release_module
+
+    monkeypatch.setattr(
+        release_module, "_verify_release_validation", real_verify_release_validation
+    )
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "gate-offline-override")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(root, proposed.generation_id)
+    override = tmp_path / "override" / "findings.json"
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_bytes(b'{"schema": "qe-validate-generation/1"}')
+
+    def offline_default_then_override(path: Path):
+        if path.resolve() == override.resolve():
+            return override.read_bytes(), None
+        return None, "not resident (cloud placeholder)"
+
+    monkeypatch.setattr(
+        release_module,
+        "read_release_validation_findings_bytes",
+        offline_default_then_override,
+    )
+
+    with pytest.raises(ReleaseValidationError, match="could not be read"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            release_validation_findings={"root": override},
+        )
+    assert read_current(root).generation_id != proposed.generation_id
