@@ -1875,38 +1875,47 @@ def _verify_release_validation(
         )
         for target in manifest.targets
     }
-    for root_id, override_path in overrides.items():
-        default_path = default_paths.get(root_id)
-        if default_path is None or not default_path.is_file():
-            continue
-        if override_path.resolve() == default_path.resolve():
-            continue
-        if override_path.is_file() and override_path.read_bytes() == (
-            default_path.read_bytes()
-        ):
-            continue
-        raise ReleaseValidationError(
-            f"release validation refuses root {root_id!r}: an override findings "
-            "path was supplied whose bytes differ from this root's current "
-            f"findings at {default_path}; an override may not restore a "
-            "findings anchor other than the one currently on disk"
-        )
-    paths = {
-        target.root_id: overrides.get(target.root_id) or default_paths[target.root_id]
-        for target in manifest.targets
-    }
-    # Read every root's findings bytes once, here, and evaluate exactly these
-    # snapshots: a file replaced after the guard above (but before the
-    # evaluator re-opened the path) could otherwise admit a stale anchor
-    # through the check/use gap (round-2 review, release.py:1884 probe). A
-    # root whose bytes cannot be read here keeps no snapshot entry, so the
-    # evaluator's own guarded read reports the refusal reason.
+
+    def _guarded_read(path: Path) -> bytes | None:
+        try:
+            return path.read_bytes()
+        except OSError:
+            return None
+
+    # Single-read rule (round-2 review, release.py:1884 probe): the override
+    # guard and the evaluator must reason about the SAME bytes. Every read
+    # happens here, once: an override is refused when the default-path bytes
+    # exist and differ (a stale-anchor restore), and the bytes that survive
+    # the guard are the only ones the evaluator sees. No selected findings
+    # path is reopened after its guarded read.
+    paths: dict[str, Path] = {}
     snapshot: dict[str, bytes] = {}
     for target in manifest.targets:
-        try:
-            snapshot[target.root_id] = paths[target.root_id].read_bytes()
-        except OSError:
+        root_id = target.root_id
+        default_path = default_paths[root_id]
+        override_path = overrides.get(root_id)
+        if override_path is None or override_path.resolve() == default_path.resolve():
+            paths[root_id] = default_path
+            default_bytes = _guarded_read(default_path)
+            if default_bytes is not None:
+                snapshot[root_id] = default_bytes
             continue
+        override_bytes = _guarded_read(override_path)
+        if override_bytes is None:
+            raise ReleaseValidationError(
+                f"release validation refuses root {root_id!r}: the override "
+                f"findings path {override_path} could not be read"
+            )
+        default_bytes = _guarded_read(default_path)
+        if default_bytes is not None and override_bytes != default_bytes:
+            raise ReleaseValidationError(
+                f"release validation refuses root {root_id!r}: an override findings "
+                "path was supplied whose bytes differ from this root's current "
+                f"findings at {default_path}; an override may not restore a "
+                "findings anchor other than the one currently on disk"
+            )
+        paths[root_id] = override_path
+        snapshot[root_id] = override_bytes
     may_publish, per_root_reason = evaluate_release_findings_set(
         manifest.targets, paths, snapshot=snapshot
     )

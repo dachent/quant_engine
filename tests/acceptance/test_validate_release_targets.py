@@ -637,3 +637,38 @@ def test_a_provenance_row_for_a_non_baseline_root_binds(tmp_path: Path) -> None:
     assert [f.check_id for f in findings] == ["release.target_binding"]
     assert findings[0].klass == BLOCKER_AUTHORITY
     assert "portfolio-correlation-generation" in findings[0].message
+
+
+def test_lens_provenance_rows_bind_to_their_owning_roots(tmp_path: Path) -> None:
+    """The Astra delta-2 probe: provenance[artifact=portfolio-decomposition-
+    lens-<key>] carries the lens content digest and must bind to the owning
+    LIVE_ONLY lens root's actual artifact bytes."""
+    panel = _panel_with_digests()
+    for source_key in ("us-economic", "us-equity-style"):
+        panel["provenance"].append(
+            {
+                "artifact": f"portfolio-decomposition-lens-{source_key}",
+                "sha256": LENS_ARTIFACT_SHA,
+            }
+        )
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "analytics/decomposition.json",
+                "sha256": LENS_ARTIFACT_SHA,
+            }
+        ],
+    )
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    write_lens_artifact(tmp_path, GOOD_GEN)
+    target = make_target("us-economic", tmp_path, GOOD_GEN)
+    assert list(rt.target_binding(target, panel, tmp_path)) == []
+    for row in panel["provenance"]:
+        if row["artifact"] == "portfolio-decomposition-lens-us-economic":
+            row["sha256"] = _sha(b"wrong-lens-bytes\n")
+    findings = list(rt.target_binding(target, panel, tmp_path))
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert "portfolio-decomposition-lens-us-economic" in findings[0].message
