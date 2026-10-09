@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from types import MappingProxyType, ModuleType
-from typing import Callable, Final, Mapping, Protocol, cast
+from typing import Callable, Final, Mapping, Protocol, Sequence, cast
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -1823,6 +1823,25 @@ _RELEASE_VALIDATION_DOCUMENT_KEYS: Final = frozenset(
     }
 )
 
+# --- Release-findings-set precondition (ruling B, findings-contract.md) -------------
+#
+# `tools/validate_generation.py` judges the one generation a user reads (the panel
+# target, `_RELEASE_VALIDATION_SCHEMA` above). `tools/validate_release_targets.py`
+# derives a narrower binding judgement for every *other* release target, schema
+# `qe-release-findings/1`: is this target's generation exactly the input the panel's
+# own (already-clean) findings cite? Its document carries every key the panel schema
+# does, plus `panel_validation` naming the panel target and the exact findings bytes
+# (by sha256) it was derived against -- so a re-validated panel (new findings bytes)
+# invalidates every derived document still citing the old digest.
+
+_RELEASE_FINDINGS_SCHEMA: Final = "qe-release-findings/1"
+_RELEASE_FINDINGS_PANEL_VALIDATION_KEYS: Final = frozenset(
+    {"generation_id", "findings_sha256"}
+)
+_RELEASE_FINDINGS_DOCUMENT_KEYS: Final = frozenset(
+    {*_RELEASE_VALIDATION_DOCUMENT_KEYS, "panel_validation"}
+)
+
 # Windows FILE_ATTRIBUTE_* flags for cloud-sync (OneDrive/SharePoint Files-On-Demand)
 # placeholders: metadata only, no local bytes. Reading one hydrates it through the sync
 # provider's filter driver; AGENT-CONSTRAINTS requires checking residency first (`stat`
@@ -1885,13 +1904,18 @@ def _release_validation_finding(entry: object, *, index: int) -> dict[str, objec
     return entry
 
 
-def _release_validation_document(payload: object) -> dict[str, object]:
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != _RELEASE_VALIDATION_DOCUMENT_KEYS
-    ):
+def _validated_findings_core(
+    payload: dict[str, object], *, schema: str, keys: frozenset[str]
+) -> dict[str, object]:
+    """The validation shared by every findings document schema (panel or derived).
+
+    Factored out of the original single-schema `_release_validation_document` so
+    `_release_findings_document` (schema `qe-release-findings/1`, ruling B) can
+    reuse the exact same field-by-field checks instead of re-deriving them.
+    """
+    if set(payload) != keys:
         raise ReleaseValidationFindingsError("findings document shape differs")
-    if payload["schema"] != _RELEASE_VALIDATION_SCHEMA:
+    if payload["schema"] != schema:
         raise ReleaseValidationFindingsError("findings document schema differs")
     _release_validation_required_string(payload["generation_id"], "generation_id")
     _release_validation_required_string(payload["generation_dir"], "generation_dir")
@@ -1927,40 +1951,66 @@ def _release_validation_document(payload: object) -> dict[str, object]:
     return payload
 
 
-def evaluate_release_validation_findings(
-    path: Path, *, expected_generation_id: str
-) -> tuple[bool, list[dict[str, object]], str | None]:
-    """Return ``(may_publish, blocking_findings, refusal_reason)`` for one generation.
+def _release_validation_document(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ReleaseValidationFindingsError("findings document shape differs")
+    return _validated_findings_core(
+        payload, schema=_RELEASE_VALIDATION_SCHEMA, keys=_RELEASE_VALIDATION_DOCUMENT_KEYS
+    )
 
-    Fails closed on every axis the contract names: missing, unreadable, a
-    non-resident cloud placeholder, malformed, naming a different generation,
-    or declaring no expected baseline (``expected_baseline_sha256: null``, the
-    shape a validator run without ``--expected`` produces) all refuse. Only a
-    well-formed document for exactly ``expected_generation_id``, with a
-    recorded expected-baseline digest and zero ``BLOCKER_*`` findings, may
-    publish. ``refusal_reason`` is set only for those non-finding refusals; a
-    well-formed document with blockers returns them instead so the caller can
-    report exactly what refused it.
-    """
+
+def _release_findings_panel_validation(value: object) -> dict[str, object]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != _RELEASE_FINDINGS_PANEL_VALIDATION_KEYS
+    ):
+        raise ReleaseValidationFindingsError("panel_validation shape differs")
+    _release_validation_required_string(
+        value["generation_id"], "panel_validation.generation_id"
+    )
+    _release_validation_required_string(
+        value["findings_sha256"], "panel_validation.findings_sha256"
+    )
+    return value
+
+
+def _release_findings_document(payload: object) -> dict[str, object]:
+    """Validate a derived (non-panel) target's ``qe-release-findings/1`` document."""
+    if not isinstance(payload, dict):
+        raise ReleaseValidationFindingsError("findings document shape differs")
+    document = _validated_findings_core(
+        payload, schema=_RELEASE_FINDINGS_SCHEMA, keys=_RELEASE_FINDINGS_DOCUMENT_KEYS
+    )
+    document["panel_validation"] = _release_findings_panel_validation(
+        document["panel_validation"]
+    )
+    return document
+
+
+def _load_findings_file(path: Path) -> tuple[bytes | None, str | None]:
+    """``(raw_bytes, None)`` or ``(None, refusal_reason)`` -- the IO/residency axes
+    shared by every findings document, panel or derived (ruling B)."""
     if not path.is_file():
-        return False, [], f"no release-validation findings file at {path}"
+        return None, f"no release-validation findings file at {path}"
     if _is_cloud_placeholder(path):
         return (
-            False,
-            [],
+            None,
             (
                 f"release-validation findings file is not resident (cloud placeholder): {path}"
             ),
         )
     try:
-        raw = path.read_bytes()
+        return path.read_bytes(), None
     except OSError as exc:
-        return False, [], f"release-validation findings file cannot be read: {exc}"
-    try:
-        payload = strict_json_object(raw, label="release-validation findings")
-        document = _release_validation_document(payload)
-    except (StrictJSONError, ReleaseValidationFindingsError) as exc:
-        return False, [], str(exc)
+        return None, f"release-validation findings file cannot be read: {exc}"
+
+
+def _evaluate_findings_document(
+    document: dict[str, object], *, expected_generation_id: str
+) -> tuple[bool, list[dict[str, object]], str | None]:
+    """The checks shared by a panel (``/1``) and a derived (``qe-release-findings/1``)
+    document once its shape is already known-good: generation identity, a recorded
+    expected-baseline digest, and zero ``BLOCKER_*`` findings."""
     if document["generation_id"] != expected_generation_id:
         return (
             False,
@@ -1988,3 +2038,178 @@ def evaluate_release_validation_findings(
         if cast(str, entry["class"]).startswith(_RELEASE_VALIDATION_BLOCKER_PREFIX)
     ]
     return not blockers, blockers, None
+
+
+def evaluate_release_validation_findings(
+    path: Path, *, expected_generation_id: str
+) -> tuple[bool, list[dict[str, object]], str | None]:
+    """Return ``(may_publish, blocking_findings, refusal_reason)`` for one generation.
+
+    Fails closed on every axis the contract names: missing, unreadable, a
+    non-resident cloud placeholder, malformed, naming a different generation,
+    or declaring no expected baseline (``expected_baseline_sha256: null``, the
+    shape a validator run without ``--expected`` produces) all refuse. Only a
+    well-formed document for exactly ``expected_generation_id``, with a
+    recorded expected-baseline digest and zero ``BLOCKER_*`` findings, may
+    publish. ``refusal_reason`` is set only for those non-finding refusals; a
+    well-formed document with blockers returns them instead so the caller can
+    report exactly what refused it.
+    """
+    raw, reason = _load_findings_file(path)
+    if reason is not None:
+        return False, [], reason
+    assert raw is not None
+    try:
+        payload = strict_json_object(raw, label="release-validation findings")
+        document = _release_validation_document(payload)
+    except (StrictJSONError, ReleaseValidationFindingsError) as exc:
+        return False, [], str(exc)
+    return _evaluate_findings_document(document, expected_generation_id=expected_generation_id)
+
+
+def evaluate_findings_document_at_path(
+    path: Path, *, expected_generation_id: str
+) -> tuple[bool, list[dict[str, object]], str | None]:
+    """Like ``evaluate_release_validation_findings``, but also accepts a single
+    ``qe-release-findings/1`` document (ruling B).
+
+    ``tools/check_release_validation_findings.py`` checks one findings file at a
+    time, by path -- a standalone, operator-facing echo of one axis
+    ``evaluate_release_findings_set`` enforces at the publication sink. For a
+    panel (``/1``) document the two agree exactly. For a derived
+    (``qe-release-findings/1``) document this function validates its own shape
+    and blockers the same way, but -- having only one path, not the full
+    manifest ``evaluate_release_findings_set`` needs -- it cannot check whether
+    its ``panel_validation`` still matches the release's current panel findings;
+    that cross-target staleness check is only possible at the publication sink,
+    which sees every target's path at once.
+    """
+    raw, reason = _load_findings_file(path)
+    if reason is not None:
+        return False, [], reason
+    assert raw is not None
+    try:
+        payload = strict_json_object(raw, label="release-validation findings")
+    except StrictJSONError as exc:
+        return False, [], str(exc)
+    schema = payload.get("schema") if isinstance(payload, dict) else None
+    try:
+        if schema == _RELEASE_FINDINGS_SCHEMA:
+            document = _release_findings_document(payload)
+        else:
+            document = _release_validation_document(payload)
+    except ReleaseValidationFindingsError as exc:
+        return False, [], str(exc)
+    return _evaluate_findings_document(document, expected_generation_id=expected_generation_id)
+
+
+class _FindingsTarget(Protocol):
+    """Duck-typed subset of ``release.ReleaseTarget`` this module needs.
+
+    Kept as a structural `Protocol` (not an import of `release.ReleaseTarget`)
+    because `release.py` imports this module -- importing it back here would be
+    circular.
+    """
+
+    @property
+    def root_id(self) -> str: ...
+
+    @property
+    def proposed_generation_id(self) -> str: ...
+
+
+def evaluate_release_findings_set(
+    manifest_targets: Sequence[_FindingsTarget], paths: Mapping[str, Path]
+) -> tuple[bool, dict[str, str | None]]:
+    """``(may_publish, per_root_reason)`` for every target of one release (ruling B).
+
+    Accepts both findings schemas: ``qe-validate-generation/1`` (the panel's own
+    judged document) and ``qe-release-findings/1`` (every other target's derived
+    binding document, from ``tools/validate_release_targets.py``). Every refusal
+    axis ``evaluate_release_validation_findings`` already enforces for a single
+    panel document applies identically here, per target, plus two more: at least
+    one target in this manifest must carry a clean ``/1`` document -- the judged
+    surface itself must be clean for anything to bind to -- and every
+    ``qe-release-findings/1`` document's ``panel_validation`` must name a target
+    of *this* manifest whose own clean ``/1`` document's bytes hash to exactly
+    ``panel_validation.findings_sha256``. A re-validated panel (new findings
+    bytes, hence a new sha256) therefore invalidates every derived document
+    still citing the old digest; a stale derived document refuses.
+
+    ``per_root_reason[root_id]`` is ``None`` for a clean, bound root, else its
+    refusal reason or a ``blocking findings [...]`` summary, matching the text
+    a single-target caller would have reported.
+    """
+    per_root_reason: dict[str, str | None] = {}
+    clean_documents: dict[str, dict[str, object]] = {}
+    clean_raw_by_root: dict[str, bytes] = {}
+
+    for target in manifest_targets:
+        root_id = target.root_id
+        path = paths[root_id]
+        raw, reason = _load_findings_file(path)
+        if reason is not None:
+            per_root_reason[root_id] = reason
+            continue
+        assert raw is not None
+        try:
+            payload = strict_json_object(raw, label="release-validation findings")
+        except StrictJSONError as exc:
+            per_root_reason[root_id] = str(exc)
+            continue
+        schema = payload.get("schema") if isinstance(payload, dict) else None
+        try:
+            if schema == _RELEASE_VALIDATION_SCHEMA:
+                document = _release_validation_document(payload)
+            elif schema == _RELEASE_FINDINGS_SCHEMA:
+                document = _release_findings_document(payload)
+            else:
+                raise ReleaseValidationFindingsError("findings document schema differs")
+        except ReleaseValidationFindingsError as exc:
+            per_root_reason[root_id] = str(exc)
+            continue
+        may_publish, blockers, reason = _evaluate_findings_document(
+            document, expected_generation_id=target.proposed_generation_id
+        )
+        if not may_publish:
+            if reason is not None:
+                per_root_reason[root_id] = reason
+            else:
+                summary = ", ".join(
+                    f"{entry['class']}:{entry['check_id']}" for entry in blockers
+                )
+                per_root_reason[root_id] = f"blocking findings [{summary}]"
+            continue
+        per_root_reason[root_id] = None
+        clean_documents[root_id] = document
+        clean_raw_by_root[root_id] = raw
+
+    clean_panel_by_generation_id: dict[str, str] = {
+        cast(str, document["generation_id"]): hashlib.sha256(
+            clean_raw_by_root[root_id]
+        ).hexdigest()
+        for root_id, document in clean_documents.items()
+        if document["schema"] == _RELEASE_VALIDATION_SCHEMA
+    }
+    judged_clean = bool(clean_panel_by_generation_id)
+
+    for root_id, document in clean_documents.items():
+        if document["schema"] != _RELEASE_FINDINGS_SCHEMA:
+            continue
+        panel_validation = cast(dict[str, object], document["panel_validation"])
+        panel_generation_id = cast(str, panel_validation["generation_id"])
+        panel_findings_sha256 = clean_panel_by_generation_id.get(panel_generation_id)
+        if panel_findings_sha256 is None or (
+            panel_findings_sha256 != panel_validation["findings_sha256"]
+        ):
+            per_root_reason[root_id] = (
+                "release findings panel_validation is stale: it names panel "
+                f"generation {panel_generation_id!r} with findings_sha256 "
+                f"{panel_validation['findings_sha256']!r}, which is not this "
+                "manifest's current clean panel findings"
+            )
+
+    if not judged_clean:
+        return False, per_root_reason
+    may_publish = all(reason is None for reason in per_root_reason.values())
+    return may_publish, per_root_reason

@@ -1,14 +1,14 @@
-"""Standalone CLI to check a generation's validate_generation findings.
+"""Standalone CLI to check one target's release findings (panel or derived).
 
 This is a thin, human-facing wrapper: the actual gate is enforced at the
 publication sink itself (`commit_release`,
 packages/core/src/quant_engine/core/release.py), not here, so no caller can
-publish without a clean findings file just because it forgot to run this
-tool. This CLI exists for an operator or a script to get a fast, standalone
-answer -- "would this generation be allowed to publish right now?" -- against
-the same contract and the same code
-(`quant_engine.core.publication.evaluate_release_validation_findings`) the
-sink itself uses.
+publish without clean findings just because it forgot to run this tool. This
+CLI exists for an operator or a script to get a fast, standalone answer --
+"would this one target be allowed to publish right now?" -- against the same
+contract and the same code
+(`quant_engine.core.publication.evaluate_findings_document_at_path`) the sink
+uses per target.
 
 Contract (owned by the validator lane, consumed here strictly by path/shape;
 see `state/briefs/findings-contract.md` and
@@ -25,6 +25,17 @@ mismatched, or null-`expected_baseline_sha256` (validator ran without
 treated as a clean pass. #326's
 "applicable open correction blocks release" maps to a `BLOCKER_AUTHORITY`
 finding with a `correction.` `check_id` prefix.
+
+Ruling B (release-findings gate, `state/briefs/findings-contract.md`): this
+tool now also accepts a derived `qe-release-findings/1` document (the schema
+`tools/validate_release_targets.py` writes for every non-panel release
+target), checking it the same way. What it cannot check from one path alone
+is cross-target staleness -- whether a derived document's `panel_validation`
+still matches the release's *current* panel findings; that check only exists
+at the publication sink (`evaluate_release_findings_set`), which sees every
+target's path in the same release at once. A clean result from this CLI is
+therefore necessary, not sufficient, for a derived target; the sink remains
+authoritative.
 """
 
 from __future__ import annotations
@@ -35,7 +46,7 @@ import sys
 
 from quant_engine.core.publication import (
     default_release_validation_findings_path,
-    evaluate_release_validation_findings,
+    evaluate_findings_document_at_path,
 )
 
 
@@ -70,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    may_publish, blockers, reason = evaluate_release_validation_findings(
+    may_publish, blockers, reason = evaluate_findings_document_at_path(
         path, expected_generation_id=arguments.generation_id
     )
 
