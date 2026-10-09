@@ -151,6 +151,12 @@ _PATH_STAGES = {
     # top-level `acceptance/validate/`; it reads published outputs and imports no
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
+    # Derived release-findings producer (ruling B / C1): binds every non-panel
+    # release target to the panel's own findings. Its checks live in
+    # `acceptance/validate/release_targets.py`; it reads a prepared release.json
+    # and published generation.json/panel bytes, and imports no producer, so a
+    # change to it affects no execution stage.
+    "tools/validate_release_targets.py": [],
     # Rollforward-cycle verifiers (docs/data-rollforward.md). They re-read the freshness
     # artifact and a staged panel candidate to write a local cycle receipt; no producer
     # imports them and they write no delivery artifact, so a change affects no stage.

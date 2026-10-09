@@ -1528,6 +1528,53 @@ def _write_release_validation_findings(
     )
 
 
+def _write_derived_release_findings(
+    root: Path,
+    generation_id: str,
+    *,
+    panel_generation_id: str,
+    panel_findings_sha256: str,
+    findings: tuple[dict[str, object], ...] = (),
+    baseline: str | None = "b" * 64,
+) -> None:
+    """A minimal well-formed ``qe-release-findings/1`` document (ruling B):
+    the schema ``tools/validate_release_targets.py`` writes for a non-panel
+    release target, binding it to a named panel target's findings bytes."""
+    summary = {
+        "BLOCKER_INVARIANT": 0,
+        "BLOCKER_AUTHORITY": 0,
+        "BLOCKER_REGRESSION": 0,
+        "NOT_READY": 0,
+        "WARNING": 0,
+    }
+    for entry in findings:
+        summary[str(entry["class"])] += 1
+    path = root / "validation" / generation_id / "findings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        json.dumps(
+            {
+                "schema": "qe-release-findings/1",
+                "generation_id": generation_id,
+                "generation_dir": str(root / "generations" / generation_id),
+                "validator_commit": "c" * 40,
+                "expected_baseline_sha256": baseline,
+                "summary": summary,
+                "findings": list(findings),
+                "panel_validation": {
+                    "generation_id": panel_generation_id,
+                    "findings_sha256": panel_findings_sha256,
+                },
+            }
+        ).encode("utf-8")
+    )
+
+
+def _findings_sha256(root: Path, generation_id: str) -> str:
+    path = root / "validation" / generation_id / "findings.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _enable_real_release_validation(
     monkeypatch, real_verify_release_validation
 ) -> None:
@@ -1727,3 +1774,143 @@ def test_commit_release_skip_release_validation_bypasses_the_gate(
     )
 
     assert journal.state is ReleaseState.COMMITTED
+
+
+def test_commit_release_accepts_a_clean_derived_release_findings_target(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """Ruling B's two-pass gate: a target with a derived
+    ``qe-release-findings/1`` document, correctly bound (by sha256) to a
+    sibling target's clean panel findings, may publish alongside it."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    panel_root = tmp_path / "panel"
+    other_root = tmp_path / "other"
+    _, panel_proposed = _stage_pair(panel_root, "panel")
+    _, other_proposed = _stage_pair(other_root, "other")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"panel": panel_root, "other": other_root},
+        proposed_generations={
+            "panel": panel_proposed.generation_id,
+            "other": other_proposed.generation_id,
+        },
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(panel_root, panel_proposed.generation_id)
+    panel_findings_sha256 = _findings_sha256(panel_root, panel_proposed.generation_id)
+    _write_derived_release_findings(
+        other_root,
+        other_proposed.generation_id,
+        panel_generation_id=panel_proposed.generation_id,
+        panel_findings_sha256=panel_findings_sha256,
+    )
+
+    journal = commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"panel": panel_root, "other": other_root},
+    )
+
+    assert journal.state is ReleaseState.COMMITTED
+    assert read_current(panel_root).generation_id == panel_proposed.generation_id
+    assert read_current(other_root).generation_id == other_proposed.generation_id
+
+
+def test_commit_release_refuses_a_stale_derived_release_findings_target(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """A derived document's ``panel_validation.findings_sha256`` must name the
+    panel's *current* clean findings bytes exactly; one byte different (e.g.
+    the panel was re-validated) must refuse the whole release, not just warn."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    panel_root = tmp_path / "panel"
+    other_root = tmp_path / "other"
+    _, panel_proposed = _stage_pair(panel_root, "panel-stale")
+    _, other_proposed = _stage_pair(other_root, "other-stale")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"panel": panel_root, "other": other_root},
+        proposed_generations={
+            "panel": panel_proposed.generation_id,
+            "other": other_proposed.generation_id,
+        },
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_release_validation_findings(panel_root, panel_proposed.generation_id)
+    _write_derived_release_findings(
+        other_root,
+        other_proposed.generation_id,
+        panel_generation_id=panel_proposed.generation_id,
+        panel_findings_sha256="f" * 64,  # does not match the panel's real bytes
+    )
+
+    with pytest.raises(ReleaseValidationError, match="stale"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"panel": panel_root, "other": other_root},
+        )
+    assert read_current(panel_root).generation_id != panel_proposed.generation_id
+    assert read_current(other_root).generation_id != other_proposed.generation_id
+
+
+def test_commit_release_refuses_when_no_target_has_clean_panel_findings(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """Ruling B: at least one target must carry a clean judged (panel,
+    ``qe-validate-generation/1``) document -- a release made entirely of
+    derived documents, with nothing judged, has nothing for the bound set to
+    bind to. With a named (but absent/unclean) panel generation, the only
+    target reports the exact binding it can't satisfy -- there is no separate,
+    reachable "nothing was judged at all" message once any target names a
+    reason, since every derived document that cannot resolve to a clean panel
+    already reports itself stale."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    other_root = tmp_path / "other"
+    _, other_proposed = _stage_pair(other_root, "other-unjudged")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"other": other_root},
+        proposed_generations={"other": other_proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    _write_derived_release_findings(
+        other_root,
+        other_proposed.generation_id,
+        panel_generation_id="some-panel-gen",
+        panel_findings_sha256="f" * 64,
+    )
+
+    with pytest.raises(ReleaseValidationError, match="panel_validation is stale"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"other": other_root},
+        )
+    assert read_current(other_root).generation_id != other_proposed.generation_id
+
+
+def test_commit_release_refuses_when_only_findings_file_is_missing_entirely(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """The "nothing was judged" fallback message in `_verify_release_validation`
+    for the one case the per-target loop leaves with no reason to report: when
+    `evaluate_release_findings_set` itself reports no refusal reason for any
+    target (practically unreachable with a non-empty manifest -- see the test
+    above -- but exercised here directly against the function, not the CLI
+    path, as a safety-net unit test of the fallback branch)."""
+    from quant_engine.core.publication import evaluate_release_findings_set
+
+    may_publish, per_root_reason = evaluate_release_findings_set([], {})
+
+    assert may_publish is False
+    assert per_root_reason == {}
