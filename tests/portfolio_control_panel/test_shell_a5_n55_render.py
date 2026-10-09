@@ -79,11 +79,16 @@ def _label(
 # ---- A5: account-live CAGR / MWR annualization labels -----------------------------
 
 
-def test_a5_account_live_cagr_label_renders_beside_the_cumulative_return(
+def test_a5_account_live_cagr_label_renders_beside_the_cagr_not_the_cumulative_return(
     tmp_path: Path,
 ) -> None:
+    # Distinct cumulative and annualized numbers, matching the Astra finding at
+    # app.js:986: the cumulative return (unannualized, over a multi-year window) and
+    # the CAGR (annualized) must not be crossed -- each value must render with its own
+    # correct figure, and the annualization label must attach to the CAGR value only.
     strategy = _cost_strategy(
-        account_live_cumulative_return="0.0842",
+        account_live_cumulative_return="0.10",
+        account_live_cagr="0.21",
         account_live_cagr_annualization=_label(
             basis="CAGR",
             frequency="DAILY",
@@ -97,13 +102,21 @@ def test_a5_account_live_cagr_label_renders_beside_the_cumulative_return(
     dom = _run(tmp_path, payload, "renderSignals")
     table = dom["#implementation-table"]["innerHTML"]
 
-    assert "8.4%" in table
-    assert (
-        "annualized from 183 daily observations, 2026-01-09..2026-07-10 (&lt;1 year)"
-        in table
-        or "annualized from 183 daily observations, 2026-01-09..2026-07-10 (<1 year)"
-        in table
+    # The cumulative return renders unannualized, at its own (different) value.
+    assert "10.0%" in table
+    # The CAGR value renders separately, at its own value, with the annualization
+    # label bound to it directly in one markup span -- "CAGR <value> (<label>)" --
+    # rather than the label being attached to the cumulative-return figure.
+    label_html_variants = (
+        "CAGR 21.0% (annualized from 183 daily observations, "
+        "2026-01-09..2026-07-10 (&lt;1 year))",
+        "CAGR 21.0% (annualized from 183 daily observations, "
+        "2026-01-09..2026-07-10 (<1 year))",
     )
+    assert any(variant in table for variant in label_html_variants)
+    # The old (buggy) rendering attached the CAGR label directly to the cumulative
+    # figure with no "CAGR" marker at all -- prove that shape is absent.
+    assert '10.0%<span class="cell-secondary">annualized' not in table
 
 
 def test_a5_mwr_label_renders_beside_the_strategy_level_mwr(tmp_path: Path) -> None:

@@ -977,15 +977,17 @@
     ]);
     // A5: the account-live CAGR and strategy-level MWR each carry an annualization label
     // (basis/window, already marked "(<1 year)" when short) that must render beside the
-    // figure it describes; there is no existing cell for strategy-level MWR, so it joins
-    // the account-cumulative cell rather than being silently dropped.
+    // figure it describes. The cumulative return stays unannualized; the CAGR value
+    // renders separately with its own annualization label so the two numbers and their
+    // labels are never crossed. Neither CAGR nor MWR has its own cell, so both join the
+    // account-cumulative cell rather than being silently dropped.
     const implementationRows = data.strategies.map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
       const cagrLabel = row.account_live_cagr_annualization?.label;
       const mwrLabel = row.mwr_annualization?.label;
       const cumulativeCell = performanceLineageMismatch
         ? withheld
-        : `${pct(row.account_live_cumulative_return)}${cagrLabel ? `<span class="cell-secondary">${safe(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${mwrLabel ? ` (${safe(mwrLabel)})` : ""}</span>` : ""}`;
+        : `${pct(row.account_live_cumulative_return)}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${cagrLabel ? ` (${safe(cagrLabel)})` : ""}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${mwrLabel ? ` (${safe(mwrLabel)})` : ""}</span>` : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
       return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${formatDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
