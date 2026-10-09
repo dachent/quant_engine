@@ -28,7 +28,21 @@ GOOD_GEN = "a" * 64
 PREVIOUS_GEN = "b" * 64
 PANEL_GEN = "c" * 64
 
-LENS_ARTIFACT_SHA = "d" * 64
+# The lens content artifact's actual bytes on disk, and the sha256 every
+# GOOD fixture level agrees on: the panel's source_sha256, the generation
+# manifest's declared artifact sha256, and the artifact file's real bytes.
+LENS_ARTIFACT_BYTES = b'{"decomposition": "fixture-bytes"}\n'
+LENS_ARTIFACT_SHA = hashlib.sha256(LENS_ARTIFACT_BYTES).hexdigest()
+
+
+def write_lens_artifact(root_dir: Path, generation_id: str) -> None:
+    """Write the lens content artifact whose sha256 is ``LENS_ARTIFACT_SHA``."""
+
+    artifact = (
+        root_dir / "generations" / generation_id / "analytics" / "decomposition.json"
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(LENS_ARTIFACT_BYTES)
 
 
 def _dump(value: Any) -> bytes:
@@ -181,6 +195,24 @@ def test_bad_b5_target_id_not_at_its_declared_panel_pointer(tmp_path: Path) -> N
     assert all(f.klass == BLOCKER_AUTHORITY for f in findings)
 
 
+def test_bad_b6_unknown_hybrid_root_is_not_resolved_by_prefix_alone(
+    tmp_path: Path,
+) -> None:
+    """Astra :185: ``_declared_pointers`` must not resolve ``hybrid-<x>`` for an
+    ``<x>`` outside the declared lens root set -- an unknown hybrid root must
+    fall through to ``release.target_unbound``, not silently bind to whatever
+    panel pointer happens to share its suffix."""
+    panel = base_panel()
+    write_manifest(tmp_path, GOOD_GEN)
+    target = make_target("hybrid-future-root", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_unbound"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert "hybrid-future-root" not in rt.KNOWN_ROOTS
+
+
 def test_bad_b6_root_absent_from_the_binding_table(tmp_path: Path) -> None:
     """BAD-B6 (producer): a release root id not in the declared binding table
     -> release.target_unbound, blocking, fails closed for any root added later."""
@@ -206,7 +238,7 @@ def test_bad_b7_hybrid_dynamic_style_id_appears_unconsumed_in_the_panel(
         "proposed_generation_id": GOOD_GEN,
     }
 
-    findings = list(rt.target_unconsumed(target, panel))
+    findings = list(rt.target_unconsumed(target, panel, {}))
 
     assert [f.check_id for f in findings] == ["release.target_unconsumed"]
     assert findings[0].klass == BLOCKER_AUTHORITY
@@ -218,7 +250,7 @@ def test_hybrid_dynamic_style_clean_when_truly_unconsumed(tmp_path: Path) -> Non
         "root_id": rt.UNCONSUMED_ROOT_ID,
         "proposed_generation_id": "9" * 64,
     }
-    assert list(rt.target_unconsumed(target, panel)) == []
+    assert list(rt.target_unconsumed(target, panel, {})) == []
 
 
 # ------------------------------------------------------------- lens content sha256
@@ -264,6 +296,9 @@ def test_lens_source_sha256_match_is_clean(tmp_path: Path) -> None:
             }
         ],
     )
+    # The manifest's declared sha256 must also match the artifact's actual
+    # bytes (the byte-level half of the B.2.2 binding).
+    write_lens_artifact(tmp_path, GOOD_GEN)
     target = make_target("us-economic", tmp_path, GOOD_GEN)
 
     assert list(rt.target_binding(target, panel, tmp_path)) == []
@@ -276,7 +311,7 @@ def test_run_target_checks_on_a_fully_clean_target_is_empty(tmp_path: Path) -> N
     panel = base_panel()
     write_manifest(tmp_path, GOOD_GEN)
     target = make_target("correlation", tmp_path, GOOD_GEN)
-    assert rt.run_target_checks(target, tmp_path, panel) == []
+    assert rt.run_target_checks(target, tmp_path, panel, {}) == []
 
 
 def test_release_findings_document_shape() -> None:
@@ -336,3 +371,202 @@ def test_known_roots_equals_production_roots_minus_the_panel() -> None:
     assert rt.KNOWN_ROOTS == frozenset(materializer.PRODUCTION_ROOTS) - {
         rt.PANEL_ROOT_ID
     }
+
+
+# ------------------------------------------------- content-digest bindings (B.2.2)
+
+
+def _panel_with_digests(**overrides: str) -> dict[str, Any]:
+    """base_panel plus the content digests the panel carries for the simple
+    roots' files, each naming the digest of the fixture artifact bytes."""
+
+    panel = base_panel()
+    panel["meta"].update(
+        {
+            "report_sha256": overrides.get("report", _sha(REPORT_ARTIFACT_BYTES)),
+            "correlation_sha256": overrides.get(
+                "correlation", _sha(CORRELATION_ARTIFACT_BYTES)
+            ),
+            "decomposition_sha256": overrides.get(
+                "decomposition", _sha(DECOMPOSITION_ARTIFACT_BYTES)
+            ),
+            "weekly_returns_sha256": overrides.get(
+                "weekly", _sha(WEEKLY_ARTIFACT_BYTES)
+            ),
+        }
+    )
+    if "baseline_catalog" in overrides:
+        for row in panel.setdefault("provenance", []):
+            if row.get("artifact") == "baseline-catalog":
+                row["sha256"] = overrides["baseline_catalog"]
+    else:
+        panel["provenance"] = [
+            {
+                "artifact": "baseline-generation",
+                "sha256": GOOD_GEN,
+            },
+            {
+                "artifact": "baseline-catalog",
+                "sha256": overrides.get(
+                    "baseline_catalog", _sha(BASELINE_CATALOG_BYTES)
+                ),
+            },
+        ]
+    return panel
+
+
+REPORT_ARTIFACT_BYTES = b'{"report": "fixture"}\n'
+CORRELATION_ARTIFACT_BYTES = b'{"correlation": "fixture"}\n'
+DECOMPOSITION_ARTIFACT_BYTES = LENS_ARTIFACT_BYTES
+WEEKLY_ARTIFACT_BYTES = b'{"weekly": "fixture"}\n'
+BASELINE_CATALOG_BYTES = b'{"baseline-catalog": "fixture"}\n'
+
+
+def _write_content_artifacts(root_dir: Path, generation_id: str) -> None:
+    for artifact_id, content in (
+        ("portfolio-report-data.json", REPORT_ARTIFACT_BYTES),
+        ("correlation.json", CORRELATION_ARTIFACT_BYTES),
+        ("analytics/decomposition.json", DECOMPOSITION_ARTIFACT_BYTES),
+        ("weekly-returns.json", WEEKLY_ARTIFACT_BYTES),
+        ("portfolio-baseline.json", BASELINE_CATALOG_BYTES),
+    ):
+        path = root_dir / "generations" / generation_id / artifact_id
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def test_content_digests_of_the_real_artifact_bytes_bind_for_every_simple_root(
+    tmp_path: Path,
+) -> None:
+    """B.2.2: report/correlation/decomposition/weekly content digests must
+    match the target generation's actual artifact bytes, not only the ids."""
+    panel = _panel_with_digests()
+    write_manifest(tmp_path, GOOD_GEN)
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    write_lens_artifact(tmp_path, GOOD_GEN)
+    for root_id in (
+        "portfolio-report",
+        "correlation",
+        "factor-decomposition",
+        "weekly-returns",
+    ):
+        target = make_target(root_id, tmp_path, GOOD_GEN)
+        assert list(rt.target_binding(target, panel, tmp_path)) == [], root_id
+
+
+def test_a_report_content_digest_mismatch_is_a_binding_failure(tmp_path: Path) -> None:
+    panel = _panel_with_digests(report=_sha(b"different-bytes\n"))
+    write_manifest(tmp_path, GOOD_GEN)
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    target = make_target("portfolio-report", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert "meta.report_sha256" in findings[0].json_path
+
+
+def test_a_missing_content_artifact_is_a_binding_failure_not_a_skip(
+    tmp_path: Path,
+) -> None:
+    """The Astra probe: a declared digest with no artifact file behind it must
+    refuse, not emit a clean bind."""
+    panel = _panel_with_digests()
+    write_manifest(tmp_path, GOOD_GEN)
+    target = make_target("portfolio-report", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert findings[0].observed is None
+
+
+def test_a_lens_declared_digest_without_the_artifact_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """The Astra probe: a lens target whose intact manifest carries no
+    matching analytics/decomposition.json artifact must refuse when the panel
+    declares a source_sha256, instead of silently passing."""
+    panel = base_panel()
+    write_manifest(tmp_path, GOOD_GEN, artifacts=[])  # no artifact declared
+    target = make_target("us-economic", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert findings[0].observed is None
+
+
+def test_lens_artifact_bytes_disagreeing_with_the_manifest_block(
+    tmp_path: Path,
+) -> None:
+    """The manifest's declared sha256 must match the artifact's actual bytes,
+    not only the panel's declaration."""
+    panel = base_panel()
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "analytics/decomposition.json",
+                "sha256": LENS_ARTIFACT_SHA,
+            }
+        ],
+    )
+    (tmp_path / "generations" / GOOD_GEN / "analytics").mkdir(
+        parents=True, exist_ok=True
+    )
+    (
+        tmp_path / "generations" / GOOD_GEN / "analytics" / "decomposition.json"
+    ).write_bytes(b"tampered\n")
+    target = make_target("us-economic", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert "bytes do not match" in findings[0].message
+
+
+def test_baseline_provenance_rows_bind_to_the_target_bytes(tmp_path: Path) -> None:
+    """B.2.2's baseline example: provenance rows for baseline-generation and
+    baseline-catalog must match the target's manifest and catalog bytes."""
+    panel = _panel_with_digests()
+    write_manifest(tmp_path, GOOD_GEN)
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    target = make_target("portfolio-baseline", tmp_path, GOOD_GEN)
+
+    assert list(rt.target_binding(target, panel, tmp_path)) == []
+
+    panel["provenance"][1]["sha256"] = _sha(b"other-catalog\n")
+    findings = list(rt.target_binding(target, panel, tmp_path))
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].entity == "portfolio-baseline"
+
+
+# ------------------------------------------------- unconsumed vs panel AND report
+
+
+def test_unconsumed_generation_id_in_the_report_alone_blocks(tmp_path: Path) -> None:
+    """B.2.3: the unconsumed claim is verified against the panel AND the
+    report; a report-only consumer is a refusal (the Astra probe)."""
+    unconsumed_gen = "9" * 64  # absent from the panel by construction
+    write_manifest(tmp_path, unconsumed_gen)
+    target = make_target("hybrid-dynamic-style", tmp_path, unconsumed_gen)
+    report = {"some": {"nested": unconsumed_gen}}
+
+    findings = list(rt.target_unconsumed(target, base_panel(), report))
+
+    assert [f.check_id for f in findings] == ["release.target_unconsumed"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert "report" in findings[0].message
+
+
+def test_unconsumed_clean_when_absent_from_both_payloads(tmp_path: Path) -> None:
+    target = {
+        "root_id": "hybrid-dynamic-style",
+        "proposed_generation_id": "9" * 64,
+    }
+    assert list(rt.target_unconsumed(target, base_panel(), {"other": 1})) == []

@@ -43,7 +43,8 @@ from acceptance.validate.release_targets import (  # noqa: E402
 )
 from quant_engine.core.publication import (  # noqa: E402
     default_release_validation_findings_path,
-    evaluate_release_validation_findings,
+    evaluate_release_validation_findings_bytes,
+    read_release_validation_findings_bytes,
 )
 
 from validate_generation import validator_commit  # noqa: E402
@@ -153,8 +154,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_ascii(f"validate_release_targets: ERROR: {exc}"), file=sys.stderr)
         return EXIT_ERROR
 
-    may_publish, blockers, reason = evaluate_release_validation_findings(
-        panel_findings_path, expected_generation_id=panel_generation_id
+    panel_findings_bytes, load_reason = read_release_validation_findings_bytes(
+        panel_findings_path
+    )
+    if load_reason is not None:
+        print(
+            _ascii(
+                f"validate_release_targets: REFUSED: panel findings "
+                f"{panel_findings_path} -- {load_reason}"
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    assert panel_findings_bytes is not None
+    may_publish, blockers, reason = evaluate_release_validation_findings_bytes(
+        panel_findings_bytes, expected_generation_id=panel_generation_id
     )
     if not may_publish:
         if reason is not None:
@@ -176,11 +190,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return EXIT_ERROR
 
-    try:
-        panel_findings_bytes = panel_findings_path.read_bytes()
-    except OSError as exc:
-        print(_ascii(f"validate_release_targets: ERROR: {exc}"), file=sys.stderr)
-        return EXIT_ERROR
+    # Validated and hashed from the same bytes read above -- no second read of
+    # this file can slip a different panel findings document between the
+    # validation that cleared it and the sha256 every derived document binds
+    # to (ruling B; the TOCTOU this closes).
     panel_findings_sha256 = hashlib.sha256(panel_findings_bytes).hexdigest()
 
     panel_payload_path = panel_root / "generations" / panel_generation_id / PANEL
@@ -194,6 +207,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             _ascii(
                 f"validate_release_targets: ERROR: {panel_payload_path} is not a "
                 "JSON object"
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    # Ruling B.2.3: the unconsumed claim is verified against the panel AND the
+    # report, so the report the release binds is a required input; refusing
+    # here fails closed rather than passing an unverifiable claim.
+    report_targets = [t for t in targets if t["root_id"] == "portfolio-report"]
+    report: dict[str, Any] | None = None
+    if report_targets and "portfolio-report" in roots:
+        report_generation_id = report_targets[0]["proposed_generation_id"]
+        report_payload_path = (
+            roots["portfolio-report"]
+            / "generations"
+            / report_generation_id
+            / "portfolio-report-data.json"
+        )
+        try:
+            loaded = _read_json(report_payload_path, "report payload")
+        except ContractError as exc:
+            print(_ascii(f"validate_release_targets: ERROR: {exc}"), file=sys.stderr)
+            return EXIT_ERROR
+        if not isinstance(loaded, dict):
+            print(
+                _ascii(
+                    f"validate_release_targets: ERROR: {report_payload_path} is "
+                    "not a JSON object"
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        report = loaded
+    else:
+        print(
+            _ascii(
+                "validate_release_targets: REFUSED: the prepared release has no "
+                "portfolio-report target, so release.target_unconsumed cannot be "
+                "verified against the report"
             ),
             file=sys.stderr,
         )
@@ -219,7 +271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return EXIT_ERROR
         root_dir = roots[root_id]
-        findings = run_target_checks(target, root_dir, panel_payload)
+        findings = run_target_checks(target, root_dir, panel_payload, report)
         document = release_findings_document(
             generation_id=generation_id,
             generation_dir=str(root_dir / "generations" / generation_id),
