@@ -2042,6 +2042,37 @@ def _evaluate_findings_document(
     return not blockers, blockers, None
 
 
+def read_release_validation_findings_bytes(
+    path: Path,
+) -> tuple[bytes | None, str | None]:
+    """Public ``(raw_bytes, None)`` / ``(None, refusal_reason)`` IO/residency read.
+
+    Shared, single-read entry point for a findings file's bytes (ruling B):
+    a caller that must both validate a findings document and separately bind
+    its sha256 (e.g. ``tools/validate_release_targets.py``, deriving every
+    other target's ``panel_validation.findings_sha256``) reads the bytes
+    exactly once here and reuses them for both, rather than reading the path
+    a second time -- a second read is a TOCTOU window in which the file could
+    change between the validated bytes and the hashed bytes.
+    """
+    return _load_findings_file(path)
+
+
+def evaluate_release_validation_findings_bytes(
+    raw: bytes, *, expected_generation_id: str
+) -> tuple[bool, list[dict[str, object]], str | None]:
+    """Like :func:`evaluate_release_validation_findings`, given bytes already read
+    (via :func:`read_release_validation_findings_bytes`) instead of a path."""
+    try:
+        payload = strict_json_object(raw, label="release-validation findings")
+        document = _release_validation_document(payload)
+    except (StrictJSONError, ReleaseValidationFindingsError) as exc:
+        return False, [], str(exc)
+    return _evaluate_findings_document(
+        document, expected_generation_id=expected_generation_id
+    )
+
+
 def evaluate_release_validation_findings(
     path: Path, *, expected_generation_id: str
 ) -> tuple[bool, list[dict[str, object]], str | None]:
@@ -2061,13 +2092,8 @@ def evaluate_release_validation_findings(
     if reason is not None:
         return False, [], reason
     assert raw is not None
-    try:
-        payload = strict_json_object(raw, label="release-validation findings")
-        document = _release_validation_document(payload)
-    except (StrictJSONError, ReleaseValidationFindingsError) as exc:
-        return False, [], str(exc)
-    return _evaluate_findings_document(
-        document, expected_generation_id=expected_generation_id
+    return evaluate_release_validation_findings_bytes(
+        raw, expected_generation_id=expected_generation_id
     )
 
 
@@ -2189,6 +2215,28 @@ def evaluate_release_findings_set(
         per_root_reason[root_id] = None
         clean_documents[root_id] = document
         clean_raw_by_root[root_id] = raw
+
+    clean_panel_root_ids = [
+        root_id
+        for root_id, document in clean_documents.items()
+        if document["schema"] == _RELEASE_VALIDATION_SCHEMA
+    ]
+    if len(clean_panel_root_ids) > 1:
+        # GLM (publication.py:2193): the clean `/1` anchor every derived
+        # document binds to must be unambiguous. Without this, any root that
+        # happens to also carry a clean qe-validate-generation/1 document
+        # could serve as (or be confused for) the panel's own binding anchor.
+        # Refuse outright -- a manifest with more than one clean judged
+        # document has no single panel findings digest to bind to.
+        reason = (
+            "release validation refuses: more than one target in this release "
+            "carries a clean judged (qe-validate-generation/1) findings "
+            f"document ({', '.join(sorted(clean_panel_root_ids))}); exactly "
+            "one /1 document per manifest is required"
+        )
+        for root_id in clean_panel_root_ids:
+            per_root_reason[root_id] = reason
+        return False, per_root_reason
 
     clean_panel_by_generation_id: dict[str, str] = {
         cast(str, document["generation_id"]): hashlib.sha256(

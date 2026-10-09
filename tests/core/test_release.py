@@ -1899,6 +1899,93 @@ def test_commit_release_refuses_when_no_target_has_clean_panel_findings(
     assert read_current(other_root).generation_id != other_proposed.generation_id
 
 
+def test_commit_release_refuses_an_override_that_restores_an_older_panel_anchor(
+    tmp_path: Path, monkeypatch, real_verify_release_validation
+) -> None:
+    """Astra (release.py:1863): derive ``other``'s findings from panel document
+    A, then re-validate the panel to clean document B at its default path (A
+    and B differ byte-for-byte). A plain commit refuses (stale, already
+    covered by ``test_commit_release_refuses_a_stale_derived_release_findings_target``).
+    But ``release_validation_findings={"panel": <path to the saved A bytes>}``
+    must not silently restore A as "the current panel anchor" either -- an
+    override whose bytes differ from the root's actual current (default-path)
+    findings is exactly the freshness-anchor substitution the gate exists to
+    prevent, so it must refuse too, not just skip the staleness check."""
+    _enable_real_release_validation(monkeypatch, real_verify_release_validation)
+    panel_root = tmp_path / "panel"
+    other_root = tmp_path / "other"
+    _, panel_proposed = _stage_pair(panel_root, "panel-anchor")
+    _, other_proposed = _stage_pair(other_root, "other-anchor")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"panel": panel_root, "other": other_root},
+        proposed_generations={
+            "panel": panel_proposed.generation_id,
+            "other": other_proposed.generation_id,
+        },
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    # Document A: the panel's first clean findings. `other`'s derived document
+    # is bound to A's exact bytes.
+    _write_release_validation_findings(panel_root, panel_proposed.generation_id)
+    panel_path = (
+        panel_root / "validation" / panel_proposed.generation_id / "findings.json"
+    )
+    saved_document_a = tmp_path / "saved-document-a.json"
+    saved_document_a.write_bytes(panel_path.read_bytes())
+    document_a_sha256 = _findings_sha256(panel_root, panel_proposed.generation_id)
+    _write_derived_release_findings(
+        other_root,
+        other_proposed.generation_id,
+        panel_generation_id=panel_proposed.generation_id,
+        panel_findings_sha256=document_a_sha256,
+    )
+
+    # The panel is re-validated: document B (different bytes/sha256) replaces
+    # A at the real, default findings path. `other`'s derived document --
+    # still citing A -- is now stale against the real current panel findings.
+    _write_release_validation_findings(
+        panel_root,
+        panel_proposed.generation_id,
+        findings=(
+            {
+                "check_id": "example.warning",
+                "class": "WARNING",
+                "entity": "root",
+                "observed": "x",
+                "expected": "y",
+                "pointer": "generations/abc/report.json",
+                "defect_ids": [],
+            },
+        ),
+    )
+    assert panel_path.read_bytes() != saved_document_a.read_bytes()
+
+    with pytest.raises(ReleaseValidationError, match="stale"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"panel": panel_root, "other": other_root},
+        )
+
+    # The exploit: supplying the override restores A as "the" panel findings
+    # for this call, even though the real, default-path findings are now B.
+    with pytest.raises(ReleaseValidationError):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"panel": panel_root, "other": other_root},
+            release_validation_findings={"panel": saved_document_a},
+        )
+
+    assert read_current(panel_root).generation_id != panel_proposed.generation_id
+    assert read_current(other_root).generation_id != other_proposed.generation_id
+
+
 def test_commit_release_refuses_when_only_findings_file_is_missing_entirely(
     tmp_path: Path, monkeypatch, real_verify_release_validation
 ) -> None:

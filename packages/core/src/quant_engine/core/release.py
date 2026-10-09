@@ -1857,13 +1857,42 @@ def _verify_release_validation(
     any ``BLOCKER_*`` finding, no clean judged panel document at all, or a
     derived document whose ``panel_validation`` no longer matches the panel's
     current clean findings (a stale derivation) -- all refuse.
+
+    Astra (release.py:1863): ``findings_overrides`` has full, unchecked
+    authority over every root it names, including the panel's. An override
+    could otherwise substitute an older, already-superseded panel findings
+    document as "the current panel anchor" -- silently defeating the
+    staleness check above, which only compares what it is given. To close
+    this, every root's DEFAULT (non-overridden) findings path is always also
+    read, independent of any override; if an override is supplied for a root
+    whose default-path bytes exist and differ from the override's bytes, the
+    override is refused outright as an attempt to restore a stale anchor.
     """
     overrides = findings_overrides or {}
-    paths = {
-        target.root_id: overrides.get(target.root_id)
-        or default_release_validation_findings_path(
+    default_paths = {
+        target.root_id: default_release_validation_findings_path(
             normalized_roots[target.root_id], target.proposed_generation_id
         )
+        for target in manifest.targets
+    }
+    for root_id, override_path in overrides.items():
+        default_path = default_paths.get(root_id)
+        if default_path is None or not default_path.is_file():
+            continue
+        if override_path.resolve() == default_path.resolve():
+            continue
+        if override_path.is_file() and override_path.read_bytes() == (
+            default_path.read_bytes()
+        ):
+            continue
+        raise ReleaseValidationError(
+            f"release validation refuses root {root_id!r}: an override findings "
+            "path was supplied whose bytes differ from this root's current "
+            f"findings at {default_path}; an override may not restore a "
+            "findings anchor other than the one currently on disk"
+        )
+    paths = {
+        target.root_id: overrides.get(target.root_id) or default_paths[target.root_id]
         for target in manifest.targets
     }
     may_publish, per_root_reason = evaluate_release_findings_set(

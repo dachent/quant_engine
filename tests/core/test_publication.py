@@ -416,6 +416,53 @@ def test_evaluate_release_findings_set_refuses_a_missing_target_file(
     assert "no release-validation findings file" in per_root_reason["correlation"]
 
 
+def test_evaluate_release_findings_set_refuses_a_non_panel_root_carrying_a_clean_v1_document(
+    tmp_path: Path,
+) -> None:
+    """GLM (pr519-final.glm.review.md, publication.py:2193): the clean `/1`
+    anchor every derived document binds to must be the panel root's document
+    specifically, or there must be exactly one `/1` document in the manifest.
+    Without that, a non-panel root (``correlation``) that happens to also
+    carry a clean ``qe-validate-generation/1`` document can serve as the
+    binding anchor for a derived document on a *third* root, forging a panel
+    digest that was never the real panel's own judged findings."""
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+
+    rogue_path = tmp_path / "rogue.json"
+    _write(rogue_path, _document("rogue-gen"))
+    rogue_findings_sha256 = hashlib.sha256(rogue_path.read_bytes()).hexdigest()
+
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen",
+            panel_generation_id="rogue-gen",
+            panel_findings_sha256=rogue_findings_sha256,
+        ),
+    )
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "rogue-gen"),
+        _Target("weekly-returns", "other-gen"),
+    ]
+    paths = {
+        "portfolio-panel": panel_path,
+        "correlation": rogue_path,
+        "weekly-returns": other_path,
+    }
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["portfolio-panel"] is not None
+    assert per_root_reason["correlation"] is not None
+    assert "exactly one" in per_root_reason["portfolio-panel"]
+    assert "exactly one" in per_root_reason["correlation"]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows file-attribute API only")
 def test_non_resident_cloud_placeholder_refuses_without_reading(tmp_path: Path) -> None:
     """A non-resident (OneDrive Files-On-Demand placeholder) findings file must
