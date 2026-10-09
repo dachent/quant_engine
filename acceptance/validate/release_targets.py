@@ -41,7 +41,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .checks import BLOCKER_AUTHORITY, BLOCKER_INVARIANT, Finding, _finding, node, summarize
+from .checks import (
+    BLOCKER_AUTHORITY,
+    BLOCKER_INVARIANT,
+    Finding,
+    _finding,
+    node,
+    summarize,
+)
 from .generation import GENERATION_MANIFEST, PANEL
 
 FINDINGS_SCHEMA = "qe-release-findings/1"
@@ -120,9 +127,7 @@ _LENS_CONTENT_ARTIFACT_ID = "analytics/decomposition.json"
 def _simple_pointers(
     panel: Mapping[str, Any], paths: Sequence[tuple[str, ...]]
 ) -> list[tuple[str, Any, None]]:
-    return [
-        (f"$.{'.'.join(path)}", node(panel, *path), None) for path in paths
-    ]
+    return [(f"$.{'.'.join(path)}", node(panel, *path), None) for path in paths]
 
 
 def _dependence_mode_pointers(panel: Mapping[str, Any]) -> list[tuple[str, Any, None]]:
@@ -130,7 +135,11 @@ def _dependence_mode_pointers(panel: Mapping[str, Any]) -> list[tuple[str, Any, 
     if not isinstance(modes, Mapping):
         return []
     return [
-        (f"$.dependence_modes.{name}.generation_id", node(modes, name, "generation_id"), None)
+        (
+            f"$.dependence_modes.{name}.generation_id",
+            node(modes, name, "generation_id"),
+            None,
+        )
         for name in sorted(modes)
     ]
 
