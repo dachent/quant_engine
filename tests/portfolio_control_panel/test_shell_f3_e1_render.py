@@ -321,13 +321,16 @@ def test_real_panel_payload_renders_readable_notes_and_explicit_symbol_status(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     data = _build_panel_data(inputs, tmp_path)
-    if "symbol_status" not in data["positions"][0] or any(
-        "note_source" not in gate for gate in data["gates"]
-    ):
+    # E1: the producer now publishes symbol_status/symbol_reason unconditionally
+    # (lane qc1d-r3) -- assert their presence rather than skip on them.
+    assert "symbol_status" in data["positions"][0]
+    if any("note_source" not in gate for gate in data["gates"]):
+        # F3's producer half (gates[].note_source) is a separate lane's scope
+        # (portfolio_control_panel.py:9605-9625 per the ruling doc) and is not
+        # touched here; skip only on that still-missing field.
         pytest.skip(
-            "the panel producer on this branch does not publish symbol_status/"
-            "note_source yet (producer lane qc1b-l8); run this against a tree "
-            "that has it"
+            "the panel producer on this branch does not publish gates[].note_source "
+            "yet (producer lane qc1b-l8, F3 half); run this against a tree that has it"
         )
     dom = _run(
         tmp_path, json.loads(json.dumps(data)), "renderCommand", "renderPositionTable"
