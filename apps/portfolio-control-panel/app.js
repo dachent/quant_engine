@@ -1101,14 +1101,20 @@
       const comparisonPolicyUnavailable = verifiedMetrics?.status === "UNAVAILABLE_POLICY_NOT_ADMITTED";
       const actualAccountReturns = implementationDetail?.account_live_return_summary;
       // A contract older than the PROVIDER_ADMIT_OR_DECLARE_V1 exclusion says so beside its date
-      // (N56 shape); the date and the exclusion are the producer's fields, never literals here.
-      const contractDateText = (asOf) => {
-        if (typeof asOf !== "string" || !asOf) return "";
-        const exclusion = implementationDetail?.pre_policy_exclusion;
-        const before = exclusion && typeof exclusion.effective_start === "string" && asOf.slice(0, 10) < exclusion.effective_start.slice(0, 10)
-          ? `, before the ${exclusion.policy_id} exclusion effective ${formatDate(exclusion.effective_start)}`
+      // (N56 shape).  The producer publishes this per contract kind under
+      // layers.implementation_reconciliation.contracts[kind] -- {as_of_date, stale,
+      // pre_policy} -- plus one shared contracts.provider_return_policy {policy_id,
+      // effective_start}; this never reads implementationDetail/.return_attribution
+      // fields that the producer does not emit.
+      const contracts = implementation.contracts || {};
+      const contractDateText = (kind) => {
+        const contract = contracts[kind];
+        if (!contract || typeof contract.as_of_date !== "string" || !contract.as_of_date) return "";
+        const policy = contracts.provider_return_policy;
+        const before = contract.pre_policy && policy && typeof policy.effective_start === "string"
+          ? `, before the ${policy.policy_id} exclusion effective ${formatDate(policy.effective_start)}`
           : "";
-        return ` · contract as of ${formatDate(asOf)}${before}`;
+        return ` · contract as of ${formatDate(contract.as_of_date)}${before}`;
       };
       const staleReconciliation = implementationDetail?.stale_reconciliation;
       const staleAttribution = implementationDetail?.stale_return_attribution;
@@ -1124,7 +1130,7 @@
         : comparisonPolicyUnavailable
         ? `<span class="cell-primary">Model comparison unavailable under the current source policy</span>${actualAccountReturns ? `<span class="cell-secondary">Actual account return ${pct(actualAccountReturns.cumulative_return)} · ${formatDateHtml(actualAccountReturns.observed_start)}–${formatDateHtml(actualAccountReturns.observed_end)} · ${integer.format(actualAccountReturns.observations)} returns</span>` : ""}<span class="cell-secondary">Account and trade evidence is retained. No model return or comparison gap is inferred.</span>`
         : verifiedMetrics
-        ? `<span class="cell-primary">${safe(MODEL_BASIS_LABELS[verifiedMetrics.model_basis] || "Model (basis not recorded)")} ${pct(verifiedMetrics.model_cumulative_return, 2)} · account ${pct(verifiedMetrics.account_cumulative_return, 2)}${verifiedMetrics.account_basis ? ` (${safe(accountBasisText(verifiedMetrics.account_basis))})` : ""} · gap ${pct(verifiedMetrics.account_minus_model_cumulative, 2)}</span><span class="cell-secondary">${formatDateHtml(verifiedMetrics.observed_start)}–${formatDateHtml(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates${safe(contractDateText(implementationDetail?.contract_as_of_date))} · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
+        ? `<span class="cell-primary">${safe(MODEL_BASIS_LABELS[verifiedMetrics.model_basis] || "Model (basis not recorded)")} ${pct(verifiedMetrics.model_cumulative_return, 2)} · account ${pct(verifiedMetrics.account_cumulative_return, 2)}${verifiedMetrics.account_basis ? ` (${safe(accountBasisText(verifiedMetrics.account_basis))})` : ""} · gap ${pct(verifiedMetrics.account_minus_model_cumulative, 2)}</span><span class="cell-secondary">${formatDateHtml(verifiedMetrics.observed_start)}–${formatDateHtml(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates${safe(contractDateText("reconciliation"))} · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
         : "";
       const causalCategoryMarkup = (causalBridge?.categories || []).map((item) => {
         const effect = Number(item.effect_pp);
@@ -1139,7 +1145,7 @@
         : causalBridge?.status === "UNAVAILABLE_POLICY_NOT_ADMITTED"
         ? `<span class="cell-secondary">Actual account return ${pct(causalBridge.account_return)} · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}. Trade P&amp;L attribution is retained; a model-gap waterfall is unavailable.</span>`
         : causalBridge
-        ? `<span class="cell-primary">Causal return waterfall · bridge model (${safe(BRIDGE_BASIS_LABELS[causalBridge.model_basis] || "basis not recorded")}) ${pct(causalBridge.model_return, 2)} · account ${pct(causalBridge.account_return, 2)}${causalBridge.account_basis ? ` (${safe(accountBasisText(causalBridge.account_basis))})` : ""} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}${safe(contractDateText(returnAttribution.contract_as_of_date))}</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
+        ? `<span class="cell-primary">Causal return waterfall · bridge model (${safe(BRIDGE_BASIS_LABELS[causalBridge.model_basis] || "basis not recorded")}) ${pct(causalBridge.model_return, 2)} · account ${pct(causalBridge.account_return, 2)}${causalBridge.account_basis ? ` (${safe(accountBasisText(causalBridge.account_basis))})` : ""} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}${safe(contractDateText("return_attribution"))}</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
         : "";
       // The retained provider/reference comparison is its own quantity.  Under a stale
       // implementation contract it is the only older gap shown, with its basis and window.
