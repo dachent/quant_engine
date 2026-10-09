@@ -123,6 +123,30 @@ KNOWN_ROOTS: frozenset[str] = frozenset(
 # The artifact a lens generation carries whose bytes the panel's source_sha256 pins.
 _LENS_CONTENT_ARTIFACT_ID = "analytics/decomposition.json"
 
+# Content digests the panel carries for a simple root's files (ruling B.2.2:
+# "every content digest the panel carries for T's files must also equal the
+# target's bytes"): panel json-pointer -> the file inside the target's
+# generation directory whose bytes that digest pins. Each pairing was verified
+# against the real smoke9 generations (report portfolio-report-data.json,
+# correlation correlation.json, decomposition analytics/decomposition.json,
+# weekly-returns weekly-returns.json).
+_CONTENT_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "portfolio-report": (("meta.report_sha256", "portfolio-report-data.json"),),
+    "correlation": (("meta.correlation_sha256", "correlation.json"),),
+    "factor-decomposition": (
+        ("meta.decomposition_sha256", "analytics/decomposition.json"),
+    ),
+    "weekly-returns": (("meta.weekly_returns_sha256", "weekly-returns.json"),),
+}
+
+# The panel provenance rows that name portfolio-baseline's bytes (ruling B.2.2
+# example: "$.provenance[].sha256"): provenance artifact name -> the file inside
+# the baseline target's generation directory whose bytes that row's sha256 pins.
+_BASELINE_PROVENANCE_BINDINGS: tuple[tuple[str, str], ...] = (
+    ("baseline-generation", None),  # the manifest bytes: sha256 == generation id
+    ("baseline-catalog", "portfolio-baseline.json"),
+)
+
 
 def _simple_pointers(
     panel: Mapping[str, Any], paths: Sequence[tuple[str, ...]]
@@ -184,11 +208,15 @@ def _declared_pointers(
         return _lens_pointers(panel, mode="LIVE_ONLY", source_key=root_id)
     if root_id.startswith(_HYBRID_PREFIX) and root_id != UNCONSUMED_ROOT_ID:
         source_key = root_id[len(_HYBRID_PREFIX) :]
+        if source_key not in _LENS_SOURCE_KEYS:
+            return None
         return _lens_pointers(panel, mode="LIVE_PLUS_BACKTEST", source_key=source_key)
     return None
 
 
 def _lens_content_sha256(root_dir: Path, generation_id: str) -> str | None:
+    """The manifest-declared sha256 of the lens content artifact."""
+
     manifest_path = root_dir / "generations" / generation_id / GENERATION_MANIFEST
     if not manifest_path.is_file():
         return None
@@ -207,6 +235,20 @@ def _lens_content_sha256(root_dir: Path, generation_id: str) -> str | None:
             sha = artifact.get("sha256")
             return sha if isinstance(sha, str) else None
     return None
+
+
+def _artifact_file_sha256(
+    root_dir: Path, generation_id: str, artifact_id: str
+) -> str | None:
+    """The sha256 of the artifact's actual bytes on disk, or None if absent."""
+
+    artifact_path = root_dir / "generations" / generation_id / artifact_id
+    if not artifact_path.is_file():
+        return None
+    try:
+        return hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def target_integrity(target: Mapping[str, Any], root_dir: Path) -> Iterator[Finding]:
@@ -314,22 +356,109 @@ def target_binding(
             )
             continue
         if observed_source_sha256 is not None:
-            actual_source_sha256 = _lens_content_sha256(root_dir, generation_id)
-            if (
-                actual_source_sha256 is not None
-                and observed_source_sha256 != actual_source_sha256
-            ):
+            # Ruling B.2.2, fail-closed: a declared panel digest with no
+            # verifiable target bytes is itself a finding, never a skip.
+            manifest_declared = _lens_content_sha256(root_dir, generation_id)
+            if manifest_declared is None:
+                yield _finding(
+                    "release.target_binding",
+                    BLOCKER_AUTHORITY,
+                    root_id,
+                    None,
+                    observed_source_sha256,
+                    str(root_dir / "generations" / generation_id / GENERATION_MANIFEST),
+                    f"$.artifacts[{_LENS_CONTENT_ARTIFACT_ID}].sha256",
+                    (),
+                    f"the panel declares a {json_path}.source_sha256 for this "
+                    "target, but the target's generation manifest carries no "
+                    f"{_LENS_CONTENT_ARTIFACT_ID} artifact to bind it to",
+                )
+                continue
+            if observed_source_sha256 != manifest_declared:
                 yield _finding(
                     "release.target_binding",
                     BLOCKER_AUTHORITY,
                     root_id,
                     observed_source_sha256,
-                    actual_source_sha256,
+                    manifest_declared,
                     PANEL,
                     f"{json_path}.source_sha256",
                     (),
                     "panel source_sha256 does not match the target's own "
-                    f"{_LENS_CONTENT_ARTIFACT_ID} artifact",
+                    f"{_LENS_CONTENT_ARTIFACT_ID} artifact declaration",
+                )
+                continue
+            # The manifest's declaration must also match the artifact's actual
+            # bytes, not only the manifest's own claim (round-1 review: the
+            # declaration alone is not the target's bytes).
+            actual_bytes_sha256 = _artifact_file_sha256(
+                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID
+            )
+            if actual_bytes_sha256 != manifest_declared:
+                yield _finding(
+                    "release.target_binding",
+                    BLOCKER_AUTHORITY,
+                    root_id,
+                    actual_bytes_sha256,
+                    manifest_declared,
+                    str(
+                        root_dir
+                        / "generations"
+                        / generation_id
+                        / _LENS_CONTENT_ARTIFACT_ID
+                    ),
+                    "$.sha256",
+                    (),
+                    f"the target's {_LENS_CONTENT_ARTIFACT_ID} bytes do not "
+                    "match the generation manifest's declared sha256",
+                )
+
+    # Ruling B.2.2: every content digest the panel carries for this root's
+    # files must equal the target's actual bytes.
+    for digest_pointer, artifact_id in _CONTENT_BINDINGS.get(root_id, ()):
+        panel_digest = _content_digest_at(panel, digest_pointer)
+        if panel_digest is None:
+            continue
+        actual = _artifact_file_sha256(root_dir, generation_id, artifact_id)
+        if actual != panel_digest:
+            yield _finding(
+                "release.target_binding",
+                BLOCKER_AUTHORITY,
+                root_id,
+                actual,
+                panel_digest,
+                str(root_dir / "generations" / generation_id / artifact_id),
+                digest_pointer,
+                (),
+                f"panel content digest {digest_pointer} does not match the "
+                f"target's {artifact_id} bytes",
+            )
+
+    # Ruling B.2.2 example: the baseline provenance rows name the baseline
+    # generation's own bytes.
+    for artifact_name, artifact_id in _BASELINE_PROVENANCE_BINDINGS:
+        if root_id != "portfolio-baseline":
+            break
+        for row in _provenance_rows(panel, artifact_name):
+            observed = row.get("sha256")
+            expected = (
+                generation_id
+                if artifact_id is None
+                else _artifact_file_sha256(root_dir, generation_id, artifact_id)
+            )
+            if observed != expected:
+                pointer = row.get("_pointer", "$.provenance[]")
+                yield _finding(
+                    "release.target_binding",
+                    BLOCKER_AUTHORITY,
+                    root_id,
+                    observed,
+                    expected,
+                    PANEL,
+                    pointer,
+                    (),
+                    f"panel provenance row {artifact_name!r} does not match "
+                    "the baseline target's bytes",
                 )
 
 
@@ -343,39 +472,77 @@ def _contains_value(value: Any, needle: str) -> bool:
     return False
 
 
+def _content_digest_at(panel: Mapping[str, Any], dotted_pointer: str) -> Any:
+    """The panel value at a dotted json-pointer, or None if absent."""
+
+    current: Any = panel
+    for part in dotted_pointer.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _provenance_rows(
+    panel: Mapping[str, Any], artifact_name: str
+) -> list[dict[str, Any]]:
+    """The panel provenance rows naming ``artifact_name``, pointer-annotated."""
+
+    rows = panel.get("provenance")
+    if not isinstance(rows, list):
+        return []
+    found = []
+    for index, row in enumerate(rows):
+        if isinstance(row, Mapping) and row.get("artifact") == artifact_name:
+            annotated = dict(row)
+            annotated["_pointer"] = f"$.provenance[{index}]"
+            found.append(annotated)
+    return found
+
+
 def target_unconsumed(
-    target: Mapping[str, Any], panel: Mapping[str, Any]
+    target: Mapping[str, Any], panel: Mapping[str, Any], report: Mapping[str, Any]
 ) -> Iterator[Finding]:
-    """BLOCKER_AUTHORITY: hybrid-dynamic-style's "unconsumed" claim, verified."""
+    """BLOCKER_AUTHORITY: hybrid-dynamic-style's "unconsumed" claim, verified.
+
+    Ruling B.2.3: the generation id must not appear anywhere in the panel *or*
+    the report without a declared binding, so the report payload is checked
+    alongside the panel and is a required input (the producer refuses without
+    it rather than passing an unconsumed claim it could not verify).
+    """
 
     root_id = str(target.get("root_id"))
     if root_id != UNCONSUMED_ROOT_ID:
         return
     generation_id = str(target.get("proposed_generation_id"))
-    if _contains_value(panel, generation_id):
-        yield _finding(
-            "release.target_unconsumed",
-            BLOCKER_AUTHORITY,
-            root_id,
-            generation_id,
-            "absent from the panel (no declared binding exists for this root)",
-            PANEL,
-            "$",
-            (),
-            f"{root_id!r} is declared unconsumed but its generation id appears "
-            "in the panel payload",
-        )
+    for label, payload in (("panel", panel), ("report", report)):
+        if _contains_value(payload, generation_id):
+            yield _finding(
+                "release.target_unconsumed",
+                BLOCKER_AUTHORITY,
+                root_id,
+                generation_id,
+                f"absent from the {label} (no declared binding exists for this root)",
+                label,
+                "$",
+                (),
+                f"{root_id!r} is declared unconsumed but its generation id "
+                f"appears in the {label} payload",
+            )
 
 
 def run_target_checks(
-    target: Mapping[str, Any], root_dir: Path, panel: Mapping[str, Any]
+    target: Mapping[str, Any],
+    root_dir: Path,
+    panel: Mapping[str, Any],
+    report: Mapping[str, Any],
 ) -> list[Finding]:
     """Every finding for one non-panel release target, sorted."""
 
     findings = [
         *target_integrity(target, root_dir),
         *target_binding(target, panel, root_dir),
-        *target_unconsumed(target, panel),
+        *target_unconsumed(target, panel, report),
     ]
     return sorted(findings, key=Finding.sort_key)
 
