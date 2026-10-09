@@ -30,12 +30,25 @@ from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
 
 FIXTURE = Path(__file__).parent / "rows" / "smoke9_real_rows.json"
+RAW_SOURCE_FIXTURE = Path(__file__).parent / "rows" / "a6_volatis_raw_source_rows.json"
 VOLATIS = "volatis-strategy"
 P123_EU = "p123-eu"
+VOLATIS_ACCOUNT = "account-58e75e8d952fa1b8"
 
 
 def _real() -> dict[str, Any]:
     return json.loads(FIXTURE.read_text(encoding="ascii"))
+
+
+def _raw_source() -> dict[str, Any]:
+    """Verbatim raw ``nav_observations``/``capital_anchors`` rows for the A6 account.
+
+    Independent of the production ``strategy_returns`` rows under judgment: these
+    are copied from the real provider-ledger.json (sha256 pinned in the fixture's
+    own ``provenance`` block), which the capital-identity computation never writes.
+    """
+
+    return json.loads(RAW_SOURCE_FIXTURE.read_text(encoding="ascii"))
 
 
 def _context(gen_dir: Path, expected: list[dict[str, Any]] | None = None) -> Any:
@@ -326,6 +339,29 @@ def _capital_identity() -> Decimal:
     ) - Decimal(1)
 
 
+def _independent_capital_identity() -> Decimal:
+    """The same identity, derived only from the raw provider-ledger rows.
+
+    This does not read ``strategy_returns`` (the row under judgment) at all: the
+    11-13 beginning capital is the independent oracle's own sum of the 11-12 raw
+    NAV observation plus the 11-11 raw capital anchor (the deposit), and the day's
+    return is the 11-13 raw NAV over that sum. A coherent change to the captured
+    production row (beginning_capital and/or return) cannot move this value,
+    because it is never read here.
+    """
+
+    raw = _raw_source()
+    nav_by_date = {row["as_of_date"]: row for row in raw["nav_observations"]}
+    (anchor,) = raw["capital_anchors"]
+    assert anchor["account_id"] == VOLATIS_ACCOUNT
+    assert anchor["nav_recognition_date"] == DAY
+    prior_nav = Decimal(nav_by_date["2025-11-12"]["nav"]["value"])
+    deposit = Decimal(anchor["amount"]["value"])
+    independent_beginning_1113 = prior_nav + deposit
+    independent_nav_1113 = Decimal(nav_by_date[DAY]["nav"]["value"])
+    return independent_nav_1113 / independent_beginning_1113 - Decimal(1)
+
+
 def _a6_row(expected: Decimal) -> dict[str, Any]:
     return {
         "metric_id": "twr.strategy",
@@ -357,19 +393,33 @@ def _expected(context: checks.Context) -> list[checks.Finding]:
 def test_a6_the_isolated_day_return_is_the_capital_identity_of_the_day(
     tmp_path: Path,
 ) -> None:
-    """The published -6.18 percent equals NAV(11-14 begin) / NAV(11-13 begin) - 1."""
+    """The published -6.18 percent equals NAV(11-14 begin) / NAV(11-13 begin) - 1.
 
+    The expected value bound to the check is the independent oracle's own
+    derivation from the raw provider-ledger nav_observations/capital_anchors rows
+    (``_independent_capital_identity``), not a value read back out of the
+    captured production ``strategy_returns`` row under judgment. The in-repo
+    arithmetic identity against the captured row (``_capital_identity``) is kept
+    only as a secondary, informational cross-check.
+    """
+
+    independent = _independent_capital_identity()
     identity = _capital_identity()
+    # the independent, source-derived oracle value agrees with the in-repo
+    # capital-identity arithmetic over the captured row, to the full precision
+    # the raw rows carry.
+    assert abs(independent - identity) < Decimal("1e-20")
+
     rows = _volatis_rows()
     published = Decimal(rows[DAY]["return"])
-    assert abs(published - identity) < Decimal("1e-20")
+    assert abs(published - independent) < Decimal("1e-20")
     # the deposit is real: the day begins at about 54958 after ending the day before at
     # about 29931, and its neighbours are quiet (the A6 shape: one isolated move)
     assert Decimal(rows[DAY]["beginning_capital"]) > Decimal("54000")
     assert Decimal(rows["2025-11-12"]["beginning_capital"]) < Decimal("30000")
     assert abs(Decimal(rows["2025-11-12"]["return"])) < Decimal("0.01")
     assert abs(Decimal(rows[NEXT_DAY]["return"])) < Decimal("0.01")
-    context = _a6_world(tmp_path, expected=identity)
+    context = _a6_world(tmp_path, expected=independent)
     (view,) = checks.recompute_metric(
         context,
         "twr.strategy",
@@ -377,9 +427,69 @@ def test_a6_the_isolated_day_return_is_the_capital_identity_of_the_day(
         (checks.to_date("2025-11-12"), checks.to_date(DAY)),
         checks.to_date("2025-11-12"),
     )
-    assert abs(Decimal(view.value) - identity) < Decimal("1e-12")
+    assert abs(Decimal(view.value) - independent) < Decimal("1e-12")
     assert view.view.startswith("recomputed:compound(report.strategy_returns[")
     assert _expected(context) == []
+
+
+def _coherently_mutate_the_captured_day(rows: list[dict[str, Any]]) -> None:
+    """A coherent production-output mutation: shift beginning_capital and return together.
+
+    This is the review's own probe (Astra finding 11): add 100 to the captured
+    day's beginning_capital and recompute its return from the *other* captured
+    row (the next day's beginning_capital), so the mutated row is internally
+    self-consistent. An expectation bound only to the captured row (as
+    ``_capital_identity`` is) cannot distinguish this from the real data; an
+    expectation bound to the independent raw source rows must.
+    """
+
+    by_day = {row["date"]: row for row in rows}
+    mutated_beginning = Decimal(by_day[DAY]["beginning_capital"]) + 100
+    by_day[DAY]["beginning_capital"] = str(mutated_beginning)
+    by_day[DAY]["return"] = str(
+        Decimal(by_day[NEXT_DAY]["beginning_capital"]) / mutated_beginning
+        - Decimal(1)
+    )
+
+
+def test_a6_a_coherent_production_mutation_fails_against_the_independent_oracle(
+    tmp_path: Path,
+) -> None:
+    """A self-consistent mutation of the captured row must still be caught.
+
+    Astra finding 11 (pr519-final.astra.review.md): adding 100 to the captured
+    day's beginning_capital, and rederiving its return from the same mutated
+    row set, left the old internal-consistency test green. Here the expected
+    value is the independent oracle's own value, computed from raw source rows
+    the mutation never touches, so the mutated report row must be refused.
+    """
+
+    mutated_rows = copy.deepcopy(_real()["strategy_returns"][VOLATIS])
+    _coherently_mutate_the_captured_day(mutated_rows)
+    by_mutated_day = {row["date"]: row for row in mutated_rows}
+    old_style_expected = Decimal(
+        by_mutated_day[NEXT_DAY]["beginning_capital"]
+    ) / Decimal(by_mutated_day[DAY]["beginning_capital"]) - Decimal(1)
+
+    # proof of the vulnerability this fixes: an "oracle" derived the old way
+    # (from the captured row itself, after the same mutation) is circular and
+    # never catches the mutation at all.
+    blind_context = _a6_world(
+        tmp_path, _coherently_mutate_the_captured_day, expected=old_style_expected
+    )
+    assert _expected(blind_context) == []
+
+    independent = _independent_capital_identity()
+    context = _a6_world(
+        tmp_path, _coherently_mutate_the_captured_day, expected=independent
+    )
+    findings = _expected(context)
+    assert [(f.check_id, f.klass, f.entity) for f in findings] == [
+        ("expected.twr.strategy", checks.BLOCKER_REGRESSION, "volatis-strategy|H")
+    ]
+    # the mutated row's own internal identity still computes cleanly (it is
+    # self-consistent), but its value has moved away from the independent oracle
+    assert abs(Decimal(findings[0].observed["value"]) - independent) > Decimal("1e-6")
 
 
 def _read_the_deposit_as_a_gain(rows: list[dict[str, Any]]) -> None:
