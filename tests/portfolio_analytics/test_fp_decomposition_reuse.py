@@ -451,7 +451,7 @@ def test_corrupt_retained_result_is_rejected_before_any_fitting(
     tmp_path: Path, work: Work, corrupted: str
 ) -> None:
     source_root, spec, retained, staged = _staged_static(tmp_path)
-    (Path(str(staged["candidate"])) / "decomposition.json").write_bytes(b"{}\n")
+    (Path(str(staged["candidate"])) / corrupted).write_bytes(b"{}\n")
     work.reset()
     before = _tree(retained)
 
