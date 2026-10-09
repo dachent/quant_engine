@@ -12,7 +12,7 @@ were NOT_READY with "metric has no production view" although the producer was ri
   oracle leaves the same assignment-only epochs out (R2).
 
 The rows below are the real ones, copied verbatim from the smoke9 report into
-``fixtures/smoke9_real_rows.json``; the oracle rows are the real v11 rows ($[57], $[58],
+``rows/smoke9_real_rows.json``; the oracle rows are the real v11 rows ($[57], $[58],
 $[75]).  A comparison that agrees is asserted positively (the view or the recomputed
 value is read back), not by the absence of a finding.
 """

@@ -3,7 +3,7 @@
 The ledger rows were UNVERIFIED: the validator output names a check only when it fires,
 so on a clean generation silence proved nothing about whether the check ran over the
 entity.  Each test below runs the real check (or the real expected-row path) over rows
-copied verbatim from the smoke9 report (``fixtures/smoke9_real_rows.json``), asserts
+copied verbatim from the smoke9 report (``rows/smoke9_real_rows.json``), asserts
 the preconditions that make the comparison happen (so a green result is a positive
 record, not an absence), and pairs it with a bad control that must fire.
 
@@ -29,7 +29,7 @@ from test_validate_generation import CUTOFF, Spec, _policy_fixture, build
 from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
 
-FIXTURE = Path(__file__).parent / "fixtures" / "smoke9_real_rows.json"
+FIXTURE = Path(__file__).parent / "rows" / "smoke9_real_rows.json"
 VOLATIS = "volatis-strategy"
 P123_EU = "p123-eu"
 
