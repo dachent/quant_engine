@@ -456,6 +456,31 @@ def test_pre_policy_label_needs_the_contract_to_predate_the_policy(
     )
 
 
+def test_only_p123_ai_factor_is_ever_labelled_pre_policy(tmp_path: Path) -> None:
+    """Pins `_implementation_reference_extras`'s hardcoded ``"p123-ai-factor"`` literal.
+
+    `tools/portfolio_report.py` (``_implementation_reference_extras``) names
+    ``p123-ai-factor`` by string literal rather than deriving "pre-policy" from
+    the contract's own data. Every other predicate the function checks (not
+    stale, the contract predates the policy's effective_start, the model
+    comparison is available) is satisfied by GRIZZLY and TT here exactly as it
+    is by AI -- only the literal excludes them. If a second strategy is ever
+    exempted from the provider-return policy in production, this hardcoded
+    check will silently leave it unlabelled; this test must fail and be
+    revisited (do not widen the literal to a set without a ruling) the day
+    that happens.
+    """
+    path = tmp_path / "rec.json"
+    _write(path, "rec", {GRIZZLY: GOVERNED, AI: GOVERNED, TT: GOVERNED})
+
+    _, ref = _read_rec(path)
+
+    assert ref["stale_strategy_ids"] == []  # none of the three is stale here
+    assert ref["pre_policy_strategy_ids"] == [AI]
+    assert GRIZZLY not in ref["pre_policy_strategy_ids"]
+    assert TT not in ref["pre_policy_strategy_ids"]
+
+
 @pytest.mark.parametrize(
     ("reconciliation_stale", "attribution_stale", "expected"),
     [
