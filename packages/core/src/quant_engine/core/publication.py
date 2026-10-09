@@ -2151,7 +2151,10 @@ class _FindingsTarget(Protocol):
 
 
 def evaluate_release_findings_set(
-    manifest_targets: Sequence[_FindingsTarget], paths: Mapping[str, Path]
+    manifest_targets: Sequence[_FindingsTarget],
+    paths: Mapping[str, Path],
+    *,
+    snapshot: Mapping[str, bytes] | None = None,
 ) -> tuple[bool, dict[str, str | None]]:
     """``(may_publish, per_root_reason)`` for every target of one release (ruling B).
 
@@ -2168,6 +2171,11 @@ def evaluate_release_findings_set(
     bytes, hence a new sha256) therefore invalidates every derived document
     still citing the old digest; a stale derived document refuses.
 
+    ``snapshot``, when given, supplies each root's findings bytes as already
+    read (and guard-checked) by the caller; the files are not reopened, so a
+    replacement between the caller's guard and this evaluation cannot slip a
+    different anchor past the check/use gap.
+
     ``per_root_reason[root_id]`` is ``None`` for a clean, bound root, else its
     refusal reason or a ``blocking findings [...]`` summary, matching the text
     a single-target caller would have reported.
@@ -2179,7 +2187,12 @@ def evaluate_release_findings_set(
     for target in manifest_targets:
         root_id = target.root_id
         path = paths[root_id]
-        raw, reason = _load_findings_file(path)
+        raw: bytes | None
+        reason: str | None
+        if snapshot is not None and root_id in snapshot:
+            raw, reason = snapshot[root_id], None
+        else:
+            raw, reason = _load_findings_file(path)
         if reason is not None:
             per_root_reason[root_id] = reason
             continue
