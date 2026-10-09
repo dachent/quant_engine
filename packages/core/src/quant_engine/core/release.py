@@ -1895,8 +1895,20 @@ def _verify_release_validation(
         target.root_id: overrides.get(target.root_id) or default_paths[target.root_id]
         for target in manifest.targets
     }
+    # Read every root's findings bytes once, here, and evaluate exactly these
+    # snapshots: a file replaced after the guard above (but before the
+    # evaluator re-opened the path) could otherwise admit a stale anchor
+    # through the check/use gap (round-2 review, release.py:1884 probe). A
+    # root whose bytes cannot be read here keeps no snapshot entry, so the
+    # evaluator's own guarded read reports the refusal reason.
+    snapshot: dict[str, bytes] = {}
+    for target in manifest.targets:
+        try:
+            snapshot[target.root_id] = paths[target.root_id].read_bytes()
+        except OSError:
+            continue
     may_publish, per_root_reason = evaluate_release_findings_set(
-        manifest.targets, paths
+        manifest.targets, paths, snapshot=snapshot
     )
     if may_publish:
         return

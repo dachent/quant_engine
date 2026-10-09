@@ -129,7 +129,10 @@ _LENS_CONTENT_ARTIFACT_ID = "analytics/decomposition.json"
 # generation directory whose bytes that digest pins. Each pairing was verified
 # against the real smoke9 generations (report portfolio-report-data.json,
 # correlation correlation.json, decomposition analytics/decomposition.json,
-# weekly-returns weekly-returns.json).
+# weekly-returns weekly-returns.json). The source_sha256-bearing pointers the
+# panel emits for the same roots' surfaces are bound in
+# _SURFACE_SOURCE_BINDINGS below; the two tables together cover every
+# emitted digest location (round-2 review probe).
 _CONTENT_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
     "portfolio-report": (("meta.report_sha256", "portfolio-report-data.json"),),
     "correlation": (("meta.correlation_sha256", "correlation.json"),),
@@ -139,13 +142,42 @@ _CONTENT_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
     "weekly-returns": (("meta.weekly_returns_sha256", "weekly-returns.json"),),
 }
 
-# The panel provenance rows that name portfolio-baseline's bytes (ruling B.2.2
-# example: "$.provenance[].sha256"): provenance artifact name -> the file inside
-# the baseline target's generation directory whose bytes that row's sha256 pins.
-_BASELINE_PROVENANCE_BINDINGS: tuple[tuple[str, str | None], ...] = (
-    ("baseline-generation", None),  # the manifest bytes: sha256 == generation id
-    ("baseline-catalog", "portfolio-baseline.json"),
-)
+# Surface-level source_sha256 pointers (same artifact bytes as the meta digest
+# for the same root): pointer -> the artifact file. These are dotted prefixes:
+# every mapping/list under the pointer carries ``source_sha256``.
+_SURFACE_SOURCE_BINDINGS: dict[str, tuple[str, ...]] = {
+    "correlation": (
+        "dependence_analysis",
+        "dependence_modes",
+    ),
+    "factor-decomposition": ("factor_analysis",),
+    "weekly-returns": ("weekly_returns",),
+}
+
+# Provenance rows that name a root's generation bytes (names verified against
+# the real panel 07fe4351): provenance artifact name -> (owning root, the
+# artifact file whose bytes the row pins; None means the row's sha256 pins the
+# generation manifest itself). Rows naming inputs that are not a release
+# target's own generation output (tracker/audit/authority rows) are the
+# producer-ledger and per-root bindings' concern or carry no release target.
+_PROVENANCE_BINDINGS: dict[str, tuple[str, str | None]] = {
+    "baseline-generation": ("portfolio-baseline", None),
+    "baseline-catalog": ("portfolio-baseline", "portfolio-baseline.json"),
+    "portfolio-report-generation": (
+        "portfolio-report",
+        "portfolio-report-data.json",
+    ),
+    "portfolio-correlation-generation": ("correlation", "correlation.json"),
+    "portfolio-dependence-analysis": ("correlation", "correlation.json"),
+    "portfolio-factor-decomposition-generation": (
+        "factor-decomposition",
+        "analytics/decomposition.json",
+    ),
+    "portfolio-weekly-return-generation": (
+        "weekly-returns",
+        "weekly-returns.json",
+    ),
+}
 
 
 def _simple_pointers(
@@ -434,33 +466,65 @@ def target_binding(
                 f"target's {artifact_id} bytes",
             )
 
-    # Ruling B.2.2 example: the baseline provenance rows name the baseline
-    # generation's own bytes.
-    if root_id == "portfolio-baseline":
-        for provenance_artifact, baseline_artifact in _BASELINE_PROVENANCE_BINDINGS:
-            for row in _provenance_rows(panel, provenance_artifact):
-                observed = row.get("sha256")
-                expected = (
-                    generation_id
-                    if baseline_artifact is None
-                    else _artifact_file_sha256(
-                        root_dir, generation_id, baseline_artifact
-                    )
+    # The surface-level source_sha256 digests the panel emits for the same
+    # roots' analysis surfaces bind to the same artifact bytes.
+    surface_artifact = _SURFACE_ARTIFACT_BY_ROOT.get(root_id)
+    if surface_artifact is not None:
+        for surface_pointer in _SURFACE_SOURCE_BINDINGS.get(root_id, ()):
+            current: Any = panel
+            if not _descend(current, surface_pointer):
+                continue
+            for part in surface_pointer.split("."):
+                current = current[part]
+            for sha256, sha_pointer in _source_sha256_leaves(
+                current, f"$.{surface_pointer}"
+            ):
+                actual = _artifact_file_sha256(
+                    root_dir, generation_id, surface_artifact
                 )
-                if observed != expected:
-                    pointer = row.get("_pointer", "$.provenance[]")
+                if actual != sha256:
                     yield _finding(
                         "release.target_binding",
                         BLOCKER_AUTHORITY,
                         root_id,
-                        observed,
-                        expected,
+                        actual,
+                        sha256,
                         PANEL,
-                        pointer,
+                        sha_pointer,
                         (),
-                        f"panel provenance row {provenance_artifact!r} does not match "
-                        "the baseline target's bytes",
+                        f"panel surface digest {sha_pointer} does not match "
+                        f"the target's {surface_artifact} bytes",
                     )
+
+    # Ruling B.2.2: every provenance row naming this root's generation bytes
+    # binds to the target's actual bytes (manifest row pins the manifest).
+    for (
+        provenance_artifact,
+        (owning_root, baseline_artifact),
+    ) in _PROVENANCE_BINDINGS.items():
+        if root_id != owning_root:
+            continue
+        for row in _provenance_rows(panel, provenance_artifact):
+            observed = row.get("sha256")
+            expected = (
+                generation_id
+                if baseline_artifact is None
+                else _artifact_file_sha256(root_dir, generation_id, baseline_artifact)
+            )
+            if observed != expected:
+                pointer = row.get("_pointer", "$.provenance[]")
+                yield _finding(
+                    "release.target_binding",
+                    BLOCKER_AUTHORITY,
+                    root_id,
+                    observed,
+                    expected,
+                    PANEL,
+                    pointer,
+                    (),
+                    f"panel provenance row {provenance_artifact!r} does not match "
+                    "the target's bytes",
+                )
 
 
 def _contains_value(value: Any, needle: str) -> bool:
@@ -471,6 +535,40 @@ def _contains_value(value: Any, needle: str) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_contains_value(item, needle) for item in value)
     return False
+
+
+# The artifact file each root's surface source_sha256 digests pin (the same
+# bytes as the root's meta content digest).
+_SURFACE_ARTIFACT_BY_ROOT: dict[str, str] = {
+    "correlation": "correlation.json",
+    "factor-decomposition": "analytics/decomposition.json",
+    "weekly-returns": "weekly-returns.json",
+}
+
+
+def _descend(value: Any, dotted: str) -> bool:
+    """True if every dotted part resolves to a present mapping key."""
+
+    for part in dotted.split("."):
+        if not isinstance(value, Mapping) or part not in value:
+            return False
+        value = value[part]
+    return True
+
+
+def _source_sha256_leaves(value: Any, pointer: str) -> Iterator[tuple[str, str]]:
+    """Every (sha256, json_pointer) under ``pointer`` where the payload carries
+    a ``source_sha256`` key on a mapping, depth-first, sorted by pointer."""
+
+    if isinstance(value, Mapping):
+        sha = value.get("source_sha256")
+        if isinstance(sha, str):
+            yield sha, f"{pointer}.source_sha256"
+        for key in sorted(k for k in value if k != "source_sha256"):
+            yield from _source_sha256_leaves(value[key], f"{pointer}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _source_sha256_leaves(item, f"{pointer}[{index}]")
 
 
 def _content_digest_at(panel: Mapping[str, Any], dotted_pointer: str) -> Any:

@@ -570,3 +570,70 @@ def test_unconsumed_clean_when_absent_from_both_payloads(tmp_path: Path) -> None
         "proposed_generation_id": "9" * 64,
     }
     assert list(rt.target_unconsumed(target, base_panel(), {"other": 1})) == []
+
+
+def test_surface_source_sha256_locations_bind_for_every_root(tmp_path: Path) -> None:
+    """B.2.2 EVERY-digest requirement (round-2 probe): dependence_analysis,
+    dependence_modes, factor_analysis and weekly_returns source_sha256
+    locations must bind to the target's bytes; corrupting any one refuses."""
+    panel = _panel_with_digests()
+    for surface in (
+        "dependence_analysis",
+        "factor_analysis",
+        "weekly_returns",
+    ):
+        panel[surface]["source_sha256"] = _sha(
+            {
+                "dependence_analysis": CORRELATION_ARTIFACT_BYTES,
+                "factor_analysis": DECOMPOSITION_ARTIFACT_BYTES,
+                "weekly_returns": WEEKLY_ARTIFACT_BYTES,
+            }[surface]
+        )
+    panel["dependence_modes"]["LIVE_ONLY"]["source_sha256"] = _sha(
+        CORRELATION_ARTIFACT_BYTES
+    )
+    panel["dependence_modes"]["LIVE_PLUS_BACKTEST"]["source_sha256"] = _sha(
+        CORRELATION_ARTIFACT_BYTES
+    )
+    write_manifest(tmp_path, GOOD_GEN)
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    write_lens_artifact(tmp_path, GOOD_GEN)
+    for root_id, surface_pointer in (
+        ("correlation", "dependence_analysis"),
+        ("factor-decomposition", "factor_analysis"),
+        ("weekly-returns", "weekly_returns"),
+    ):
+        target = make_target(root_id, tmp_path, GOOD_GEN)
+        assert list(rt.target_binding(target, panel, tmp_path)) == [], root_id
+        panel[surface_pointer]["source_sha256"] = _sha(b"corrupted\n")
+        findings = list(rt.target_binding(target, panel, tmp_path))
+        assert [f.check_id for f in findings] == ["release.target_binding"], root_id
+        assert findings[0].klass == BLOCKER_AUTHORITY
+        assert surface_pointer in findings[0].json_path
+        panel[surface_pointer]["source_sha256"] = {
+            "dependence_analysis": _sha(CORRELATION_ARTIFACT_BYTES),
+            "factor_analysis": _sha(DECOMPOSITION_ARTIFACT_BYTES),
+            "weekly_returns": _sha(WEEKLY_ARTIFACT_BYTES),
+        }[surface_pointer]
+
+
+def test_a_provenance_row_for_a_non_baseline_root_binds(tmp_path: Path) -> None:
+    """The Astra probe: provenance[artifact=portfolio-correlation-generation]
+    must bind to the correlation target's bytes."""
+    panel = _panel_with_digests()
+    panel["provenance"].append(
+        {
+            "artifact": "portfolio-correlation-generation",
+            "sha256": _sha(CORRELATION_ARTIFACT_BYTES),
+        }
+    )
+    write_manifest(tmp_path, GOOD_GEN)
+    _write_content_artifacts(tmp_path, GOOD_GEN)
+    write_lens_artifact(tmp_path, GOOD_GEN)
+    target = make_target("correlation", tmp_path, GOOD_GEN)
+    assert list(rt.target_binding(target, panel, tmp_path)) == []
+    panel["provenance"][-1]["sha256"] = _sha(b"wrong\n")
+    findings = list(rt.target_binding(target, panel, tmp_path))
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert "portfolio-correlation-generation" in findings[0].message
