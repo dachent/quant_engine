@@ -46,7 +46,7 @@
   ],
   "properties": {
     "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital"},
-    "panel_schema_version": { "enum": [21, 22, 23] },
+    "panel_schema_version": { "enum": [21, 22, 23, 24, 25] },
     "account_manifest": {
       "anyOf": [
         { "$ref": "#/$defs/account_manifest_v7" },
@@ -212,6 +212,31 @@
         "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
         "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
         "hwm_numerical_reason": { "type": "string", "minLength": 1 },
+        "hwm_candidate": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["complete_through", "current_drawdown", "current_hwm", "current_index", "evaluated_on", "financial_acceptance", "label", "maximum_drawdown", "not_accepted_reason", "not_accepted_register", "policy_id", "receipt_sha256", "status"],
+              "properties": {
+                "complete_through": { "type": "string", "format": "date" },
+                "current_drawdown": { "$ref": "#/$defs/decimal" },
+                "current_hwm": { "$ref": "#/$defs/decimal" },
+                "current_index": { "$ref": "#/$defs/decimal" },
+                "evaluated_on": { "type": "string", "format": "date" },
+                "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                "maximum_drawdown": { "$ref": "#/$defs/decimal" },
+                "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+                "not_accepted_register": { "const": "E2" },
+                "policy_id": { "const": "PORT-HWM-4" },
+                "receipt_sha256": { "$ref": "#/$defs/hash" },
+                "status": { "const": "CANDIDATE_PENDING_OWNER_ACCEPTANCE" }
+              }
+            }
+          ]
+        },
         "hwm_status": { "type": "string" },
         "hwm_status_code_version": { "const": 2 },
         "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
@@ -496,6 +521,24 @@
       "items": { "type": "object" }
     },
     "positions": { "$ref": "#/$defs/rows" },
+    "position_snapshots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted_rows_total", "after_cutoff_rows", "current_at_cutoff_rows", "current_basis", "cutoff_date", "historical_rows", "history_first_as_of", "history_last_as_of", "history_snapshot_dates", "latest_before_cutoff_rows", "unavailable_rows"],
+      "properties": {
+        "accepted_rows_total": { "type": "integer", "minimum": 0 },
+        "after_cutoff_rows": { "type": "integer", "minimum": 0 },
+        "current_at_cutoff_rows": { "type": "integer", "minimum": 0 },
+        "current_basis": { "const": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF" },
+        "cutoff_date": { "type": "string", "format": "date" },
+        "historical_rows": { "type": "integer", "minimum": 0 },
+        "history_first_as_of": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+        "history_last_as_of": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+        "history_snapshot_dates": { "type": "integer", "minimum": 0 },
+        "latest_before_cutoff_rows": { "type": "integer", "minimum": 0 },
+        "unavailable_rows": { "type": "integer", "minimum": 0 }
+      }
+    },
     "leverage_disclosures": { "type": "array", "items": { "$ref": "#/$defs/leverage_disclosure" } },
     "provenance": { "$ref": "#/$defs/rows" },
     "provider_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
@@ -683,7 +726,14 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"panel_schema_version": {"const": 23}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [24, 25]}}, "required": ["panel_schema_version"]},
+      "then": {
+        "required": ["position_snapshots"],
+        "properties": {"advisory": {"required": ["hwm_candidate"]}}
+      }
+    },
+    {
+      "if": {"properties": {"panel_schema_version": {"enum": [23, 25]}}, "required": ["panel_schema_version"]},
       "then": {
         "properties": {
           "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
@@ -852,6 +902,7 @@
               "readiness": { "const": "DO_NOT_EXPAND_SYSTEMATIC_RISK" },
               "hwm_numerical_status": { "const": "UNAVAILABLE" },
               "hwm_numerical_reason": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" },
+              "hwm_candidate": { "type": "null" },
               "hwm_status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
             }
           },
@@ -895,7 +946,7 @@
       }
     },
     {
-      "if": {"properties": {"panel_schema_version": {"enum": [22, 23]}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [22, 23, 24, 25]}}, "required": ["panel_schema_version"]},
       "then": {
         "properties": {
           "dependence_analysis": {"required": ["weight_basis", "weight_authority"]},
@@ -930,7 +981,7 @@
     {
       "if": {
         "properties": {
-          "panel_schema_version": {"enum": [22, 23]},
+          "panel_schema_version": {"enum": [22, 23, 24, 25]},
           "invested_capital": {"type": "object"}
         },
         "required": ["panel_schema_version", "invested_capital"]

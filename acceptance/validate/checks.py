@@ -2553,6 +2553,9 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
         return
     checks = rows(ctx.panel, "reconciliation_checks")
     performance = rows(ctx.panel, "performance")
+    positions = rows(ctx.panel, "positions")
+    by_class = Counter(str(row.get("position_class")) for row in positions)
+    classified = any("position_class" in row for row in positions)
     derived: dict[str, tuple[int, tuple[str, ...]]] = {
         "reconciliation_checks": (len(checks), ()),
         "reconciliation_passed": (
@@ -2570,7 +2573,12 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
         ),
         "accounts": (len(rows(ctx.panel, "account_summary")), ()),
         "strategies": (len(rows(ctx.panel, "strategies")), ("D9",)),
-        "positions": (len(rows(ctx.panel, "positions")), ()),
+        # The count is the current holdings: a classified panel counts the rows at the
+        # cutoff, not the accepted history beside them (N62).
+        "positions": (
+            by_class["CURRENT_AT_CUTOFF"] if classified else len(positions),
+            (),
+        ),
     }
     for key, (value, defects) in derived.items():
         if key in counts and counts[key] != value:
@@ -2585,6 +2593,28 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
                 defects,
                 "displayed count differs from the rows it counts",
             )
+    snapshots = node(ctx.panel, "position_snapshots")
+    if isinstance(snapshots, Mapping):
+        snapshot_counts = {
+            "current_at_cutoff_rows": by_class["CURRENT_AT_CUTOFF"],
+            "latest_before_cutoff_rows": by_class["LATEST_BEFORE_CUTOFF"],
+            "historical_rows": by_class["HISTORICAL"],
+            "after_cutoff_rows": by_class["AFTER_CUTOFF"],
+            "unavailable_rows": by_class["UNAVAILABLE"],
+        }
+        for key, value in snapshot_counts.items():
+            if snapshots.get(key) != value:
+                yield _finding(
+                    "preservation.counts",
+                    BLOCKER_INVARIANT,
+                    f"position_snapshots.{key}",
+                    snapshots.get(key),
+                    value,
+                    PANEL,
+                    f"$.position_snapshots.{key}",
+                    (),
+                    "displayed position snapshot count differs from the rows it counts",
+                )
 
 
 # ------------------------------------------------------------------ capital checks
@@ -3272,7 +3302,8 @@ COVERAGE_END_METRIC = "date.strategy_cash.coverage_end"
 COVERAGE_END_CHECK = "expected.capital.strategy_cash.coverage_end"
 _COVERAGE_BLOCK = "capital_coverage_bounds"
 _COVERAGE_DEFECTS = ("N56",)
-_COVERAGE_REPORT_VERSION = 3
+# The coverage disclosure exists from report schema 3; version 4 keeps it unchanged.
+_COVERAGE_REPORT_VERSIONS = frozenset({3, 4})
 _COVERAGE_RULE = "N56-COVERAGE"
 _COVERAGE_BLOCK_KEYS = frozenset(
     {"schema_version", "rule", "calculation_cutoff_date", "lines", "bounded_sections"}
@@ -3448,13 +3479,14 @@ def capital_coverage_disclosure(ctx: Context) -> CoverageDisclosure | None:
     result = None if block is None else _read_capital_coverage_disclosure(block)
     version = ctx.report.get("report_schema_version")
     if result is not None and (
-        type(version) is not int or version != _COVERAGE_REPORT_VERSION
+        type(version) is not int or version not in _COVERAGE_REPORT_VERSIONS
     ):
         result = replace(
             result,
             problems=(
                 f"{_COVERAGE_BLOCK} exists only at report_schema_version "
-                f"{_COVERAGE_REPORT_VERSION}, this report is {version!r}",
+                f"{' or '.join(str(item) for item in sorted(_COVERAGE_REPORT_VERSIONS))}"
+                f", this report is {version!r}",
                 *result.problems,
             ),
         )
@@ -3862,7 +3894,7 @@ def check_capital_coverage_end(ctx: Context) -> Iterator[Finding]:
     if (
         oracle is None
         or type(version) is not int
-        or version != _COVERAGE_REPORT_VERSION
+        or version not in _COVERAGE_REPORT_VERSIONS
     ):
         return
     custody = node(ctx.report, "custody_current_capital")
@@ -5666,6 +5698,95 @@ def _current_capital_values(ctx: Context) -> dict[str, Decimal]:
     return values
 
 
+_SNAPSHOT_WEIGHT_FIELDS = (
+    "weight_denominator_usd",
+    "weight_perimeter",
+    "weight_perimeter_component_count",
+)
+
+
+def _snapshot_weight_findings(
+    ctx: Context, problem: Callable[[str, Any, Any, str, str], Finding]
+) -> Iterator[Finding]:
+    """N65: a version-4 dated snapshot's weights are its values over its own perimeter.
+
+    The recorded weight column reconciles with no denominator, so the report
+    publishes value / the snapshot's whole recorded systematic total (the excluded
+    components included).  Judged from the rows alone: each weight times the stated
+    denominator is the snap_row's value, the rows of one snapshot state one denominator,
+    and the published values cannot exceed it.  A version-4 snap_row that states none of
+    this is a finding; older versions keep the recorded column and are not judged.
+    """
+
+    if ctx.report.get("report_schema_version") != 4:
+        return
+    tolerance = Decimal("1e-12")
+    by_day: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for snap_position, snap_row in enumerate(rows(ctx.report, "allocation_history")):
+        if snap_row.get("scope") != "SYSTEMATIC" or not _historical_snapshot(snap_row):
+            continue
+        by_day.setdefault(str(snap_row.get("as_of_date")), []).append(
+            (snap_position, snap_row)
+        )
+    for day, members in sorted(by_day.items()):
+        denominators: set[Decimal] = set()
+        published = Decimal(0)
+        for snap_position, snap_row in members:
+            strategy = str(snap_row.get("strategy_id"))
+            path = f"$.allocation_history[{snap_position}]"
+            missing = [name for name in _SNAPSHOT_WEIGHT_FIELDS if name not in snap_row]
+            denominator = to_decimal(snap_row.get("weight_denominator_usd"))
+            weight = to_decimal(snap_row.get("systematic_weight"))
+            value = to_decimal(snap_row.get("current_value_usd"))
+            if missing or denominator is None or denominator <= 0:
+                yield problem(
+                    strategy,
+                    {name: snap_row.get(name) for name in _SNAPSHOT_WEIGHT_FIELDS},
+                    "the snapshot perimeter total and its component count",
+                    path + ".weight_denominator_usd",
+                    "a version-4 snapshot weight does not state its perimeter",
+                )
+                continue
+            denominators.add(denominator)
+            if weight is None or value is None:
+                yield problem(
+                    strategy,
+                    {"weight": snap_row.get("systematic_weight"), "value": value},
+                    "finite snapshot weight and value",
+                    path + ".systematic_weight",
+                    "a version-4 snapshot weight or value is missing",
+                )
+                continue
+            published += value
+            if abs(weight * denominator - value) > tolerance * max(
+                denominator, Decimal(1)
+            ):
+                yield problem(
+                    strategy,
+                    snap_row.get("systematic_weight"),
+                    f"{value} / {denominator}",
+                    path + ".systematic_weight",
+                    f"the {day} snapshot weight is not its value over the "
+                    "snapshot perimeter total",
+                )
+        if len(denominators) > 1:
+            yield problem(
+                day,
+                sorted(str(item) for item in denominators),
+                "one perimeter total per snapshot",
+                "$.allocation_history[*].weight_denominator_usd",
+                f"the {day} snapshot states more than one perimeter total",
+            )
+        elif denominators and published > next(iter(denominators)) + tolerance:
+            yield problem(
+                day,
+                str(published),
+                f"at most {next(iter(denominators))}",
+                "$.allocation_history[*].weight_denominator_usd",
+                f"the {day} snapshot values exceed its stated perimeter total",
+            )
+
+
 def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
     """B5: current shares and policy weights are distinct, independently checked sets."""
     tolerance = Decimal("5e-8")
@@ -5719,6 +5840,7 @@ def check_allocation_weights(ctx: Context) -> Iterator[Finding]:
                 sets.setdefault(strategy, {})[f"report.{section}.systematic_weight"] = (
                     amount
                 )
+    yield from _snapshot_weight_findings(ctx, problem)
     totals = _current_capital_values(ctx)
     grand = sum(totals.values(), Decimal(0))
     if grand > 0:
@@ -6973,7 +7095,7 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
             and value == metadata.get("as_of_date")
             and isinstance(metadata.get("schema_version"), int)
             and not isinstance(metadata.get("schema_version"), bool)
-            and metadata.get("schema_version") == 1
+            and metadata.get("schema_version") in (1, 2)
             and isinstance(metadata.get(identity), str)
             and bool(metadata[identity].strip())
             and isinstance(metadata.get("sha256"), str)
@@ -8316,6 +8438,7 @@ _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
     "twr.strategy": ("B2", "B3"),
     "mwr.account": (),
     "mwr.strategy": (),
+    "invested_capital.strategy.cutoff": ("B7", "N36"),
     "date.source_last_observation": ("C5",),
     COVERAGE_END_METRIC: ("N56",),
 }
@@ -8324,7 +8447,9 @@ _METRIC_DEFECTS: dict[str, tuple[str, ...]] = {
 def metric_unit(metric_id: str, declared: Any) -> str:
     if isinstance(declared, str) and declared:
         return declared
-    if metric_id.startswith("capital.") or metric_id == "flows.account.net":
+    if metric_id.startswith(("capital.", "invested_capital.")) or (
+        metric_id == "flows.account.net"
+    ):
         return "USD"
     if metric_id.startswith(("twr.", "mwr.", "weight.")):
         return "ratio"
@@ -8466,6 +8591,28 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         row.get("end"),
                         PANEL,
                         f"$.account_manifest.rows[{position}].current_value",
+                    )
+                )
+    elif metric_id == "invested_capital.strategy.cutoff":
+        # N36/B7: the report's governed invested capital of one strategy. An unpublished
+        # amount is no view (NOT_READY), never a value that differs from the oracle.
+        for position, row in enumerate(
+            rows(node(report, "invested_capital"), "current_by_strategy")
+        ):
+            if (
+                row.get("strategy_id") == entity
+                and to_decimal(row.get("invested_capital_usd")) is not None
+            ):
+                out.append(
+                    Observed(
+                        "report:invested_capital.current_by_strategy.invested_capital_usd",
+                        row.get("invested_capital_usd"),
+                        None,
+                        None,
+                        None,
+                        REPORT,
+                        f"$.invested_capital.current_by_strategy[{position}]"
+                        ".invested_capital_usd",
                     )
                 )
     elif metric_id == "weight.strategy.cutoff":
@@ -9107,15 +9254,17 @@ def recompute_metric(
     strategy_level = metric_id in ("twr.strategy", "mwr.strategy")
     # L6a: a blocked epoch the census confirms is outside the account's TWR and MWR
     # (R2) and publishes no dates or cash flows, so it would only make the account
-    # recompute decline. The strategy-level recompute is not changed (l0-design 5.1
-    # skips account-level views only).
+    # recompute decline. N29: a strategy's MWR pools the same funded epochs and the
+    # oracle leaves the same blocked epochs out (R2), so ``mwr.strategy`` skips them
+    # too. ``twr.strategy`` reads only ``strategy_returns``, so it needs no skip.
     blocked = blocked_epochs(ctx)
+    skip_blocked = metric_id != "twr.strategy"
     epochs = sorted(
         (
             (position, row)
             for position, row in twr_rows(ctx)
             if str(row.get("strategy_id" if strategy_level else "account_id")) == entity
-            and (strategy_level or not blocked.skips_report_row(row))
+            and not (skip_blocked and blocked.skips_report_row(row))
         ),
         key=lambda item: str(item[1].get("effective_start")),
     )
@@ -9858,7 +10007,7 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
             # The exemption is a property of the declared report schema, not of
             # field absence: a version-3 line must carry both fields.
             stated = (
-                declared_version == 3
+                declared_version in _COVERAGE_REPORT_VERSIONS
                 or "last_event_date" in line
                 or "coverage_end" in line
             )
@@ -10095,6 +10244,196 @@ def check_evaluation_clock(ctx: Context) -> Iterator[Finding]:
         )
 
 
+_STALE_IMPLEMENTATION_STATUS = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+_STALE_IMPLEMENTATION_KEYS = frozenset(
+    {
+        "status",
+        "strategy_id",
+        "contract_kind",
+        "contract_id",
+        "contract_sha256",
+        "contract_as_of_date",
+        "window_start",
+        "window_end",
+        "governed_account_return",
+        "governed_account_basis",
+        "governed_observations",
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+        "superseded_contract_account_return",
+        "superseded_contract_account_basis",
+        "reason",
+        "repair_ref",
+    }
+)
+_IMPLEMENTATION_ACCOUNT_LEG_CHECK = "returns.implementation_account_legs"
+
+
+def _implementation_published_account(
+    key: str, row: Mapping[str, Any]
+) -> tuple[Any, Any, Any]:
+    """The account figure and window an accepted implementation row publishes."""
+
+    if key == "implementation_return_attribution":
+        bridge = row.get("bridge")
+        figure = bridge.get("account_return") if isinstance(bridge, Mapping) else None
+        return figure, row.get("observed_start"), row.get("observed_end")
+    metrics = row.get("return_reconciliation")
+    if isinstance(metrics, Mapping) and (
+        metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    ):
+        actual = row.get("account_live_return_summary")
+        actual = actual if isinstance(actual, Mapping) else {}
+        return (
+            actual.get("cumulative_return"),
+            actual.get("observed_start"),
+            actual.get("observed_end"),
+        )
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return (
+        metrics.get("account_cumulative_return"),
+        metrics.get("observed_start"),
+        metrics.get("observed_end"),
+    )
+
+
+def check_implementation_account_legs(ctx: Context) -> Iterator[Finding]:
+    """N66/N66-R: one account return per quantity and window in the implementation layer.
+
+    Every published implementation row's account figure is recomputed from the
+    report's own ``strategy_returns`` over the window the row declares; a figure
+    that differs is a second account return (``BLOCKER_INVARIANT``).  A stale row
+    (its contract pins another provider ledger) is a closed NOT_READY object: it is
+    one ``NOT_READY`` finding, never a blocker, provided its governed figure is the
+    recompute and it names two different ledgers.
+    """
+
+    for position, strategy in enumerate(rows(ctx.report, "strategy_summary")):
+        strategy_id = str(strategy.get("strategy_id"))
+        for key in (
+            "implementation_reconciliation",
+            "implementation_return_attribution",
+        ):
+            row = strategy.get(key)
+            if not isinstance(row, Mapping):
+                continue
+            pointer = f"$.strategy_summary[{position}].{key}"
+            if row.get("status") == _STALE_IMPLEMENTATION_STATUS:
+                yield from _stale_implementation_findings(
+                    ctx, strategy_id, row, pointer
+                )
+                continue
+            figure, start_text, end_text = _implementation_published_account(key, row)
+            shown = to_decimal(figure)
+            start, end = to_date(start_text), to_date(end_text)
+            computed, count = (
+                compound_window(ctx, strategy_id, start, end)
+                if start is not None and end is not None
+                else (None, 0)
+            )
+            if shown is None or computed is None or count == 0:
+                yield _finding(
+                    _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+                    BLOCKER_INVARIANT,
+                    strategy_id,
+                    {"account_figure": figure, "window": [start_text, end_text]},
+                    "an account figure with governed account-live dates in its window",
+                    REPORT,
+                    pointer,
+                    ("N66",),
+                    "published implementation account return cannot be recomputed "
+                    "from the governed account-live series",
+                )
+            elif abs(shown - computed) > RETURN_TOLERANCE:
+                yield _finding(
+                    _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+                    BLOCKER_INVARIANT,
+                    strategy_id,
+                    shown,
+                    {
+                        "compound_live_series": computed,
+                        "live_series_rows_in_window": count,
+                        "window": [start, end],
+                    },
+                    REPORT,
+                    pointer,
+                    ("N66",),
+                    "published implementation account return differs from the "
+                    f"governed account-live series by {shown - computed}",
+                )
+
+
+def _stale_implementation_findings(
+    ctx: Context, strategy_id: str, row: Mapping[str, Any], pointer: str
+) -> Iterator[Finding]:
+    start, end = to_date(row.get("window_start")), to_date(row.get("window_end"))
+    computed, count = (
+        compound_window(ctx, strategy_id, start, end)
+        if start is not None and end is not None
+        else (None, 0)
+    )
+    shown = to_decimal(row.get("governed_account_return"))
+    contract_ledger = row.get("contract_provider_ledger_sha256")
+    problems: list[str] = []
+    if set(row) != _STALE_IMPLEMENTATION_KEYS:
+        problems.append("the stale object's key set differs from the closed shape")
+    if row.get("strategy_id") != strategy_id:
+        problems.append("the stale object names another strategy")
+    if (
+        computed is None
+        or shown is None
+        or abs(shown - computed) > RETURN_TOLERANCE
+        or row.get("governed_observations") != count
+    ):
+        problems.append(
+            "the governed account return is not the recompute from the report's "
+            "own account-live series"
+        )
+    if row.get("governed_account_basis") != "BASELINE_ACCOUNT_LIVE" or row.get(
+        "superseded_contract_account_basis"
+    ) != ("SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"):
+        problems.append("a basis label differs from the closed shape")
+    if (
+        not isinstance(contract_ledger, str)
+        or not contract_ledger
+        or contract_ledger == row.get("governed_provider_ledger_sha256")
+    ):
+        problems.append("the contract does not pin a different provider ledger")
+    if problems:
+        yield _finding(
+            _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+            BLOCKER_INVARIANT,
+            strategy_id,
+            {key: row.get(key) for key in sorted(row) if key != "reason"},
+            {
+                "compound_live_series": computed,
+                "live_series_rows_in_window": count,
+                "window": [start, end],
+            },
+            REPORT,
+            pointer,
+            ("N66",),
+            "; ".join(problems),
+        )
+        return
+    yield _finding(
+        _IMPLEMENTATION_ACCOUNT_LEG_CHECK,
+        NOT_READY,
+        strategy_id,
+        {
+            "status": row.get("status"),
+            "contract_kind": row.get("contract_kind"),
+            "governed_account_return": shown,
+            "window": [start, end],
+        },
+        "an implementation contract built from the governed provider ledger",
+        REPORT,
+        pointer,
+        ("N66-R",),
+        str(row.get("reason")),
+    )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -10126,6 +10465,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("returns.strategy_return_views_agree", check_strategy_return_views),
     ("returns.epoch_hpr_receipts_verified", check_epoch_hpr_receipts),
     ("returns.benchmark_account_return", check_benchmark_account_return),
+    (_IMPLEMENTATION_ACCOUNT_LEG_CHECK, check_implementation_account_legs),
     ("returns.flow_lists_agree", check_flow_lists),
     ("returns.mwr_opening_matches_first_flow", check_mwr_opening),
     ("returns.implied_unrecorded_flows", check_implied_flows),

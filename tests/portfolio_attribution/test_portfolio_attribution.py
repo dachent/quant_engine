@@ -49,6 +49,7 @@ def _baseline(
     provider_admissions: list[dict[str, Any]] | None = None,
     strategy_version_refs: dict[str, str] | None = None,
     baseline_schema_version: int = 1,
+    cost_rows: dict[int, tuple[str | None, str]] | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
     version_refs = strategy_version_refs or {}
@@ -94,8 +95,20 @@ def _baseline(
         "baseline_schema_version": baseline_schema_version,
         "costs": [
             {
-                "annual_external_cost_usd": "7.18" if index == 1 else None,
-                "cost_status": "known" if index == 1 else "unknown",
+                "annual_external_cost_usd": (
+                    cost_rows[index][0]
+                    if cost_rows is not None and index in cost_rows
+                    else "7.18"
+                    if index == 1
+                    else None
+                ),
+                "cost_status": (
+                    cost_rows[index][1]
+                    if cost_rows is not None and index in cost_rows
+                    else "known"
+                    if index == 1
+                    else "unknown"
+                ),
                 "strategy_id": f"strategy-{index}",
             }
             for index in range(1, 10)
@@ -288,6 +301,45 @@ def test_exact_date_metrics_costs_and_legacy_baseline_are_explicit(
     benchmark = catalog["benchmark_comparisons"][0]
     assert benchmark["metrics"]["observations"] == 2
     assert benchmark["metrics"]["beta"] is not None
+
+
+def test_a_contract_cap_is_an_upper_bound_not_evidenced_fees(tmp_path: Path) -> None:
+    """N73 (K10): the Volatis 1% contract cap is an upper bound, never "Evidenced".
+
+    The status words are the real cost-economics ones: known_fixed and
+    known_gold_api are known costs; conservative_1pct_contract_cap is a cap.
+    """
+
+    baseline = _baseline(
+        tmp_path,
+        cost_rows={
+            1: ("3590", "known_gold_api"),
+            2: ("798", "known_fixed"),
+            3: ("664.57", "conservative_1pct_contract_cap"),
+            4: (None, "unknown_model_subscription_cost"),
+            5: (None, "30pct_incentive_or_unknown_subscription"),
+        },
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    status = {row["strategy_id"]: row["fees_status"] for row in catalog["costs"]}
+    assert status["strategy-1"] == "EVIDENCED_PRE_TAX"
+    assert status["strategy-2"] == "EVIDENCED_PRE_TAX"
+    assert status["strategy-3"] == "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+    assert status["strategy-4"] == "UNAVAILABLE"
+    assert status["strategy-5"] == "UNAVAILABLE"
+
+
+def test_a_cost_amount_with_an_unrecognised_status_is_refused(tmp_path: Path) -> None:
+    baseline = _baseline(tmp_path, cost_rows={1: ("10", "mystery_status")})
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(
+        attribution.AttributionValidationError, match="cost status mystery_status"
+    ):
+        attribution.build_catalog(baseline, spec)
 
 
 def test_account_cumulative_return_includes_a_non_benchmark_date(
@@ -1068,23 +1120,51 @@ def test_daily_periods_per_year_keeps_exact_date_pairing(
 
     The same rows declared at 252 or more periods a year are paired on exact
     dates as before: the account's return on each reference date meets the
-    reference return, and the account compounds every row of the window.
+    reference return, and the account compounds every row of the window.  The
+    dates are daily: a declared daily frequency over weekly-sparse dates is refused
+    by the frequency guard (test_annualization_frequency_guard.py), not paired.
     """
 
-    baseline = _baseline(tmp_path, account_live_returns=_WEEKLY_ACCOUNT_RETURNS)
+    # Every calendar day, so the series carries 365 periods a year as well as 252.
+    days = [date(2026, 1, 16) + timedelta(days=offset) for offset in range(15)]
+    account = {
+        day: str(Decimal("0.01") * (index % 3 - 1)) for index, day in enumerate(days)
+    }
+    reference = {
+        day.isoformat(): str(Decimal("0.005") * (index % 4 - 1))
+        for index, day in enumerate(days)
+    }
+    # The strategy's other, default comparison needs its own two dates.
+    baseline = _baseline(
+        tmp_path,
+        account_live_returns={
+            date(2026, 1, 2): "0.01",
+            date(2026, 1, 3): "-0.02",
+            **account,
+        },
+    )
     spec, returns = _inputs(tmp_path)
     _with_weekly_reference(
-        spec, returns, _WEEKLY_REFERENCE_RETURNS, periods_per_year=periods_per_year
+        spec,
+        returns,
+        reference,
+        periods_per_year=periods_per_year,
+        observed_start=days[0].isoformat(),
+        observed_end=days[-1].isoformat(),
     )
 
     catalog, _, _ = attribution.build_catalog(baseline, spec)
 
     metrics = catalog["comparisons"][0]["metrics"]
-    assert metrics["observations"] == 3
-    # Rows in [2026-01-16, 2026-01-30]: 1.1 * 1.1 * 0.9 * 1.2 * 0.9 - 1.
-    assert metrics["account_cumulative_return"] == "0.17612"
-    # (0.10 - 0.20, -0.10 + 0.10, -0.10 - 0.10) on the three reference dates.
-    active = [-0.10, 0.0, -0.20]
+    assert metrics["observations"] == len(days)
+    wealth = Decimal(1)
+    for day in days:
+        wealth *= Decimal(1) + Decimal(account[day])
+    assert Decimal(metrics["account_cumulative_return"]) == wealth - 1
+    active = [
+        float(Decimal(account[day]) - Decimal(reference[day.isoformat()]))
+        for day in days
+    ]
     assert float(metrics["active_return_annualized"]) == pytest.approx(
         statistics.fmean(active) * periods_per_year
     )
@@ -1373,13 +1453,18 @@ def test_dependence_selected_actual_stage_publish_preserves_raw_statistics(
     assert attribution.main(["publish", *cli, "--generation-id", generation.name]) == 0
     catalog = json.loads((generation / attribution.CATALOG_NAME).read_text())
     for name in ("comparisons", "benchmark_comparisons"):
+        if frequency == 252:
+            # Weekly-sparse dates declared daily: the staged and published catalog
+            # carries the frequency refusal, not a number scaled by 252.
+            assert catalog[name][0]["status"] == "UNAVAILABLE"
+            assert catalog[name][0]["metrics"] is None
+            assert (
+                catalog[name][0]["not_ready_reason"]
+                == attribution.ANNUALIZATION_FREQUENCY_INCONSISTENT
+            )
+            continue
         assert catalog[name][0]["metrics"]["account_cumulative_return"] == "0.3332"
         assert catalog[name][0]["metrics"]["cumulative_gap"] == "0.3332"
-        if frequency == 252:
-            assert catalog[name][0]["metrics"]["observations"] == 3
-            assert catalog[name][0]["metrics"][
-                "active_return_annualized"
-            ] == attribution._decimal_text(statistics.fmean([0.10, 0.01, 0]) * 252)
     artifact_ids = {
         item["artifact_id"]
         for item in json.loads((generation / "generation.json").read_text())[

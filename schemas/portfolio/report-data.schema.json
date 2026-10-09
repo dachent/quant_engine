@@ -32,7 +32,7 @@
     "hwm_summary"
   ],
   "properties": {
-    "report_schema_version": {"enum": [1, 2, 3]},
+    "report_schema_version": {"enum": [1, 2, 3, 4]},
     "as_of_date": {"type": "string", "format": "date"},
     "calculation_cutoff_date": {"type": "string", "format": "date"},
     "custody_current_capital": {
@@ -1418,6 +1418,7 @@
         }
       ]
     },
+    "annualization_label": {"type": ["object", "null"], "additionalProperties": false, "required": ["basis", "frequency", "label", "observations", "periods_per_year", "short_window", "window_days", "window_end", "window_start"], "properties": {"basis": {"enum": ["CALENDAR_DAYS_COMPOUNDED_OVER_365", "SOURCE_REPORTED", "XIRR_ACT_365", "PERIODS_PER_YEAR_SCALED"]}, "frequency": {"type": ["string", "null"]}, "label": {"type": "string", "minLength": 1}, "observations": {"type": ["integer", "null"], "minimum": 0}, "periods_per_year": {"type": ["integer", "null"], "minimum": 1}, "short_window": {"type": "boolean"}, "window_days": {"type": "integer", "minimum": 0}, "window_end": {"type": "string", "format": "date"}, "window_start": {"type": "string", "format": "date"}}},
     "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "historical_weight_basis": {"type": "string", "pattern": "^HISTORICAL_SNAPSHOT_[0-9]{4}_[0-9]{2}_[0-9]{2}$"},
@@ -1817,7 +1818,7 @@
       "then": {"required": ["calculation_cutoff_date"]}
     },
     {
-      "if": {"properties": {"report_schema_version": {"enum": [2, 3]}}, "required": ["report_schema_version"]},
+      "if": {"properties": {"report_schema_version": {"enum": [2, 3, 4]}}, "required": ["report_schema_version"]},
       "then": {
         "properties": {
           "portfolio_summary": {
@@ -1834,7 +1835,7 @@
       }
     },
     {
-      "if": {"properties": {"report_schema_version": {"const": 3}}, "required": ["report_schema_version"]},
+      "if": {"properties": {"report_schema_version": {"enum": [3, 4]}}, "required": ["report_schema_version"]},
       "then": {
         "properties": {
           "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
@@ -1844,6 +1845,75 @@
     {
       "if": {"properties": {"report_schema_version": {"enum": [1, 2]}}, "required": ["report_schema_version"]},
       "then": {"not": {"required": ["capital_coverage_bounds"]}}
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"const": 4}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "allocation_history": {
+            "items": {
+              "if": {"properties": {"scope": {"const": "SYSTEMATIC"}}, "required": ["scope"]},
+              "then": {
+                "required": ["systematic_weight", "weight_denominator_usd", "weight_perimeter", "weight_perimeter_component_count"],
+                "properties": {
+                  "systematic_weight": {"$ref": "#/$defs/decimal"},
+                  "weight_denominator_usd": {"$ref": "#/$defs/decimal"},
+                  "weight_perimeter": {"const": "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"},
+                  "weight_perimeter_component_count": {"type": "integer", "minimum": 1}
+                }
+              }
+            }
+          },
+          "strategy_summary": {
+            "items": {
+              "required": ["account_live_cagr_annualization", "mwr_annualization"],
+              "properties": {
+                "account_live_cagr_annualization": {"$ref": "#/$defs/annualization_label"},
+                "benchmark_annualization": {"$ref": "#/$defs/annualization_label"},
+                "benchmark_assignment_authority": {"enum": ["OWNER_POLICY_DECISION", "RETAINED_ATTRIBUTION_SPEC"]},
+                "benchmark_comparison_reason": {"type": ["string", "null"]},
+                "mwr_annualization": {"$ref": "#/$defs/annualization_label"},
+                "provider_annualization": {"$ref": "#/$defs/annualization_label"},
+                "provider_comparison_reason": {"type": ["string", "null"]},
+                "cost_rate_denominator_basis": {"const": "CURRENT_CUTOFF"},
+                "cost_rate_status": {"enum": ["AVAILABLE_AT_CUTOFF_SLEEVE_VALUE", "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF", "NOT_READY_SLEEVE_VALUE_UNAVAILABLE", "UNAVAILABLE_NO_COST_AMOUNT"]},
+                "fees_status": {"enum": ["EVIDENCED_PRE_TAX", "UPPER_BOUND_CONTRACT_CAP_PRE_TAX", "UNAVAILABLE"]}
+              },
+              "allOf": [
+                {
+                  "if": {"required": ["cost_rate_status"]},
+                  "then": {"required": ["annual_external_cost_rate_pre_tax", "cost_rate_denominator_as_of_date", "cost_rate_denominator_basis", "cost_rate_denominator_usd", "cost_rate_reason", "cost_schedule_as_of_date", "fees_status"]}
+                },
+                {
+                  "if": {"properties": {"cost_rate_status": {"const": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"}}, "required": ["cost_rate_status"]},
+                  "then": {"properties": {"annual_external_cost_rate_pre_tax": {"$ref": "#/$defs/decimal"}}}
+                },
+                {
+                  "if": {"properties": {"cost_rate_status": {"enum": ["NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF", "NOT_READY_SLEEVE_VALUE_UNAVAILABLE", "UNAVAILABLE_NO_COST_AMOUNT"]}}, "required": ["cost_rate_status"]},
+                  "then": {"properties": {"annual_external_cost_rate_pre_tax": {"type": "null"}, "cost_rate_reason": {"type": "string", "minLength": 1}}}
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"report_schema_version": {"enum": [1, 2, 3]}}, "required": ["report_schema_version"]},
+      "then": {
+        "properties": {
+          "allocation_history": {
+            "items": {
+              "not": {"anyOf": [{"required": ["weight_denominator_usd"]}, {"required": ["weight_perimeter"]}, {"required": ["weight_perimeter_component_count"]}]}
+            }
+          },
+          "strategy_summary": {
+            "items": {
+              "not": {"anyOf": [{"required": ["cost_rate_status"]}, {"required": ["cost_rate_denominator_usd"]}, {"required": ["cost_schedule_as_of_date"]}, {"required": ["account_live_cagr_annualization"]}, {"required": ["mwr_annualization"]}, {"required": ["benchmark_annualization"]}, {"required": ["provider_annualization"]}, {"required": ["benchmark_assignment_authority"]}, {"required": ["benchmark_comparison_reason"]}, {"required": ["provider_comparison_reason"]}]}
+            }
+          }
+        }
+      }
     }
   ]
 }

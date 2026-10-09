@@ -1249,8 +1249,12 @@ def _provider_admission_validator() -> Callable[..., None]:
             sys.modules[module_name] = previous
 
 
-def _verify_financial_outcomes(spec: PipelineSpec) -> dict[str, Any]:
-    """Run the repository's single product completion verifier at this boundary."""
+def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any]:
+    """Run the repository's single product completion verifier at this boundary.
+
+    The verifier records every call in its own ledger under ``spec.state_root``;
+    ``caller`` only names this boundary, so counts never travel through return values.
+    """
     tools_root = Path(__file__).resolve().parents[5] / "tools"
     path = tools_root / "portfolio_financial_outcomes.py"
     if path.is_symlink() or not path.is_file():
@@ -1265,7 +1269,7 @@ def _verify_financial_outcomes(spec: PipelineSpec) -> dict[str, Any]:
     try:
         sys.path.insert(0, str(tools_root))
         module_spec.loader.exec_module(module)
-        proof = module.validate_financial_outcomes(spec)
+        proof = module.validate_financial_outcomes(spec, caller=caller)
         if not isinstance(proof, dict) or proof.get("status") != "PASS":
             raise PipelineValidationError("financial outcomes did not pass")
         return cast(dict[str, Any], proof)
@@ -3000,7 +3004,7 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
     expected_checks = set(_POST_BUILD_CHECKS)
     if financial_check:
         expected_checks.add("financial_outcomes")
-        proof = _verify_financial_outcomes(spec)
+        proof = _verify_financial_outcomes(spec, "pipeline.post-build-semantic-gate")
         from portfolio_financial_outcomes import financial_outcomes_semantic_identity
 
         if payload["financial_outcomes_sha256"] != financial_outcomes_semantic_identity(
@@ -4497,7 +4501,7 @@ def _require_executable_product(spec: PipelineSpec) -> dict[str, object] | None:
             + ",".join(str(item) for item in blocking_reasons)
         )
     if _requires_production_product(spec):
-        _verify_financial_outcomes(spec)
+        _verify_financial_outcomes(spec, "pipeline.require-executable-product")
     return product_summary
 
 

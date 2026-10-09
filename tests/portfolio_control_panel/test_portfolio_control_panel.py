@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 import runpy
 import sys
@@ -873,6 +874,7 @@ def _report() -> dict[str, object]:
                 "market_value_usd": "30",
                 "quantity": "3",
                 "security_id": "security-synthetic",
+                "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
                 "status": "AVAILABLE_MAPPED",
                 "strategy_id": ACTIVE_STRATEGY_IDS[0],
                 "symbol": "SYNTH",
@@ -2964,13 +2966,20 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
+            "position_class": "CURRENT_AT_CUTOFF",
             "security_id": "security-synthetic",
+            "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
             "status": "AVAILABLE_MAPPED",
             "strategy_id": ACTIVE_STRATEGY_IDS[0],
             "strategy_name": STRATEGY_NAMES[0],
             "symbol": "SYNTH",
+            "symbol_status": "AVAILABLE",
+            "symbol_reason": None,
         }
     ]
+    assert data["counts"]["positions"] == 1
+    assert data["position_snapshots"]["current_at_cutoff_rows"] == 1
+    assert data["advisory"]["hwm_candidate"] is None
     assert data["factor_analysis"]["available_count"] == 4
     assert data["factor_analysis"]["diagnostic_count"] == 1
     assert data["factor_analysis"]["dynamic_available_count"] == 1
@@ -3402,6 +3411,12 @@ def test_composed_schema9_performance_lineage_paths(
         "cash_drag_reason",
         "legacy_baseline_disposition",
         "annual_external_cost_rate_pre_tax",
+        "cost_rate_status",
+        "cost_rate_reason",
+        "cost_rate_denominator_usd",
+        "cost_rate_denominator_as_of_date",
+        "cost_rate_denominator_basis",
+        "cost_schedule_as_of_date",
         "annual_external_cost_usd",
         "after_tax_annual_cost_rate",
         "after_tax_status",
@@ -6067,6 +6082,388 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         )
 
 
+def _capture_view(name: str) -> str:
+    return "" if name == "direct-file" else name.split("-", 1)[1]
+
+
+def _qa_v2(candidate: Path, root: Path) -> Path:
+    """Reshape the synthetic QA directory into the version-2 relative form."""
+
+    qa = _qa(candidate, root)
+    for name in panel.CAPTURES:
+        manifest_path = qa / name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        target = "index.html" + (
+            f"#{_capture_view(name)}" if _capture_view(name) else ""
+        )
+        manifest.update(
+            console_events_path="console-events.json",
+            final_url=target,
+            html_directory_name=candidate.name,
+            pdf_path="page.pdf" if name == "desktop-command" else None,
+            qa_manifest_version=2,
+            request_failures_path="request-failures.json",
+            screenshot_path="screenshot.png",
+            target=target,
+        )
+        _write_json(manifest_path, manifest)
+        if name in panel.LINT_CAPTURES:
+            lint_path = qa / name / "visual-lint.json"
+            lint = json.loads(lint_path.read_text(encoding="utf-8"))
+            lint.update(qa_manifest_version=2, target=target)
+            _write_json(lint_path, lint)
+    return qa
+
+
+def _edit_manifest(qa: Path, name: str, **changes: object) -> None:
+    path = qa / name / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(changes)
+    _write_json(path, manifest)
+
+
+@pytest.fixture
+def candidate_v2(inputs: dict[str, Path]) -> Path:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    return Path(built["candidate_dir"])
+
+
+def test_qa_v2_relative_manifests_validate(candidate_v2: Path, tmp_path: Path) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    result = panel.validate_qa(candidate_v2, qa)
+    assert result["all_passed"] is True
+    names = {row["check"] for row in result["checks"]}
+    assert "QA evidence carries no absolute locator" in names
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "absolute_screenshot_path",
+        "file_url_target",
+        "escaping_final_url",
+        "other_candidate",
+        "wrong_version",
+        "mixed_versions",
+        "absolute_text_elsewhere",
+        "absolute_pdf_link",
+        "drive_in_final_url",
+    ],
+)
+def test_qa_v2_refuses_absolute_or_inconsistent_evidence(
+    candidate_v2: Path, tmp_path: Path, mutation: str
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    if mutation == "absolute_screenshot_path":
+        _edit_manifest(
+            qa, "desktop-command", screenshot_path=str(qa / "desktop-command" / "x.png")
+        )
+    elif mutation == "file_url_target":
+        _edit_manifest(
+            qa, "desktop-command", target=f"file:///C:/x/{candidate_v2.name}/index.html"
+        )
+    elif mutation == "escaping_final_url":
+        _edit_manifest(qa, "desktop-command", final_url="../x/index.html#command")
+    elif mutation == "drive_in_final_url":
+        _edit_manifest(qa, "desktop-command", final_url="C:/x/index.html#command")
+    elif mutation == "other_candidate":
+        _edit_manifest(qa, "desktop-command", html_directory_name="0" * 64)
+    elif mutation == "wrong_version":
+        for name in panel.CAPTURES:
+            _edit_manifest(qa, name, qa_manifest_version=3)
+    elif mutation == "mixed_versions":
+        manifest = json.loads(
+            (qa / "mobile-data" / "manifest.json").read_text(encoding="utf-8")
+        )
+        manifest.pop("qa_manifest_version")
+        _write_json(qa / "mobile-data" / "manifest.json", manifest)
+    elif mutation == "absolute_text_elsewhere":
+        _edit_manifest(qa, "desktop-command", note="see C:\\Users\\x\\y")
+    elif mutation == "absolute_pdf_link":
+        stream = zlib.compress(b"<< /URI (file:///C:/x/index.html) >>")
+        (qa / "desktop-command" / "page.pdf").write_bytes(
+            b"%PDF-1.4\nstream\n" + stream + b"\nendstream\n"
+        )
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel.validate_qa(candidate_v2, qa)
+
+
+def test_qa_v1_manifests_keep_verifying(candidate_v2: Path, tmp_path: Path) -> None:
+    qa = _qa(candidate_v2, tmp_path)
+    assert panel.validate_qa(candidate_v2, qa)["all_passed"] is True
+
+
+def test_qa_locator_predicate() -> None:
+    hits = panel.qa_absolute_locator_offsets
+    for text in (
+        b'"C:\\\\Users\\\\x"',
+        b"C:/Users/x",
+        b"file:///C:/x/index.html",
+        b"file:///home/x",
+        b'"\\\\\\\\server\\\\share"',
+        b"\\\\server\\share",
+    ):
+        assert hits(text), text
+    for text in (
+        b"https://example.com/a",
+        b"index.html#command",
+        b"generations/abc/index.html#risk",
+        b"Source file: ledger",
+        b"ratio 3:1 and 12:30",
+        b'"a\\\\b"',
+    ):
+        assert not hits(text), text
+
+
+def test_native_qa_receipt_is_written_outside_the_qa_directory(
+    candidate_v2: Path, tmp_path: Path
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    receipt = tmp_path / "logs" / "native-qa-receipt.json"
+    result = panel.validate_qa(candidate_v2, qa, receipt_path=receipt)
+    assert receipt.read_bytes() == canonical_json_bytes(result)
+    assert not (qa / "qa-validation.json").exists()
+    with pytest.raises(panel.ControlPanelValidationError, match="outside the QA"):
+        panel.validate_qa(candidate_v2, qa, receipt_path=qa / "receipt.json")
+    assert panel.qa_evidence_inventory_findings(qa) == []
+    (qa / "native-qa-receipt.json").write_text("{}", encoding="utf-8")
+    assert any(
+        "native QA receipt" in finding
+        for finding in panel.qa_evidence_inventory_findings(qa)
+    )
+
+
+def test_qa_inventory_flags_external_manifest_path_and_pdf_locators(
+    candidate_v2: Path, tmp_path: Path
+) -> None:
+    qa = _qa_v2(candidate_v2, tmp_path)
+    interaction = json.loads((qa / "interaction-results.json").read_text("utf-8"))
+    interaction["checks"][1]["evidence"] = {"external_manifest_path": "x.json"}
+    _write_json(qa / "interaction-results.json", interaction)
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert findings == ["interaction-results.json: external_manifest_path key present"]
+    (qa / "desktop-command" / "page.pdf").write_bytes(
+        b"%PDF-1.4\nstream\n" + zlib.compress(b"(D:\\x\\y)") + b"\nendstream\n"
+    )
+    assert any(
+        finding.startswith("desktop-command/page.pdf")
+        for finding in panel.qa_evidence_inventory_findings(qa)
+    )
+
+
+def _launcher_v2_fixture(
+    inputs: dict[str, Path], tmp_path: Path
+) -> tuple[Path, Path, str]:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa_v2(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
+    )
+    generation_id = str(published["generation_id"])
+    launcher_qa = _qa_v2(candidate, tmp_path / "launcher")
+    for name in panel.CAPTURES:
+        view = _capture_view(name)
+        fragment = f"#{view}" if view else ""
+        _edit_manifest(
+            launcher_qa,
+            name,
+            final_url=f"generations/{generation_id}/index.html{fragment}",
+            html_directory_name=inputs["output"].name,
+            target=f"index.html{fragment}",
+        )
+        if name in panel.LINT_CAPTURES:
+            lint_path = launcher_qa / name / "visual-lint.json"
+            lint = json.loads(lint_path.read_text(encoding="utf-8"))
+            lint["target"] = f"index.html{fragment}"
+            _write_json(lint_path, lint)
+    return inputs["output"] / "index.html", launcher_qa, generation_id
+
+
+def test_stable_launcher_qa_v2_relative_form_and_refusals(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    launcher, launcher_qa, generation_id = _launcher_v2_fixture(inputs, tmp_path)
+    result = panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+    assert result["all_passed"] is True
+    assert result["checks_total"] == 6
+    # A re-run is idempotent: the receipt it wrote beside the evidence is not scanned.
+    assert panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+
+    def refused(**changes: object) -> None:
+        _edit_manifest(launcher_qa, "mobile-risk", **changes)
+        with pytest.raises(panel.ControlPanelValidationError):
+            panel.validate_stable_launcher_qa(launcher, launcher_qa, generation_id)
+
+    good = json.loads(
+        (launcher_qa / "mobile-risk" / "manifest.json").read_text("utf-8")
+    )
+    refused(final_url=f"generations/{'0' * 64}/index.html#risk")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(final_url=f"generations/{generation_id}/index.html")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(target=launcher.resolve().as_uri() + "#risk")
+    _edit_manifest(launcher_qa, "mobile-risk", **good)
+    refused(
+        final_url=str(launcher.parent / "generations" / generation_id / "index.html")
+    )
+
+
+def _real_harness_candidate_args(candidate: Path) -> tuple[str, list[str]]:
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    cutoff = data["meta"]["portfolio_as_of"]
+    clock = data["meta"].get("source_clock")
+    extra = (
+        ["--expected-common-eod", clock["latest_common_eod"]]
+        if isinstance(clock, dict) and clock.get("latest_common_eod")
+        else []
+    )
+    return cutoff, extra
+
+
+def test_real_qa_harness_output_validates_and_publishes_without_locators(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """F6 seam: the real browser_qa.mjs and interaction_qa.mjs write what validate_qa reads."""
+
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    cutoff, extra = _real_harness_candidate_args(candidate)
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = playwright_module
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    qa = tmp_path / "real-qa"
+    commands = [
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "browser_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(qa),
+            "--expected-calculation-cutoff",
+            cutoff,
+            *extra,
+        ],
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(qa / "interaction-results.json"),
+            "--exclude-candidates",
+            "true",
+            "--epoch-only",
+            "true",
+            "--expected-calculation-cutoff",
+            cutoff,
+            *extra,
+        ],
+    ]
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=900,
+        )
+        assert completed.returncode == 0, (completed.stderr or completed.stdout or "")[
+            -3000:
+        ]
+
+    manifests = sorted(qa.glob("*/manifest.json"))
+    lints = sorted(qa.glob("*/visual-lint.json"))
+    assert len(manifests) == 28
+    assert len(lints) == 27
+    for path in (*manifests, *lints):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert record["qa_manifest_version"] == 2
+        assert record["target"] == "index.html" + (
+            f"#{path.parent.name.split('-', 1)[1]}"
+            if path.parent.name != "direct-file"
+            else ""
+        )
+    assert panel.qa_evidence_inventory_findings(qa) == []
+
+    # The minimal fixture panel renders with visual-lint findings that have nothing to do
+    # with locators. Only the lint counts are cleared, on a copy; every locator field,
+    # PDF, screenshot and the interaction result stay exactly as the harness wrote them.
+    sealed = tmp_path / "sealed-qa"
+    shutil.copytree(qa, sealed)
+    for path in sealed.glob("*/visual-lint.json"):
+        lint = json.loads(path.read_text(encoding="utf-8"))
+        lint.update(finding_count=0, findings=[])
+        _write_json(path, lint)
+    qa = sealed
+
+    receipt = tmp_path / "logs" / "native-qa-receipt.json"
+    assert panel.validate_qa(candidate, qa, receipt_path=receipt)["all_passed"] is True
+    panel.validate_qa(candidate, qa)
+
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        coordinated_release_receipt=_frozen_financial_receipt(
+            tmp_path, inputs, candidate, qa, financial
+        ),
+        **financial,
+    )
+    generation = inputs["output"] / "generations" / str(published["generation_id"])
+    assert panel.qa_evidence_inventory_findings(generation / "qa") == []
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    for sealed_file in (generation / "qa").rglob("*"):
+        if sealed_file.is_file() and sealed_file.suffix in {".json", ".txt", ".csv"}:
+            assert absolute_locator_offsets(sealed_file.read_bytes()) == [], sealed_file
+
+
 def _publish_with_freshness(
     inputs: dict[str, Path], tmp_path: Path, freshness: dict[str, object]
 ) -> dict[str, object]:
@@ -6651,7 +7048,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22, 23].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23, 24, 25].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -6922,7 +7319,8 @@ def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
     )
 
     assert ".topbar-meta {\n    display: grid;" in css
-    assert ".validation-card { grid-template-columns: 1fr; }" in css
+    assert (".validation-card," + chr(10) + "  .binding-card {") in css
+    assert "grid-template-columns: 1fr;" in css
     assert ".metric-block .metric-note" in css
     assert "overflow-wrap: anywhere;" in css
     assert "Mobile header retains portfolio date, freshness date, and coverage" in qa
@@ -7351,6 +7749,16 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert renderer.count("prepareScrollableTableRegions();") >= 4
     assert 'options["exclude-candidates"] === "true"' in browser_qa
     assert 'scope: excludeCandidates ? "NON_CANDIDATE" : "FULL"' in browser_qa
+    assert "const QA_MANIFEST_VERSION = 2;" in browser_qa
+    assert "qa_manifest_version: QA_MANIFEST_VERSION" in browser_qa
+    assert "html_directory_name: path.basename(htmlDirectory)" in browser_qa
+    assert 'screenshot_path: "screenshot.png"' in browser_qa
+    assert 'console_events_path: "console-events.json"' in browser_qa
+    assert 'request_failures_path: "request-failures.json"' in browser_qa
+    assert 'pdf_path: capture.pdf ? "page.pdf" : null' in browser_qa
+    assert "final_url: finalUrl" in browser_qa
+    assert "console_events_path: path.join" not in browser_qa
+    assert "final_url: page.url()" not in browser_qa
     assert 'options["exclude-candidates"] !== "true"' in interaction_qa
     assert 'scope: includeCandidates ? "FULL" : "NON_CANDIDATE"' in interaction_qa
     assert (
@@ -11219,7 +11627,8 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert rendered_rows[0]["label"] == "Authority label •6907"
     assert rendered_rows[0]["label"] != "wrong-summary-provider account 1"
     assert evidence["legend"].find("Calculations through 2026-08-13") >= 0
-    assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
+    assert evidence["legend"].find("Ledger as-of: 2026-08-16") >= 0
+    assert evidence["legend"].find("Artifact/provider capture date") < 0
 
 
 def test_interaction_qa_checks_the_rendered_source_clock_handoff(
@@ -11363,7 +11772,8 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     artifact["as_of_date"] = "2026-08-17"
     _write_dashboard_data_script(candidate, data)
     changed = _run_rendered_epoch_manifest_probe(candidate / "index.html")
-    assert "Artifact/provider capture date: 2026-08-17." in changed["legend"]
+    assert "Ledger as-of: 2026-08-17." in changed["legend"]
+    assert "Artifact/provider capture date" not in changed["legend"]
     result, qa = _run_interaction_qa(
         candidate, tmp_path / "interaction-changed-capture.json"
     )
@@ -11403,7 +11813,7 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     _write_dashboard_data_script(candidate, data)
 
     evidence = _run_rendered_epoch_manifest_probe(candidate / "index.html")
-    assert "Artifact/provider capture date: unavailable." in evidence["legend"]
+    assert "Ledger as-of: unavailable." in evidence["legend"]
     assert "UNAUTHORIZED-LEGACY-DATE" not in evidence["legend"]
     result, qa = _run_interaction_qa(
         candidate, tmp_path / "interaction-missing-capture.json"
@@ -13167,10 +13577,10 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
     )
 
 
-def test_report_readers_accept_versions_one_to_three_and_reject_four(
+def test_report_readers_accept_versions_one_to_four_and_reject_five(
     tmp_path: Path,
 ) -> None:
-    for version in (1, 2, 3):
+    for version in (1, 2, 3, 4):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"published-{version}"
@@ -13189,7 +13599,7 @@ def test_report_readers_accept_versions_one_to_three_and_reject_four(
         assert candidate_value["report_schema_version"] == version
         assert candidate_identity["sha256"] == identity["sha256"]
         assert candidate_path == payload
-    for version in (4, True, "2"):
+    for version in (5, True, "2"):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"rejected-{version!s}"
@@ -13215,8 +13625,8 @@ def test_schema22_weight_labels_preserve_schema21(
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
     )
-    assert data["panel_schema_version"] == 22
-    assert panel.BUILDER_VERSION == "2.12.0"
+    assert data["panel_schema_version"] == 24
+    assert panel.BUILDER_VERSION == "2.13.0"
     panel._validate_panel_data_schema(data)
     data["dependence_modes"]["LIVE_PLUS_BACKTEST"] = deepcopy(
         data["dependence_modes"]["LIVE_ONLY"]
@@ -13325,15 +13735,15 @@ def test_panel_schema22_publication_records_input_report_version(
             for item in dashboard["provenance"]
             if item.get("artifact") == "portfolio-report-generation"
         )
-        assert manifest["adapter"]["version"] == "2.12.0"
-        assert dashboard["panel_schema_version"] == 22
+        assert manifest["adapter"]["version"] == "2.13.0"
+        assert dashboard["panel_schema_version"] == 24
         assert artifact["schema"]["version"] == str(report_version)
         assert artifact["sha256"] == selected_sha
         assert provenance["schema"] == f"portfolio-report-data/{report_version}"
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_22_and23(
+def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -13353,7 +13763,7 @@ def test_renderer_accepts_panel_schema21_22_and23(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23, 24):
+    for version in (21, 22, 23, 24, 25, 26):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -13381,7 +13791,7 @@ def test_renderer_accepts_panel_schema21_22_and23(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23, 24]) {
+          for (const version of [21, 22, 23, 24, 25, 26]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -13415,16 +13825,16 @@ def test_renderer_accepts_panel_schema21_22_and23(
         check=True,
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=120,
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23, 24]
-    for item in evidence[:3]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26]
+    for item in evidence[:5]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[3]
+    unsupported = evidence[5]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])
@@ -13793,7 +14203,7 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     candidate = Path(built["candidate_dir"])
     data_path = candidate / "data" / "dashboard_data.json"
     payload = json.loads(data_path.read_text(encoding="utf-8"))
-    assert payload["panel_schema_version"] == 22
+    assert payload["panel_schema_version"] == 24
     assert len(payload["allocations"]) >= 2
     payload["allocations"][0]["as_of_date"] = "2026-08-16"
     payload["allocations"][0]["weight_basis"] = "CURRENT_CUTOFF"
@@ -13819,3 +14229,759 @@ def test_f2_f7_malformed_date_is_text_and_valid_date_controls_render(
     assert evidence["allocationRows"][1]["dateText"] == hostile_date, evidence
     assert evidence["positionDateTexts"][0] == position_attack, evidence
     assert evidence["pageErrors"] == [], evidence
+
+
+# QC1-P: the panel producer follows the governed predicates, not the first row.
+
+_QC1P_STRATEGIES = (
+    # (id, name, history observations, history status)
+    ("p123-eu", "EU [P123]", 4208, "ACCEPTED_FOR_ECONOMIC_INFERENCE"),
+    (
+        "robuxio-crypto",
+        "Robuxio Crypto (High Sharpe High Vol)",
+        2165,
+        "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+    ),
+    ("volatis-strategy", "Volatis Strategy", 0, "UNAVAILABLE_NO_ACCEPTED_HISTORY"),
+    (
+        "grizzlybears-vtma",
+        "GrizzlyBears VTMA",
+        4038,
+        "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+    ),
+)
+_QC1P_SOURCES = ("us-economic", "europe-economic")
+# Which (strategy, source) pairs the real analytics fit, and the backtest
+# observations that fit consumed in the hybrid mode.
+_QC1P_FITS = {
+    ("EU [P123]", "europe-economic"): 4208,
+    ("Volatis Strategy", "us-economic"): 0,
+    ("GrizzlyBears VTMA", "us-economic"): 4038,
+}
+
+
+def _qc1p_strategy_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy_id": strategy_id,
+            "strategy_name": name,
+            "history_observations": observations,
+            "history_compatibility_status": status,
+            "live_plus_backtest_status": (
+                "ELIGIBLE_ACCEPTED_HISTORY"
+                if status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                else "BLOCKED_NO_ACCEPTED_HISTORY"
+            ),
+            "benchmark_id": "benchmark:developed-ex-us-iefa",
+            "account_live_observed_start": "2025-09-15",
+        }
+        for strategy_id, name, observations, status in _QC1P_STRATEGIES
+    ]
+
+
+def _qc1p_lens_row(name: str, source_key: str, mode: str) -> dict[str, Any]:
+    """A decomposition series row in the shape the real lens producer emits."""
+
+    if (name, source_key) not in _QC1P_FITS:
+        return {
+            "alpha": None,
+            "coverage": None,
+            "model_quality": {
+                "decision_status": "UNAVAILABLE",
+                "holdout_predicted_r_squared": None,
+            },
+            "selection_status": "NOT_APPLICABLE_METHOD_SCOPE",
+            "series_id": name,
+            "source_key": source_key,
+            "status": "UNAVAILABLE",
+            "unavailable_reasons": ["NOT_APPLICABLE_METHOD_SCOPE"],
+        }
+    used = _QC1P_FITS[(name, source_key)] if mode == "LIVE_PLUS_BACKTEST" else 0
+    return {
+        "alpha": {"net_annualized": "0.32"},
+        "coverage": {"aligned_observations": 4388 if used else 181},
+        "model_quality": {
+            "decision_status": "PM_VALID",
+            "holdout_predicted_r_squared": "0.15",
+        },
+        "selection_status": "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL",
+        "series_composition": {"backtest_observations_used": used},
+        "series_id": name,
+        "source_key": source_key,
+        "status": "AVAILABLE",
+        "unavailable_reasons": None,
+    }
+
+
+def _qc1p_lenses() -> dict[str, Any]:
+    """Both source keys list every strategy, us-economic rows first (real order)."""
+
+    modes: dict[str, list[dict[str, Any]]] = {}
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        rows = [
+            _qc1p_lens_row(name, source_key, mode)
+            for source_key in _QC1P_SOURCES
+            for _id, name, _obs, _status in _QC1P_STRATEGIES
+        ]
+        modes[mode] = [
+            {
+                "lens_id": "ECONOMIC_FACTOR",
+                "default_source_key": "us-economic",
+                "available_source_keys": list(_QC1P_SOURCES),
+                "series": rows,
+            }
+        ]
+    return {
+        "default_evidence_mode": "LIVE_ONLY",
+        "default_lens": "ECONOMIC_FACTOR",
+        "modes": modes,
+    }
+
+
+def _qc1p_weekly(live_benchmark_return: float) -> dict[str, Any]:
+    """Weekly rows in the real feed shape: 90 pre-live weeks, then 10 live weeks."""
+
+    first = date(2024, 1, 1).toordinal()
+    week_text = [
+        date.fromordinal(first + 7 * index).isoformat() for index in range(100)
+    ]
+    meta = [1, week_text[0], week_text[-1], "COMPLETE_WITHIN_ACCEPTED_CALENDAR"]
+    benchmark = {
+        week: (
+            (-0.02 if index % 3 == 0 else 0.01) if index < 90 else live_benchmark_return
+        )
+        for index, week in enumerate(week_text)
+    }
+    live = {week: 0.005 for week in week_text[90:]}
+    hybrid = {week: 0.004 for week in week_text}
+    series: list[dict[str, Any]] = [
+        {
+            "series_id": "market:IEFA",
+            "values": benchmark,
+            "observation_meta": {week: meta for week in week_text},
+        }
+    ]
+    for _id, name, _obs, _status in _QC1P_STRATEGIES:
+        series.append(
+            {
+                "series_id": f"strategy:{name}",
+                "values_by_mode": {"LIVE_ONLY": live, "LIVE_PLUS_BACKTEST": hybrid},
+                "observation_meta_by_mode": {
+                    "LIVE_ONLY": {week: meta for week in live},
+                    "LIVE_PLUS_BACKTEST": {week: meta for week in week_text},
+                },
+            }
+        )
+    return {"series": series, "live_start": week_text[90]}
+
+
+def _qc1p_underwriting(
+    lenses: Mapping[str, Any] | None = None,
+    live_benchmark_return: float = -0.03,
+) -> dict[str, Any]:
+    weekly = _qc1p_weekly(live_benchmark_return)
+    strategies = _qc1p_strategy_rows()
+    for row in strategies:
+        row["account_live_observed_start"] = weekly["live_start"]
+    result, _policy_hash = panel._strategy_underwriting(
+        strategies,
+        lenses or _qc1p_lenses(),
+        {
+            "economic_driver_cluster_budget": {"clusters": []},
+            "correlation_one": {"components": [], "loss": "0.2"},
+        },
+        {"series": weekly["series"]},
+        "2026-09-17",
+    )
+    return result
+
+
+def _qc1p_rows_by_name(underwriting: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["strategy_name"]: row for row in underwriting["rows"]}
+
+
+def test_membership_is_the_h2_predicate_and_the_lens_row_is_the_strategys_own() -> None:
+    """N61 (A12): EU matched 4208 and Robuxio 2165, Volatis stays 0 and blocked.
+
+    The first ECONOMIC_FACTOR row for EU is the us-economic row, which is
+    UNAVAILABLE and carries no composition; the strategy's own europe-economic row
+    consumed 4208 backtest observations.  Robuxio has no fit in either lens.
+    """
+
+    underwriting = _qc1p_underwriting()
+    rows = _qc1p_rows_by_name(underwriting)
+    available = "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+    blocked = "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+
+    assert {
+        name: (
+            row["long_history"]["status"],
+            row["long_history"]["matched_backtest_observations"],
+        )
+        for name, row in rows.items()
+    } == {
+        "EU [P123]": (available, 4208),
+        "Robuxio Crypto (High Sharpe High Vol)": (available, 2165),
+        "Volatis Strategy": (blocked, 0),
+        "GrizzlyBears VTMA": (available, 4038),
+    }
+    assert underwriting["counts"]["version_matched_long_history"] == 3
+    eu_backtest = rows["EU [P123]"]["evidence_layers"]["backtest"]
+    assert eu_backtest["matched_observations"] == 4208
+    for name in ("EU [P123]", "Robuxio Crypto (High Sharpe High Vol)"):
+        assert (
+            "NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+            not in rows[name]["advisory_disposition"]["reasons"]
+        )
+    assert (
+        "NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+        in rows["Volatis Strategy"]["advisory_disposition"]["reasons"]
+    )
+
+
+def test_lens_statistics_come_from_the_strategys_available_row_with_its_source() -> (
+    None
+):
+    rows = _qc1p_rows_by_name(_qc1p_underwriting())
+    eu = rows["EU [P123]"]["long_history"]
+    robuxio = rows["Robuxio Crypto (High Sharpe High Vol)"]["long_history"]
+    grizzly = rows["GrizzlyBears VTMA"]["long_history"]
+
+    assert eu["hybrid_aligned_observations"] == 4388
+    assert eu["live_aligned_observations"] == 181
+    assert eu["lens_statistics_source"] == {
+        "lens_id": "ECONOMIC_FACTOR",
+        "live_source_key": "europe-economic",
+        "hybrid_source_key": "europe-economic",
+    }
+    assert grizzly["lens_statistics_source"]["hybrid_source_key"] == "us-economic"
+    # No row in any source fits Robuxio: the statistic is absent with its own
+    # reason, and it never changes membership.
+    assert robuxio["hybrid_aligned_observations"] is None
+    assert robuxio["lens_statistics_source"] == {
+        "lens_id": "ECONOMIC_FACTOR",
+        "live_source_key": None,
+        "hybrid_source_key": None,
+    }
+    assert robuxio["membership_rule"] == (
+        "H2_ACCEPTED_HISTORY_AND_ELIGIBLE_LIVE_PLUS_BACKTEST"
+    )
+
+
+def test_a_diagnostic_row_in_the_second_source_is_the_lens_row() -> None:
+    lenses = _qc1p_lenses()
+    for lens in lenses["modes"]["LIVE_PLUS_BACKTEST"]:
+        for row in lens["series"]:
+            if (
+                row["series_id"] == "EU [P123]"
+                and row["source_key"] == "europe-economic"
+            ):
+                row["status"] = "DIAGNOSTIC_ONLY"
+    row = _qc1p_rows_by_name(_qc1p_underwriting(lenses))["EU [P123]"]
+
+    assert row["long_history"]["lens_statistics_source"]["hybrid_source_key"] == (
+        "europe-economic"
+    )
+    assert row["long_history"]["matched_backtest_observations"] == 4208
+
+
+def test_eu_regime_prehistory_reads_the_weekly_hybrid_series_once_matched() -> None:
+    """The regime prehistory gate follows membership, not a lens row."""
+
+    eu = _qc1p_rows_by_name(_qc1p_underwriting())["EU [P123]"]
+    regimes = {row["regime_id"]: row for row in eu["regime_conformance"]["regimes"]}
+
+    assert regimes["BENCHMARK_NEGATIVE"]["matched_prehistory_observations"] == 30
+    assert regimes["BENCHMARK_NEGATIVE"]["empirical_p05"] is not None
+    assert eu["regime_conformance"]["status"] == (
+        "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+    )
+
+
+def test_a_regime_without_a_live_event_is_named_for_the_missing_event() -> None:
+    """N70 (A14): p05/p95 are published, so the range is not the missing piece."""
+
+    underwriting = _qc1p_underwriting(live_benchmark_return=0.02)
+    grizzly = _qc1p_rows_by_name(underwriting)["GrizzlyBears VTMA"]
+    negative = next(
+        row
+        for row in grizzly["regime_conformance"]["regimes"]
+        if row["regime_id"] == "BENCHMARK_NEGATIVE"
+    )
+
+    assert negative["latest_week"] is None
+    assert negative["empirical_p05"] is not None
+    assert negative["empirical_p95"] is not None
+    assert negative["latest_event_range_status"] == "UNAVAILABLE_NO_LIVE_REGIME_EVENT"
+
+
+def test_a_live_event_without_a_prehistory_range_keeps_the_range_reason() -> None:
+    """The range reason survives where a live event exists and the range does not."""
+
+    volatis = _qc1p_rows_by_name(_qc1p_underwriting())["Volatis Strategy"]
+    negative = next(
+        row
+        for row in volatis["regime_conformance"]["regimes"]
+        if row["regime_id"] == "BENCHMARK_NEGATIVE"
+    )
+
+    assert negative["latest_week"] is not None
+    assert negative["empirical_p05"] is None
+    assert negative["latest_event_range_status"] == (
+        "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
+    )
+
+
+# QC1-P N62: current holdings are the latest accepted snapshot at the cutoff.
+
+
+def _qc1p_position(
+    account_id: str, as_of_date: str, security_id: str
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "as_of_date": as_of_date,
+        "evidence_class": "WCH_CURRENT",
+        "mapping_status": "MAPPED",
+        "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+        "quantity": "1",
+        "security_id": security_id,
+        "strategy_id": ACTIVE_STRATEGY_IDS[0],
+        "symbol": "SYNTH",
+    }
+
+
+def _qc1p_producer_positions(
+    rows: Sequence[tuple[str, str, str]], as_of_date: str
+) -> list[dict[str, Any]]:
+    """Position rows exactly as the report producer emits them."""
+
+    import portfolio_report as reporter
+
+    return reporter._positions(
+        {
+            "as_of_date": as_of_date,
+            "positions": [_qc1p_position(*item) for item in rows],
+        }
+    )
+
+
+def test_positions_are_classified_against_the_cutoff_from_the_producers_rows() -> None:
+    """A9/K4/K5: only the latest snapshot dated at the cutoff is current.
+
+    The producer marks the latest snapshot per account, which may be older than
+    the cutoff (stale) or newer than it (captured after the cutoff).
+    """
+
+    rows = _qc1p_producer_positions(
+        [
+            ("account-a", "2026-02-02", "s1"),
+            ("account-a", "2026-08-05", "s2"),
+            ("account-a", "2026-09-17", "s3"),
+            ("account-a", "2026-09-17", "s4"),
+            ("account-b", "2025-11-26", "s5"),
+            ("account-b", "2026-09-10", "s6"),
+            ("account-c", "2026-09-10", "s7"),
+            ("account-c", "2026-09-18", "s8"),
+        ],
+        "2026-09-17",
+    )
+
+    classified, summary = panel._classify_positions(rows, "2026-09-17")
+
+    assert {row["security_id"]: row["position_class"] for row in classified} == {
+        "s1": "HISTORICAL",
+        "s2": "HISTORICAL",
+        "s3": "CURRENT_AT_CUTOFF",
+        "s4": "CURRENT_AT_CUTOFF",
+        "s5": "HISTORICAL",
+        "s6": "LATEST_BEFORE_CUTOFF",
+        "s7": "HISTORICAL",
+        "s8": "AFTER_CUTOFF",
+    }
+    assert summary == {
+        "cutoff_date": "2026-09-17",
+        "current_basis": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF",
+        "current_at_cutoff_rows": 2,
+        "latest_before_cutoff_rows": 1,
+        "historical_rows": 4,
+        "after_cutoff_rows": 1,
+        "unavailable_rows": 0,
+        "accepted_rows_total": 8,
+        "history_snapshot_dates": 4,
+        "history_first_as_of": "2025-11-26",
+        "history_last_as_of": "2026-09-10",
+    }
+    # Existing producer fields are preserved untouched.
+    assert [
+        {key: value for key, value in row.items() if key != "position_class"}
+        for row in classified
+    ] == rows
+
+
+def test_the_unavailable_position_row_is_not_counted_as_current() -> None:
+    rows = _qc1p_producer_positions([], "2026-09-17")
+
+    classified, summary = panel._classify_positions(rows, "2026-09-17")
+
+    assert [row["position_class"] for row in classified] == ["UNAVAILABLE"]
+    assert summary["current_at_cutoff_rows"] == 0
+    assert summary["unavailable_rows"] == 1
+    assert summary["accepted_rows_total"] == 0
+    assert summary["history_first_as_of"] is None
+
+
+def test_a_position_row_without_a_snapshot_status_is_refused() -> None:
+    rows = _qc1p_producer_positions([("account-a", "2026-09-17", "s1")], "2026-09-17")
+    del rows[0]["snapshot_status"]
+
+    with pytest.raises(panel.ControlPanelValidationError, match="snapshot_status"):
+        panel._classify_positions(rows, "2026-09-17")
+
+
+def test_the_built_panel_counts_current_holdings_at_the_cutoff_only(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    report["positions"] = _qc1p_producer_positions(
+        [
+            ("account-00", "2026-07-01", "s1"),
+            ("account-00", "2026-07-30", "s2"),
+            ("account-01", "2026-07-20", "s3"),
+        ],
+        "2026-07-30",
+    )
+    report_root = tmp_path / "qc1p-positions-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "qc1p-positions-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+
+    assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION == 24
+    assert data["counts"]["positions"] == 1
+    assert data["position_snapshots"] == {
+        "cutoff_date": "2026-07-30",
+        "current_basis": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF",
+        "current_at_cutoff_rows": 1,
+        "latest_before_cutoff_rows": 1,
+        "historical_rows": 1,
+        "after_cutoff_rows": 0,
+        "unavailable_rows": 0,
+        "accepted_rows_total": 3,
+        "history_snapshot_dates": 2,
+        "history_first_as_of": "2026-07-01",
+        "history_last_as_of": "2026-07-20",
+    }
+    assert {row["security_id"]: row["position_class"] for row in data["positions"]} == {
+        "s1": "HISTORICAL",
+        "s2": "CURRENT_AT_CUTOFF",
+        "s3": "LATEST_BEFORE_CUTOFF",
+    }
+    verified = panel.verify_candidate(
+        report_root,
+        inputs["legacy"],
+        Path(built["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert verified["all_passed"] is True
+
+
+# QC1-P N67: the governed PORT-HWM-4 number is a labelled candidate.
+
+
+def _qc1p_governed_proof(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(
+        panel,
+        "_PORTABLE_HWM_POLICY",
+        REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
+    )
+    result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
+    return panel._panel_governed_hwm_proof(
+        result, generation_bytes, calendar_bytes, receipt_bytes
+    )
+
+
+def test_the_governed_number_is_a_candidate_beside_the_unaccepted_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A5: the E2 register keeps the numeric status unaccepted; the number shows."""
+
+    proof = _qc1p_governed_proof(monkeypatch)
+    assert proof["status"] == "AVAILABLE"
+    assert proof["financial_acceptance"] == "PENDING_OWNER_ACCEPTANCE"
+    summary = {
+        "hwm_numerical_status": "UNAVAILABLE",
+        "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+    }
+
+    candidate = panel._hwm_candidate(proof, summary)
+
+    assert candidate == {
+        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "policy_id": "PORT-HWM-4",
+        "current_drawdown": proof["current_drawdown"],
+        "maximum_drawdown": proof["maximum_drawdown"],
+        "current_index": proof["current_index"],
+        "current_hwm": proof["current_hwm"],
+        "complete_through": proof["complete_through"],
+        "evaluated_on": proof["evaluated_on"],
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "not_accepted_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        "not_accepted_register": "E2",
+        "receipt_sha256": proof["receipt_sha256"],
+        "label": "Governed PORT-HWM-4 candidate, pending owner acceptance",
+    }
+
+
+def test_no_candidate_without_an_available_governed_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": "X"}
+    proof = _qc1p_governed_proof(monkeypatch)
+
+    assert panel._hwm_candidate(None, summary) is None
+    assert panel._hwm_candidate({**proof, "status": "UNAVAILABLE"}, summary) is None
+
+
+def test_the_built_panel_publishes_the_candidate_and_leaves_the_status_alone(
+    inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(
+        panel,
+        "_PORTABLE_HWM_POLICY",
+        REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
+    )
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
+    proof = panel._panel_governed_hwm_proof(
+        result, generation_bytes, calendar_bytes, receipt_bytes
+    )
+    report["hwm_governed_proof"] = proof
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_governed_result=result,
+        hwm_governed_generation_bytes=generation_bytes,
+        hwm_governed_calendar_bytes=calendar_bytes,
+        hwm_governed_receipt_bytes=receipt_bytes,
+    )
+    data = _candidate_data(candidate)
+
+    published = data["advisory"]["hwm_candidate"]
+    assert published["status"] == "CANDIDATE_PENDING_OWNER_ACCEPTANCE"
+    assert published["current_index"] == proof["current_index"]
+    assert published["maximum_drawdown"] == proof["maximum_drawdown"]
+    assert published["not_accepted_reason"] is None
+    assert (
+        data["hwm_summary"]["hwm_numerical_status"]
+        == (data["advisory"]["hwm_numerical_status"])
+    )
+
+
+# QC1-P N72: the semantic check reads the lens the panel renders.
+
+
+def test_the_rendered_default_lens_is_the_default_lens_and_source_not_the_alias() -> (
+    None
+):
+    lens_id, source_key, rows = panel._rendered_default_lens_rows(_qc1p_lenses())
+
+    assert (lens_id, source_key) == ("ECONOMIC_FACTOR", "us-economic")
+    assert {row["source_key"] for row in rows} == {"us-economic"}
+    assert [row["series_id"] for row in rows] == [
+        name for _id, name, _obs, _status in _QC1P_STRATEGIES
+    ]
+    assert [row["status"] for row in rows] == [
+        "UNAVAILABLE",
+        "UNAVAILABLE",
+        "AVAILABLE",
+        "AVAILABLE",
+    ]
+
+
+def test_the_factor_check_names_the_lens_and_source_it_validated(
+    inputs: dict[str, Path],
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    result = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        Path(built["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    lenses = data["decomposition_lenses"]
+    check = next(
+        row
+        for row in result["checks"]
+        if row["check"] == "Accepted factor and alpha evidence is exact"
+    )
+
+    assert check["status"] == "PASS"
+    assert check["evidence"]["lens_id"] == lenses["default_lens"]
+    assert check["evidence"]["evidence_mode"] == lenses["default_evidence_mode"]
+    assert "source_key" in check["evidence"]
+    assert (
+        check["evidence"]["available"]
+        + check["evidence"]["diagnostic_only"]
+        + check["evidence"]["unavailable"]
+        == 7
+    )
+
+
+def test_a_lens_listing_every_strategy_under_every_source_is_source_qualified() -> None:
+    rows = _qc1p_lenses()["modes"]["LIVE_ONLY"][0]["series"]
+
+    assert panel._lens_is_source_qualified(rows) is True
+
+
+def test_a_combined_legacy_lens_is_not_source_qualified() -> None:
+    rows = [
+        {"series_id": "A", "source_key": "us-economic"},
+        {"series_id": "B"},
+        {"series_id": "C", "source_key": "europe-economic"},
+    ]
+
+    assert panel._lens_is_source_qualified(rows) is False
+
+
+def test_a_row_without_a_source_key_is_rendered_under_the_default_source() -> None:
+    lenses = _qc1p_lenses()
+    placeholder = {"series_id": "Placeholder", "status": "UNAVAILABLE"}
+    lenses["modes"]["LIVE_ONLY"][0]["series"].append(placeholder)
+
+    _lens_id, _source_key, rows = panel._rendered_default_lens_rows(lenses)
+
+    assert placeholder in rows
+    assert {row.get("source_key") for row in rows} == {"us-economic", None}
+
+
+# QC1-P seam: every reader of the panel version accepts every version the builder emits.
+
+
+def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
+    """Builder, schema, renderer and the new-field conditionals agree on 24 and 25."""
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    renderer = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
+        encoding="utf-8"
+    )
+    emitted = {panel.PANEL_SCHEMA_VERSION, panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION}
+    allow_list = re.search(
+        r"!\[([0-9, ]+)\]\.includes\(data\.panel_schema_version\)", renderer
+    )
+    assert allow_list is not None
+    renderer_versions = {int(item) for item in allow_list.group(1).split(",")}
+    schema_versions = set(schema["properties"]["panel_schema_version"]["enum"])
+
+    assert emitted == {24, 25}
+    assert emitted <= schema_versions and emitted <= renderer_versions
+    assert schema_versions == renderer_versions
+
+    # position_snapshots and advisory.hwm_candidate are required from the version
+    # that introduced them, and only from it.
+    conditions = [
+        entry
+        for entry in schema["allOf"]
+        if "position_snapshots" in entry.get("then", {}).get("required", [])
+    ]
+    assert len(conditions) == 1
+    condition = conditions[0]
+    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25]
+    assert condition["then"]["properties"]["advisory"]["required"] == ["hwm_candidate"]
+
+
+def test_a_rejected_lineage_suppresses_the_version_four_cost_rate_fields() -> None:
+    row = {
+        "strategy_id": ACTIVE_STRATEGY_IDS[0],
+        "strategy_name": STRATEGY_NAMES[0],
+        "annual_external_cost_rate_pre_tax": "0.07",
+        "cost_rate_status": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE",
+        "cost_rate_reason": None,
+        "cost_rate_denominator_usd": "51233.9",
+        "cost_rate_denominator_as_of_date": "2026-09-17",
+        "cost_rate_denominator_basis": "CURRENT_CUTOFF",
+        "cost_schedule_as_of_date": "2026-07-25",
+    }
+
+    (suppressed,) = panel._suppress_unmatched_strategy_performance([row])
+
+    for field in row:
+        if field.startswith(("cost_rate_", "cost_schedule_")) or field == (
+            "annual_external_cost_rate_pre_tax"
+        ):
+            assert suppressed[field] is None, field
+
+
+def test_membership_needs_both_halves_of_the_h2_predicate() -> None:
+    base = {
+        "strategy_name": "EU [P123]",
+        "history_observations": 4208,
+        "history_compatibility_status": "ACCEPTED_FOR_ECONOMIC_INFERENCE",
+        "live_plus_backtest_status": "ELIGIBLE_ACCEPTED_HISTORY",
+    }
+
+    def observations(row: dict[str, Any], hybrid: dict[str, Any] | None = None):
+        return panel._version_matched_history_observations(row, hybrid)
+
+    assert observations(base) == 4208
+    assert observations({**base, "live_plus_backtest_status": "BLOCKED_X"}) is None
+    assert (
+        observations({**base, "history_compatibility_status": "UNAVAILABLE_X"}) is None
+    )
+    # An accepted member with no counted observations is still a member.
+    assert observations({**base, "history_observations": None}) == 0
+    # A report without the history contract keeps the older lens evidence.
+    legacy = {"strategy_name": "Legacy"}
+    fit = {"series_composition": {"backtest_observations_used": 12}}
+    assert observations(legacy, fit) == 12
+    assert observations(legacy, None) is None
+
+
+def test_the_report_version_selects_the_panel_version() -> None:
+    assert panel._panel_schema_version_for(1) == 24
+    assert panel._panel_schema_version_for(2) == 24
+    assert panel._panel_schema_version_for(3) == 25
+    assert panel._panel_schema_version_for(4) == 25
+    assert panel._panel_schema_version_for(True) == 24

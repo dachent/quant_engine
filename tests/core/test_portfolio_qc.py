@@ -234,7 +234,9 @@ def test_release_preflight_emits_measured_content_addressed_receipt(
     spec = _spec(tmp_path)
     spec.state_root = tmp_path / "private-stage"
     evidence = tmp_path / "audit" / "coding" / "execution-evidence"
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(
         qc, "_candidate_qa", lambda *_args: {"financial_outcomes_status": "PASS"}
     )
@@ -270,7 +272,9 @@ def test_release_preflight_emits_commit_authorization_bound_to_the_spec(
     spec = _spec(tmp_path)
     spec.state_root = tmp_path / "private-stage"
     authorization = tmp_path / "authority" / "commit-authorization.json"
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
 
     argv = [
@@ -302,7 +306,9 @@ def test_release_preflight_writes_no_authorization_when_a_check_fails(
     spec = _spec(tmp_path)
     authorization = tmp_path / "commit-authorization.json"
     snapshots = [{"authority": {"exists": False}}, {"authority": {"exists": True}}]
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
     monkeypatch.setattr(qc, "_production_snapshot", lambda _spec: snapshots.pop(0))
 
@@ -339,7 +345,9 @@ def test_release_preflight_refuses_an_authorization_for_another_spec(
             separators=(",", ":"),
         ).encode("utf-8")
     )
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
 
     assert (
@@ -367,7 +375,9 @@ def test_release_preflight_rejects_pointer_change(
     spec_path.write_text("{}", encoding="utf-8")
     spec = _spec(tmp_path)
     snapshots = [{"authority": {"exists": False}}, {"authority": {"exists": True}}]
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
     monkeypatch.setattr(qc, "_production_snapshot", lambda _spec: snapshots.pop(0))
 
@@ -398,7 +408,9 @@ def test_post_release_rejects_counterfeit_preflight(
     value = json.loads(preflight.read_bytes())
     value["plan"]["roots"][0]["generation_id"] = "3" * 64
     preflight.write_text(json.dumps(value), encoding="utf-8")
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
 
     assert (
         qc.main(
@@ -426,7 +438,9 @@ def test_post_release_rejects_non_committed_authority(
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     preflight = _write_preflight(evidence, spec)
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
 
     def reject(_spec: Any) -> Any:
         raise qc.QualityControlFailure("authoritative release journal is not COMMITTED")
@@ -460,7 +474,9 @@ def test_post_release_uses_existing_release_inputs_without_extra_qa_directories(
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     preflight = _write_preflight(evidence, spec)
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(
+        qc, "_load_and_validate_spec", lambda _path, **_kwargs: (spec, _proof())
+    )
     monkeypatch.setattr(qc, "_read_committed_release", lambda _spec: object())
     monkeypatch.setattr(qc, "_verify_committed_manifest", lambda *_args: {})
     assert (

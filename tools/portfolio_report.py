@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 import time as time_module
-from typing import Any, Collection, Final, Mapping, Sequence, cast
+from typing import Any, Callable, Collection, Final, Mapping, Sequence, cast
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -94,6 +94,9 @@ REPORT_SCHEMA_VERSION: Final = 2
 # A report that carries custody cash dated by its admission coverage (baseline
 # schema 2) is version 3: each cash line names its last event and coverage end.
 CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION: Final = 3
+# Version 4 adds the cutoff-denominated cost rate and the self-consistent allocation
+# snapshot weights (QC-1 N64, N65); it is emitted wherever version 3 was.
+CUTOFF_BASIS_REPORT_SCHEMA_VERSION: Final = 4
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.6.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
@@ -1574,8 +1577,411 @@ def _capital_coverage_bounds(
     }
 
 
+FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
+FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+
+
+def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
+    """The fees label a cost row earns: a known cost is evidenced, a cap is a bound.
+
+    A cost amount exists for both a known cost (``known_fixed``, ``known_gold_api``)
+    and a contract cap (``conservative_1pct_contract_cap``); only the first is
+    evidence of a cost.  A cap is the most the contract allows, so it is labelled
+    as the upper bound it is.  ``None`` means an amount whose status names neither.
+    """
+
+    if annual_cost is None:
+        return FEES_STATUS_UNAVAILABLE
+    text = cost_status if isinstance(cost_status, str) else ""
+    if text.startswith("known"):
+        return FEES_STATUS_EVIDENCED
+    if text.endswith("contract_cap"):
+        return FEES_STATUS_UPPER_BOUND
+    return None
+
+
+COST_RATE_AVAILABLE: Final = "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
+COST_RATE_NOT_DATED_AT_CUTOFF: Final = "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF"
+COST_RATE_NO_SLEEVE_VALUE: Final = "NOT_READY_SLEEVE_VALUE_UNAVAILABLE"
+COST_RATE_NO_AMOUNT: Final = "UNAVAILABLE_NO_COST_AMOUNT"
+# The same 34 digits the baseline publishes a current weight with.
+_COST_RATE_PRECISION: Final = 34
+
+
+def _uses_cutoff_basis(catalog: Mapping[str, Any]) -> bool:
+    """A report built from a schema-2 baseline with a custody handoff is version 4."""
+
+    return (
+        catalog.get("baseline_schema_version") == 2
+        and _current_capital(catalog).get("custody_authority") is not None
+    )
+
+
+def _cost_schedule_as_of_date(catalog: Mapping[str, Any]) -> str | None:
+    """The date the baseline's own source artifact gives the cost-economics schedule."""
+
+    for artifact in _objects(catalog.get("source_artifacts", []), "source_artifacts"):
+        if artifact.get("source_key") == "cost-economics":
+            day = artifact.get("as_of_date")
+            return day if isinstance(day, str) else None
+    return None
+
+
+def _cutoff_cost_rate(
+    strategy: Mapping[str, Any],
+    cost: Mapping[str, Any],
+    basis: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The annual cost over the strategy's sleeve value at the calculation cutoff.
+
+    The attribution catalog divides by the value of the dated allocation snapshot
+    (2026-08-16), a size the strategy no longer has, and labels the quotient a
+    rate of the current sleeve.  The cost schedule keeps its own date; the
+    denominator is the strategy's current-capital value, and only when that value
+    is dated at the cutoff.  A value dated earlier (a sleeve whose accounts have
+    no NAV at the cutoff) leaves the rate NOT_READY with the reason, never an
+    older value stood in for the cutoff.
+    """
+
+    cutoff = _text(basis.get("calculation_cutoff_date"), "cost rate cutoff")
+    amount_text = cost.get("annual_external_cost_usd")
+    value_text = strategy.get("current_value_usd")
+    value_date = strategy.get("capital_as_of_date")
+    result: dict[str, Any] = {
+        "annual_external_cost_rate_pre_tax": None,
+        "cost_rate_denominator_as_of_date": value_date,
+        "cost_rate_denominator_basis": WEIGHT_BASIS_CURRENT,
+        "cost_rate_denominator_usd": value_text,
+        "cost_rate_reason": None,
+        "cost_rate_status": COST_RATE_NO_AMOUNT,
+        "cost_schedule_as_of_date": basis.get("cost_schedule_as_of_date"),
+        "fees_status": fees_status_for_cost(cost.get("cost_status"), amount_text),
+    }
+    if amount_text is None:
+        result["cost_rate_reason"] = "no annual cost amount is evidenced"
+        return result
+    if value_text is None or strategy.get("capital_status") != "AVAILABLE":
+        result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
+        result["cost_rate_reason"] = "the strategy has no sleeve value at the cutoff"
+        return result
+    if value_date != cutoff:
+        result["cost_rate_status"] = COST_RATE_NOT_DATED_AT_CUTOFF
+        result["cost_rate_reason"] = (
+            f"the sleeve value is dated {value_date}, not the {cutoff} cutoff"
+        )
+        return result
+    value = _decimal(value_text, "cost rate denominator")
+    if value <= 0:
+        result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
+        result["cost_rate_reason"] = "the sleeve value at the cutoff is not positive"
+        return result
+    with localcontext() as context:
+        context.prec = _COST_RATE_PRECISION
+        rate = _decimal(amount_text, "annual cost") / value
+    result["annual_external_cost_rate_pre_tax"] = decimal_text(rate)
+    result["cost_rate_status"] = COST_RATE_AVAILABLE
+    return result
+
+
+# ---- QC1-R N55: the contract's benchmark assignment, and A5: annualization labels ----
+
+RETAINED_UNAVAILABLE_ASSIGNMENT: Final = "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"
+ASSIGNMENT_AUTHORITY_OWNER_POLICY: Final = "OWNER_POLICY_DECISION"
+ASSIGNMENT_AUTHORITY_RETAINED_SPEC: Final = "RETAINED_ATTRIBUTION_SPEC"
+COMPARISON_SELECTED_GENERATION_UNAVAILABLE: Final = "SELECTED_GENERATION_UNAVAILABLE"
+_BENCHMARK_DECISION_DATE = re.compile(r"benchmark is effective (\d{4}-\d{2}-\d{2})")
+_BENCHMARK_BOUND_REF = re.compile(r"\bbound as ([A-Za-z0-9:._-]+?);")
+_BENCHMARK_SELECTED_GENERATION = re.compile(r"selected generation ([0-9a-f]{64})")
+_SENTENCE_BREAK = re.compile(r"(?<=\.)\s+")
+
+
+def _contract_benchmark_assignments(
+    contract: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Each strategy's benchmark assignment that the source contract decides.
+
+    The contract's ``STRATEGY_BENCHMARK`` segment records the owner's benchmark
+    selection in its ``owner_policy_decision`` text; it has no structured field for it.
+    The decision is the sentence that says the benchmark "is effective <date>", read
+    with the sentence before it (which names the strategy) and the same text's
+    "bound as <reference>;" and "selected generation <sha256>".  A decision that names
+    no strategy of its segment, or lacks its bound reference or its selected
+    generation, is refused rather than guessed; a segment with no such sentence
+    assigns nothing.
+    """
+
+    payload = (
+        contract
+        if contract is not None
+        else _load_json(_PORTABLE_HWM_PRODUCT_CONTRACT, "financial MVP contract")
+    )
+    assignments: dict[str, dict[str, Any]] = {}
+    for segment in _objects(payload.get("source_segments"), "contract source_segments"):
+        if "STRATEGY_BENCHMARK" not in segment.get("data_classes", []):
+            continue
+        text = _text(segment.get("owner_policy_decision"), "owner_policy_decision")
+        sentences = _SENTENCE_BREAK.split(text)
+        for position, sentence in enumerate(sentences):
+            effective = _BENCHMARK_DECISION_DATE.search(sentence)
+            if effective is None:
+                continue
+            source_id = _text(segment.get("source_id"), "contract source_id")
+            bound = _BENCHMARK_BOUND_REF.search(sentence)
+            generation = _BENCHMARK_SELECTED_GENERATION.search(sentence)
+            if bound is None or generation is None:
+                raise ReportValidationError(
+                    f"benchmark decision of {source_id} lacks its bound reference "
+                    "or selected generation"
+                )
+            context = " ".join(sentences[max(position - 1, 0) : position + 1])
+            subjects = _object(segment.get("subjects"), "contract subjects")
+            named = [
+                strategy_id
+                for strategy_id in _objects_or_text(subjects.get("strategy_ids"))
+                if re.search(
+                    rf"\b{re.escape(strategy_id.split('-')[0])}\b",
+                    context,
+                    re.IGNORECASE,
+                )
+            ]
+            if not named:
+                raise ReportValidationError(
+                    f"benchmark decision of {source_id} names no strategy of its segment"
+                )
+            reference = bound.group(1)
+            head, _, tail = reference.rpartition(":")
+            identifier = head if re.fullmatch(r"[0-9a-f]{64}", tail) else reference
+            for strategy_id in named:
+                assignments[strategy_id] = {
+                    "benchmark_id": identifier,
+                    "benchmark_version_ref": reference,
+                    "effective_start": effective.group(1),
+                    "rationale": context,
+                    "selected_generation_id": generation.group(1),
+                    "source_id": source_id,
+                }
+    return assignments
+
+
+def _objects_or_text(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ReportValidationError("contract strategy_ids must be a list of text")
+    return list(value)
+
+
+def _with_contract_benchmark_assignments(
+    attribution: Mapping[str, Any],
+    assignments: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish the contract's assignment where the retained spec says there is none.
+
+    The retained attribution spec was written before the owner's selection and still
+    reads "no authoritative assignment" for Robuxio.  A strategy whose contract carries
+    a decision, whose retained row says UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT and
+    whose retained comparison has no figures is published EVIDENCED, with the decision's
+    text, effective date and bound reference.  The comparison stays UNAVAILABLE in the
+    catalog's own shape (no series, no window, no figures) and says NOT_READY with the
+    selected generation named, so no number stands in for a generation that is not
+    there.  A strategy the retained catalog already compares, or one the contract does
+    not assign, is untouched.
+    """
+
+    comparisons = {
+        str(row.get("strategy_id")): row
+        for row in _objects(
+            attribution.get("benchmark_comparisons", []),
+            "attribution.benchmark_comparisons",
+        )
+    }
+    assignment_rows: list[dict[str, Any]] = []
+    overridden: set[str] = set()
+    for row in _objects(
+        attribution.get("benchmark_assignments"), "attribution.benchmark_assignments"
+    ):
+        strategy_id = str(row.get("strategy_id"))
+        decision = assignments.get(strategy_id)
+        comparison = comparisons.get(strategy_id)
+        if (
+            decision is None
+            or row.get("status") != RETAINED_UNAVAILABLE_ASSIGNMENT
+            or (comparison is not None and comparison.get("metrics") is not None)
+        ):
+            assignment_rows.append(dict(row))
+            continue
+        overridden.add(strategy_id)
+        assignment_rows.append(
+            {
+                "assignment_authority": ASSIGNMENT_AUTHORITY_OWNER_POLICY,
+                "assignment_source_id": decision["source_id"],
+                "benchmark_id": decision["benchmark_id"],
+                "effective_end": None,
+                "effective_start": decision["effective_start"],
+                "rationale": decision["rationale"],
+                "retained_spec_status": row.get("status"),
+                "selected_generation_id": decision["selected_generation_id"],
+                "status": "EVIDENCED",
+                "strategy_id": strategy_id,
+                "version_ref": decision["benchmark_version_ref"],
+            }
+        )
+    comparison_rows: list[dict[str, Any]] = []
+    for row in _objects(
+        attribution.get("benchmark_comparisons", []),
+        "attribution.benchmark_comparisons",
+    ):
+        strategy_id = str(row.get("strategy_id"))
+        if strategy_id not in overridden:
+            comparison_rows.append(dict(row))
+            continue
+        generation = str(assignments[strategy_id]["selected_generation_id"])
+        reason = f"selected generation {generation[:8]} unavailable"
+        comparison_rows.append(
+            {
+                **row,
+                "disposition": (
+                    f"NOT_READY: {reason}; no benchmark-relative comparison is "
+                    "computed against the owner-selected benchmark."
+                ),
+                "not_ready_detail": reason,
+                "not_ready_reason": COMPARISON_SELECTED_GENERATION_UNAVAILABLE,
+                "selected_generation_id": generation,
+            }
+        )
+    return {
+        **attribution,
+        "benchmark_assignments": assignment_rows,
+        "benchmark_comparisons": comparison_rows,
+    }
+
+
+_ONE_YEAR_DAYS: Final = 365
+ANNUALIZATION_BASIS_CAGR: Final = "CALENDAR_DAYS_COMPOUNDED_OVER_365"
+ANNUALIZATION_BASIS_SOURCE_REPORTED: Final = "SOURCE_REPORTED"
+ANNUALIZATION_BASIS_XIRR: Final = "XIRR_ACT_365"
+ANNUALIZATION_BASIS_PERIODS_SCALED: Final = "PERIODS_PER_YEAR_SCALED"
+_FREQUENCY_BY_PERIODS_PER_YEAR: Final = {
+    252: ("DAILY_TRADING", "daily"),
+    365: ("DAILY_CALENDAR", "daily"),
+    366: ("DAILY_CALENDAR", "daily"),
+    52: ("WEEKLY", "weekly"),
+    12: ("MONTHLY", "monthly"),
+    4: ("QUARTERLY", "quarterly"),
+    1: ("ANNUAL", "annual"),
+}
+_FREQUENCY_WORDS: Final = {
+    "DAILY": "daily",
+    **{name: word for name, word in _FREQUENCY_BY_PERIODS_PER_YEAR.values()},
+}
+
+
+def _annualization_label(
+    *,
+    basis: str,
+    start: object,
+    end: object,
+    observations: object = None,
+    periods_per_year: object = None,
+    frequency: str | None = None,
+) -> dict[str, Any] | None:
+    """The basis and window an annualized figure stands on, or None without a window.
+
+    A window under 365 days is a short-window annualization: ``short_window`` is true
+    and the label says so beside the dates.  The label names the observation count
+    and the frequency of the series the figure was scaled from; for a figure scaled
+    from cash flows (XIRR) it names the cash-flow window.
+    """
+
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    window_days = (
+        _date(end, "annualization end") - _date(start, "annualization start")
+    ).days
+    count = observations if isinstance(observations, int) else None
+    periods = periods_per_year if isinstance(periods_per_year, int) else None
+    if frequency is None and periods is not None:
+        frequency = _FREQUENCY_BY_PERIODS_PER_YEAR.get(
+            periods, (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year")
+        )[0]
+    word = (
+        None
+        if frequency is None
+        else _FREQUENCY_WORDS.get(frequency, f"{periods}-per-year")
+    )
+    short = window_days < _ONE_YEAR_DAYS
+    if frequency == "CASH_FLOW_DATES":
+        text = f"annualized from cash flows, {start}..{end}"
+    elif count is not None and word is not None:
+        text = f"annualized from {count} {word} observations, {start}..{end}"
+    else:
+        text = f"annualized over {start}..{end}"
+    return {
+        "basis": basis,
+        "frequency": frequency,
+        "label": text + (" (<1 year)" if short else ""),
+        "observations": count,
+        "periods_per_year": periods,
+        "short_window": short,
+        "window_days": window_days,
+        "window_end": end,
+        "window_start": start,
+    }
+
+
+def _comparison_annualization(
+    comparison: Mapping[str, Any], metrics: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The label of a comparison's annualized figures (active return, tracking error)."""
+
+    if not metrics:
+        return None
+    return _annualization_label(
+        basis=ANNUALIZATION_BASIS_PERIODS_SCALED,
+        start=metrics.get("observed_start"),
+        end=metrics.get("observed_end"),
+        observations=metrics.get("observations"),
+        periods_per_year=comparison.get("periods_per_year"),
+    )
+
+
+def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The CAGR and MWR labels of one strategy summary row (version 4)."""
+
+    cagr = None
+    if row.get("account_live_cagr") is not None:
+        derived = row.get("account_live_cagr_status") == (
+            "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
+        )
+        cagr = _annualization_label(
+            basis=(
+                ANNUALIZATION_BASIS_CAGR
+                if derived
+                else ANNUALIZATION_BASIS_SOURCE_REPORTED
+            ),
+            start=row.get("account_live_observed_start"),
+            end=row.get("account_live_observed_end"),
+            observations=row.get("account_live_return_observations"),
+            frequency="DAILY",
+        )
+    mwr = None
+    if row.get("mwr_xirr") is not None:
+        mwr = _annualization_label(
+            basis=ANNUALIZATION_BASIS_XIRR,
+            start=row.get("mwr_opening_date"),
+            end=row.get("mwr_terminal_date"),
+            frequency="CASH_FLOW_DATES",
+        )
+    return {
+        "account_live_cagr_annualization": cagr,
+        "mwr_annualization": mwr,
+    }
+
+
 def _merge_attribution(
-    strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
+    strategies: Sequence[Mapping[str, Any]],
+    attribution: Mapping[str, Any],
+    *,
+    cost_rate_at_cutoff: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     benchmarks = {
         str(item.get("strategy_id")): item
@@ -1735,6 +2141,29 @@ def _merge_attribution(
                 "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
+                **(
+                    {}
+                    if cost_rate_at_cutoff is None
+                    else {
+                        **_cutoff_cost_rate(item, cost, cost_rate_at_cutoff),
+                        **_account_annualization_labels(item),
+                        "benchmark_annualization": _comparison_annualization(
+                            benchmark_comparison, benchmark_metrics
+                        ),
+                        "benchmark_assignment_authority": benchmark.get(
+                            "assignment_authority", ASSIGNMENT_AUTHORITY_RETAINED_SPEC
+                        ),
+                        "benchmark_comparison_reason": benchmark_comparison.get(
+                            "not_ready_detail"
+                        )
+                        or benchmark_comparison.get("not_ready_reason"),
+                        "provider_annualization": _comparison_annualization(
+                            comparison, metrics
+                        ),
+                        "provider_comparison_reason": comparison.get("not_ready_detail")
+                        or comparison.get("not_ready_reason"),
+                    }
+                ),
             }
         )
     return result
@@ -4186,8 +4615,16 @@ def _strategy_attribution_section(
     attribution_catalog: Mapping[str, Any],
     attribution_ref: Mapping[str, str],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None,
+    *,
+    cutoff_cost_rate: bool = False,
 ) -> dict[str, Any]:
-    """Project every attribution list through the same current-product filter."""
+    """Project every attribution list through the same current-product filter.
+
+    With ``cutoff_cost_rate`` the cost rows lose the producer's snapshot-sized rate
+    and value (the strategy rows carry the one rate, over the cutoff sleeve value)
+    and take the fees label the cost status earns, so no retained catalog's older
+    label or rate is published beside the report's own.
+    """
 
     def current(key: str) -> list[dict[str, Any]]:
         optional = key == "benchmark_comparisons"
@@ -4201,11 +4638,30 @@ def _strategy_attribution_section(
             f"strategy_attribution.{key}",
         )
 
+    costs = current("costs")
+    if cutoff_cost_rate:
+        costs = [
+            {
+                **{
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "annual_external_cost_rate_pre_tax",
+                        "current_sleeve_value_usd",
+                    }
+                },
+                "fees_status": fees_status_for_cost(
+                    row.get("cost_status"), row.get("annual_external_cost_usd")
+                ),
+            }
+            for row in costs
+        ]
     return {
         "benchmark_assignments": current("benchmark_assignments"),
         "benchmark_comparisons": current("benchmark_comparisons"),
         "comparisons": current("comparisons"),
-        "costs": current("costs"),
+        "costs": costs,
         "generation_id": attribution_ref["generation_id"],
     }
 
@@ -4723,15 +5179,292 @@ def _validate_policy_unavailable_comparison(
         )
 
 
+_IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS: Final = (1, 2)
+_ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
+_ACCOUNT_LEG_SERIES_SCHEMA: Final = "ordered-date-return/1"
+# The figure published beside a leg is the leg itself; the tolerance only absorbs
+# float round trips.  The leg against the governed series is the ruling's 1e-8.
+_ACCOUNT_LEG_PUBLISHED_TOLERANCE: Final = 1e-12
+_ACCOUNT_LEG_GOVERNED_TOLERANCE: Final = 1e-8
+
+
+def _governed_account_returns(catalog: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """The governed account-live series per strategy: date to canonical decimal text.
+
+    BASELINE_ACCOUNT_LIVE is the one account leg of a strategy window (B2); an
+    implementation contract's account return is bound to it.
+    """
+
+    series: dict[str, dict[str, str]] = {}
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "strategy return.strategy_id")
+        observed = _date(row.get("date"), "strategy return.date").isoformat()
+        series.setdefault(strategy_id, {})[observed] = decimal_text(
+            _decimal(row.get("return"), "strategy return.return")
+        )
+    return series
+
+
+def _governed_window_return(
+    governed: Mapping[str, str], start: str, end: str
+) -> tuple[float | None, int]:
+    wealth = Decimal(1)
+    count = 0
+    with localcontext() as context:
+        context.prec = 34
+        for observed in sorted(governed):
+            if start <= observed <= end:
+                wealth *= 1 + Decimal(governed[observed])
+                count += 1
+    return (float(wealth - 1) if count else None), count
+
+
+_STALE_IMPLEMENTATION_STATUS: Final = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+_STALE_IMPLEMENTATION_BASIS: Final = "SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"
+_STALE_REPAIR_REF: Final = "N66-R"
+
+
+def _contract_provider_ledger_pin(
+    payload: Mapping[str, Any], key: str, value: str
+) -> str | None:
+    """The provider-ledger digest a contract pins, or None unless it is unique."""
+
+    pins = [
+        item
+        for item in payload.get("source_artifacts") or []
+        if isinstance(item, Mapping) and item.get(key) == value
+    ]
+    if len(pins) != 1:
+        return None
+    digest = pins[0].get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest
+
+
+def _stale_implementation_row(
+    context: Mapping[str, str],
+    strategy_id: str,
+    *,
+    start: str,
+    end: str,
+    governed_figure: float,
+    governed_count: int,
+    figure: float,
+) -> dict[str, Any]:
+    contract_ledger = context["contract_ledger_sha256"]
+    governed_ledger = context["governed_ledger_sha256"]
+    return {
+        "status": _STALE_IMPLEMENTATION_STATUS,
+        "strategy_id": strategy_id,
+        "contract_kind": context["contract_kind"],
+        "contract_id": context["contract_id"],
+        "contract_sha256": context["contract_sha256"],
+        "contract_as_of_date": context["contract_as_of_date"],
+        "window_start": start,
+        "window_end": end,
+        "governed_account_return": governed_figure,
+        "governed_account_basis": _ACCOUNT_LEG_BASIS,
+        "governed_observations": governed_count,
+        "contract_provider_ledger_sha256": contract_ledger,
+        "governed_provider_ledger_sha256": governed_ledger,
+        "superseded_contract_account_return": figure,
+        "superseded_contract_account_basis": _STALE_IMPLEMENTATION_BASIS,
+        "reason": (
+            f"Implementation {context['contract_kind_text']} contract "
+            f"{context['contract_id'][:12]} (as of {context['contract_as_of_date']}) "
+            f"was built from provider ledger {contract_ledger[:12]}; the governed "
+            f"ledger is {governed_ledger[:12]}. Its account return over "
+            f"{start}..{end} differs from the governed account-live series by "
+            f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
+            "risk statistic or causal waterfall is published from it."
+        ),
+        "repair_ref": _STALE_REPAIR_REF,
+    }
+
+
+def _verify_implementation_account_legs(
+    rows: Mapping[str, Mapping[str, Any]],
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None,
+    *,
+    schema_version: int,
+    published: Callable[[Mapping[str, Any]], tuple[float, str, str]],
+    stale_context: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Bind each row's account return to the governed account-live series.
+
+    A version-2 contract carries its leg and must equal the governed series over
+    the leg's window.  A sealed version-1 contract carries none, so its published
+    account return is read over its declared window.  A figure that differs by
+    more than 1e-8 is a second account return for one window and is never
+    published.  When the contract pins a different provider ledger than the
+    governed one, the difference is explained: the row is returned as a closed
+    NOT_READY object (N66-R) instead of being refused.  Any other difference,
+    and every structural failure, raises.
+    """
+
+    stale: dict[str, dict[str, Any]] = {}
+    if governed_account_returns is None:
+        return stale
+    for strategy_id, row in rows.items():
+        figure, start, end = published(row)
+        governed = governed_account_returns.get(strategy_id, {})
+        differs = ReportValidationError(
+            "implementation account leg differs from the governed account-live "
+            f"series: {strategy_id} {start}..{end}"
+        )
+        governed_figure, governed_count = _governed_window_return(governed, start, end)
+        if schema_version == 1:
+            explained = governed_figure is not None and (
+                abs(governed_figure - figure) <= _ACCOUNT_LEG_GOVERNED_TOLERANCE
+            )
+        else:
+            leg = row.get("account_leg")
+            if not isinstance(leg, Mapping):
+                raise ReportValidationError(
+                    f"implementation account leg is absent: {strategy_id}"
+                )
+            if (
+                set(leg)
+                != {
+                    "basis",
+                    "compared_observations",
+                    "cumulative_return",
+                    "series_schema",
+                    "series_sha256",
+                    "window_end",
+                    "window_observations",
+                    "window_start",
+                }
+                or leg.get("basis") != _ACCOUNT_LEG_BASIS
+                or leg.get("series_schema") != _ACCOUNT_LEG_SERIES_SCHEMA
+                or re.fullmatch(r"[0-9a-f]{64}", str(leg.get("series_sha256"))) is None
+                or leg.get("window_start") != start
+                or leg.get("window_end") != end
+                or type(leg.get("compared_observations")) is not int
+                or type(leg.get("window_observations")) is not int
+            ):
+                raise ReportValidationError(
+                    "implementation account leg differs from its contract: "
+                    f"{strategy_id}"
+                )
+            leg_figure = _finite_number(
+                leg.get("cumulative_return"), "account leg return"
+            )
+            if abs(leg_figure - figure) > _ACCOUNT_LEG_PUBLISHED_TOLERANCE:
+                raise ReportValidationError(
+                    "implementation published account return differs from its leg: "
+                    f"{strategy_id}"
+                )
+            # ``series_sha256`` names the bytes of the ledger vintage the contract
+            # was built from.  It is identity for audit; the values are the gate, so
+            # a byte-different vintage with equal values (a float-repr ledger and a
+            # decimal one) is not a second account return.
+            explained = (
+                governed_figure is not None
+                and abs(governed_figure - leg_figure) <= _ACCOUNT_LEG_GOVERNED_TOLERANCE
+                and leg["window_observations"] == governed_count
+            )
+        if explained:
+            continue
+        contract_ledger = (
+            None if stale_context is None else stale_context["contract_ledger_sha256"]
+        )
+        if (
+            governed_figure is None
+            or stale_context is None
+            or not contract_ledger
+            or contract_ledger == stale_context["governed_ledger_sha256"]
+        ):
+            raise differs
+        stale[strategy_id] = _stale_implementation_row(
+            stale_context,
+            strategy_id,
+            start=start,
+            end=end,
+            governed_figure=governed_figure,
+            governed_count=governed_count,
+            figure=figure,
+        )
+    return stale
+
+
+def _implementation_reference_extras(
+    rows: Mapping[str, Mapping[str, Any]],
+    stale: Mapping[str, Any],
+    *,
+    contract_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None,
+    model_comparison_status: Callable[[Mapping[str, Any]], object],
+) -> dict[str, Any]:
+    """The stale ids and the pre-policy label every implementation reference carries."""
+
+    effective_start = (
+        None
+        if provider_return_policy is None
+        else str(provider_return_policy["effective_start"])
+    )
+    pre_policy = sorted(
+        strategy_id
+        for strategy_id, row in rows.items()
+        if strategy_id == "p123-ai-factor"
+        and strategy_id not in stale
+        and effective_start is not None
+        and contract_as_of.isoformat() < effective_start
+        and model_comparison_status(row) != "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    )
+    return {
+        "pre_policy_strategy_ids": pre_policy,
+        "provider_return_policy": (
+            None if provider_return_policy is None else dict(provider_return_policy)
+        ),
+        "stale_strategy_ids": sorted(stale),
+    }
+
+
+def _reconciliation_published_account_return(
+    row: Mapping[str, Any],
+) -> tuple[float, str, str]:
+    metrics = _object(row.get("return_reconciliation"), "implementation comparison")
+    if metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+        metrics = _object(row.get("account_live_return_summary"), "actual account")
+        figure = metrics.get("cumulative_return")
+    else:
+        figure = metrics.get("account_cumulative_return")
+    return (
+        _finite_number(figure, "implementation account return"),
+        _date(
+            metrics.get("observed_start"), "implementation observed_start"
+        ).isoformat(),
+        _date(metrics.get("observed_end"), "implementation observed_end").isoformat(),
+    )
+
+
+def _attribution_published_account_return(
+    row: Mapping[str, Any],
+) -> tuple[float, str, str]:
+    bridge = _object(row.get("bridge"), "implementation bridge")
+    return (
+        _finite_number(bridge.get("account_return"), "implementation account return"),
+        _date(row.get("observed_start"), "implementation observed_start").isoformat(),
+        _date(row.get("observed_end"), "implementation observed_end").isoformat(),
+    )
+
+
 def _implementation_reconciliation_contract(
     path: Path,
     *,
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
+    governed_provider_ledger_sha256: str | None = None,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation reconciliation contract")
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") not in _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS
         or payload.get("builder") != "portfolio-implementation-reconciliation"
         or payload.get("verification") != "VERIFIED"
     ):
@@ -4827,16 +5560,50 @@ def _implementation_reconciliation_contract(
             "implementation reconciliation strategy boundary differs"
         )
     sha256, size = hash_file(path)
+    contract_id = _text(
+        payload.get("reconciliation_id"),
+        "implementation reconciliation identity",
+    )
+    contract_ledger = _contract_provider_ledger_pin(
+        payload, "artifact_id", "normalized/provider-ledger.json"
+    )
+    stale = _verify_implementation_account_legs(
+        by_id,
+        governed_account_returns,
+        schema_version=payload["schema_version"],
+        published=_reconciliation_published_account_return,
+        stale_context=(
+            None
+            if governed_provider_ledger_sha256 is None or contract_ledger is None
+            else {
+                "contract_kind": "RECONCILIATION",
+                "contract_kind_text": "reconciliation",
+                "contract_id": contract_id,
+                "contract_sha256": sha256,
+                "contract_as_of_date": contract_as_of.isoformat(),
+                "contract_ledger_sha256": contract_ledger,
+                "governed_ledger_sha256": governed_provider_ledger_sha256,
+            }
+        ),
+    )
+    extras = _implementation_reference_extras(
+        by_id,
+        stale,
+        contract_as_of=contract_as_of,
+        provider_return_policy=provider_return_policy,
+        model_comparison_status=lambda row: _object(
+            row.get("return_reconciliation"), "implementation comparison"
+        ).get("status"),
+    )
+    by_id.update(stale)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
-        "reconciliation_id": _text(
-            payload.get("reconciliation_id"),
-            "implementation reconciliation identity",
-        ),
+        "reconciliation_id": contract_id,
         "schema_version": payload["schema_version"],
         "sha256": sha256,
         "size_bytes": size,
         "strategy_count": len(by_id),
+        **extras,
     }
 
 
@@ -4845,10 +5612,13 @@ def _implementation_return_attribution_contract(
     *,
     portfolio_as_of: str,
     expected_policy_evidence: Mapping[str, Any] | None = None,
+    governed_account_returns: Mapping[str, Mapping[str, str]] | None = None,
+    governed_provider_ledger_sha256: str | None = None,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation return attribution contract")
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") not in _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS
         or payload.get("builder") != "portfolio-implementation-return-attribution"
         or payload.get("verification")
         != "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES"
@@ -4989,16 +5759,50 @@ def _implementation_return_attribution_contract(
             "implementation return attribution strategy boundary differs"
         )
     sha256, size = hash_file(path)
+    contract_id = _text(
+        payload.get("attribution_id"),
+        "implementation return attribution identity",
+    )
+    contract_ledger = _contract_provider_ledger_pin(
+        payload, "source_id", "provider-ledger"
+    )
+    stale = _verify_implementation_account_legs(
+        by_id,
+        governed_account_returns,
+        schema_version=payload["schema_version"],
+        published=_attribution_published_account_return,
+        stale_context=(
+            None
+            if governed_provider_ledger_sha256 is None or contract_ledger is None
+            else {
+                "contract_kind": "RETURN_ATTRIBUTION",
+                "contract_kind_text": "return attribution",
+                "contract_id": contract_id,
+                "contract_sha256": sha256,
+                "contract_as_of_date": contract_as_of.isoformat(),
+                "contract_ledger_sha256": contract_ledger,
+                "governed_ledger_sha256": governed_provider_ledger_sha256,
+            }
+        ),
+    )
+    extras = _implementation_reference_extras(
+        by_id,
+        stale,
+        contract_as_of=contract_as_of,
+        provider_return_policy=provider_return_policy,
+        model_comparison_status=lambda row: _object(
+            row.get("bridge"), "implementation bridge"
+        ).get("status"),
+    )
+    by_id.update(stale)
     return by_id, {
         "as_of_date": contract_as_of.isoformat(),
-        "attribution_id": _text(
-            payload.get("attribution_id"),
-            "implementation return attribution identity",
-        ),
+        "attribution_id": contract_id,
         "schema_version": payload["schema_version"],
         "sha256": sha256,
         "size_bytes": size,
         "strategy_count": len(by_id),
+        **extras,
     }
 
 
@@ -5086,6 +5890,39 @@ def _strategy_mwr(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mwr_terminal_date": ordered[-1][0].isoformat() if ordered else None,
         "mwr_xirr": None if rate is None else decimal_text(cast(Decimal, rate)),
     }
+
+
+def _is_stale_implementation(row: Mapping[str, Any]) -> bool:
+    return str(row.get("status", "")).startswith("NOT_READY_STALE")
+
+
+def _implementation_status(
+    history_status: object,
+    implementation: Mapping[str, Any],
+    return_attribution: Mapping[str, Any],
+) -> object:
+    """The strategy's implementation status; a stale contract is never "verified"."""
+
+    reconciliation_stale = _is_stale_implementation(implementation)
+    attribution_stale = _is_stale_implementation(return_attribution)
+    if reconciliation_stale or attribution_stale:
+        if reconciliation_stale and (attribution_stale or not return_attribution):
+            return _STALE_IMPLEMENTATION_STATUS
+        if reconciliation_stale:
+            return "PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY"
+        if implementation:
+            return "PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY"
+        return _STALE_IMPLEMENTATION_STATUS
+    if not implementation:
+        return history_status
+    if (
+        return_attribution.get("bridge", {}).get("status")
+        == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    ):
+        return "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    if return_attribution:
+        return "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+    return "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
 
 
 def _strategies(
@@ -5619,17 +6456,10 @@ def _strategies(
                 "history_observed_start": history.get("backtest_observed_start"),
                 "history_observed_end": history.get("backtest_observed_end"),
                 "implementation_lineage": history.get("implementation_lineage"),
-                "implementation_reconciliation_status": history.get(
-                    "implementation_reconciliation_status"
-                )
-                if not implementation
-                else (
-                    "UNAVAILABLE_POLICY_NOT_ADMITTED"
-                    if implementation_return_attribution.get("bridge", {}).get("status")
-                    == "UNAVAILABLE_POLICY_NOT_ADMITTED"
-                    else "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
-                    if implementation_return_attribution
-                    else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
+                "implementation_reconciliation_status": _implementation_status(
+                    history.get("implementation_reconciliation_status"),
+                    implementation,
+                    implementation_return_attribution,
                 ),
                 "implementation_reconciliation": implementation or None,
                 "implementation_return_attribution": (
@@ -5849,10 +6679,85 @@ def _flow_reconciliation(
     return rows
 
 
+SNAPSHOT_WEIGHT_PERIMETER: Final = "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"
+SNAPSHOT_WEIGHT_TOLERANCE: Final = Decimal("1e-12")
+# The dated snapshot is sealed: its systematic total is the baseline's sequential
+# 28-digit half-even sum (``portfolio_baseline._snapshot_sum``), and the denominator
+# here must be that very figure, not an exact variant of it.
+_SNAPSHOT_SUM_PRECISION: Final = 28
+
+
+def _verify_snapshot_weight_sum(
+    weights: Sequence[Decimal], *, tolerance: Decimal = SNAPSHOT_WEIGHT_TOLERANCE
+) -> None:
+    with localcontext() as context:
+        context.prec = _EXACT_PRECISION
+        total = sum(weights, Decimal(0))
+    if abs(total - 1) > tolerance:
+        raise ReportValidationError("snapshot weights do not sum to one")
+
+
+def _snapshot_weights(
+    catalog: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[str, int, Decimal]]:
+    """Each systematic snapshot row's share of its own recorded perimeter.
+
+    The recorded ``systematic_weight`` column of the component decision table does
+    not reconcile with the recorded values over any denominator (the value-implied
+    totals differ row by row), so it is source residue that stays in the baseline.
+    The published weight is the row's value over the sum of every systematic
+    component the snapshot records, the excluded ones included: that is the
+    snapshot's own perimeter, not a renormalisation to the current required set.
+    Returns ``(as_of_date, allocation_id)`` to ``(denominator, count, weight)``.
+    """
+
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for member in _objects(catalog.get("allocations"), "allocations"):
+        if member.get("scope") == "SYSTEMATIC":
+            by_date[_text(member.get("as_of_date"), "allocation.as_of_date")].append(
+                member
+            )
+    replay = catalog.get("replay")
+    recorded_total = (
+        replay.get("systematic_total_usd") if isinstance(replay, Mapping) else None
+    )
+    result: dict[tuple[str, str], tuple[str, int, Decimal]] = {}
+    for day, day_members in by_date.items():
+        values = [_amount(member, "current_value") for member in day_members]
+        with localcontext() as context:
+            context.prec = _SNAPSHOT_SUM_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            denominator = sum(values, Decimal(0))
+        if (
+            len(by_date) == 1
+            and recorded_total is not None
+            and _decimal(recorded_total, "replay systematic total") != denominator
+        ):
+            raise ReportValidationError(
+                "allocation snapshot perimeter differs from its recorded systematic total"
+            )
+        if denominator <= 0:
+            raise ReportValidationError("allocation snapshot perimeter is not positive")
+        weights: list[Decimal] = []
+        with localcontext() as context:
+            context.prec = 34
+            for member, value in zip(day_members, values):
+                weight = value / denominator
+                weights.append(weight)
+                result[(day, _text(member.get("allocation_id"), "allocation_id"))] = (
+                    decimal_text(denominator),
+                    len(day_members),
+                    weight,
+                )
+        _verify_snapshot_weight_sum(weights)
+    return result
+
+
 def _allocations(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
+    snapshot_weights = _snapshot_weights(catalog) if _uses_cutoff_basis(catalog) else {}
     rows = []
     for item in _objects(catalog.get("allocations"), "allocations"):
         strategy_id = item.get("strategy_id")
@@ -5883,6 +6788,17 @@ def _allocations(
                 ),
             }
         )
+        key = (str(item.get("as_of_date")), str(item.get("allocation_id")))
+        if key in snapshot_weights:
+            denominator, count, weight = snapshot_weights[key]
+            rows[-1].update(
+                {
+                    "systematic_weight": decimal_text(weight),
+                    "weight_denominator_usd": denominator,
+                    "weight_perimeter": SNAPSHOT_WEIGHT_PERIMETER,
+                    "weight_perimeter_component_count": count,
+                }
+            )
     rows = sorted(
         rows,
         key=lambda item: (
@@ -6479,6 +7395,16 @@ def _declared_schema_version(payload: Mapping[str, Any], field: str, label: str)
     if isinstance(version, bool) or not isinstance(version, int):
         raise ReportValidationError(f"{label} schema version differs")
     return str(version)
+
+
+def _implementation_artifact_schema(name: str, reference: Mapping[str, Any]) -> str:
+    """The provenance schema of an implementation contract: its own declared version.
+
+    A retained contract is schema 1 and a rebuilt one is schema 2, so the version is
+    the reference's (read from the contract), never a literal.
+    """
+
+    return f"{name}/{_declared_schema_version(reference, 'schema_version', name)}"
 
 
 def _freshness_artifact_version(path: Path) -> str:
@@ -7296,6 +8222,137 @@ def _current_epoch_detail(
     }
 
 
+def _governed_provider_ledger_sha256(catalog: Mapping[str, Any]) -> str | None:
+    """The governed provider-ledger digest, or None when the catalog does not name one."""
+
+    try:
+        return _baseline_provider_ledger_identity(catalog)["provider-ledger-catalog"]
+    except ReportValidationError:
+        return None
+
+
+def _provider_return_policy_window(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+) -> dict[str, str] | None:
+    """The selected admission receipt's P123 provider-return exclusion window start.
+
+    It dates the label of a P123 comparison built before the exclusion took effect.
+    A receipt that cannot be read gives no label; it never fails the report.
+    """
+
+    try:
+        identity = _baseline_provider_ledger_identity(catalog)
+        root = provider_ledger_root or baseline_root.parent / "provider-ledger"
+        candidates = [
+            path.parent
+            for path in (root / "generations").glob("*/generation.json")
+            if not path.is_symlink()
+            and hash_file(path)[0] == identity["generation-manifest"]
+        ]
+        if len(candidates) != 1:
+            return None
+        receipt = json.loads(
+            (candidates[0] / "admit-or-declare-receipt.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        rows = [
+            row
+            for row in receipt["dispositions"]
+            if isinstance(row, dict)
+            and row.get("provider_id") == "portfolio123"
+            and row.get("item_kind") == "PRODUCT_DATA_CLASS"
+            and row.get("data_class") == "PROVIDER_LIVE_RETURN"
+        ]
+        if len(rows) != 1:
+            return None
+        return {
+            "effective_start": date.fromisoformat(
+                str(rows[0]["policy_effective_start"])
+            ).isoformat(),
+            "policy_id": _text(rows[0]["policy_id"], "provider return policy id"),
+        }
+    except (OSError, ValueError, KeyError, TypeError, ReportValidationError):
+        return None
+
+
+def _implementation_contracts(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    implementation_reconciliation_path: Path | None,
+    implementation_return_attribution_path: Path | None,
+) -> tuple[
+    dict[str, dict[str, Any]] | None,
+    dict[str, Any] | None,
+    dict[str, dict[str, Any]] | None,
+    dict[str, Any] | None,
+]:
+    """Read both implementation contracts against the catalog's governed series."""
+
+    implementation_contract: dict[str, dict[str, Any]] | None = None
+    implementation_contract_ref: dict[str, Any] | None = None
+    implementation_policy_evidence = None
+    governed_ledger = _governed_provider_ledger_sha256(catalog)
+    return_policy = _provider_return_policy_window(
+        catalog, baseline_root, provider_ledger_root
+    )
+    for appendix_path, comparison_key in (
+        (implementation_reconciliation_path, "return_reconciliation"),
+        (implementation_return_attribution_path, "bridge"),
+    ):
+        if appendix_path is not None and any(
+            _object(row.get(comparison_key), "implementation comparison").get("status")
+            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+            for row in _objects(
+                _load_json(appendix_path, "implementation appendix").get("strategies"),
+                "implementation strategies",
+            )
+        ):
+            implementation_policy_evidence = _selected_implementation_policy_evidence(
+                catalog,
+                baseline_root,
+                provider_ledger_root,
+                accepted_as_of=_date(catalog.get("as_of_date"), "portfolio as_of_date"),
+            )
+            break
+    if implementation_reconciliation_path is not None:
+        implementation_contract, implementation_contract_ref = (
+            _implementation_reconciliation_contract(
+                implementation_reconciliation_path,
+                portfolio_as_of=_text(
+                    catalog.get("as_of_date"), "portfolio as_of_date"
+                ),
+                expected_policy_evidence=implementation_policy_evidence,
+                governed_account_returns=_governed_account_returns(catalog),
+                governed_provider_ledger_sha256=governed_ledger,
+                provider_return_policy=return_policy,
+            )
+        )
+    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
+    implementation_return_attribution_ref: dict[str, Any] | None = None
+    if implementation_return_attribution_path is not None:
+        (
+            implementation_return_attribution_contract,
+            implementation_return_attribution_ref,
+        ) = _implementation_return_attribution_contract(
+            implementation_return_attribution_path,
+            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+            expected_policy_evidence=implementation_policy_evidence,
+            governed_account_returns=_governed_account_returns(catalog),
+            governed_provider_ledger_sha256=governed_ledger,
+            provider_return_policy=return_policy,
+        )
+    return (
+        implementation_contract,
+        implementation_contract_ref,
+        implementation_return_attribution_contract,
+        implementation_return_attribution_ref,
+    )
+
+
 def build_report_data(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
@@ -7503,49 +8560,18 @@ def build_report_data(
         raw_observation_coverage=raw_observation_coverage,
         value_basis_bounds=value_basis_bounds,
     )
-    implementation_contract: dict[str, dict[str, Any]] | None = None
-    implementation_contract_ref: dict[str, Any] | None = None
-    implementation_policy_evidence = None
-    for appendix_path, comparison_key in (
-        (implementation_reconciliation_path, "return_reconciliation"),
-        (implementation_return_attribution_path, "bridge"),
-    ):
-        if appendix_path is not None and any(
-            _object(row.get(comparison_key), "implementation comparison").get("status")
-            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
-            for row in _objects(
-                _load_json(appendix_path, "implementation appendix").get("strategies"),
-                "implementation strategies",
-            )
-        ):
-            implementation_policy_evidence = _selected_implementation_policy_evidence(
-                catalog,
-                baseline_root,
-                provider_ledger_root,
-                accepted_as_of=_date(catalog.get("as_of_date"), "portfolio as_of_date"),
-            )
-            break
-    if implementation_reconciliation_path is not None:
-        implementation_contract, implementation_contract_ref = (
-            _implementation_reconciliation_contract(
-                implementation_reconciliation_path,
-                portfolio_as_of=_text(
-                    catalog.get("as_of_date"), "portfolio as_of_date"
-                ),
-                expected_policy_evidence=implementation_policy_evidence,
-            )
-        )
-    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
-    implementation_return_attribution_ref: dict[str, Any] | None = None
-    if implementation_return_attribution_path is not None:
-        (
-            implementation_return_attribution_contract,
-            implementation_return_attribution_ref,
-        ) = _implementation_return_attribution_contract(
-            implementation_return_attribution_path,
-            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
-            expected_policy_evidence=implementation_policy_evidence,
-        )
+    (
+        implementation_contract,
+        implementation_contract_ref,
+        implementation_return_attribution_contract,
+        implementation_return_attribution_ref,
+    ) = _implementation_contracts(
+        catalog,
+        baseline_root,
+        provider_ledger_root,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
+    )
     strategy_summary = _strategies(
         catalog,
         performance,
@@ -7592,7 +8618,32 @@ def build_report_data(
             baseline_ref,
             attribution_generation_id=attribution_generation_id,
         )
-        strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
+        cutoff_basis = _uses_cutoff_basis(catalog)
+        if cutoff_basis:
+            # Version 4 publishes the benchmark assignment the source contract
+            # decides where the retained spec still says there is none (N55).
+            attribution_catalog = _with_contract_benchmark_assignments(
+                attribution_catalog, _contract_benchmark_assignments()
+            )
+        strategy_summary = _merge_attribution(
+            strategy_summary,
+            attribution_catalog,
+            cost_rate_at_cutoff=(
+                {
+                    "calculation_cutoff_date": (
+                        calculation_cutoff_date
+                        or _current_capital(catalog).get("valuation_date")
+                    ),
+                    "cost_schedule_as_of_date": _cost_schedule_as_of_date(catalog),
+                }
+                if cutoff_basis
+                else None
+            ),
+        )
+    if _uses_cutoff_basis(catalog):
+        strategy_summary = [
+            {**row, **_account_annualization_labels(row)} for row in strategy_summary
+        ]
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
@@ -8061,7 +9112,10 @@ def build_report_data(
                         "as_of_date": implementation_return_attribution_ref[
                             "as_of_date"
                         ],
-                        "schema": "portfolio-implementation-return-attribution/1",
+                        "schema": _implementation_artifact_schema(
+                            "portfolio-implementation-return-attribution",
+                            implementation_return_attribution_ref,
+                        ),
                         "sha256": implementation_return_attribution_ref["sha256"],
                     }
                 ]
@@ -8073,7 +9127,10 @@ def build_report_data(
                     {
                         "artifact": "strategy-implementation-reconciliation",
                         "as_of_date": implementation_contract_ref["as_of_date"],
-                        "schema": "portfolio-implementation-reconciliation/1",
+                        "schema": _implementation_artifact_schema(
+                            "portfolio-implementation-reconciliation",
+                            implementation_contract_ref,
+                        ),
                         "sha256": implementation_contract_ref["sha256"],
                     }
                 ]
@@ -8126,7 +9183,7 @@ def build_report_data(
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
-            report["report_schema_version"] = CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION
+            report["report_schema_version"] = CUTOFF_BASIS_REPORT_SCHEMA_VERSION
             if calculation_cutoff_date is not None:
                 coverage_bounds = _capital_coverage_bounds(
                     verified_capital, calculation_cutoff_date
@@ -8145,7 +9202,11 @@ def build_report_data(
         report["hwm_inputs"] = current_product_catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
         report["strategy_attribution"] = _strategy_attribution_section(
-            attribution_catalog, attribution_ref, strategy_product_controls
+            attribution_catalog,
+            attribution_ref,
+            strategy_product_controls,
+            cutoff_cost_rate=report["report_schema_version"]
+            == CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
         )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(
@@ -9353,7 +10414,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2, 3}
+        or report.get("report_schema_version") not in {1, 2, 3, 4}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
@@ -13333,7 +14394,13 @@ def publish_report(
                 snapshot_implementation_path,
                 "input/strategy-implementation-reconciliation.json",
                 "portfolio-implementation-reconciliation",
-                "1",
+                _declared_schema_version(
+                    _load_json(
+                        snapshot_implementation_path, "implementation reconciliation"
+                    ),
+                    "schema_version",
+                    "implementation reconciliation contract",
+                ),
             )
         )
     if snapshot_return_attribution_path is not None:
@@ -13342,7 +14409,14 @@ def publish_report(
                 snapshot_return_attribution_path,
                 "input/strategy-implementation-return-attribution.json",
                 "portfolio-implementation-return-attribution",
-                "1",
+                _declared_schema_version(
+                    _load_json(
+                        snapshot_return_attribution_path,
+                        "implementation return attribution",
+                    ),
+                    "schema_version",
+                    "implementation return attribution contract",
+                ),
             )
         )
     if snapshot_freshness_path is not None:

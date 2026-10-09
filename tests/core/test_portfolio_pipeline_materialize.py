@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -3657,6 +3658,100 @@ def test_current_lens_generation_bindings_reject_drift(
         materializer._production_lens_nodes(tmp_path, contract)
 
 
+WORK_COUNTER_KEYS = (
+    "correlation_build_calls",
+    "full_rederivation_count",
+    "grid_search_calls",
+    "model_fit_calls",
+    "receipt_reuse_count",
+)
+
+
+def _stub_financial_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    counters: dict[str, int] | None = None,
+) -> list[str]:
+    """Local stand-in for the numerical verifier, with the ruled call interface.
+
+    The real verifier is exercised without stubs by test_portfolio_mvp2_vertical and
+    by the verifier's own tests. This stand-in only records which caller label each
+    call carried and returns a proof shaped like the real one: `work_counters` with
+    exactly the five keys.
+
+    Both the ordinary and deferred-ledger entry points are stubbed, since
+    production-spec building calls the deferred one and other call sites (the
+    semantic gate, portfolio_qc) call the ordinary one.
+    """
+
+    import portfolio_financial_outcomes
+
+    calls: list[str] = []
+    reported = counters or {key: 0 for key in WORK_COUNTER_KEYS}
+
+    def validate(
+        _spec: object, *, allow_synthetic: bool = False, caller: str = "unattributed"
+    ) -> dict[str, object]:
+        assert allow_synthetic is False
+        calls.append(caller)
+        return {"status": "PASS", "work_counters": dict(reported)}
+
+    def validate_with_deferred_ledger(
+        _spec: object, *, allow_synthetic: bool = False, caller: str = "unattributed"
+    ) -> tuple[dict[str, object], Any]:
+        assert allow_synthetic is False
+        calls.append(caller)
+
+        def finalize(_final_spec: object) -> None:
+            # This stand-in never touches the real on-disk ledger (callers.append
+            # above is the only record of this call); a dedicated test exercises
+            # the real deferred-ledger writer and its on-disk identity directly.
+            return None
+
+        return {"status": "PASS", "work_counters": dict(reported)}, finalize
+
+    monkeypatch.setattr(
+        portfolio_financial_outcomes, "validate_financial_outcomes", validate
+    )
+    monkeypatch.setattr(
+        portfolio_financial_outcomes,
+        "validate_financial_outcomes_with_deferred_ledger",
+        validate_with_deferred_ledger,
+    )
+    return calls
+
+
+def _bind_attended_run(prepared_root: Path, retained_cache_root: Path) -> None:
+    """Write the attended-run receipt a real attended run leaves in its root.
+
+    The request identity is produced by the materializer's own function, so the
+    receipt has the shape `--execute` writes, with `retained_cache_root` set to the
+    given root (an overlay root when a retained cache base is used).
+    """
+
+    retained_cache_root.mkdir(parents=True, exist_ok=True)
+    python = prepared_root.parent / "attended-python.exe"
+    python.write_bytes(b"python")
+    source_run = prepared_root.parent / "attended-source-run.json"
+    source_run.write_bytes(b"{}")
+    identity = materializer._attended_request_identity(
+        repo_root=Path(materializer.__file__).resolve().parents[1],
+        python=python,
+        workspace_root=prepared_root.parent / "workspace",
+        output_root=prepared_root,
+        retained_cache_root=retained_cache_root,
+        requested_as_of="2026-09-17",
+        evaluated_on=None,
+        source_run=source_run,
+        financial_stage_inputs={},
+        source_phase={"status": "PASS"},
+        runtime={"identity": {"runtime": "test"}},
+    )
+    receipt = materializer._attended_run_receipt(prepared_root)
+    receipt.write_bytes(
+        canonical_json_bytes({"schema_version": 1, "request_identity": identity})
+    )
+
+
 @pytest.mark.parametrize("current_surfaces", [False, True])
 def test_production_spec_binds_stable_twenty_root_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current_surfaces: bool
@@ -3788,13 +3883,9 @@ def test_production_spec_binds_stable_twenty_root_authority(
 
     # This test isolates the established root/recovery mapping. Numerical
     # completion is exercised without stubs by test_portfolio_mvp2_vertical.
-    import portfolio_financial_outcomes
-
-    monkeypatch.setattr(
-        portfolio_financial_outcomes,
-        "validate_financial_outcomes",
-        lambda _spec: {"status": "PASS"},
-    )
+    _stub_financial_outcomes(monkeypatch)
+    state_root = tmp_path / "retained-cache"
+    _bind_attended_run(prepared_root, state_root)
     financial_artifacts = tmp_path / "financial-artifacts.json"
     supplied_lenses = []
     if current_surfaces:
@@ -3856,7 +3947,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
         prepared_root,
         prepared_root / "evidence" / "post-build-semantic.json",
         production_root,
-        tmp_path / "production-state",
+        state_root,
         spec_path,
         financial_artifacts_path=financial_artifacts,
         predecessor_repair_gate_path=repair_gate_path,
@@ -3883,7 +3974,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
         prepared_root,
         prepared_root / "evidence" / "post-build-semantic.json",
         production_root,
-        tmp_path / "production-state-no-repair",
+        state_root,
         plain_spec_path,
         financial_artifacts_path=financial_artifacts,
     )
@@ -4045,10 +4136,17 @@ def test_production_spec_binds_stable_twenty_root_authority(
         pipeline_status(stripped_spec)
 
 
-def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Schema-v9 five-input producer evidence survives the production rebind seam."""
+def _production_spec_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    counters: dict[str, int] | None = None,
+) -> SimpleNamespace:
+    """A prepared attended run whose production specification is ready to build.
+
+    The numerical verifier is the local stand-in of `_stub_financial_outcomes`; the
+    prepared root carries a real attended-run receipt that names the retained cache
+    root, which is the only state root `production-spec` accepts.
+    """
 
     short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
     analytics_root_ids = [
@@ -4221,14 +4319,8 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
 
     # This fixture proves epoch/root rebinding only. The complete production
     # vertical supplies and verifies the actual four numerical outcomes.
-    import portfolio_financial_outcomes
-
     monkeypatch.setattr(materializer, "_production_lens_nodes", lambda *_args: {})
-    monkeypatch.setattr(
-        portfolio_financial_outcomes,
-        "validate_financial_outcomes",
-        lambda _spec: {"status": "PASS"},
-    )
+    verifier_calls = _stub_financial_outcomes(monkeypatch, counters)
     financial_artifacts = tmp_path / "epoch-rebind-source-artifacts.json"
     _write_json(
         financial_artifacts,
@@ -4241,14 +4333,40 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
             }
         ],
     )
+    state_root = tmp_path / "retained-cache"
+    _bind_attended_run(prepared_root, state_root)
+    return SimpleNamespace(
+        recipe_path=recipe_path,
+        prepared_root=prepared_root,
+        semantic_gate=prepared_root / "evidence" / "post-build-semantic.json",
+        production_root=production_root,
+        state_root=state_root,
+        spec_path=spec_path,
+        financial_artifacts=financial_artifacts,
+        accepted_recipe=accepted_recipe,
+        prepared_proof=prepared_proof,
+        verifier_calls=verifier_calls,
+    )
+
+
+def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema-v9 five-input producer evidence survives the production rebind seam."""
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    recipe_path = inputs.recipe_path
+    prepared_root = inputs.prepared_root
+    spec_path = inputs.spec_path
+    accepted_recipe = inputs.accepted_recipe
+    prepared_proof = inputs.prepared_proof
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
-        prepared_root / "evidence" / "post-build-semantic.json",
-        production_root,
-        tmp_path / "production-state",
+        inputs.semantic_gate,
+        inputs.production_root,
+        inputs.state_root,
         spec_path,
-        financial_artifacts_path=financial_artifacts,
+        financial_artifacts_path=inputs.financial_artifacts,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
@@ -4294,6 +4412,332 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
             PipelineSpec.from_json_bytes(canonical_json_bytes(forged))
         )
     Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
+
+
+def _production_spec_argv(inputs: SimpleNamespace, state_root: Path) -> list[str]:
+    return [
+        "production-spec",
+        "--recipe",
+        str(inputs.recipe_path),
+        "--prepared-root",
+        str(inputs.prepared_root),
+        "--semantic-gate",
+        str(inputs.semantic_gate),
+        "--portfolio-root",
+        str(inputs.production_root),
+        "--state-root",
+        str(state_root),
+        "--spec",
+        str(inputs.spec_path),
+        "--financial-artifacts",
+        str(inputs.financial_artifacts),
+    ]
+
+
+def _build_production_spec(inputs: SimpleNamespace, state_root: Path) -> dict[str, Any]:
+    return materializer.build_production_spec(
+        inputs.recipe_path,
+        inputs.prepared_root,
+        inputs.semantic_gate,
+        inputs.production_root,
+        state_root,
+        inputs.spec_path,
+        financial_artifacts_path=inputs.financial_artifacts,
+    )
+
+
+COLD_WORK_COUNTERS = {
+    "correlation_build_calls": 2,
+    "full_rederivation_count": 3,
+    "grid_search_calls": 5,
+    "model_fit_calls": 7,
+    "receipt_reuse_count": 11,
+}
+WARM_WORK_COUNTERS = {
+    "correlation_build_calls": 0,
+    "full_rederivation_count": 0,
+    "grid_search_calls": 0,
+    "model_fit_calls": 0,
+    "receipt_reuse_count": 13,
+}
+
+
+def test_production_spec_stdout_carries_the_verifier_work_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Z1/M8: the counters of the verifier call reach the command's own stdout."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+
+    assert materializer.main(_production_spec_argv(inputs, inputs.state_root)) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert set(result) == {"contract", "nodes", "root_count", "spec", "work_counters"}
+    assert tuple(sorted(result["work_counters"])) == WORK_COUNTER_KEYS
+    assert result["work_counters"] == COLD_WORK_COUNTERS
+    # The one verifier call this command makes names itself, so the verifier's own
+    # ledger can attribute it.
+    assert inputs.verifier_calls == ["production-spec"]
+
+
+def _hashed_outputs(spec_path: Path) -> dict[str, bytes]:
+    """Every file the command wrote beside its specification.
+
+    The specification carries a wall-clock `created_at`, which no input determines, so
+    it is compared without that one field.
+    """
+
+    files = {
+        path.relative_to(spec_path.parent).as_posix(): path.read_bytes()
+        for path in sorted(spec_path.parent.rglob("*"))
+        if path.is_file()
+    }
+    spec = json.loads(files[spec_path.name])
+    del spec["created_at"]
+    files[spec_path.name] = canonical_json_bytes(spec)
+    return files
+
+
+def test_production_spec_gate_contract_and_spec_do_not_depend_on_the_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z1 control: cold and warm counters give byte-identical hashed outputs.
+
+    Mutation check: putting the counters into the semantic payload makes the two
+    semantic gates, and so the contract and the specification that bind their hash,
+    differ.
+    """
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+    cold = _build_production_spec(inputs, inputs.state_root)
+    cold_outputs = _hashed_outputs(inputs.spec_path)
+    assert {"production-post-build-semantic.json", "production-spec.json"} <= set(
+        cold_outputs
+    )
+    assert "portfolio-production-rebind-contract.json" in cold_outputs
+    shutil.rmtree(inputs.spec_path.parent)
+
+    _stub_financial_outcomes(monkeypatch, WARM_WORK_COUNTERS)
+    warm = _build_production_spec(inputs, inputs.state_root)
+
+    assert cold["work_counters"] == COLD_WORK_COUNTERS
+    assert warm["work_counters"] == WARM_WORK_COUNTERS
+    assert _hashed_outputs(inputs.spec_path) == cold_outputs
+
+
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"model_fit_calls": 0},
+        {**COLD_WORK_COUNTERS, "extra_calls": 0},
+        {**COLD_WORK_COUNTERS, "model_fit_calls": -1},
+        {**COLD_WORK_COUNTERS, "model_fit_calls": True},
+    ],
+    ids=["missing-keys", "extra-key", "negative", "boolean"],
+)
+def test_production_spec_refuses_a_proof_without_the_five_work_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, counters: dict[str, int]
+) -> None:
+    """Z1: a verifier proof that lost its counters cannot be emitted as evidence."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, counters)
+
+    with pytest.raises(materializer.MaterializationError, match="work counters"):
+        _build_production_spec(inputs, inputs.state_root)
+
+
+def test_production_spec_state_root_must_be_the_prepared_retained_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z2: receipts live in the retained cache, so no other state root is accepted."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    other = tmp_path / "per-cycle-production-state"
+    other.mkdir()
+    assert inputs.verifier_calls == []
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="production state root must be the prepared run's retained cache root",
+    ):
+        _build_production_spec(inputs, other)
+
+    # The refusal comes before the verifier, so nothing was verified or written.
+    assert inputs.verifier_calls == []
+    assert not inputs.spec_path.exists()
+
+    # The retained cache root, spelled through a parent hop, is the same root.
+    spelled = inputs.state_root / ".." / inputs.state_root.name
+    result = _build_production_spec(inputs, spelled)
+    assert inputs.verifier_calls == ["production-spec"]
+    spec = PipelineSpec.from_json_bytes(Path(result["spec"]).read_bytes())
+    assert spec.state_root == inputs.state_root.resolve()
+
+
+def test_production_spec_state_root_follows_the_overlay_of_a_shared_cache_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z2: with a retained cache base the run's overlay is its retained cache root."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    overlay = tmp_path / "overlay-cache"
+    _bind_attended_run(inputs.prepared_root, overlay)
+
+    with pytest.raises(materializer.MaterializationError, match="retained cache root"):
+        _build_production_spec(inputs, inputs.state_root)
+    assert inputs.verifier_calls == []
+
+    result = _build_production_spec(inputs, overlay)
+    spec = PipelineSpec.from_json_bytes(Path(result["spec"]).read_bytes())
+    assert spec.state_root == overlay.resolve()
+
+
+@pytest.mark.parametrize("damage", ["missing", "not-json", "no-identity", "no-root"])
+def test_production_spec_refuses_a_prepared_root_without_a_readable_run_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """Z2: the retained cache root is read from the receipt, never assumed."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    receipt = materializer._attended_run_receipt(inputs.prepared_root)
+    if damage == "missing":
+        receipt.unlink()
+    elif damage == "not-json":
+        receipt.write_bytes(b"not-json")
+    elif damage == "no-identity":
+        receipt.write_bytes(canonical_json_bytes({"schema_version": 1}))
+    else:
+        receipt.write_bytes(
+            canonical_json_bytes(
+                {"schema_version": 1, "request_identity": {"output_root": "x"}}
+            )
+        )
+
+    with pytest.raises(materializer.MaterializationError, match="attended run receipt"):
+        _build_production_spec(inputs, inputs.state_root)
+    assert inputs.verifier_calls == []
+
+
+def _ledger_callers(state_root: Path) -> list[str]:
+    """The caller of every entry in the verifier's own per-call ledger."""
+
+    ledger = state_root / "financial-verification-ledger"
+    if not ledger.is_dir():
+        return []
+    return [
+        json.loads(entry.read_bytes())["caller"] for entry in sorted(ledger.iterdir())
+    ]
+
+
+def test_production_spec_verifier_call_is_recorded_under_its_own_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real verifier, not the stand-in, records the production-spec caller.
+
+    The fixture holds no real financial artifacts, so the real verifier refuses it; its
+    ledger is written on failure too, which is what makes a refused call countable.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real = outcomes.validate_financial_outcomes_with_deferred_ledger
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        outcomes, "validate_financial_outcomes_with_deferred_ledger", real
+    )
+
+    with pytest.raises(outcomes.FinancialOutcomeError):
+        _build_production_spec(inputs, inputs.state_root)
+
+    assert _ledger_callers(inputs.state_root) == ["production-spec"]
+
+
+def test_production_spec_ledger_entry_names_the_emitted_spec_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production-spec ledger entry must name the spec file actually emitted.
+
+    Astra's review (pr519-final.astra.review.md, tools/portfolio_pipeline_materialize.py:5352)
+    found the ledger entry recorded against `completed_spec` before the final
+    semantic/contract hashes replace `spec["gates"][0:2]`, so the emitted
+    production-spec.json never has the identity the ledger names: T0-d P-Z1's
+    `E_Z` caller filter (ledger entries with `spec_sha256` in the set of
+    production-spec identities) then finds nothing. Reproduce that identity
+    check directly: the one ledger entry this call writes must carry the
+    sha256 of the bytes `production-spec.json` actually holds, and must still
+    carry the real counters from the one real verifier call.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real_deferred = outcomes.validate_financial_outcomes_with_deferred_ledger
+    inputs = _production_spec_inputs(tmp_path, monkeypatch, COLD_WORK_COUNTERS)
+
+    # Exercise the real deferred-ledger entry point -- the actual ledger seam
+    # `_write_verification_ledger`/`_spec_identity` go through in production --
+    # with only the expensive numerical verification itself stubbed, since this
+    # fixture carries no real financial artifacts for it to verify.
+    monkeypatch.setattr(
+        outcomes, "validate_financial_outcomes_with_deferred_ledger", real_deferred
+    )
+
+    def fake_validate(
+        _spec: object,
+        _allow_synthetic: bool,
+        work_counters: dict[str, int],
+        _calls: list[dict[str, object]],
+    ) -> dict[str, object]:
+        work_counters.update(COLD_WORK_COUNTERS)
+        return {"status": "PASS", "work_counters": dict(COLD_WORK_COUNTERS)}
+
+    monkeypatch.setattr(outcomes, "_validate_financial_outcomes", fake_validate)
+
+    built = _build_production_spec(inputs, inputs.state_root)
+
+    spec_path = Path(built["spec"])
+    emitted_spec_sha256 = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    emitted_spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    assert emitted_spec.spec_sha256 == emitted_spec_sha256
+
+    ledger_dir = inputs.state_root / "financial-verification-ledger"
+    entries = [
+        json.loads(path.read_bytes()) for path in sorted(ledger_dir.glob("*.json"))
+    ]
+    (entry,) = [row for row in entries if row["caller"] == "production-spec"]
+    assert entry["spec_sha256"] == emitted_spec_sha256
+    assert entry["work_counters"] == COLD_WORK_COUNTERS
+
+
+def test_semantic_verifier_call_is_recorded_under_its_own_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`semantic --financial-spec` names itself in the verifier's per-call ledger.
+
+    The epoch-rebind fixture's own prepared root carries no panel QA artifacts (it
+    exists only to prove epoch/root rebinding), so the semantic reconciliation itself
+    is exercised against the ordinary `_fixture` output, which does carry them; the
+    financial spec handed to it is the real completed production spec, naming the
+    same retained-cache `state_root` the production-spec call above already wrote to.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+
+    real = outcomes.validate_financial_outcomes
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    built = _build_production_spec(inputs, inputs.state_root)
+    assert _ledger_callers(inputs.state_root) == []
+
+    recipe, output_root = _fixture(tmp_path / "semantic-check")
+    monkeypatch.setattr(outcomes, "validate_financial_outcomes", real)
+
+    with pytest.raises(outcomes.FinancialOutcomeError):
+        materializer.semantic(
+            recipe,
+            output_root / "evidence" / "label-check.json",
+            Path(built["spec"]),
+        )
+
+    assert _ledger_callers(inputs.state_root) == ["materialize.semantic"]
 
 
 def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
@@ -5747,6 +6191,272 @@ def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
         == 97
     )
     assert calls == ["ledger", "baseline", "baseline"]
+
+
+PANEL_SIDE_ROLES = ("panel-candidate", "panel")
+ANALYTICS_SIDE_ROLES = ("analytics", "report")
+
+
+def _stage_digest(root: Path) -> str:
+    """One digest over the names and bytes of every file below a stage root."""
+
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _stage_snapshot(output_root: Path) -> dict[str, object]:
+    """Bytes and write times of everything the analytics and report stages own."""
+
+    files = {}
+    for role in ANALYTICS_SIDE_ROLES:
+        owned = [
+            output_root / "stage-results" / f"{role}.json",
+            *sorted(
+                item
+                for item in (output_root / "stages" / role).rglob("*")
+                if item.is_file()
+            ),
+        ]
+        for path in owned:
+            files[path.relative_to(output_root).as_posix()] = (
+                path.read_bytes(),
+                path.stat().st_mtime_ns,
+            )
+    return files
+
+
+class _PanelFailureRun:
+    """A four-stage attended run whose panel child can be made to fail.
+
+    The children are real files written under the real stage roots. The two native
+    readers that need a published analytics or report generation are replaced by a
+    reader that binds each stage's receipt to the digest of the bytes below its root,
+    so a changed or rewritten stage is still refused or detected. Everything under
+    test, the resume ordering and the failed-stage preservation, is the real code.
+    """
+
+    def __init__(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, panel_fails: bool
+    ) -> None:
+        self.preflight = _attended_preflight_fixture(tmp_path)
+        self.preflight["required_stages"] = (
+            *ANALYTICS_SIDE_ROLES,
+            *PANEL_SIDE_ROLES,
+        )
+        self.output_root = tmp_path / "output"
+        self.panel_fails = panel_fails
+        self.calls: list[str] = []
+
+        def verify_bytes(
+            receipt: dict[str, object], stage_root: Path, role: str
+        ) -> None:
+            if receipt.get("stage_sha256") != _stage_digest(stage_root):
+                raise materializer.MaterializationError(
+                    f"attended completed {role} artifact identity differs"
+                )
+
+        def verify_candidate(_receipt: dict[str, object], stage_root: Path) -> None:
+            if not (stage_root / "panel-candidate.bin").is_file():
+                raise materializer.MaterializationError(
+                    "attended completed panel-candidate artifact identity differs"
+                )
+
+        monkeypatch.setattr(
+            materializer, "_attended_completed_stage_root", verify_bytes
+        )
+        monkeypatch.setattr(
+            materializer, "_attended_completed_panel_candidate", verify_candidate
+        )
+        monkeypatch.setattr(
+            materializer, "_attended_preflight", lambda _args: self.preflight
+        )
+        monkeypatch.setattr(materializer.subprocess, "run", self.child)
+
+    def child(
+        self, argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        self.calls.append(role)
+        root = materializer._attended_stage_root(self.output_root, role)
+        root.mkdir(parents=True, exist_ok=True)
+        if role == "panel" and self.panel_fails:
+            (root / "partial.bin").write_bytes(b"partial panel")
+            return subprocess.CompletedProcess(argv, 71, "", "panel failed")
+        (root / f"{role}.bin").write_bytes(f"bytes of {role}".encode() * 4)
+        _write_json(
+            self.output_root / "stage-results" / f"{role}.json",
+            {"role": role, "stage_sha256": _stage_digest(root)},
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def execute(self, *, resume: bool = False) -> int:
+        return materializer.main(
+            _attended_argv(
+                self.preflight, self.output_root, execute=True, resume=resume
+            )
+        )
+
+
+def test_a_panel_stage_failure_resumes_without_rerunning_analytics_or_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M9: a presentation-stage failure does not regenerate the financial stages."""
+
+    run = _PanelFailureRun(tmp_path, monkeypatch, panel_fails=True)
+    assert run.execute() == 71
+    assert run.calls == ["analytics", "report", "panel-candidate", "panel"]
+    before = _stage_snapshot(run.output_root)
+    assert len(before) == 4
+
+    run.calls.clear()
+    run.panel_fails = False
+    assert run.execute(resume=True) == 0
+
+    # Only the panel side ran again. `panel-candidate` is included because it shares
+    # `stages/panel` with the failed `panel`, so its outputs went aside with it.
+    assert run.calls == list(PANEL_SIDE_ROLES)
+    assert _stage_snapshot(run.output_root) == before
+    # The failed attempt's bytes are kept for diagnosis, and both panel receipts are
+    # present again for the final view.
+    preserved = run.output_root / "failed-stage-evidence" / "panel" / "attempt-1"
+    assert (preserved / "stage-root" / "partial.bin").read_bytes() == b"partial panel"
+    view = materializer._attended_view(
+        run.output_root, run.preflight["required_stages"], {"fixture": "view"}
+    )
+    assert view["verified_completed_stages"] == list(run.preflight["required_stages"])
+
+
+def test_a_changed_financial_stage_blocks_the_panel_resume_before_any_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M9 control: the unchanged-bytes claim is real, because a change is detected."""
+
+    run = _PanelFailureRun(tmp_path, monkeypatch, panel_fails=True)
+    assert run.execute() == 71
+    analytics = run.output_root / "stages" / "analytics" / "analytics.bin"
+    analytics.write_bytes(analytics.read_bytes() + b"x")
+
+    run.calls.clear()
+    run.panel_fails = False
+    assert run.execute(resume=True) == 1
+    assert run.calls == []
+    assert not (run.output_root / "stage-results" / "panel.json").exists()
+
+
+TOOLS_DIRECTORY = Path(materializer.__file__).resolve().parent
+ENTRYPOINT_PROBE_SECONDS = 180
+
+
+def _attended_child_entrypoints() -> list[str]:
+    """The scripts an attended run launches as children, read from the launcher itself.
+
+    The attended runner starts `portfolio_release_builder.py`, and that builder starts
+    each numerical, report and panel producer it names. Reading the names from the
+    builder's source keeps the list from drifting when a producer is added.
+    """
+
+    builder = TOOLS_DIRECTORY / "portfolio_release_builder.py"
+    named = set(re.findall(r'"(portfolio_[a-z_]+\.py)"', builder.read_text("utf-8")))
+    return sorted(
+        {"portfolio_release_builder.py", "portfolio_pipeline_materialize.py"}
+        | {name for name in named if (TOOLS_DIRECTORY / name).is_file()}
+    )
+
+
+def _probe_entrypoint(
+    script: Path, cwd: Path
+) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+    """Launch one script as a child would be: a fresh interpreter, no PYTHONPATH."""
+
+    environment = {
+        name: value for name, value in os.environ.items() if name != "PYTHONPATH"
+    }
+
+    def launch(argument: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(script), argument],
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=ENTRYPOINT_PROBE_SECONDS,
+            check=False,
+        )
+
+    return launch("--help"), launch("--not-an-argument-of-any-entrypoint")
+
+
+def _entrypoint_violations(
+    helped: subprocess.CompletedProcess[str],
+    refused: subprocess.CompletedProcess[str],
+) -> list[str]:
+    violations = []
+    if helped.returncode != 0 or "Error" in helped.stderr:
+        violations.append(f"--help exits {helped.returncode}: {helped.stderr[-200:]}")
+    elif not helped.stdout.strip():
+        violations.append("--help prints no usage")
+    if refused.returncode == 0:
+        violations.append("an invalid argument exits 0")
+    elif not refused.stderr.strip():
+        violations.append("an invalid argument exits nonzero without a message")
+    elif "ModuleNotFoundError" in refused.stderr or "ImportError" in refused.stderr:
+        violations.append(f"import failure: {refused.stderr[-200:]}")
+    return violations
+
+
+def test_attended_child_entrypoints_include_every_stage_producer() -> None:
+    entrypoints = _attended_child_entrypoints()
+
+    assert {
+        "portfolio_baseline.py",
+        "portfolio_control_panel.py",
+        "portfolio_correlation.py",
+        "portfolio_decomposition.py",
+        "portfolio_release_builder.py",
+        "portfolio_report.py",
+        "portfolio_weekly_returns.py",
+    } <= set(entrypoints)
+
+
+@pytest.mark.parametrize("entrypoint", _attended_child_entrypoints())
+def test_every_attended_child_entrypoint_launches_and_propagates_failure(
+    entrypoint: str, tmp_path: Path
+) -> None:
+    """M6: a child launched without PYTHONPATH imports, and a bad call fails loudly."""
+
+    helped, refused = _probe_entrypoint(TOOLS_DIRECTORY / entrypoint, tmp_path)
+
+    assert _entrypoint_violations(helped, refused) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import module_that_does_not_exist\n", "--help exits"),
+        ("print('usage: ignores every argument')\n", "an invalid argument exits 0"),
+        (
+            "import sys\nprint('usage')\nsys.exit(0 if '--help' in sys.argv else 3)\n",
+            "without a message",
+        ),
+    ],
+    ids=["import-failure", "swallowed-failure", "silent-failure"],
+)
+def test_entrypoint_probe_flags_a_child_that_cannot_propagate_failure(
+    source: str, expected: str, tmp_path: Path
+) -> None:
+    """M6 control: the probe fails on the shapes it exists to catch."""
+
+    script = tmp_path / "broken_child.py"
+    script.write_bytes(source.encode())
+
+    helped, refused = _probe_entrypoint(script, tmp_path)
+
+    violations = _entrypoint_violations(helped, refused)
+    assert violations
+    assert any(expected in violation for violation in violations)
 
 
 def test_attended_preserve_moves_the_receipt_sharing_the_stage_root(

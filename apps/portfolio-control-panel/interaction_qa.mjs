@@ -271,7 +271,7 @@ if (externalManifestPath) {
     "Panel payload equals the independently supplied epoch manifest",
     payloadMatchesExternalManifest,
     {
-      external_manifest_path: externalManifestPath,
+      external_manifest_name: path.basename(externalManifestPath),
       external_manifest_sha256: externalManifestSha256,
       external_manifest_size: externalManifestBytes.byteLength,
       payload_equal: payloadMatchesExternalManifest,
@@ -405,7 +405,9 @@ const manifestCutoffDisplayMatch = !epochManifest || !Array.isArray(epochManifes
       && isCalendarDate(providerCaptureDate)
       && expectedCalculationCutoff <= providerCaptureDate
       && epochLegend?.includes(`Calculations through ${manifestCutoff}.`)
-      && epochLegend.includes(`Artifact/provider capture date: ${providerCaptureDate}.`)
+      && epochLegend.includes(`Ledger as-of: ${providerCaptureDate}.`)
+      && !epochLegend.includes("Artifact/provider capture date")
+      && epochLegend.includes("Provider capture date not recorded in this manifest.")
       && epochLegend.includes("Capital in = explicit opening capital + deposits + internal-in after start.")
       && epochLegend.includes("Net capital = Capital in − Withdrawn."));
 const calculationFactsAfterAcceptedCutoff = calculationDateFacts(epochManifest)
@@ -464,6 +466,45 @@ checks.push(check(
     producer_publication_readiness: producerReadiness.publication_readiness,
     disclosure: epochDisclosure,
   },
+));
+const D8_STATUS_WORDS = /\b(PUBLISHED|PUBLICATION_READY|VERIFIED|READY|RELEASED|ACCEPTED|AVAILABLE|APPROVED|CERTIFIED|CLEARED|PASSED)\b/;
+const D8_BINDING_NOTE = "stage input, hash-bound at build";
+const D8_MANIFEST_FIRST_NOTE = "Recorded when this panel was built, before release. These are the epoch manifest's authority fields, not the release state; the release state is in the coordinated release record, not in this panel.";
+const dataNav = page.locator('[data-nav="data"]').first();
+if (await dataNav.count()) await dataNav.click();
+const inputBindingsText = await page.locator("#input-bindings").innerText();
+const inputBindingsScoreCount = await page.locator("#input-bindings .validation-score").count();
+const inputBindingsGenerationIds = [
+  dashboardData.meta.report_generation_id,
+  dashboardData.meta.decomposition_generation_id,
+  dashboardData.meta.correlation_generation_id,
+];
+const inputBindingsStatusWordMatch = D8_STATUS_WORDS.exec(inputBindingsText);
+const inputBindingsNoteCount = inputBindingsText.split(D8_BINDING_NOTE).length - 1;
+checks.push(check(
+  "D8 build inputs carry no status word",
+  inputBindingsText.length > 0
+    && inputBindingsStatusWordMatch === null
+    && inputBindingsScoreCount === 0
+    && inputBindingsNoteCount === 3
+    && inputBindingsGenerationIds.every((id) => typeof id === "string" && inputBindingsText.includes(id.slice(0, 12))),
+  {
+    generation_prefixes_present: inputBindingsGenerationIds.map((id) => inputBindingsText.includes(String(id).slice(0, 12))),
+    note_count: inputBindingsNoteCount,
+    score_elements: inputBindingsScoreCount,
+    status_word: inputBindingsStatusWordMatch?.[1] ?? null,
+    text: inputBindingsText,
+  },
+));
+const manifestNotes = await page.locator("#account-manifest-disclosure-list li").evaluateAll((nodes) => nodes.map((node) => node.textContent.trim()));
+const manifestStaleLabels = manifestNotes.filter((note) => /^(Panel verification:|Producer readiness:|Manifest self-declared readiness:)/.test(note));
+const manifestUnscopedReadiness = manifestNotes.filter((note) => /NOT_READY|NOT_PERFORMED|READY/.test(note) && !note.startsWith("Epoch manifest "));
+checks.push(check(
+  "D8 manifest readiness is scoped to build",
+  manifestNotes[0] === D8_MANIFEST_FIRST_NOTE
+    && manifestStaleLabels.length === 0
+    && manifestUnscopedReadiness.length === 0,
+  { first_note: manifestNotes[0] ?? null, notes: manifestNotes, stale_labels: manifestStaleLabels, unscoped_readiness: manifestUnscopedReadiness },
 ));
 checks.push(check(
   "Epoch manifest DOM matches exact source values and blockers",
@@ -547,6 +588,7 @@ if (epochOnly) {
     candidate_record_sha256: candidateRecordSha256,
     checks,
     panel_id: panelId,
+    qa_manifest_version: 2,
     scope: "EPOCH_ONLY",
   };
   await browser.close();
@@ -983,7 +1025,12 @@ const positionRows = Number(await page.locator("#position-table").getAttribute("
 const positionText = await page.locator("#position-table").textContent();
 checks.push(check("Current positions retain mapped strategy attribution", positionRows > 0 && !positionText?.includes("AVAILABLE UNMAPPED") && !positionText?.includes("No accepted strategy"), { mapped_rows: positionRows, unmapped_visible: Boolean(positionText?.includes("UNMAPPED")) }));
 const accountOptions = await page.locator("#context-account option").evaluateAll((nodes) => nodes.map((node) => ({ label: node.textContent?.trim(), value: node.value })));
-const firstPositionAccount = await page.evaluate(() => window.PORTFOLIO_DATA.positions[0]?.account_id);
+// Current holdings are the rows current at the cutoff; a payload without classes lists every row.
+const firstPositionAccount = await page.evaluate(() => {
+  const rows = window.PORTFOLIO_DATA.positions;
+  const classified = rows.some((row) => typeof row.position_class === "string");
+  return (classified ? rows.find((row) => row.position_class === "CURRENT_AT_CUTOFF") : rows[0])?.account_id;
+});
 await page.locator("#context-account").selectOption(firstPositionAccount);
 const selectedAccountLabel = await page.locator("#context-account option:checked").textContent();
 const accountContextSummary = await page.locator("#context-summary").textContent();
@@ -1040,6 +1087,9 @@ checks.push(check(
 ));
 const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
 const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
+// The unresolved historical intervals are the HISTORICAL, non-reserve attribution dispositions (N63).
+const expectedHistoricalGaps = await page.evaluate(() => (window.PORTFOLIO_DATA.attribution_dispositions || []).filter((row) => row.period === "HISTORICAL" && row.disposition !== "RESERVE_NOT_APPLICABLE").length);
+const historicalGapReserveRows = await page.locator("#historical-gap-table tbody tr", { hasText: "RESERVE" }).count();
 const volatisPerformance = await page.locator("#performance-table tbody tr", { hasText: "Volatis" }).textContent();
 const robuxioPerformance = await page.locator("#performance-table tbody tr", { hasText: "Robuxio" }).textContent();
 checks.push(check(
@@ -1063,8 +1113,10 @@ checks.push(check(
 ));
 checks.push(check(
   "Reserve assignments are excluded from historical systematic mapping gaps",
-  historicalGapRows === 1 && historicalGapHeading?.includes("0 unresolved"),
-  { historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
+  historicalGapRows === Math.max(1, expectedHistoricalGaps)
+    && historicalGapHeading?.trim() === `${expectedHistoricalGaps} unresolved intervals`
+    && historicalGapReserveRows === 0,
+  { expected_historical_gaps: expectedHistoricalGaps, historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
 ));
 await page.locator('[data-nav="capital"]').click();
 const reserveLifecycleRows = await page.locator("#lifecycle-table tbody tr", { hasText: "Reserve — strategy not applicable" }).count();
@@ -1230,6 +1282,7 @@ const result = {
   candidate_record_sha256: candidateRecordSha256,
   checks,
   panel_id: panelId,
+  qa_manifest_version: 2,
   scope: includeCandidates ? "FULL" : "NON_CANDIDATE",
 };
 await browser.close();

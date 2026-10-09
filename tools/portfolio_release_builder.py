@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterator, Mapping, Sequence, TypedDict
+from typing import Any, Iterable, Iterator, Mapping, Sequence, TypedDict
 
 from quant_engine.core import (
     GenerationManifest,
@@ -30,6 +30,14 @@ from quant_engine.core import (
     read_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from portfolio_counted_producer import (
+    COUNTED_PRODUCERS,
+    COUNTER_ENV,
+    CountedProducerError,
+    read_work_counters,
+    reconcile_reuse_label,
+    sum_work_counters,
+)
 from portfolio_private_stage import validate_private_stage_target
 
 
@@ -1825,7 +1833,58 @@ def _run_xlsx_startup_extension(
     return result_path
 
 
+class _CountedResult(dict[str, Any]):
+    """A producer's JSON result, unchanged, plus the work its run was counted doing."""
+
+    work_counters: dict[str, int] | None
+
+    def __init__(
+        self, result: Mapping[str, Any], work_counters: dict[str, int] | None
+    ) -> None:
+        super().__init__(result)
+        self.work_counters = work_counters
+
+
+def _counted_command(name: str, args: Sequence[str]) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        str(TOOLS_ROOT / "portfolio_counted_producer.py"),
+        name,
+        *args,
+    )
+
+
+def _counted_tool(name: str, *args: str, timeout: int) -> _CountedResult:
+    """Run a numerical producer under the counting wrapper and keep its counts.
+
+    The producers report only a reuse label, so the work is counted around them
+    without touching their bytes. A producer that leaves no counts, or whose
+    reuse label disagrees with the counts, is refused rather than read as zero.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="qe-work-counters-") as scratch:
+        counters_path = Path(scratch) / "work-counters.json"
+        result = _run(
+            _counted_command(name, args),
+            timeout=timeout,
+            env={**os.environ, COUNTER_ENV: str(counters_path)},
+        )
+        try:
+            counters = read_work_counters(counters_path, producer=name)
+            reconcile_reuse_label(
+                counters,
+                result.get("reused"),
+                producer=name,
+                operation=args[0] if args else "",
+            )
+        except CountedProducerError as exc:
+            raise VerticalBuildError(str(exc)) from exc
+    return _CountedResult(result, counters)
+
+
 def _tool(name: str, *args: str, timeout: int = 3600) -> dict[str, Any]:
+    if name in COUNTED_PRODUCERS:
+        return _counted_tool(name, *args, timeout=timeout)
     return _run(
         (sys.executable, str(TOOLS_ROOT / name), *args),
         timeout=timeout,
@@ -1853,6 +1912,9 @@ def _record_numerical_producer_operation(
         else "UNKNOWN"
     )
     spec_sha256, spec_size_bytes = _sha(spec_path)
+    # A producer launched outside the counting wrapper has no counts; that is
+    # recorded as unmeasured, never as zero work.
+    work_counters = getattr(producer_result, "work_counters", None)
     operations.append(
         {
             "generation_id": producer_result.get("generation_id"),
@@ -1867,8 +1929,20 @@ def _record_numerical_producer_operation(
                 "spec_size_bytes": spec_size_bytes,
             },
             "tool": tool,
+            "work_counters": None if work_counters is None else dict(work_counters),
         }
     )
+
+
+def _numerical_producer_evidence_total(
+    rows: Iterable[Mapping[str, int] | None],
+) -> dict[str, int] | None:
+    """Sum the counted work; one unmeasured operation leaves the total unknown."""
+
+    counted = list(rows)
+    if not counted or any(row is None for row in counted):
+        return None
+    return sum_work_counters(row for row in counted if row is not None)
 
 
 def _numerical_producer_evidence(
@@ -1884,7 +1958,15 @@ def _numerical_producer_evidence(
         if "RECOMPUTED" in statuses
         else "UNKNOWN"
     )
-    return {"operations": operations, "warm_status": warm_status}
+    work_counters = _numerical_producer_evidence_total(
+        row.get("work_counters") for row in operations
+    )
+    return {
+        "operations": operations,
+        "warm_status": warm_status,
+        "work_counters": work_counters,
+        "work_counters_status": "UNMEASURED" if work_counters is None else "COUNTED",
+    }
 
 
 def _published_generation(root: Path) -> tuple[str, Path]:

@@ -10,6 +10,7 @@ never crash with an unhandled `TypeError` from the frozenset membership test.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -19,6 +20,8 @@ import pytest
 from quant_engine.core.publication import (
     _is_cloud_placeholder,
     default_release_validation_findings_path,
+    evaluate_findings_document_at_path,
+    evaluate_release_findings_set,
     evaluate_release_validation_findings,
 )
 
@@ -218,6 +221,246 @@ def test_malformed_document_refuses_cleanly_never_crashes(
     assert may_publish is False
     assert blockers == []
     assert reason is not None
+
+
+def _derived_document(
+    generation_id: str,
+    *,
+    findings: tuple[dict[str, object], ...] = (),
+    baseline: str | None = "b" * 64,
+    panel_generation_id: str = "panel-gen",
+    panel_findings_sha256: str = "f" * 64,
+) -> dict[str, object]:
+    document = _document(generation_id, findings=findings, baseline=baseline)
+    document["schema"] = "qe-release-findings/1"
+    document["panel_validation"] = {
+        "generation_id": panel_generation_id,
+        "findings_sha256": panel_findings_sha256,
+    }
+    return document
+
+
+class _Target:
+    """The duck-typed subset of `release.ReleaseTarget` these tests need."""
+
+    def __init__(self, root_id: str, proposed_generation_id: str) -> None:
+        self.root_id = root_id
+        self.proposed_generation_id = proposed_generation_id
+
+
+def test_evaluate_findings_document_at_path_accepts_a_clean_derived_document(
+    tmp_path: Path,
+) -> None:
+    """Ruling B: the single-path check used by
+    `tools/check_release_validation_findings.py` accepts the derived
+    `qe-release-findings/1` schema the same way it accepts the panel's own."""
+    path = tmp_path / "findings.json"
+    _write(path, _derived_document("gen-1"))
+
+    may_publish, blockers, reason = evaluate_findings_document_at_path(
+        path, expected_generation_id="gen-1"
+    )
+
+    assert (may_publish, blockers, reason) == (True, [], None)
+
+
+def test_evaluate_findings_document_at_path_rejects_a_bad_panel_validation_shape(
+    tmp_path: Path,
+) -> None:
+    document = _derived_document("gen-1")
+    del document["panel_validation"]["findings_sha256"]  # type: ignore[attr-defined,union-attr]
+    path = tmp_path / "findings.json"
+    _write(path, document)
+
+    may_publish, blockers, reason = evaluate_findings_document_at_path(
+        path, expected_generation_id="gen-1"
+    )
+
+    assert may_publish is False
+    assert blockers == []
+    assert reason is not None
+
+
+def test_evaluate_release_findings_set_clean_panel_and_derived_target(
+    tmp_path: Path,
+) -> None:
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+    panel_findings_sha256 = hashlib.sha256(panel_path.read_bytes()).hexdigest()
+
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen",
+            panel_generation_id="panel-gen",
+            panel_findings_sha256=panel_findings_sha256,
+        ),
+    )
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
+    paths = {"portfolio-panel": panel_path, "correlation": other_path}
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is True
+    assert per_root_reason == {"portfolio-panel": None, "correlation": None}
+
+
+def test_evaluate_release_findings_set_refuses_a_stale_derived_target(
+    tmp_path: Path,
+) -> None:
+    """A re-validated panel (new findings bytes -> new sha256) must invalidate
+    a derived document still citing the old digest (ruling B.2.4)."""
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen",
+            panel_generation_id="panel-gen",
+            panel_findings_sha256="0" * 64,  # not the panel's real sha256
+        ),
+    )
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
+    paths = {"portfolio-panel": panel_path, "correlation": other_path}
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["portfolio-panel"] is None
+    assert per_root_reason["correlation"] is not None
+    assert "stale" in per_root_reason["correlation"]
+
+
+def test_evaluate_release_findings_set_refuses_with_no_clean_panel_at_all(
+    tmp_path: Path,
+) -> None:
+    """At least one target must carry a clean judged (`/1`) document; a
+    manifest with only derived documents has nothing for the bound set to
+    bind to and refuses even if every derived document is internally clean."""
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen", panel_generation_id="panel-gen", panel_findings_sha256="f" * 64
+        ),
+    )
+
+    targets = [_Target("correlation", "other-gen")]
+    paths = {"correlation": other_path}
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["correlation"] is not None
+
+
+def test_evaluate_release_findings_set_refuses_a_blocker_on_a_derived_target(
+    tmp_path: Path,
+) -> None:
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+    panel_findings_sha256 = hashlib.sha256(panel_path.read_bytes()).hexdigest()
+
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen",
+            findings=(_finding(**{"class": "BLOCKER_AUTHORITY"}),),
+            panel_generation_id="panel-gen",
+            panel_findings_sha256=panel_findings_sha256,
+        ),
+    )
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
+    paths = {"portfolio-panel": panel_path, "correlation": other_path}
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["portfolio-panel"] is None
+    assert per_root_reason["correlation"] is not None
+    assert "blocking findings" in per_root_reason["correlation"]
+
+
+def test_evaluate_release_findings_set_refuses_a_missing_target_file(
+    tmp_path: Path,
+) -> None:
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "other-gen"),
+    ]
+    paths = {"portfolio-panel": panel_path, "correlation": tmp_path / "absent.json"}
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["correlation"] is not None
+    assert "no release-validation findings file" in per_root_reason["correlation"]
+
+
+def test_evaluate_release_findings_set_refuses_a_non_panel_root_carrying_a_clean_v1_document(
+    tmp_path: Path,
+) -> None:
+    """GLM (pr519-final.glm.review.md, publication.py:2193): the clean `/1`
+    anchor every derived document binds to must be the panel root's document
+    specifically, or there must be exactly one `/1` document in the manifest.
+    Without that, a non-panel root (``correlation``) that happens to also
+    carry a clean ``qe-validate-generation/1`` document can serve as the
+    binding anchor for a derived document on a *third* root, forging a panel
+    digest that was never the real panel's own judged findings."""
+    panel_path = tmp_path / "panel.json"
+    _write(panel_path, _document("panel-gen"))
+
+    rogue_path = tmp_path / "rogue.json"
+    _write(rogue_path, _document("rogue-gen"))
+    rogue_findings_sha256 = hashlib.sha256(rogue_path.read_bytes()).hexdigest()
+
+    other_path = tmp_path / "other.json"
+    _write(
+        other_path,
+        _derived_document(
+            "other-gen",
+            panel_generation_id="rogue-gen",
+            panel_findings_sha256=rogue_findings_sha256,
+        ),
+    )
+
+    targets = [
+        _Target("portfolio-panel", "panel-gen"),
+        _Target("correlation", "rogue-gen"),
+        _Target("weekly-returns", "other-gen"),
+    ]
+    paths = {
+        "portfolio-panel": panel_path,
+        "correlation": rogue_path,
+        "weekly-returns": other_path,
+    }
+
+    may_publish, per_root_reason = evaluate_release_findings_set(targets, paths)
+
+    assert may_publish is False
+    assert per_root_reason["portfolio-panel"] is not None
+    assert per_root_reason["correlation"] is not None
+    assert "exactly one" in per_root_reason["portfolio-panel"]
+    assert "exactly one" in per_root_reason["correlation"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows file-attribute API only")

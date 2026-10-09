@@ -109,6 +109,14 @@ _PATH_STAGES = {
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
+    "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
+    # The implementation reconciliation and return-attribution builders write the
+    # two hash-bound contracts the report reads, and the report imports the
+    # reconciliation module for the P123 policy evidence.  A change to either
+    # changes the contract bytes the report is bound to, so the report (and the
+    # panel that renders it) must be re-run.
+    "tools/portfolio_implementation_reconciliation.py": ["report", "panel"],
+    "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
@@ -143,6 +151,12 @@ _PATH_STAGES = {
     # top-level `acceptance/validate/`; it reads published outputs and imports no
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
+    # Derived release-findings producer (ruling B / C1): binds every non-panel
+    # release target to the panel's own findings. Its checks live in
+    # `acceptance/validate/release_targets.py`; it reads a prepared release.json
+    # and published generation.json/panel bytes, and imports no producer, so a
+    # change to it affects no execution stage.
+    "tools/validate_release_targets.py": [],
     # Rollforward-cycle verifiers (docs/data-rollforward.md). They re-read the freshness
     # artifact and a staged panel candidate to write a local cycle receipt; no producer
     # imports them and they write no delivery artifact, so a change affects no stage.

@@ -51,6 +51,59 @@ The workbook is read-only and advisory. It contains no provider connection,
 external link, macro, order-submission path, candidate refresh, optimization,
 or broker credential.
 
+## Report schema versions
+
+`report_schema_version` says which rules built the report, and a reader accepts the
+versions it can read: 1 and 2 (baseline schema 1), 3 and 4 (baseline schema 2 with a
+custody handoff). A new field exists only from the version that introduces it, so a
+retained report of an older version still validates and no sealed generation is re-pinned.
+
+- 3: each custody cash line names its `last_event_date` and `coverage_end`, and the report
+  may carry `capital_coverage_bounds`.
+- 4 (QC-1, N64 and N65): the strategy cost rate divides by the sleeve value at the
+  calculation cutoff, and the dated allocation snapshot publishes self-consistent weights.
+  Everything in version 3 is unchanged. Version 4 is emitted wherever version 3 was.
+
+## Cost rate at the cutoff
+
+From report schema 4 a strategy's `annual_external_cost_rate_pre_tax` is its annual external
+cost over its sleeve value at the calculation cutoff, and only then. The attribution catalog
+divides by the value in the dated allocation snapshot (2026-08-16), a size the strategy no
+longer has, so the report ignores that quotient and the cost mirror under
+`strategy_attribution.costs` no longer carries it or `current_sleeve_value_usd`.
+
+- The denominator is `current_value_usd` of the strategy row (basis `CURRENT_CUTOFF`),
+  published as `cost_rate_denominator_usd` with its date `cost_rate_denominator_as_of_date`.
+- A value dated before the cutoff (a sleeve whose accounts have no NAV at the cutoff) leaves
+  the rate null and `cost_rate_status` `NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF`, with the
+  reason naming both dates. No cost amount is `UNAVAILABLE_NO_COST_AMOUNT`.
+- The amount keeps the date of its schedule, `cost_schedule_as_of_date`, taken from the
+  baseline's `cost-economics` source artifact.
+- `fees_status` follows `cost_status`: a `known_*` cost is `EVIDENCED_PRE_TAX`, a
+  `*_contract_cap` is `UPPER_BOUND_CONTRACT_CAP_PRE_TAX` (a ceiling the contract allows, not
+  an observed cost), no amount is `UNAVAILABLE`. A rate over a cap is an upper bound too.
+
+## Allocation snapshot weights
+
+`allocation_history` is the dated allocation snapshot (2026-08-16), kept as a labelled
+historical reference (`weight_basis` `HISTORICAL_SNAPSHOT_<date>`). The snapshot's recorded
+`systematic_weight` column does not reconcile with its recorded values over any
+denominator (the value-implied totals differ row by row), so from report schema 4 the
+report does not publish it. A systematic row's `systematic_weight` is its
+`current_value_usd` over the sum of every systematic component the snapshot records (nine
+in the retained inputs, including the two retained-excluded ones), before the
+current-product filter. That is the snapshot's own perimeter; it is not a renormalisation
+to the current required strategies, so the three weight sets (current cutoff, policy,
+historical) stay distinct. Each row states `weight_denominator_usd`,
+`weight_perimeter` and `weight_perimeter_component_count`. The recorded column stays in
+the baseline catalog, which is sealed and unchanged.
+
+The denominator is the baseline's own sequential 28-digit half-even sum, equal to the
+replayed `systematic_total_usd`; the report refuses a snapshot whose perimeter total
+differs from that figure, and one whose weights over the whole perimeter do not sum to one
+within 1e-12. The acceptance validator re-derives each weight from the row's value and
+stated denominator.
+
 ## Build and verify
 
 From the repository root, with the private roots supplied explicitly:

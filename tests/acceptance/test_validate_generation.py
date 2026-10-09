@@ -13,7 +13,7 @@ from collections.abc import Callable
 import copy
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, getcontext, setcontext
+from decimal import Decimal, getcontext, localcontext, setcontext
 import hashlib
 import importlib.util
 import json
@@ -5965,3 +5965,135 @@ def test_a_schema_four_freshness_bundle_with_a_malformed_value_is_refused(
 
     assert findings, case
     assert {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}, case
+
+
+# ---- QC1-R N65: version-4 snapshot weights are value over the perimeter ----------
+
+_PERIMETER = Decimal("7500")
+
+
+def _version_four_snapshot(report: dict[str, Any]) -> None:
+    """Alpha 1100 and beta 5500 of a 7500 perimeter; 900 sits in an excluded component."""
+
+    report["report_schema_version"] = 4
+    for row in report["allocation_history"]:
+        if row["scope"] != "SYSTEMATIC":
+            continue
+        value = Decimal(row["current_value_usd"])
+        with localcontext() as context:
+            context.prec = 34
+            row["systematic_weight"] = str(value / _PERIMETER)
+        row["weight_denominator_usd"] = "7500"
+        row["weight_perimeter"] = "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"
+        row["weight_perimeter_component_count"] = 3
+
+
+def _snapshot_findings(tmp_path: Path, *mutations: Any) -> list[Any]:
+    found = run(
+        build(tmp_path, Spec(report=[_version_four_snapshot, *mutations])),
+    )
+    return [
+        f
+        for f in found
+        if f.check_id == "returns.allocation_weight_sets" and f.klass in checks.BLOCKERS
+    ]
+
+
+def test_n65_a_consistent_version_four_snapshot_has_no_weight_finding(
+    tmp_path: Path,
+) -> None:
+    assert _snapshot_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["wrong_weight", "missing_denominator", "two_denominators", "values_exceed"],
+)
+def test_n65_a_version_four_snapshot_that_is_not_self_consistent_is_a_blocker(
+    tmp_path: Path, fault: str
+) -> None:
+    def tamper(report: dict[str, Any]) -> None:
+        row = report["allocation_history"][1]
+        if fault == "wrong_weight":
+            row["systematic_weight"] = "0.25"
+        elif fault == "missing_denominator":
+            del row["weight_denominator_usd"]
+        elif fault == "two_denominators":
+            row["weight_denominator_usd"] = "7400"
+        else:
+            for item in report["allocation_history"]:
+                item["weight_denominator_usd"] = "6000"
+
+    assert _snapshot_findings(tmp_path, tamper)
+
+
+def test_n65_the_recorded_column_is_not_judged_at_older_versions(
+    tmp_path: Path,
+) -> None:
+    """A version-3 report keeps its recorded weights; the new rule never reads them."""
+
+    def older(report: dict[str, Any]) -> None:
+        report["report_schema_version"] = 3
+
+    assert _snapshot_findings(tmp_path, older) == []
+
+
+def _counts_context(panel: dict[str, Any]) -> checks.Context:
+    context = checks.Context(
+        gen=None,  # type: ignore[arg-type]
+        cutoff=checks.date(2026, 9, 17),
+        cutoff_source="test",
+    )
+    context.gen = type("G", (), {"panel": panel})()  # type: ignore[assignment]
+    return context
+
+
+def _classified_positions_panel(positions_count: int) -> dict[str, Any]:
+    classes = (
+        ["CURRENT_AT_CUTOFF"] * 3
+        + ["HISTORICAL"] * 2
+        + ["LATEST_BEFORE_CUTOFF"]
+        + ["AFTER_CUTOFF"]
+    )
+    return {
+        "counts": {"positions": positions_count},
+        "positions": [{"position_class": item} for item in classes],
+        "position_snapshots": {
+            "current_at_cutoff_rows": 3,
+            "latest_before_cutoff_rows": 1,
+            "historical_rows": 2,
+            "after_cutoff_rows": 1,
+            "unavailable_rows": 0,
+        },
+    }
+
+
+def test_n62_the_positions_count_is_the_rows_current_at_the_cutoff() -> None:
+    panel = _classified_positions_panel(3)
+
+    assert list(checks.check_counts(_counts_context(panel))) == []
+
+
+def test_n62_a_count_of_every_accepted_row_is_not_the_current_holdings() -> None:
+    findings = list(
+        checks.check_counts(_counts_context(_classified_positions_panel(7)))
+    )
+
+    assert [(item.check_id, item.klass, item.entity) for item in findings] == [
+        ("preservation.counts", checks.BLOCKER_INVARIANT, "positions")
+    ]
+
+
+def test_n62_a_snapshot_count_that_differs_from_its_rows_is_a_finding() -> None:
+    panel = _classified_positions_panel(3)
+    panel["position_snapshots"]["historical_rows"] = 5
+
+    findings = list(checks.check_counts(_counts_context(panel)))
+
+    assert [item.entity for item in findings] == ["position_snapshots.historical_rows"]
+
+
+def test_n62_a_panel_without_position_classes_still_counts_every_row() -> None:
+    panel = {"counts": {"positions": 2}, "positions": [{}, {}]}
+
+    assert list(checks.check_counts(_counts_context(panel))) == []

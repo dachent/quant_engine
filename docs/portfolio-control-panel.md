@@ -13,6 +13,33 @@ without preserving stale calculations or hard-coded operator conclusions.
   HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
+- Current holdings are the accepted position rows that the report marks as the
+  latest snapshot of their account and that are dated at the calculation
+  cutoff. `counts.positions` counts only those rows. `position_snapshots`
+  counts the rest by name (latest snapshot before the cutoff, historical
+  snapshots, rows dated after the cutoff, unavailable rows) with the history
+  date range, and every position row carries its `position_class`. The
+  verifier recomputes the split from the report rows. Panel schema 24 (25 for a
+  version-3 report) carries these fields; 21 to 23 remain readable.
+- Version-matched long history for a strategy is the hybrid-gate predicate
+  (accepted history for economic inference, live plus backtest eligible) and
+  its own `history_observations`. A decomposition lens never sets membership:
+  the lens statistics come from the strategy's AVAILABLE or DIAGNOSTIC row and
+  name their source key (`long_history.lens_statistics_source`).
+- An implementation contract row built from a different provider ledger than the governed
+  one reaches the panel as the report's closed NOT_READY object (N66-R). The
+  underwriting implementation layer then reports its comparison as not ready
+  (`comparison_status`), whichever contract kind is stale, and a detail with no
+  return reconciliation is not ready, never a legacy comparison. The detail holds
+  each object under `stale_reconciliation` or `stale_return_attribution`, and
+  `contracts` gives the contract dates, the stale and pre-policy flags and the
+  provider return policy. The panel shows the governed account return with its basis and window; the contract's own
+  superseded figure stays beside its basis label and is never read as a return. The
+  verifier validates the closed object and accounts for the three strategies as
+  causal, policy-unavailable or stale.
+- The governed PORT-HWM-4 number appears as `advisory.hwm_candidate`, labelled
+  as pending owner acceptance with the E2 reason. The numeric HWM status stays
+  not accepted and `hwm_summary` is unchanged.
 - The numerical HWM composite (the `hwm_inputs` envelope) is reconciled
   against the governed baseline generation, never against the report's
   carried copies: the panel requires the baseline root (`--baseline-root`),
@@ -76,6 +103,12 @@ without preserving stale calculations or hard-coded operator conclusions.
   mix; for GrizzlyBears and TuringTrader it renders every supported ordered
   counterfactual category and any explicit residual. The report contract proves
   that each displayed waterfall closes to the exact model/account endpoint.
+  Both artifacts bind their account return to the governed account-live series
+  (`account_leg`, basis `BASELINE_ACCOUNT_LIVE`) and name the model basis of
+  every comparison. The report never publishes an account return that is not
+  that series, so one window carries one account return: a row built from
+  another provider-ledger vintage is a NOT_READY object that shows the governed
+  return and its reason, and carries no model return, gap or waterfall.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
@@ -286,6 +319,15 @@ node apps/portfolio-control-panel/interaction_qa.mjs `
 uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
+
+Version-2 capture manifests (`qa_manifest_version: 2`, also stamped on each
+`visual-lint.json`) are relative to `--html`: `target` and `final_url` are
+`index.html#<view>` (or `generations/<id>/index.html#<view>` through the stable
+launcher), the four `*_path` fields are bare file names inside the capture folder,
+and `html_directory_name` names the directory that held `--html`. No sealed QA file
+may carry a drive letter, `file:` URL or UNC path; `portfolio_control_panel.py qa`
+refuses it, writes its receipt where `--receipt` says (outside `--qa-dir`), and
+`qa-inventory --qa-dir` repeats the scan, including PDF streams, on a sealed tree.
 
 Acceptance requires all nine views at 1440×900, 1024×768, and 390×844 plus a
 direct-file capture; no console or request failures; clean visual lint across

@@ -18,7 +18,7 @@ visible, and they pin the three labeled weight sets:
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import importlib.util
 import json
 from pathlib import Path
@@ -1718,7 +1718,7 @@ def test_n56_native_custody_baseline_is_schema_two_with_proven_through_cash(
         assert line["as_of_date"] >= line["last_event_date"]
 
 
-def test_n56_report_with_custody_cash_is_version_three_and_schema_valid(
+def test_n56_report_with_custody_cash_is_version_four_and_schema_valid(
     cr2_custody_structural_complete_world,
 ):
     from jsonschema import Draft202012Validator, FormatChecker, ValidationError
@@ -1735,7 +1735,7 @@ def test_n56_report_with_custody_cash_is_version_three_and_schema_valid(
         **epoch,
     )
 
-    assert report["report_schema_version"] == 3
+    assert report["report_schema_version"] == 4
     schema = json.loads(
         (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
             encoding="utf-8"
@@ -1767,7 +1767,13 @@ def test_n56_panel_schema_requires_the_cash_fields_only_from_version_23():
             REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert schema["properties"]["panel_schema_version"]["enum"] == [21, 22, 23]
+    assert schema["properties"]["panel_schema_version"]["enum"] == [
+        21,
+        22,
+        23,
+        24,
+        25,
+    ]
     for definition in (
         "custody_handoff_custody_cash",
         "custody_handoff_custody_cash_v3",
@@ -1967,3 +1973,417 @@ def test_n56_coverage_disclosure_never_explains_a_date_the_line_does_not_prove(
     # A retained-excluded strategy makes no claim.
     robuxio["scope"] = "RETAINED_EXCLUDED"
     assert reporter._capital_coverage_bounds(custody, cutoff) is None
+
+
+# ---- QC1-R N64: a cost rate divides by the sleeve value at the cutoff ----------
+
+
+@pytest.fixture(scope="module")
+def producer_attribution(tmp_path_factory) -> dict[str, Any]:
+    """The attribution catalog as ``portfolio_attribution.build_catalog`` emits it.
+
+    Nine strategies; every dated-snapshot allocation is 100, so each cost rate the
+    producer states is the amount over 100, the figure the 2026-08-16 snapshot gives.
+    The cost words are the real cost-economics ones.
+    """
+
+    spec = importlib.util.spec_from_file_location(
+        "attribution_producer_fixture",
+        REPOSITORY_ROOT
+        / "tests"
+        / "portfolio_attribution"
+        / "test_portfolio_attribution.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    root = tmp_path_factory.mktemp("attribution-producer")
+    baseline = module._baseline(
+        root,
+        cost_rows={
+            1: ("9", "known_gold_api"),
+            2: ("8", "known_fixed"),
+            3: ("6", "conservative_1pct_contract_cap"),
+            4: ("7", "known_fixed"),
+            5: (None, "unknown_subscription_cost"),
+        },
+    )
+    attribution_spec, _ = module._inputs(root)
+    catalog, _raw, _artifacts = module.attribution.build_catalog(
+        baseline, attribution_spec
+    )
+    return catalog
+
+
+def _strategy_rows_at_cutoff(cutoff: str) -> list[dict[str, Any]]:
+    """Report strategy rows as ``_strategies`` shapes them: value and date of the capital."""
+
+    values = {
+        1: ("90", cutoff),
+        2: ("80", cutoff),
+        3: ("60", cutoff),
+        # Robuxio shape: the last member value predates the cutoff.
+        4: ("70", "2025-12-05"),
+        5: ("50", cutoff),
+    }
+    return [
+        {
+            "strategy_id": f"strategy-{index}",
+            "current_value_usd": values.get(index, ("40", cutoff))[0],
+            "capital_as_of_date": values.get(index, ("40", cutoff))[1],
+            "capital_status": "AVAILABLE",
+            "weight_basis": "CURRENT_CUTOFF",
+        }
+        for index in range(1, 10)
+    ]
+
+
+def _merged_costs(
+    producer_attribution: dict[str, Any], cutoff: str = "2026-01-06"
+) -> dict[str, dict[str, Any]]:
+    rows = reporter._merge_attribution(
+        _strategy_rows_at_cutoff(cutoff),
+        producer_attribution,
+        cost_rate_at_cutoff={
+            "calculation_cutoff_date": cutoff,
+            "cost_schedule_as_of_date": "2026-01-02",
+        },
+    )
+    return {str(row["strategy_id"]): row for row in rows}
+
+
+def test_the_producer_rate_is_over_the_snapshot_value_the_report_must_not_reuse(
+    producer_attribution: dict[str, Any],
+) -> None:
+    """Pin the premise: the sealed producer divides by the dated allocation value."""
+
+    producer = {row["strategy_id"]: row for row in producer_attribution["costs"]}
+    assert producer["strategy-1"]["current_sleeve_value_usd"] == "100"
+    assert producer["strategy-1"]["annual_external_cost_rate_pre_tax"] == "0.09"
+
+
+def test_the_cost_rate_divides_by_the_cutoff_sleeve_value_not_the_snapshot_value(
+    producer_attribution: dict[str, Any],
+) -> None:
+    rows = _merged_costs(producer_attribution)
+
+    one = rows["strategy-1"]
+    # 9 / 90 at the cutoff, not 9 / 100 from the dated snapshot.
+    assert Decimal(one["annual_external_cost_rate_pre_tax"]) == Decimal("0.1")
+    assert one["cost_rate_denominator_usd"] == "90"
+    assert one["cost_rate_denominator_as_of_date"] == "2026-01-06"
+    assert one["cost_rate_denominator_basis"] == "CURRENT_CUTOFF"
+    assert one["cost_rate_status"] == "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
+    assert one["cost_rate_reason"] is None
+    assert one["cost_schedule_as_of_date"] == "2026-01-02"
+    assert Decimal(rows["strategy-2"]["annual_external_cost_rate_pre_tax"]) == Decimal(
+        "0.1"
+    )
+    assert rows["strategy-2"]["fees_status"] == "EVIDENCED_PRE_TAX"
+
+
+def test_a_cost_rate_over_a_sleeve_value_not_dated_at_the_cutoff_is_not_ready(
+    producer_attribution: dict[str, Any],
+) -> None:
+    stale = _merged_costs(producer_attribution)["strategy-4"]
+
+    assert stale["annual_external_cost_usd"] == "7"
+    assert stale["annual_external_cost_rate_pre_tax"] is None
+    assert stale["cost_rate_status"] == "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF"
+    assert stale["cost_rate_denominator_usd"] == "70"
+    assert stale["cost_rate_denominator_as_of_date"] == "2025-12-05"
+    assert "2025-12-05" in stale["cost_rate_reason"]
+    assert "2026-01-06" in stale["cost_rate_reason"]
+
+
+def test_a_cost_rate_without_a_cost_amount_is_unavailable_not_not_ready(
+    producer_attribution: dict[str, Any],
+) -> None:
+    none = _merged_costs(producer_attribution)["strategy-5"]
+
+    assert none["annual_external_cost_usd"] is None
+    assert none["annual_external_cost_rate_pre_tax"] is None
+    assert none["cost_rate_status"] == "UNAVAILABLE_NO_COST_AMOUNT"
+    assert none["fees_status"] == "UNAVAILABLE"
+
+
+def test_a_contract_cap_rate_is_published_but_labelled_an_upper_bound(
+    producer_attribution: dict[str, Any],
+) -> None:
+    cap = _merged_costs(producer_attribution)["strategy-3"]
+
+    assert Decimal(cap["annual_external_cost_rate_pre_tax"]) == Decimal("0.1")
+    assert cap["fees_status"] == "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+
+
+def test_a_retained_catalog_that_labels_a_cap_evidenced_is_relabelled_by_the_report(
+    producer_attribution: dict[str, Any],
+) -> None:
+    """The retained smoke catalog predates the label; the report does not repeat it."""
+
+    retained = deepcopy(producer_attribution)
+    for row in retained["costs"]:
+        if row["strategy_id"] == "strategy-3":
+            row["fees_status"] = "EVIDENCED_PRE_TAX"
+    rows = _merged_costs(retained)
+
+    assert rows["strategy-3"]["fees_status"] == "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
+
+
+def test_the_legacy_merge_without_a_cutoff_basis_keeps_the_catalog_rate(
+    producer_attribution: dict[str, Any],
+) -> None:
+    """A report that predates the cutoff-denominator rule is not recomputed."""
+
+    rows = {
+        str(row["strategy_id"]): row
+        for row in reporter._merge_attribution(
+            _strategy_rows_at_cutoff("2026-01-06"), producer_attribution
+        )
+    }
+
+    assert rows["strategy-1"]["annual_external_cost_rate_pre_tax"] == "0.09"
+    assert "cost_rate_status" not in rows["strategy-1"]
+
+
+def test_the_attribution_section_does_not_republish_the_snapshot_rate(
+    producer_attribution: dict[str, Any],
+) -> None:
+    """One rate per strategy: the snapshot-sized rate and value leave the cost mirror."""
+
+    legacy = reporter._strategy_attribution_section(
+        producer_attribution, {"generation_id": "a" * 64}, None
+    )
+    assert legacy["costs"][0]["annual_external_cost_rate_pre_tax"] == "0.09"
+    current = reporter._strategy_attribution_section(
+        producer_attribution,
+        {"generation_id": "a" * 64},
+        None,
+        cutoff_cost_rate=True,
+    )
+    for row in current["costs"]:
+        assert "annual_external_cost_rate_pre_tax" not in row
+        assert "current_sleeve_value_usd" not in row
+        assert row["annual_external_cost_usd"] == next(
+            item["annual_external_cost_usd"]
+            for item in producer_attribution["costs"]
+            if item["strategy_id"] == row["strategy_id"]
+        )
+
+
+def _summary_schema_errors(version: int, rows: list[dict[str, Any]]) -> list[str]:
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(
+        {**schema, "required": []}, format_checker=FormatChecker()
+    )
+    document = {"report_schema_version": version, "strategy_summary": rows[:7]}
+    return [error.message[:100] for error in validator.iter_errors(document)]
+
+
+def test_version_four_schema_admits_the_producers_cost_rate_fields_only_at_four(
+    producer_attribution: dict[str, Any],
+) -> None:
+    rows = list(_merged_costs(producer_attribution).values())
+
+    assert _summary_schema_errors(4, rows) == []
+    assert _summary_schema_errors(3, rows)
+    assert _summary_schema_errors(2, rows)
+
+
+def test_version_four_schema_refuses_a_rate_without_its_status_or_with_a_wrong_one(
+    producer_attribution: dict[str, Any],
+) -> None:
+    rows = deepcopy(list(_merged_costs(producer_attribution).values()))
+    stale = next(row for row in rows if row["cost_rate_status"].startswith("NOT_READY"))
+    available = next(
+        row
+        for row in rows
+        if row["cost_rate_status"] == "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
+    )
+
+    stale["annual_external_cost_rate_pre_tax"] = "0.1"
+    assert _summary_schema_errors(4, rows)
+    stale["annual_external_cost_rate_pre_tax"] = None
+    stale["cost_rate_reason"] = None
+    assert _summary_schema_errors(4, rows)
+    stale["cost_rate_reason"] = "dated earlier"
+    assert _summary_schema_errors(4, rows) == []
+    available["fees_status"] = "EVIDENCED"
+    assert _summary_schema_errors(4, rows)
+    available["fees_status"] = "EVIDENCED_PRE_TAX"
+    del available["cost_schedule_as_of_date"]
+    assert _summary_schema_errors(4, rows)
+
+
+def test_only_a_schema_two_custody_baseline_takes_the_cutoff_cost_basis(
+    cr2_custody_native_world,
+) -> None:
+    catalog = cr2_custody_native_world[5]
+
+    assert reporter._uses_cutoff_basis(catalog) is True
+    assert reporter._uses_cutoff_basis(_world()) is False
+    legacy = deepcopy(catalog)
+    legacy["baseline_schema_version"] = 1
+    assert reporter._uses_cutoff_basis(legacy) is False
+
+
+def test_the_cost_schedule_date_is_the_cost_economics_artifact_date() -> None:
+    catalog = {
+        "source_artifacts": [
+            {"source_key": "component-decision-table", "as_of_date": "2026-08-16"},
+            {"source_key": "cost-economics", "as_of_date": "2026-07-25"},
+        ]
+    }
+
+    assert reporter._cost_schedule_as_of_date(catalog) == "2026-07-25"
+    assert reporter._cost_schedule_as_of_date({"source_artifacts": []}) is None
+
+
+# ---- QC1-R N65: a dated snapshot publishes weights its own values give ----------
+
+
+def _custody_world() -> dict[str, Any]:
+    """The dated-snapshot world as a schema-2 custody baseline carries it."""
+
+    catalog = _world()
+    catalog["baseline_schema_version"] = 2
+    catalog["current_capital"]["custody_authority"] = {"ledger_generation_id": "a" * 64}
+    return catalog
+
+
+def _snapshot_rows(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = reporter._allocations(catalog, _controls())
+    return {
+        str(row["strategy_id"]): row for row in rows if row["scope"] == "SYSTEMATIC"
+    }
+
+
+def test_snapshot_weights_are_value_over_the_whole_recorded_perimeter() -> None:
+    """90, 120, 110 and the retained 0.19 give a 320.19 perimeter, not the recorded column."""
+
+    rows = _snapshot_rows(_custody_world())
+
+    assert set(rows) == {"s-alpha", "s-beta", "s-gamma"}
+    total = Decimal("320.19")
+    for strategy_id, value in (
+        ("s-alpha", "90"),
+        ("s-beta", "120"),
+        ("s-gamma", "110"),
+    ):
+        weight = Decimal(rows[strategy_id]["systematic_weight"])
+        with localcontext() as context:
+            context.prec = 50
+            expected = Decimal(value) / total
+        assert abs(weight - expected) < Decimal("1e-30"), strategy_id
+        assert rows[strategy_id]["weight_denominator_usd"] == "320.19"
+        assert rows[strategy_id]["weight_perimeter_component_count"] == 4
+        assert rows[strategy_id]["weight_perimeter"] == (
+            "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER"
+        )
+        assert rows[strategy_id]["weight_basis"] == "HISTORICAL_SNAPSHOT_2025_12_31"
+    # The recorded column (0.25, 0.35, 0.30) reconciles with no denominator and is
+    # never published; the excluded retained component keeps its share of the total.
+    assert {"0.25", "0.35", "0.30"}.isdisjoint(
+        {row["systematic_weight"] for row in rows.values()}
+    )
+    published = sum(Decimal(row["systematic_weight"]) for row in rows.values())
+    assert abs(published + Decimal("0.19") / total - 1) < Decimal("1e-12")
+    # Not renormalised to the current required three (B5).
+    assert published != 1
+
+
+def test_snapshot_weights_leave_the_reserve_row_without_a_weight() -> None:
+    reserve = next(
+        row
+        for row in reporter._allocations(_custody_world(), _controls())
+        if row["scope"] == "RESERVE"
+    )
+
+    assert reserve["systematic_weight"] is None
+    assert "weight_denominator_usd" not in reserve
+
+
+def test_a_snapshot_whose_perimeter_differs_from_its_recorded_total_is_refused() -> (
+    None
+):
+    catalog = _custody_world()
+    catalog["replay"]["systematic_total_usd"] = "320.20"
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="allocation snapshot perimeter differs from its recorded systematic total",
+    ):
+        reporter._allocations(catalog, _controls())
+
+
+def test_a_snapshot_weight_set_that_does_not_sum_to_one_is_refused() -> None:
+    with pytest.raises(
+        reporter.ReportValidationError, match="snapshot weights do not sum to one"
+    ):
+        reporter._verify_snapshot_weight_sum(
+            [Decimal("0.5"), Decimal("0.4999")], tolerance=Decimal("1e-12")
+        )
+    reporter._verify_snapshot_weight_sum(
+        [Decimal("0.5"), Decimal("0.5")], tolerance=Decimal("1e-12")
+    )
+
+
+def test_a_legacy_baseline_keeps_the_recorded_snapshot_weights() -> None:
+    """A schema-1 report is a sealed shape: its allocation column stays as recorded."""
+
+    rows = _snapshot_rows(_world())
+
+    assert {key: row["systematic_weight"] for key, row in rows.items()} == {
+        "s-alpha": "0.25",
+        "s-beta": "0.35",
+        "s-gamma": "0.30",
+    }
+    assert all("weight_denominator_usd" not in row for row in rows.values())
+
+
+def test_a_version_four_report_publishes_self_consistent_snapshot_weights(
+    cr2_custody_structural_complete_world,
+) -> None:
+    """Through the real baseline builder: value over the recorded perimeter, schema valid."""
+
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    report = _complete_world_report(cr2_custody_structural_complete_world)
+    catalog = cr2_custody_structural_complete_world[5]
+    assert report["report_schema_version"] == 4
+    recorded = [
+        Decimal(row["current_value"]["value"])
+        for row in catalog["allocations"]
+        if row["scope"] == "SYSTEMATIC"
+    ]
+    rows = [r for r in report["allocation_history"] if r["scope"] == "SYSTEMATIC"]
+    assert rows
+    denominator = Decimal(rows[0]["weight_denominator_usd"])
+    assert abs(denominator - sum(recorded, Decimal(0))) < Decimal("1e-20")
+    assert denominator == Decimal(catalog["replay"]["systematic_total_usd"])
+    for row in rows:
+        value = Decimal(row["current_value_usd"])
+        assert abs(Decimal(row["systematic_weight"]) - value / denominator) < Decimal(
+            "1e-30"
+        )
+        assert row["weight_perimeter_component_count"] == len(recorded)
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(report)
+    older = deepcopy(report)
+    older["report_schema_version"] = 3
+    assert list(validator.iter_errors(older))
+    stripped = deepcopy(report)
+    del stripped["allocation_history"][1]["weight_denominator_usd"]
+    assert list(validator.iter_errors(stripped))

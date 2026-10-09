@@ -6,12 +6,16 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date
+from collections import Counter
+from collections.abc import Callable, Iterator, Mapping, Sequence
+import contextlib
+from datetime import UTC, date, datetime
 import hashlib
 from itertools import product
 import json
+import os
 from pathlib import Path
+import re
 from typing import Any, cast
 
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
@@ -575,6 +579,118 @@ def verify_selected_hwm_generation(
     return {"portfolio-calendars", "portfolio-fx-rates", "portfolio-security-master"}
 
 
+_VERIFICATION_LEDGER_DIRECTORY = "financial-verification-ledger"
+_CALLER_LABEL = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_WORK_COUNTER_KEYS = (
+    "model_fit_calls",
+    "grid_search_calls",
+    "correlation_build_calls",
+    "full_rederivation_count",
+    "receipt_reuse_count",
+)
+
+
+def _call_record(
+    kind: str, node_ids: list[str], calculation_identity: str, outcome: str
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "node_ids": node_ids,
+        "calculation_identity": calculation_identity,
+        "outcome": outcome,
+        "model_fit_calls_static": 0,
+        "model_fit_calls_dynamic": 0,
+        "grid_search_calls": 0,
+        "correlation_build_calls": 0,
+    }
+
+
+def _spec_identity(spec: Any) -> str:
+    """Name the verified specification, falling back to its bound node digests."""
+
+    declared = getattr(spec, "spec_sha256", None)
+    if isinstance(declared, str) and re.fullmatch(r"[0-9a-f]{64}", declared):
+        return declared
+    rows = sorted(
+        (
+            str(getattr(node, "node_id", "")),
+            str(
+                getattr(node, "sha256", None)
+                or getattr(node, "manifest_sha256", None)
+                or ""
+            ),
+        )
+        for node in getattr(spec, "nodes", ())
+    )
+    return hashlib.sha256(canonical_json_bytes([list(row) for row in rows])).hexdigest()
+
+
+def _write_verification_ledger(
+    spec: Any,
+    caller: str,
+    work_counters: Mapping[str, int],
+    calls: list[dict[str, Any]],
+) -> None:
+    """Record one verifier invocation where it happens; one create-only file each."""
+
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(state_root, Path):
+        return
+    spec_sha256 = _spec_identity(spec)
+    now = datetime.now(UTC)
+    entry = {
+        "schema_version": 1,
+        "caller": caller,
+        "spec_sha256": spec_sha256,
+        "recorded_at": now.isoformat(),
+        "pid": os.getpid(),
+        "work_counters": {key: work_counters[key] for key in _WORK_COUNTER_KEYS},
+        "model_fit_calls_by_estimator": {
+            "static": sum(row["model_fit_calls_static"] for row in calls),
+            "dynamic": sum(row["model_fit_calls_dynamic"] for row in calls),
+        },
+        "calls": [
+            {**row, "node_ids": sorted(row["node_ids"])}
+            for row in sorted(calls, key=lambda row: row["calculation_identity"])
+        ],
+    }
+    directory = state_root.resolve() / _VERIFICATION_LEDGER_DIRECTORY
+    if directory.is_symlink():
+        raise FinancialOutcomeError("financial verification ledger is linked")
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = (
+        f"{now.strftime('%Y%m%dT%H%M%S%f')}-{os.getpid()}-{caller}-{spec_sha256[:16]}"
+    )
+    content = canonical_json_bytes(entry)
+    for attempt in range(1000):
+        path = directory / (
+            f"{stem}.json" if attempt == 0 else f"{stem}-{attempt}.json"
+        )
+        try:
+            with path.open("xb") as handle:
+                handle.write(content)
+            return
+        except FileExistsError:
+            continue
+    raise FinancialOutcomeError("financial verification ledger name is exhausted")
+
+
+@contextlib.contextmanager
+def _verification_ledger(
+    spec: Any, caller: str
+) -> Iterator[tuple[dict[str, int], list[dict[str, Any]]]]:
+    """Yield live counters and call records; the ledger is written even on failure."""
+
+    if _CALLER_LABEL.fullmatch(caller) is None:
+        raise FinancialOutcomeError("financial verification caller label is invalid")
+    work_counters = {key: 0 for key in _WORK_COUNTER_KEYS}
+    calls: list[dict[str, Any]] = []
+    try:
+        yield work_counters, calls
+    finally:
+        _write_verification_ledger(spec, caller, work_counters, calls)
+
+
 def _replay_receipt_path(spec: Any, calculation_identity: str) -> Path | None:
     """Locate the existing retained state surface without coupling to run roots."""
 
@@ -656,6 +772,7 @@ def _replay_model(
     *,
     source_root: Path | None = None,
     work_counters: dict[str, int] | None = None,
+    calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Delegate numerical replay to the existing domain producer, once per file."""
     artifact_bytes = _verified_file(artifact.path, artifact.sha256, artifact.size_bytes)
@@ -770,22 +887,37 @@ def _replay_model(
     if _read_replay_receipt(receipt_path, receipt):
         if work_counters is not None:
             work_counters["receipt_reuse_count"] += 1
+        if calls is not None:
+            calls.append(
+                _call_record(
+                    kind, [artifact.node_id], calculation_identity, "RECEIPT_REUSED"
+                )
+            )
         return cast(dict[str, Any], json.loads(artifact_bytes.decode("utf-8")))
+    record = _call_record(kind, [artifact.node_id], calculation_identity, "REDERIVED")
+    if calls is not None:
+        calls.append(record)
     if work_counters is not None:
         work_counters["full_rederivation_count"] += 1
-    if kind == "DECOMPOSITION" and work_counters is not None:
+    if kind == "DECOMPOSITION":
         original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
         original_fit: Any = portfolio_decomposition._fit
 
         def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
-            work_counters["model_fit_calls"] += 1
+            record["model_fit_calls_dynamic"] += 1
+            if work_counters is not None:
+                work_counters["model_fit_calls"] += 1
             return original_dynamic_fit(*args, **kwargs)
 
         def counted_fit(*args: object, **kwargs: object) -> Any:
-            work_counters["model_fit_calls"] += 1
+            record["model_fit_calls_static"] += 1
+            if work_counters is not None:
+                work_counters["model_fit_calls"] += 1
             return original_fit(*args, **kwargs)
 
-        work_counters["grid_search_calls"] += len(parsed.models)
+        record["grid_search_calls"] += len(parsed.models)
+        if work_counters is not None:
+            work_counters["grid_search_calls"] += len(parsed.models)
         portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
         portfolio_decomposition._fit = cast(Any, counted_fit)
         try:
@@ -796,7 +928,8 @@ def _replay_model(
             portfolio_decomposition._dynamic_fit = original_dynamic_fit
             portfolio_decomposition._fit = original_fit
     else:
-        if kind == "DEPENDENCE" and work_counters is not None:
+        record["correlation_build_calls"] += 1
+        if work_counters is not None:
             work_counters["correlation_build_calls"] += 1
         result, rebuilt_manifest, result_bytes = build(
             specification.path, next(iter(roots))
@@ -1200,6 +1333,103 @@ def _rebuild_selected_epochs(
     return cast(dict[str, Any], result)
 
 
+def _census_assignment_only_epochs(
+    rows: Sequence[Mapping[str, Any]],
+    contract: Mapping[str, Any],
+    cutoff: date,
+) -> list[dict[str, Any]]:
+    """Rows the census confirms are ASSIGNMENT_ONLY, never FUNDED_MEMBERSHIP.
+
+    A row is exempt from the "numerically OK" requirement only when the
+    producer itself refused to fund it (``BLOCKED_ADMISSION`` /
+    ``BLOCKED`` / no funded NAV records), its interval is closed on or
+    before the cutoff, and the census confirms that exact
+    ``(strategy_id, effective_start, effective_end)`` tuple is an
+    ASSIGNMENT_ONLY interval and not also a FUNDED_MEMBERSHIP interval.
+    ``blocking_reason`` text is never consulted: it is admission-policy
+    data, not code authority, and a row must not be able to exempt itself.
+    """
+
+    required = {
+        strategy["strategy_id"]
+        for strategy in contract["strategies"]
+        if strategy["product_requirement"] == "REQUIRED"
+    }
+    assignments = [
+        assignment
+        for sleeve in contract["current_census"]["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["strategy_id"] in required
+    ]
+    assignment_only = Counter(
+        (
+            assignment["strategy_id"],
+            assignment["effective_start"],
+            assignment["effective_end"],
+        )
+        for assignment in assignments
+        if assignment["status"] == "ASSIGNMENT_ONLY"
+    )
+    funded_membership = {
+        (
+            assignment["strategy_id"],
+            assignment["effective_start"],
+            assignment["effective_end"],
+        )
+        for assignment in assignments
+        if assignment["status"] == "FUNDED_MEMBERSHIP"
+    }
+
+    def is_census_assignment_only(row: Mapping[str, Any]) -> bool:
+        key = (row["strategy_id"], row["effective_start"], row["effective_end"])
+        effective_end = row["effective_end"]
+        return (
+            row.get("status") == "BLOCKED_ADMISSION"
+            and row.get("admission_status") == "BLOCKED"
+            and row.get("funded_nav_record_ids") == []
+            and effective_end is not None
+            and date.fromisoformat(effective_end) <= cutoff
+            and key in assignment_only
+            and key not in funded_membership
+        )
+
+    exempt_rows = [row for row in rows if is_census_assignment_only(row)]
+    exempt_counts = Counter(
+        (row["strategy_id"], row["effective_start"], row["effective_end"])
+        for row in exempt_rows
+    )
+    if exempt_counts != assignment_only:
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    scored_rows = [row for row in rows if not is_census_assignment_only(row)]
+    if any(row.get("status") != "OK" for row in scored_rows):
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    if {row["strategy_id"] for row in scored_rows} != required:
+        raise FinancialOutcomeError(
+            "all required financial epochs must be numerically OK"
+        )
+    return sorted(
+        (
+            {
+                "account_id": row["account_id"],
+                "strategy_id": row["strategy_id"],
+                "effective_start": row["effective_start"],
+                "effective_end": row["effective_end"],
+            }
+            for row in exempt_rows
+        ),
+        key=lambda row: (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"] or "",
+        ),
+    )
+
+
 def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
     selected_bytes = _epoch_manifest_profile(spec)["selected_bytes"]
     baselines = [
@@ -1235,14 +1465,17 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for assignment in sleeve["assignments"]
     )
     rows = rebuilt["rows"]
-    if (
-        len(rows) != expected_count
-        or any(row.get("status") != "OK" for row in rows)
-        or {row["strategy_id"] for row in rows} != required
-    ):
+    if len(rows) != expected_count:
         raise FinancialOutcomeError(
             "all required financial epochs must be numerically OK"
         )
+    calculation_cutoff_date = rebuilt.get("calculation_cutoff_date")
+    if calculation_cutoff_date is None:
+        raise FinancialOutcomeError(
+            "finalized epoch product is missing calculation_cutoff_date"
+        )
+    cutoff = date.fromisoformat(calculation_cutoff_date)
+    assignment_only_epochs = _census_assignment_only_epochs(rows, contract, cutoff)
     dashboard_path = panel.source_dir / "data/dashboard_data.json"
     files = [
         row for row in panel.files if row.relative_path == "data/dashboard_data.json"
@@ -1258,6 +1491,7 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         "manifest": rebuilt,
         "dashboard": dashboard,
         "epoch_count": len(rows),
+        "assignment_only_epochs": assignment_only_epochs,
         "baseline_generation": baseline,
         "panel_generation": panel,
     }
@@ -1522,13 +1756,70 @@ def _verify_consumers(
 
 
 def validate_financial_outcomes(
-    spec: Any, *, allow_synthetic: bool = False
+    spec: Any, *, allow_synthetic: bool = False, caller: str = "unattributed"
 ) -> dict[str, Any]:
     """Establish all four numerical outcomes from the supplied immutable spec.
 
     Used by final semantic generation, consumer validation, and shared commit.
     It does not accept readiness text as a financial result or create authority.
+    Every invocation writes one ledger file into ``spec.state_root`` naming the
+    ``caller``, so a call that drops the returned counters is still counted.
     """
+    with _verification_ledger(spec, caller) as (work_counters, calls):
+        return _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+
+
+def validate_financial_outcomes_with_deferred_ledger(
+    spec: Any, *, allow_synthetic: bool = False, caller: str = "unattributed"
+) -> tuple[dict[str, Any], Callable[[Any], None]]:
+    """Like :func:`validate_financial_outcomes`, but let the caller name the ledger spec.
+
+    Some callers (the production-spec builder) can only know their own final
+    gate hashes after this verifier returns its proof, because those hashes are
+    derived from the proof. Passing the pre-finalized spec to the ordinary
+    entry point therefore records the one real invocation under an identity
+    that never matches the spec file the caller goes on to emit.
+
+    This performs that one real verification immediately -- the returned work
+    counters and call records are the actual evidence of that call, not a
+    second warm repeat of it -- and returns a finalizer the caller must invoke
+    exactly once with the spec whose ``spec_sha256`` should be recorded in the
+    ledger. The finalizer should be invoked from a ``finally`` block so the
+    ledger is still written (under the best identity available) if the caller
+    fails before it can finalize its own spec.
+    """
+
+    if _CALLER_LABEL.fullmatch(caller) is None:
+        raise FinancialOutcomeError("financial verification caller label is invalid")
+    work_counters = {key: 0 for key in _WORK_COUNTER_KEYS}
+    calls: list[dict[str, Any]] = []
+    written = False
+
+    def finalize(final_spec: Any) -> None:
+        nonlocal written
+        if written:
+            raise FinancialOutcomeError(
+                "financial verification ledger is already finalized"
+            )
+        written = True
+        _write_verification_ledger(final_spec, caller, work_counters, calls)
+
+    try:
+        proof = _validate_financial_outcomes(
+            spec, allow_synthetic, work_counters, calls
+        )
+    except BaseException:
+        finalize(spec)
+        raise
+    return proof, finalize
+
+
+def _validate_financial_outcomes(
+    spec: Any,
+    allow_synthetic: bool,
+    work_counters: dict[str, int],
+    calls: list[dict[str, Any]],
+) -> dict[str, Any]:
     from portfolio_financial_mvp_contract import load_contract
     from portfolio_invested_capital import verify_governed_capital_result
     from quant_engine.portfolio_ledger.hwm_governed_execution import (
@@ -1641,14 +1932,8 @@ def validate_financial_outcomes(
         not allow_synthetic and capital.get("authority_profile") != "ACCEPTED_GOVERNED"
     ):
         raise FinancialOutcomeError("capital result is unavailable or synthetic")
-    work_counters = {
-        "model_fit_calls": 0,
-        "grid_search_calls": 0,
-        "correlation_build_calls": 0,
-        "full_rederivation_count": 0,
-        "receipt_reuse_count": 0,
-    }
     replays: dict[tuple[str, Path], dict[str, Any]] = {}
+    replay_records: dict[tuple[str, Path], dict[str, Any]] = {}
     plan_bindings = {}
     plan_artifacts: dict[tuple[str, str, str], tuple[Path, str, int]] = {}
     selected_cells = {}
@@ -1664,7 +1949,11 @@ def validate_financial_outcomes(
                 key[0],
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
                 work_counters=work_counters,
+                calls=calls,
             )
+            replay_records[cache_key] = calls[-1]
+        elif node_id not in replay_records[cache_key]["node_ids"]:
+            replay_records[cache_key]["node_ids"].append(node_id)
         value = replays[cache_key]
         if key[0] == "DECOMPOSITION":
             _, strategy, source_key, lens, surface, mode = key
@@ -1773,6 +2062,7 @@ def validate_financial_outcomes(
         ],
         "artifact_count": len(nodes),
         "epoch_count": epochs["epoch_count"],
+        "assignment_only_epochs": epochs["assignment_only_epochs"],
         "capital_result_id": capital["result_id"],
         "selected_cells": selected_cells,
         "consumers": consumers,

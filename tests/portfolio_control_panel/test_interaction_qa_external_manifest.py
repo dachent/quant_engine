@@ -11,6 +11,11 @@ import pytest
 
 from browser_runtime import resolve_browser_runtime
 
+D8_FIRST_NOTE = (
+    "Recorded when this panel was built, before release. These are the epoch "
+    "manifest's authority fields, not the release state; the release state is in "
+    "the coordinated release record, not in this panel."
+)
 SCRIPT = (
     Path(__file__).parents[2]
     / "apps"
@@ -117,6 +122,13 @@ def test_dom_expected_manifest_prefers_external_source() -> None:
     ) < source.index("const rowMatches =")
 
 
+def test_both_result_objects_carry_the_qa_manifest_version() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert source.count("qa_manifest_version: 2,") == 2
+    assert "external_manifest_path:" not in source
+    assert "external_manifest_name: path.basename(externalManifestPath)," in source
+
+
 def test_legacy_mode_remains_payload_bound_without_external_argument() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert "const externalManifest = externalManifestBytes ?" in source
@@ -148,7 +160,12 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
     )
     dashboard = {
         "account_manifest": dashboard_manifest,
-        "meta": {"account_manifest_authority_profile": "INDEPENDENT_EXACT_REBUILD"},
+        "meta": {
+            "account_manifest_authority_profile": "INDEPENDENT_EXACT_REBUILD",
+            "report_generation_id": "r" * 64,
+            "decomposition_generation_id": "d" * 64,
+            "correlation_generation_id": "c" * 64,
+        },
         "dependence_analysis": {"series_ids": []},
         "performance": [],
         "strategies": [],
@@ -218,7 +235,9 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
         )
         + "</tr></thead><tbody>"
         + "".join(rows)
-        + '</tbody></table><span id="account-manifest-authority">Independent exact rebuild</span><div id="account-manifest-legend">Calculations through 2026-08-13. Artifact/provider capture date: 2026-08-16. Capital in = explicit opening capital + deposits + internal-in after start. Net capital = Capital in − Withdrawn.</div><ul id="account-manifest-disclosure-list"></ul></main></body></html>'
+        + '</tbody></table><span id="account-manifest-authority">Independent exact rebuild</span><div id="account-manifest-legend">Calculations through 2026-08-13. Ledger as-of: 2026-08-16. Provider capture date not recorded in this manifest. Capital in = explicit opening capital + deposits + internal-in after start. Net capital = Capital in − Withdrawn.</div><div id="input-bindings"><div class="binding-card">rrrrrrrrrrrr stage input, hash-bound at build</div><div class="binding-card">dddddddddddd stage input, hash-bound at build</div><div class="binding-card">cccccccccccc stage input, hash-bound at build</div></div><ul id="account-manifest-disclosure-list"><li>'
+        + D8_FIRST_NOTE
+        + "</li></ul></main></body></html>"
     )
     (candidate / "index.html").write_text(html, encoding="utf-8")
     external = tmp_path / "epoch-manifest.json"
@@ -264,6 +283,12 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
         == hashlib.sha256(external.read_bytes()).hexdigest()
     )
     assert binding["evidence"]["external_manifest_size"] == external.stat().st_size
+    # F6: the record names the manifest by basename, never by a local path, and
+    # carries the QA manifest version.
+    assert binding["evidence"]["external_manifest_name"] == "epoch-manifest.json"
+    assert "external_manifest_path" not in binding["evidence"]
+    assert str(tmp_path) not in json.dumps(result)
+    assert result["qa_manifest_version"] == 2
 
     row = external_data["rows"][0]
     assert row.get("last_four")
@@ -306,6 +331,7 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
     assert legacy.returncode == 0, legacy.stderr
     legacy_result = json.loads(legacy_output.read_text(encoding="utf-8"))
     assert legacy_result["all_passed"] is True
+    assert legacy_result["qa_manifest_version"] == 2
     assert not any(
         item["check"]
         == "Panel payload equals the independently supplied epoch manifest"

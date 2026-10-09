@@ -1577,3 +1577,155 @@ def test_the_gate_the_freshness_producer_writes_passes_the_pipeline_gate(
     assert prepared["release_state"] == "PREPARED"
     with pytest.raises(PipelineValidationError, match="operational date"):
         execute_pipeline(_parse(raw), evaluation_date=date(2026, 10, 5))
+
+
+def _verification_callers(state_root: Path) -> list[str]:
+    ledger = state_root / "financial-verification-ledger"
+    return sorted(
+        json.loads(path.read_bytes())["caller"] for path in ledger.glob("*.json")
+    )
+
+
+def test_post_build_semantic_gate_labels_its_hidden_verifier_call(
+    tmp_path: Path,
+) -> None:
+    """M7b: the verifier call inside the gate is counted where it happens."""
+
+    raw, _, _, _ = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    gate = tmp_path / "post-build-semantic.json"
+    gate.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": AS_OF.isoformat(),
+                "checks": {},
+                "evaluated_on": AS_OF.isoformat(),
+                "financial_outcomes_sha256": "0" * 64,
+                "release_commit": COMMIT,
+                "release_generations": {},
+                "schema_version": 1,
+                "unwaived_blocking_exceptions": [],
+                "verdict": "PASS",
+            }
+        )
+    )
+
+    with pytest.raises(PipelineValidationError, match="financial outcomes failed"):
+        pipeline_module._verify_post_build_semantic_gate(spec, gate)
+
+    assert _verification_callers(spec.state_root) == [
+        "pipeline.post-build-semantic-gate"
+    ]
+
+
+def test_executable_product_check_labels_its_hidden_verifier_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M7b: the second hidden verifier call is counted under its own label."""
+
+    raw, _, _, _ = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    authority = {"hwm_input_authority": {"state": "AVAILABLE"}, "raw": {}}
+    # The upstream authority readers are replaced; the verifier call under test is not.
+    monkeypatch.setattr(
+        pipeline_module, "_financial_mvp_product_authority", lambda _spec: authority
+    )
+    monkeypatch.setattr(pipeline_module, "_current_product_authority", lambda _a: True)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_financial_mvp_summary",
+        lambda _a, _s=None: {"ready_for_execution": True},
+    )
+    monkeypatch.setattr(
+        pipeline_module, "_requires_production_product", lambda _s: True
+    )
+
+    with pytest.raises(PipelineValidationError, match="financial outcomes failed"):
+        pipeline_module._require_executable_product(spec)
+
+    assert _verification_callers(spec.state_root) == [
+        "pipeline.require-executable-product"
+    ]
+
+
+def _command_node(
+    node_id: str,
+    effect: str,
+    depends_on: list[str],
+    tmp_path: Path,
+    *,
+    declared_writes: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "argv": ["synthetic", node_id],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": declared_writes or [],
+        "depends_on": depends_on,
+        "effect": effect,
+        "kind": "COMMAND",
+        "node_id": node_id,
+        "request_identity": "e" * 64 if effect == "READ_ONLY_EXTERNAL" else None,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+
+
+def _receipt_bytes(spec: PipelineSpec, node_id: str) -> bytes:
+    (path,) = [
+        item
+        for item in spec.state_root.rglob(f"{node_id}.json")
+        if item.parent.name == "receipts"
+    ]
+    return path.read_bytes()
+
+
+def test_failed_external_read_stops_only_its_dependents(tmp_path: Path) -> None:
+    """M4: a failed provider stops its dependents and nothing finished is disturbed."""
+
+    declared = tmp_path / "provider-output.csv"
+    independent = _command_node("a-independent", "LOCAL_ONLY", [], tmp_path)
+    raw, previous, proposed, target = _spec_dict(tmp_path, command=independent)
+    nodes = raw["nodes"]
+    assert isinstance(nodes, list)
+    nodes.extend(
+        [
+            _command_node(
+                "b-provider",
+                "READ_ONLY_EXTERNAL",
+                [],
+                tmp_path,
+                declared_writes=[str(declared)],
+            ),
+            _command_node("c-dependent", "LOCAL_ONLY", ["b-provider"], tmp_path),
+        ]
+    )
+    spec = _parse(raw)
+    calls: list[str] = []
+
+    def runner(node: object) -> tuple[int, bytes, bytes]:
+        node_id = getattr(node, "node_id")
+        calls.append(node_id)
+        return (
+            (3, b"", b"provider failed") if node_id == "b-provider" else (0, b"ok", b"")
+        )
+
+    with pytest.raises(PipelineExecutionError, match="b-provider"):
+        execute_pipeline(spec, allow_external_read=True, command_runner=runner)
+
+    assert calls == ["a-independent", "b-provider"]
+    finished = _receipt_bytes(spec, "a-independent")
+    assert json.loads(finished)["state"] == "COMPLETED"
+    assert json.loads(_receipt_bytes(spec, "b-provider"))["state"] != "COMPLETED"
+    assert not list(spec.state_root.rglob("c-dependent.json"))
+    assert not declared.exists()
+    assert read_current(target).generation_id == previous.generation_id
+    assert not (target / "generations" / proposed.generation_id).exists()
+
+    with pytest.raises((PipelineExecutionError, PipelineUnknownOutcomeError)):
+        execute_pipeline(spec, allow_external_read=True, command_runner=runner)
+
+    assert calls == ["a-independent", "b-provider"]
+    assert _receipt_bytes(spec, "a-independent") == finished
+    assert not list(spec.state_root.rglob("c-dependent.json"))
+    assert read_current(target).generation_id == previous.generation_id

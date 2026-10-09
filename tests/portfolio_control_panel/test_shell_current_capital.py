@@ -220,7 +220,7 @@ def test_the_capital_legend_renders_the_payload_status_never_a_literal() -> None
 
     found = hard_coded_statuses("app.js", text)
 
-    assert {item.literal for item in found} <= {"PUBLISHED"}, found
+    assert found == [], found
 
 
 def _underwriting_payload(fit: dict[str, Any]) -> dict[str, Any]:
@@ -481,7 +481,8 @@ def test_provider_anchor_rows_say_sleeve_allocation_basis_and_pinned_texts_hold(
     assert all("sleeve allocation basis" in title.lower() for title in labelled)
     legend = dom["#account-manifest-legend"]["innerHTML"]
     assert "Calculations through 2026-09-17." in legend
-    assert "Artifact/provider capture date: 2026-09-19." in legend
+    assert "Ledger as-of: 2026-09-19." in legend
+    assert "Artifact/provider capture date" not in legend
     assert "sleeve allocation basis" in legend
 
 

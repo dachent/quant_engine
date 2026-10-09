@@ -21,6 +21,7 @@ import re
 import stat
 import sys
 import tempfile
+import zlib
 from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
@@ -88,11 +89,12 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
-PANEL_SCHEMA_VERSION: Final = 22
+PANEL_SCHEMA_VERSION: Final = 24
 # A panel built from a version-3 report (custody cash dated by its admission coverage)
-# is version 23; every other panel stays 22.
-CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 23
-BUILDER_VERSION: Final = "2.12.0"
+# is version 25; every other panel is 24.  Versions 22 and 23 (the same split before
+# the position snapshot split and the governed HWM candidate) stay readable.
+CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 25
+BUILDER_VERSION: Final = "2.13.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
         "grizzlybears-vtma",
@@ -1073,7 +1075,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3}:
+    ) not in {1, 2, 3, 4}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1155,7 +1157,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3}:
+    ) not in {1, 2, 3, 4}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -3322,6 +3324,12 @@ def _suppress_unmatched_strategy_performance(
             "cash_drag_reason",
             "legacy_baseline_disposition",
             "annual_external_cost_rate_pre_tax",
+            "cost_rate_status",
+            "cost_rate_reason",
+            "cost_rate_denominator_usd",
+            "cost_rate_denominator_as_of_date",
+            "cost_rate_denominator_basis",
+            "cost_schedule_as_of_date",
             "annual_external_cost_usd",
             "after_tax_annual_cost_rate",
             "after_tax_status",
@@ -7389,6 +7397,15 @@ def _factor_row_for_strategy(
     strategy_name: str,
     lens_id: str = "ECONOMIC_FACTOR",
 ) -> dict[str, Any] | None:
+    """The strategy's own usable fit in this lens, never the first row by position.
+
+    Every source key of a lens lists every strategy, and a strategy outside a
+    source's method scope has an UNAVAILABLE placeholder there.  The row is the
+    strategy's AVAILABLE row, else its DIAGNOSTIC row, preferring the lens's
+    default source when more than one source fits.  A strategy no source fits has
+    no row: its statistics are absent, and the series rows keep their reasons.
+    """
+
     modes = _object(decomposition_lenses.get("modes"), "decomposition lens modes")
     lenses_value = modes.get(evidence_mode)
     if lenses_value is None:
@@ -7397,14 +7414,186 @@ def _factor_row_for_strategy(
     lens = next((row for row in lenses if row.get("lens_id") == lens_id), None)
     if lens is None:
         return None
-    return next(
-        (
-            row
-            for row in _objects(lens.get("series"), f"{lens_id} series")
-            if row.get("series_id") == strategy_name
-        ),
-        None,
+    rows = [
+        row
+        for row in _objects(lens.get("series"), f"{lens_id} series")
+        if row.get("series_id") == strategy_name
+    ]
+    default_source_key = lens.get("default_source_key")
+    for status_prefix in ("AVAILABLE", "DIAGNOSTIC"):
+        usable = [
+            row for row in rows if str(row.get("status", "")).startswith(status_prefix)
+        ]
+        preferred = next(
+            (row for row in usable if row.get("source_key") == default_source_key),
+            None,
+        )
+        if preferred is not None:
+            return preferred
+        if usable:
+            return usable[0]
+    return None
+
+
+LONG_HISTORY_MEMBERSHIP_RULE: Final = (
+    "H2_ACCEPTED_HISTORY_AND_ELIGIBLE_LIVE_PLUS_BACKTEST"
+)
+
+
+def _version_matched_history_observations(
+    strategy: Mapping[str, Any], hybrid_factor: Mapping[str, Any] | None
+) -> int | None:
+    """Matched backtest observations under the H2 hybrid-gate predicate.
+
+    A strategy is a member when its accepted history is admitted for economic
+    inference and the report marks live plus backtest eligible; the count is the
+    strategy's own `history_observations`.  Whether a decomposition lens could fit
+    that history is a separate statistic and never sets membership.  Returns None
+    for a strategy that is not a member.  A report without the history contract
+    (`history_compatibility_status` absent) keeps the older evidence: the
+    backtest observations its hybrid lens fit consumed.
+    """
+
+    strategy_name = _text(strategy.get("strategy_name"), "history strategy_name")
+    status = strategy.get("history_compatibility_status")
+    if status is None:
+        composition = (
+            _object(
+                hybrid_factor.get("series_composition", {}),
+                f"hybrid factor composition {strategy_name}",
+            )
+            if hybrid_factor is not None
+            else {}
+        )
+        used = int(
+            _finite_float(
+                composition.get("backtest_observations_used", 0),
+                f"matched backtest observations {strategy_name}",
+            )
+        )
+        return used if used > 0 else None
+    if (
+        status != "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+        or strategy.get("live_plus_backtest_status") != "ELIGIBLE_ACCEPTED_HISTORY"
+    ):
+        return None
+    observations = strategy.get("history_observations")
+    if observations is None:
+        return 0
+    return int(_finite_float(observations, f"history observations {strategy_name}"))
+
+
+STALE_IMPLEMENTATION_STATUS: Final = "NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE"
+NO_RETURN_RECONCILIATION_STATUS: Final = "NOT_READY_NO_RETURN_RECONCILIATION"
+_STALE_IMPLEMENTATION_KEYS: Final = frozenset(
+    {
+        "status",
+        "strategy_id",
+        "contract_kind",
+        "contract_id",
+        "contract_sha256",
+        "contract_as_of_date",
+        "window_start",
+        "window_end",
+        "governed_account_return",
+        "governed_account_basis",
+        "governed_observations",
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+        "superseded_contract_account_return",
+        "superseded_contract_account_basis",
+        "reason",
+        "repair_ref",
+    }
+)
+_IMPLEMENTATION_REFERENCE_KEYS: Final = (
+    ("reconciliation", "implementation_reconciliation_contract"),
+    ("return_attribution", "implementation_return_attribution_contract"),
+)
+
+
+def _is_stale_implementation(value: object) -> bool:
+    return isinstance(value, Mapping) and str(value.get("status", "")).startswith(
+        "NOT_READY_STALE"
     )
+
+
+def _validate_stale_implementation_object(
+    value: object, *, kind: str, strategy_id: str
+) -> dict[str, Any]:
+    """The report's closed NOT_READY object for a contract built from another ledger.
+
+    It carries the governed account return with its basis and the reason, and no
+    model return, gap, risk statistic or waterfall.  The contract's own superseded
+    figure stays beside its explicit basis label and is never read as a return.
+    """
+
+    row = _object(value, f"stale implementation {kind} {strategy_id}")
+    if set(row) != _STALE_IMPLEMENTATION_KEYS:
+        raise ControlPanelValidationError(
+            f"stale implementation object keys differ: {strategy_id}"
+        )
+    pins = []
+    for field in (
+        "contract_provider_ledger_sha256",
+        "governed_provider_ledger_sha256",
+    ):
+        pin = row[field]
+        if not isinstance(pin, str) or re.fullmatch(r"[0-9a-f]{64}", pin) is None:
+            raise ControlPanelValidationError(
+                f"stale implementation ledger identity is invalid: {strategy_id}"
+            )
+        pins.append(pin)
+    if (
+        row["status"] != STALE_IMPLEMENTATION_STATUS
+        or row["contract_kind"] != kind
+        or row["strategy_id"] != strategy_id
+        or row["governed_account_basis"] != "BASELINE_ACCOUNT_LIVE"
+        or row["superseded_contract_account_basis"]
+        != "SUPERSEDED_LEDGER_VINTAGE_NOT_AN_ACCOUNT_RETURN"
+        or row["repair_ref"] != "N66-R"
+        or pins[0] == pins[1]
+        or type(row["governed_observations"]) is not int
+        or row["governed_observations"] < 1
+        or not isinstance(row["reason"], str)
+        or not row["reason"]
+    ):
+        raise ControlPanelValidationError(
+            f"stale implementation object is not a closed NOT_READY row: {strategy_id}"
+        )
+    for field in ("governed_account_return", "superseded_contract_account_return"):
+        _finite_float(row[field], f"stale implementation {field}")
+    for field in ("contract_as_of_date", "window_start", "window_end"):
+        _panel_date(row[field], f"stale implementation {field}")
+    return dict(row)
+
+
+def _implementation_contract_context(
+    strategy_id: str,
+    present: Mapping[str, bool],
+    references: Mapping[str, Mapping[str, Any] | None],
+) -> dict[str, Any]:
+    """Which contract dates and flags label this strategy's implementation rows."""
+
+    context: dict[str, Any] = {"provider_return_policy": None}
+    for kind, key in _IMPLEMENTATION_REFERENCE_KEYS:
+        reference = references.get(key)
+        context[kind] = None
+        if not isinstance(reference, Mapping) or not present.get(kind):
+            continue
+        context[kind] = {
+            "as_of_date": reference.get("as_of_date"),
+            "stale": strategy_id in (reference.get("stale_strategy_ids") or []),
+            "pre_policy": strategy_id
+            in (reference.get("pre_policy_strategy_ids") or []),
+        }
+        policy = reference.get("provider_return_policy")
+        if isinstance(policy, Mapping) and context["provider_return_policy"] is None:
+            context["provider_return_policy"] = {
+                "policy_id": policy.get("policy_id"),
+                "effective_start": policy.get("effective_start"),
+            }
+    return context
 
 
 def _model_account_gap_underwriting(
@@ -7797,6 +7986,8 @@ def _regime_underwriting(
                             else "OUTSIDE_EMPIRICAL_PREHISTORY_90_PERCENT_RANGE_SINGLE_EVENT"
                         )
                         if latest is not None and empirical_range is not None
+                        else "UNAVAILABLE_NO_LIVE_REGIME_EVENT"
+                        if latest is None
                         else "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
                     ),
                 }
@@ -7842,6 +8033,7 @@ def _strategy_underwriting(
     policy_snapshot: bytes | None = None,
     *,
     performance_lineage_available: bool = True,
+    implementation_contracts: Mapping[str, Mapping[str, Any] | None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Compose an advisory evidence ledger without creating new fact authority."""
 
@@ -7946,23 +8138,11 @@ def _strategy_underwriting(
         hybrid_factor = _factor_row_for_strategy(
             decomposition_lenses, "LIVE_PLUS_BACKTEST", strategy_name
         )
-        hybrid_composition = (
-            _object(
-                hybrid_factor.get("series_composition", {}),
-                f"hybrid factor composition {strategy_name}",
-            )
-            if hybrid_factor is not None
-            else {}
-        )
-        matched_backtest_observations = int(
-            _finite_float(
-                hybrid_composition.get("backtest_observations_used", 0),
-                f"matched backtest observations {strategy_name}",
-            )
-        )
+        history_members = _version_matched_history_observations(strategy, hybrid_factor)
+        matched_backtest_observations = history_members or 0
         long_history_status = (
             "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
-            if matched_backtest_observations > 0
+            if history_members is not None
             else "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
         )
         lens_evidence: list[dict[str, Any]] = []
@@ -8118,8 +8298,17 @@ def _strategy_underwriting(
             else {}
         )
         implementation_value = strategy.get("implementation_reconciliation")
+        stale_reconciliation = (
+            _validate_stale_implementation_object(
+                implementation_value, kind="RECONCILIATION", strategy_id=strategy_id
+            )
+            if _is_stale_implementation(implementation_value)
+            else None
+        )
         implementation_detail = (
-            _object(
+            {"stale_reconciliation": stale_reconciliation}
+            if stale_reconciliation is not None
+            else _object(
                 implementation_value,
                 f"implementation reconciliation {strategy_name}",
             )
@@ -8127,19 +8316,54 @@ def _strategy_underwriting(
             else None
         )
         return_attribution_value = strategy.get("implementation_return_attribution")
+        stale_attribution = (
+            _validate_stale_implementation_object(
+                return_attribution_value,
+                kind="RETURN_ATTRIBUTION",
+                strategy_id=strategy_id,
+            )
+            if _is_stale_implementation(return_attribution_value)
+            else None
+        )
         return_attribution_detail = (
             _object(
                 return_attribution_value,
                 f"implementation return attribution {strategy_name}",
             )
-            if return_attribution_value is not None
+            if return_attribution_value is not None and stale_attribution is None
             else None
         )
-        if return_attribution_detail is not None:
+        if stale_attribution is not None:
+            implementation_detail = {
+                **(implementation_detail or {}),
+                "stale_return_attribution": stale_attribution,
+            }
+        elif return_attribution_detail is not None:
             implementation_detail = {
                 **(implementation_detail or {}),
                 "return_attribution": return_attribution_detail,
             }
+        if stale_reconciliation is not None or stale_attribution is not None:
+            implementation_comparison_status: object = STALE_IMPLEMENTATION_STATUS
+        elif implementation_detail is None:
+            implementation_comparison_status = gap["comparison_status"]
+        elif implementation_detail.get("return_reconciliation") is not None:
+            implementation_comparison_status = _object(
+                implementation_detail["return_reconciliation"],
+                f"implementation metrics {strategy_name}",
+            ).get("status")
+        else:
+            # A comparison that is missing is not ready; it is never read as a
+            # legacy comparison or borrowed from the other contract kind.
+            implementation_comparison_status = NO_RETURN_RECONCILIATION_STATUS
+        contract_context = _implementation_contract_context(
+            strategy_id,
+            {
+                "reconciliation": implementation_value is not None,
+                "return_attribution": return_attribution_value is not None,
+            },
+            implementation_contracts or {},
+        )
 
         def factor_value(
             row: Mapping[str, Any] | None, container: str, field: str
@@ -8205,23 +8429,8 @@ def _strategy_underwriting(
                     "implementation_reconciliation": {
                         "status": strategy.get("implementation_reconciliation_status")
                         or gap["status"],
-                        "comparison_status": (
-                            _object(
-                                implementation_detail.get("return_reconciliation"),
-                                f"implementation metrics {strategy_name}",
-                            ).get("status")
-                            if implementation_detail is not None
-                            and implementation_detail.get("return_reconciliation")
-                            is not None
-                            else (
-                                _object(
-                                    return_attribution_detail.get("bridge"),
-                                    f"causal return bridge {strategy_name}",
-                                ).get("status")
-                                if return_attribution_detail is not None
-                                else gap["comparison_status"]
-                            )
-                        ),
+                        "comparison_status": implementation_comparison_status,
+                        "contracts": contract_context,
                         "detail": implementation_detail,
                     },
                 },
@@ -8239,6 +8448,20 @@ def _strategy_underwriting(
                 "long_history": {
                     "status": long_history_status,
                     "matched_backtest_observations": matched_backtest_observations,
+                    "membership_rule": LONG_HISTORY_MEMBERSHIP_RULE,
+                    "lens_statistics_source": {
+                        "lens_id": "ECONOMIC_FACTOR",
+                        "live_source_key": (
+                            live_factor.get("source_key")
+                            if live_factor is not None
+                            else None
+                        ),
+                        "hybrid_source_key": (
+                            hybrid_factor.get("source_key")
+                            if hybrid_factor is not None
+                            else None
+                        ),
+                    },
                     "live_aligned_observations": factor_value(
                         live_factor, "coverage", "aligned_observations"
                     ),
@@ -8335,6 +8558,219 @@ def _reconciliation_passed(rows: Sequence[Mapping[str, Any]]) -> int:
     """
 
     return sum(str(row.get("status", "")).startswith("PASS") for row in rows)
+
+
+def _default_lens(lenses: Mapping[str, Any]) -> dict[str, Any]:
+    """The default evidence mode's default lens, as the panel opens on it."""
+
+    mode = _text(lenses.get("default_evidence_mode"), "default evidence mode")
+    lens_id = _text(lenses.get("default_lens"), "default lens")
+    modes = _object(lenses.get("modes"), "decomposition lens modes")
+    lens = next(
+        (
+            row
+            for row in _objects(modes.get(mode), f"decomposition lenses {mode}")
+            if row.get("lens_id") == lens_id
+        ),
+        None,
+    )
+    if lens is None:
+        raise ControlPanelValidationError(
+            f"default decomposition lens is absent from its mode: {lens_id}"
+        )
+    return lens
+
+
+def _rendered_default_lens_rows(
+    lenses: Mapping[str, Any],
+) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """The lens, source and series rows the panel shows by default.
+
+    The default lens narrowed to its default source the way the renderer filters it:
+    a row with no source key is shown under every source.
+    """
+
+    lens = _default_lens(lenses)
+    lens_id = _text(lens.get("lens_id"), "default lens id")
+    source_key = lens.get("default_source_key")
+    if source_key is not None:
+        source_key = _text(source_key, "default source key")
+    rows = [
+        row
+        for row in _objects(lens.get("series"), f"{lens_id} series")
+        if source_key is None
+        or not row.get("source_key")
+        or row.get("source_key") == source_key
+    ]
+    return lens_id, source_key, rows
+
+
+def _lens_is_source_qualified(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every source of the lens lists the same strategies (current plan)."""
+
+    by_source: dict[str, set[str]] = {}
+    for row in rows:
+        source_key = row.get("source_key")
+        if not source_key:
+            return False
+        by_source.setdefault(str(source_key), set()).add(str(row.get("series_id")))
+    return (
+        len(by_source) > 0 and len({frozenset(ids) for ids in by_source.values()}) == 1
+    )
+
+
+HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
+
+
+def _hwm_candidate(
+    proof: Mapping[str, Any] | None, hwm_summary: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The governed number as a labelled candidate beside the numeric status.
+
+    The numeric status stays what the report says: the E2 register (two Robuxio
+    two-day spans can hide a peak) keeps it unaccepted, and the governed PORT-HWM-4
+    receipt is pending owner acceptance.  The panel shows that number under its own
+    label instead of hiding it, so no "no number is calculated" text sits beside it.
+    """
+
+    if proof is None or proof.get("status") != "AVAILABLE":
+        return None
+    if proof.get("financial_acceptance") != "PENDING_OWNER_ACCEPTANCE":
+        raise ControlPanelValidationError(
+            "governed HWM proof carries an unexpected financial acceptance state"
+        )
+    unaccepted = hwm_summary.get("hwm_numerical_status", "UNAVAILABLE") == "UNAVAILABLE"
+    return {
+        "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
+        "policy_id": proof["policy_id"],
+        "current_drawdown": proof["current_drawdown"],
+        "maximum_drawdown": proof["maximum_drawdown"],
+        "current_index": proof["current_index"],
+        "current_hwm": proof["current_hwm"],
+        "complete_through": proof["complete_through"],
+        "evaluated_on": proof["evaluated_on"],
+        "financial_acceptance": proof["financial_acceptance"],
+        "not_accepted_reason": (
+            hwm_summary.get("hwm_numerical_reason") if unaccepted else None
+        ),
+        "not_accepted_register": "E2",
+        "receipt_sha256": proof["receipt_sha256"],
+        "label": HWM_CANDIDATE_LABEL,
+    }
+
+
+POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
+_POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+_POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
+
+# E1 (ADJ 6a): the contract's portfolio-security-master source is
+# REQUIRED_NOT_READY (contract :5010-5105, blockers [476]), so an accepted
+# position can have no symbol today.  G1.3 requires the gap be explicit rather
+# than a bare dash; this is that explicit reason, named once so it cannot drift
+# between the producer and its tests.
+E1_SYMBOL_NOT_READY_REASON: Final = (
+    "Listing identity (ticker symbol) is not ready: the security master source "
+    "is required by the financial source contract but is not yet admitted, so "
+    "this position is identified by its provider security id only."
+)
+_POSITION_ACCEPTED_STATUS_PREFIX: Final = "AVAILABLE"
+
+
+def _position_symbol_status_and_reason(
+    row: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    """E1: state explicitly why an accepted position has no symbol.
+
+    AVAILABLE when the row carries a symbol; NOT_READY with the governing
+    reason when an accepted position (``status`` starting with ``AVAILABLE``)
+    has none; NOT_APPLICABLE otherwise (the row is not an accepted position,
+    e.g. the no-position sentinel row).
+    """
+
+    if row.get("symbol") is not None:
+        return "AVAILABLE", None
+    if str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
+        return "NOT_READY", E1_SYMBOL_NOT_READY_REASON
+    return "NOT_APPLICABLE", None
+
+
+def _panel_schema_version_for(report_schema_version: object) -> int:
+    """The panel version a report version selects: custody coverage reports are 25."""
+
+    if report_schema_version in {3, 4}:
+        return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
+    return PANEL_SCHEMA_VERSION
+
+
+def _classify_positions(
+    rows: Sequence[Mapping[str, Any]], cutoff_date: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Split the accepted position rows into current holdings and labelled history.
+
+    A row is current only when the report marks it the latest accepted snapshot of
+    its account and that snapshot is dated at the calculation cutoff.  A latest
+    snapshot dated before the cutoff is stale, a historical snapshot is history,
+    and a row dated after the cutoff is named and never counted as current.
+    """
+
+    cutoff = _panel_date(cutoff_date, "position cutoff date")
+    classified: list[dict[str, Any]] = []
+    counts = Counter[str]()
+    history_dates: set[str] = set()
+    for row in rows:
+        if not str(row.get("status", "")).startswith("AVAILABLE"):
+            position_class = "UNAVAILABLE"
+        else:
+            snapshot_status = row.get("snapshot_status")
+            if snapshot_status not in {_POSITION_LATEST, _POSITION_HISTORICAL}:
+                raise ControlPanelValidationError(
+                    "position row lacks a recognised snapshot_status: "
+                    f"{snapshot_status!r}"
+                )
+            as_of_date = _text(row.get("as_of_date"), "position as_of_date")
+            as_of = _panel_date(as_of_date, "position as_of_date")
+            if as_of > cutoff:
+                position_class = "AFTER_CUTOFF"
+            elif snapshot_status == _POSITION_HISTORICAL:
+                position_class = "HISTORICAL"
+                history_dates.add(as_of_date)
+            elif as_of == cutoff:
+                position_class = "CURRENT_AT_CUTOFF"
+            else:
+                position_class = "LATEST_BEFORE_CUTOFF"
+                history_dates.add(as_of_date)
+        counts[position_class] += 1
+        classified.append({**row, "position_class": position_class})
+    summary = {
+        "cutoff_date": cutoff.isoformat(),
+        "current_basis": POSITION_CURRENT_BASIS,
+        "current_at_cutoff_rows": counts["CURRENT_AT_CUTOFF"],
+        "latest_before_cutoff_rows": counts["LATEST_BEFORE_CUTOFF"],
+        "historical_rows": counts["HISTORICAL"],
+        "after_cutoff_rows": counts["AFTER_CUTOFF"],
+        "unavailable_rows": counts["UNAVAILABLE"],
+        "accepted_rows_total": sum(
+            counts[name]
+            for name in (
+                "CURRENT_AT_CUTOFF",
+                "LATEST_BEFORE_CUTOFF",
+                "HISTORICAL",
+                "AFTER_CUTOFF",
+            )
+        ),
+        "history_snapshot_dates": len(history_dates),
+        "history_first_as_of": min(history_dates) if history_dates else None,
+        "history_last_as_of": max(history_dates) if history_dates else None,
+    }
+    return classified, summary
+
+
+def _position_cutoff_date(report: Mapping[str, Any]) -> str:
+    cutoff = report.get("calculation_cutoff_date")
+    return _text(
+        cutoff if cutoff is not None else report.get("as_of_date"),
+        "report position cutoff date",
+    )
 
 
 def _panel_data(
@@ -9139,6 +9575,10 @@ def _panel_data(
         _text(report.get("as_of_date"), "report.as_of_date"),
         underwriting_policy_snapshot,
         performance_lineage_available=performance_lineage_available,
+        implementation_contracts={
+            key: (report[key] if isinstance(report.get(key), Mapping) else None)
+            for _kind, key in _IMPLEMENTATION_REFERENCE_KEYS
+        },
     )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
@@ -9173,17 +9613,24 @@ def _panel_data(
         }
         for row in performance
     ]
-    normalized_positions = [
-        {
-            **row,
-            "strategy_name": (
-                None
-                if row.get("strategy_id") is None
-                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
-            ),
-        }
-        for row in positions
-    ]
+    classified_positions, position_snapshots = _classify_positions(
+        positions, _position_cutoff_date(report)
+    )
+    normalized_positions = []
+    for row in classified_positions:
+        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        normalized_positions.append(
+            {
+                **row,
+                "strategy_name": (
+                    None
+                    if row.get("strategy_id") is None
+                    else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+                ),
+                "symbol_status": symbol_status,
+                "symbol_reason": symbol_reason,
+            }
+        )
 
     fact_by_item = {
         str(row.get("item")): row
@@ -9248,9 +9695,8 @@ def _panel_data(
     mwr_available = sum(
         str(row.get("mwr_status", "")).startswith("AVAILABLE") for row in performance
     )
-    position_count = sum(
-        str(row.get("status", "")).startswith("AVAILABLE") for row in positions
-    )
+    # Current holdings only: the history stays published under its own label.
+    position_count = position_snapshots["current_at_cutoff_rows"]
     reconciliation_passed = _reconciliation_passed(reconciliations)
     source_contract = _object(source.get("contract"), "source.contract")
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
@@ -9506,6 +9952,7 @@ def _panel_data(
                 if hwm_summary.get("hwm_numerical_status") == "AVAILABLE"
                 else {}
             ),
+            "hwm_candidate": _hwm_candidate(governed_hwm_proof, hwm_summary),
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": (
                 _summary_value(summary, "Advisory readiness")
@@ -9662,12 +10109,11 @@ def _panel_data(
             ),
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
-        "panel_schema_version": (
-            CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
-            if report.get("report_schema_version") == 3
-            else PANEL_SCHEMA_VERSION
+        "panel_schema_version": _panel_schema_version_for(
+            report.get("report_schema_version")
         ),
         "performance": normalized_performance,
+        "position_snapshots": position_snapshots,
         "positions": normalized_positions,
         "provenance": provenance,
         "provider_counts": dict(sorted(provider_counts.items())),
@@ -11464,6 +11910,167 @@ def _replication_disposition_counts(
     }
 
 
+def _check_implementation_layers(
+    underwriting_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Recompute the underwriting gap and implementation layers from their rows.
+
+    A stale kind is a closed NOT_READY object: its shape is validated, it carries no
+    bridge to reconcile, and the layer must report it as not ready.  The strategies
+    whose implementation layer is accounted for are the causal, the policy-unavailable
+    and the stale-attribution ones.
+    """
+
+    gap_reconciles = True
+    causal_attribution_reconciles = True
+    causal_attribution_strategy_ids: set[str] = set()
+    policy_unavailable_strategy_ids: set[str] = set()
+    stale_attribution_strategy_ids: set[str] = set()
+    stale_reconciliation_strategy_ids: set[str] = set()
+    stale_shapes_valid = True
+    for row in underwriting_rows:
+        gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
+        total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
+        residual = _optional_float(
+            gap.get("unresolved_residual"), "underwriting unresolved residual"
+        )
+        reconciliation_error = _optional_float(
+            gap.get("reconciliation_error"), "underwriting reconciliation error"
+        )
+        components = _objects(
+            gap.get("causally_bound_components"),
+            "underwriting causally bound components",
+        )
+        if components or (
+            total_gap is not None
+            and (
+                residual is None
+                or reconciliation_error is None
+                or abs(total_gap - residual) > 1e-12
+                or abs(reconciliation_error) > 1e-12
+            )
+        ):
+            gap_reconciles = False
+            break
+        layers = _object(row.get("evidence_layers"), "underwriting evidence layers")
+        implementation = _object(
+            layers.get("implementation_reconciliation"),
+            "underwriting implementation reconciliation",
+        )
+        detail_value = implementation.get("detail")
+        stale_strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        comparison_status = implementation.get("comparison_status")
+        if detail_value is None:
+            if comparison_status == STALE_IMPLEMENTATION_STATUS:
+                stale_shapes_valid = False
+            continue
+        detail = _object(detail_value, "underwriting implementation detail")
+        stale_present = False
+        for stale_key, kind, stale_ids, live_key in (
+            (
+                "stale_reconciliation",
+                "RECONCILIATION",
+                stale_reconciliation_strategy_ids,
+                "return_reconciliation",
+            ),
+            (
+                "stale_return_attribution",
+                "RETURN_ATTRIBUTION",
+                stale_attribution_strategy_ids,
+                "return_attribution",
+            ),
+        ):
+            if stale_key not in detail:
+                continue
+            stale_present = True
+            stale_ids.add(stale_strategy_id)
+            try:
+                _validate_stale_implementation_object(
+                    detail[stale_key], kind=kind, strategy_id=stale_strategy_id
+                )
+            except ControlPanelValidationError:
+                stale_shapes_valid = False
+            if live_key in detail:
+                stale_shapes_valid = False
+        if stale_present != (comparison_status == STALE_IMPLEMENTATION_STATUS):
+            stale_shapes_valid = False
+        attribution_value = detail.get("return_attribution")
+        if attribution_value is None:
+            continue
+        attribution = _object(
+            attribution_value, "underwriting implementation return attribution"
+        )
+        bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
+        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+            import portfolio_report as reporter
+
+            strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+            metrics = _object(
+                detail.get("return_reconciliation"), "underwriting return comparison"
+            )
+            reporter._validate_policy_unavailable_comparison(
+                metrics, strategy_id=strategy_id
+            )
+            reporter._validate_policy_unavailable_comparison(
+                bridge,
+                strategy_id=strategy_id,
+                attribution=True,
+                expected_policy_evidence=_object(
+                    metrics.get("policy_evidence"), "underwriting policy evidence"
+                ),
+            )
+            if gap.get("status") != "UNAVAILABLE_POLICY_NOT_ADMITTED" or any(
+                gap.get(key) is not None
+                for key in (
+                    "total_gap",
+                    "reference_cumulative_return",
+                    "beta",
+                    "correlation",
+                    "tracking_error_annualized",
+                )
+            ):
+                causal_attribution_reconciles = False
+                break
+            policy_unavailable_strategy_ids.add(strategy_id)
+            continue
+        model_return = _finite_float(
+            bridge.get("model_return"), "underwriting causal model return"
+        )
+        account_return = _finite_float(
+            bridge.get("account_return"), "underwriting causal account return"
+        )
+        gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
+        category_total = sum(
+            _finite_float(
+                category.get("effect_pp"), "underwriting causal category effect"
+            )
+            for category in _objects(
+                bridge.get("categories"), "underwriting causal categories"
+            )
+        )
+        strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        causal_attribution_strategy_ids.add(strategy_id)
+        if not math.isclose(
+            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
+        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+            causal_attribution_reconciles = False
+            break
+    return {
+        "gap_reconciles": gap_reconciles,
+        "causal_attribution_reconciles": causal_attribution_reconciles,
+        "causal_attribution_strategy_ids": sorted(causal_attribution_strategy_ids),
+        "policy_unavailable_strategy_ids": sorted(policy_unavailable_strategy_ids),
+        "stale_attribution_strategy_ids": sorted(stale_attribution_strategy_ids),
+        "stale_reconciliation_strategy_ids": sorted(stale_reconciliation_strategy_ids),
+        "stale_shapes_valid": stale_shapes_valid,
+        "implementation_strategy_ids": sorted(
+            causal_attribution_strategy_ids
+            | policy_unavailable_strategy_ids
+            | stale_attribution_strategy_ids
+        ),
+    }
+
+
 def verify_candidate(
     report_root: Path | None,
     legacy_panel: Path,
@@ -11901,23 +12508,32 @@ def verify_candidate(
         )
         for row in _objects(report.get("strategy_summary"), "strategy_summary")
     }
-    expected_position_rows = [
-        {
-            **row,
-            "strategy_name": (
-                None
-                if row.get("strategy_id") is None
-                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
-            ),
-        }
-        for row in report_position_rows
-    ]
+    classified_report_positions, expected_position_snapshots = _classify_positions(
+        report_position_rows, _position_cutoff_date(report)
+    )
+    expected_position_rows = []
+    for row in classified_report_positions:
+        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        expected_position_rows.append(
+            {
+                **row,
+                "strategy_name": (
+                    None
+                    if row.get("strategy_id") is None
+                    else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+                ),
+                "symbol_status": symbol_status,
+                "symbol_reason": symbol_reason,
+            }
+        )
     position_rows = _objects(data.get("positions"), "positions")
     checks.append(
         _check(
             "Current positions preserve report attribution",
             position_rows == expected_position_rows
-            and data["counts"]["positions"] == len(report_position_rows)
+            and data.get("position_snapshots") == expected_position_snapshots
+            and data["counts"]["positions"]
+            == expected_position_snapshots["current_at_cutoff_rows"]
             and all(
                 row.get("status") != "AVAILABLE_MAPPED"
                 or (
@@ -12146,104 +12762,7 @@ def verify_candidate(
         "account_live",
         "implementation_reconciliation",
     }
-    gap_reconciles = True
-    causal_attribution_reconciles = True
-    causal_attribution_strategy_ids: set[str] = set()
-    policy_unavailable_strategy_ids: set[str] = set()
-    for row in underwriting_rows:
-        gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
-        total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
-        residual = _optional_float(
-            gap.get("unresolved_residual"), "underwriting unresolved residual"
-        )
-        reconciliation_error = _optional_float(
-            gap.get("reconciliation_error"), "underwriting reconciliation error"
-        )
-        components = _objects(
-            gap.get("causally_bound_components"),
-            "underwriting causally bound components",
-        )
-        if components or (
-            total_gap is not None
-            and (
-                residual is None
-                or reconciliation_error is None
-                or abs(total_gap - residual) > 1e-12
-                or abs(reconciliation_error) > 1e-12
-            )
-        ):
-            gap_reconciles = False
-            break
-        layers = _object(row.get("evidence_layers"), "underwriting evidence layers")
-        implementation = _object(
-            layers.get("implementation_reconciliation"),
-            "underwriting implementation reconciliation",
-        )
-        detail_value = implementation.get("detail")
-        if detail_value is None:
-            continue
-        detail = _object(detail_value, "underwriting implementation detail")
-        attribution_value = detail.get("return_attribution")
-        if attribution_value is None:
-            continue
-        attribution = _object(
-            attribution_value, "underwriting implementation return attribution"
-        )
-        bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
-        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
-            import portfolio_report as reporter
-
-            strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
-            metrics = _object(
-                detail.get("return_reconciliation"), "underwriting return comparison"
-            )
-            reporter._validate_policy_unavailable_comparison(
-                metrics, strategy_id=strategy_id
-            )
-            reporter._validate_policy_unavailable_comparison(
-                bridge,
-                strategy_id=strategy_id,
-                attribution=True,
-                expected_policy_evidence=_object(
-                    metrics.get("policy_evidence"), "underwriting policy evidence"
-                ),
-            )
-            if gap.get("status") != "UNAVAILABLE_POLICY_NOT_ADMITTED" or any(
-                gap.get(key) is not None
-                for key in (
-                    "total_gap",
-                    "reference_cumulative_return",
-                    "beta",
-                    "correlation",
-                    "tracking_error_annualized",
-                )
-            ):
-                causal_attribution_reconciles = False
-                break
-            policy_unavailable_strategy_ids.add(strategy_id)
-            continue
-        model_return = _finite_float(
-            bridge.get("model_return"), "underwriting causal model return"
-        )
-        account_return = _finite_float(
-            bridge.get("account_return"), "underwriting causal account return"
-        )
-        gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
-        category_total = sum(
-            _finite_float(
-                category.get("effect_pp"), "underwriting causal category effect"
-            )
-            for category in _objects(
-                bridge.get("categories"), "underwriting causal categories"
-            )
-        )
-        strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
-        causal_attribution_strategy_ids.add(strategy_id)
-        if not math.isclose(
-            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
-        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
-            causal_attribution_reconciles = False
-            break
+    implementation_findings = _check_implementation_layers(underwriting_rows)
     causal_contract_present = any(
         row.get("artifact") == "strategy-implementation-return-attribution"
         for row in _objects(data.get("provenance"), "panel provenance")
@@ -12282,12 +12801,13 @@ def verify_candidate(
                 == "NONE"
                 for row in underwriting_rows
             )
-            and gap_reconciles
-            and causal_attribution_reconciles
+            and implementation_findings["gap_reconciles"]
+            and implementation_findings["causal_attribution_reconciles"]
+            and implementation_findings["stale_shapes_valid"]
             and (
                 not causal_contract_present
-                or causal_attribution_strategy_ids | policy_unavailable_strategy_ids
-                == {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+                or implementation_findings["implementation_strategy_ids"]
+                == ["grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"]
             ),
             {
                 "policy_id": underwriting.get("policy_id"),
@@ -12302,27 +12822,75 @@ def verify_candidate(
                     underwriting.get("counts"), "underwriting counts"
                 ).get("quantified_model_account_gap"),
                 "authority_boundary": authority_boundary,
-                "gap_reconciles_without_fabricated_components": gap_reconciles,
-                "causal_attribution_reconciles": causal_attribution_reconciles,
-                "causal_attribution_strategy_ids": sorted(
-                    causal_attribution_strategy_ids
+                "gap_reconciles_without_fabricated_components": (
+                    implementation_findings["gap_reconciles"]
                 ),
-                "policy_unavailable_strategy_ids": sorted(
-                    policy_unavailable_strategy_ids
+                "causal_attribution_reconciles": (
+                    implementation_findings["causal_attribution_reconciles"]
                 ),
+                "causal_attribution_strategy_ids": (
+                    implementation_findings["causal_attribution_strategy_ids"]
+                ),
+                "policy_unavailable_strategy_ids": (
+                    implementation_findings["policy_unavailable_strategy_ids"]
+                ),
+                "stale_attribution_strategy_ids": (
+                    implementation_findings["stale_attribution_strategy_ids"]
+                ),
+                "stale_reconciliation_strategy_ids": (
+                    implementation_findings["stale_reconciliation_strategy_ids"]
+                ),
+                "stale_shapes_valid": implementation_findings["stale_shapes_valid"],
             },
         )
     )
     factor_rows = _objects(data["factor_analysis"].get("series"), "factor.series")
+    # The panel renders the default lens and its default source, not the top-level
+    # `factor_analysis` alias (the dynamic-style lens), so that is what the check
+    # validates: the rendered rows, their counts and their reconciliation.
+    rendered_lens_id, rendered_source_key, rendered_rows = _rendered_default_lens_rows(
+        lens_payload
+    )
+    rendered_counts = Counter(
+        "available"
+        if row.get("status") == "AVAILABLE"
+        else "diagnostic_only"
+        if str(row.get("status", "")).startswith("DIAGNOSTIC")
+        else "unavailable"
+        for row in rendered_rows
+    )
+    rendered_ids = {
+        _text(row.get("series_id"), "rendered factor series_id")
+        for row in rendered_rows
+    }
+    # A source-qualified lens (the current plan) lists every strategy under every
+    # source, so the rendered source must cover the exact perimeter.  A combined
+    # legacy lens spreads the strategies over its sources, so the rendered rows are a
+    # subset there and the lens-wide perimeter check above covers the rest.
+    rendered_perimeter_exact = (
+        rendered_ids == required_analysis_series
+        if _lens_is_source_qualified(
+            _objects(_default_lens(lens_payload).get("series"), "default lens series")
+        )
+        else bool(rendered_rows) and rendered_ids <= required_analysis_series
+    )
+    default_lens = _default_lens(lens_payload)
+    # The lens carries its own counts over every source it lists, so they only bind
+    # the rendered rows when the lens is not narrowed to one source.
+    rendered_counts_agree = rendered_source_key is not None or (
+        default_lens.get("available_count"),
+        default_lens.get("diagnostic_count"),
+        default_lens.get("unavailable_count"),
+    ) == (
+        rendered_counts["available"],
+        rendered_counts["diagnostic_only"],
+        rendered_counts["unavailable"],
+    )
     checks.append(
         _check(
             "Accepted factor and alpha evidence is exact",
-            data["factor_analysis"]["available_count"]
-            + data["factor_analysis"]["diagnostic_count"]
-            + data["factor_analysis"]["unavailable_count"]
-            == len(required_analysis_series)
-            and {_text(row.get("series_id"), "factor series_id") for row in factor_rows}
-            == required_analysis_series
+            rendered_counts_agree
+            and rendered_perimeter_exact
             and all(
                 row.get("contribution_summary") is None
                 or _finite_float(
@@ -12332,13 +12900,22 @@ def verify_candidate(
                     "maximum_reconciliation_error",
                 )
                 <= 1e-9
-                for row in factor_rows
-            ),
+                for row in rendered_rows
+            )
+            and data["factor_analysis"]["available_count"]
+            + data["factor_analysis"]["diagnostic_count"]
+            + data["factor_analysis"]["unavailable_count"]
+            == len(required_analysis_series)
+            and {_text(row.get("series_id"), "factor series_id") for row in factor_rows}
+            == required_analysis_series,
             {
-                "available": data["factor_analysis"]["available_count"],
-                "diagnostic_only": data["factor_analysis"]["diagnostic_count"],
+                "available": rendered_counts["available"],
+                "diagnostic_only": rendered_counts["diagnostic_only"],
+                "evidence_mode": lens_payload.get("default_evidence_mode"),
                 "generation": data["meta"]["decomposition_generation_id"],
-                "unavailable": data["factor_analysis"]["unavailable_count"],
+                "lens_id": rendered_lens_id,
+                "source_key": rendered_source_key,
+                "unavailable": rendered_counts["unavailable"],
             },
         )
     )
@@ -12491,7 +13068,177 @@ def _png_dimensions(path: Path) -> tuple[int, int] | None:
     return (width, height) if width > 0 and height > 0 else None
 
 
-def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
+# QA evidence manifests: version 2 carries relative locators only (F6).
+
+QA_MANIFEST_VERSION: Final = 2
+_QA_CAPTURE_FILES: Final = {
+    "console_events_path": "console-events.json",
+    "request_failures_path": "request-failures.json",
+    "screenshot_path": "screenshot.png",
+}
+_QA_RECEIPT_NAMES: Final = frozenset(
+    {"qa-validation.json", "stable-launcher-validation.json"}
+)
+_QA_TEXT_SUFFIXES: Final = frozenset(
+    {".json", ".js", ".html", ".htm", ".css", ".txt", ".md", ".svg", ".csv"}
+)
+_QA_UNC_LOCATOR: Final = re.compile(rb"(?<![A-Za-z0-9_\\])(?:\\\\){1,2}[A-Za-z0-9_.$-]")
+_QA_FILE_SCHEME: Final = re.compile(rb"(?<![A-Za-z0-9_])file:[/\\]", re.IGNORECASE)
+_QA_SCHEME_OR_ROOT: Final = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|[/\\])")
+
+
+def _is_ascii_letter(value: int) -> bool:
+    return 65 <= value <= 90 or 97 <= value <= 122
+
+
+def _is_ascii_word(value: int) -> bool:
+    return _is_ascii_letter(value) or 48 <= value <= 57 or value == 95
+
+
+def qa_absolute_locator_offsets(data: bytes, *, unc: bool = True) -> list[int]:
+    r"""Offsets of physical locators in QA bytes.
+
+    Refuses a drive locator (``X:\`` or ``X:/``, including inside ``file:///X:/``), a
+    ``file:`` URL (``file:`` followed by a slash) and a UNC path that starts a token
+    (raw ``\\host`` or JSON-escaped). The drive letter must start a token, so
+    ``https://`` is not a hit. The producer owns this predicate and does not import the
+    acceptance validator.
+    """
+
+    offsets: set[int] = set()
+    for needle in (b":\\", b":/"):
+        start = 0
+        while True:
+            index = data.find(needle, start)
+            if index < 0:
+                break
+            start = index + 1
+            if index < 1 or not _is_ascii_letter(data[index - 1]):
+                continue
+            if index >= 2 and _is_ascii_word(data[index - 2]):
+                continue
+            if needle == b":/" and data[index + 2 : index + 3] == b"/":
+                continue
+            offsets.add(index - 1)
+    patterns = (_QA_FILE_SCHEME, _QA_UNC_LOCATOR) if unc else (_QA_FILE_SCHEME,)
+    for pattern in patterns:
+        offsets.update(match.start() for match in pattern.finditer(data))
+    return sorted(offsets)
+
+
+def _qa_pdf_streams(data: bytes) -> list[bytes]:
+    streams: list[bytes] = []
+    for match in re.finditer(rb"stream\r?\n", data):
+        end = data.find(b"endstream", match.end())
+        if end < 0:
+            continue
+        try:
+            streams.append(zlib.decompressobj().decompress(data[match.end() : end]))
+        except zlib.error:
+            continue
+    return streams
+
+
+def qa_evidence_inventory_findings(qa_dir: Path) -> list[str]:
+    """Name every absolute locator and misplaced receipt in one QA directory.
+
+    This is the producer-side scan. It covers the text files the validator scans, the
+    raw bytes and inflated streams of every PDF, the interaction result's retired
+    ``external_manifest_path`` key, and any native-QA receipt stored inside ``qa/``.
+    """
+
+    findings: list[str] = []
+    for path in sorted(qa_dir.rglob("*")):
+        relative = path.relative_to(qa_dir).as_posix()
+        if path.is_symlink():
+            findings.append(f"{relative}: is a link")
+            continue
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in _QA_TEXT_SUFFIXES or suffix == ".pdf":
+            data = path.read_bytes()
+            is_pdf = suffix == ".pdf"
+            # A UNC pattern is meaningless inside compressed binary, so PDFs get the
+            # drive and file: rules only.
+            hits = qa_absolute_locator_offsets(data, unc=not is_pdf)
+            if is_pdf:
+                for stream in _qa_pdf_streams(data):
+                    hits.extend(qa_absolute_locator_offsets(stream, unc=False))
+            if hits:
+                findings.append(f"{relative}: {len(hits)} absolute locator(s)")
+        if "/" not in relative and path.name.lower().startswith("native-qa"):
+            findings.append(f"{relative}: native QA receipt stored inside qa/")
+    interaction = qa_dir / "interaction-results.json"
+    if interaction.is_file() and not interaction.is_symlink():
+        try:
+            parsed = json.loads(interaction.read_bytes())
+        except ValueError:
+            parsed = None
+        checks = parsed.get("checks") if isinstance(parsed, dict) else None
+        for check in checks if isinstance(checks, list) else []:
+            evidence = check.get("evidence") if isinstance(check, dict) else None
+            if isinstance(evidence, dict) and "external_manifest_path" in evidence:
+                findings.append(
+                    "interaction-results.json: external_manifest_path key present"
+                )
+    return findings
+
+
+def _qa_scan_check(qa_dir: Path) -> dict[str, Any]:
+    findings = [
+        finding
+        for finding in qa_evidence_inventory_findings(qa_dir)
+        if finding.split(":", 1)[0] not in _QA_RECEIPT_NAMES
+    ]
+    return _check("QA evidence carries no absolute locator", not findings, findings)
+
+
+def _qa_record_version(record: Mapping[str, Any], label: str) -> int:
+    version = record.get("qa_manifest_version", 1)
+    if isinstance(version, bool) or version not in (1, QA_MANIFEST_VERSION):
+        raise ControlPanelValidationError(f"{label} has an unknown QA manifest version")
+    return int(version)
+
+
+def _qa_uniform_version(
+    manifests: Mapping[str, Mapping[str, Any]], lints: Mapping[str, Mapping[str, Any]]
+) -> int:
+    versions = {
+        _qa_record_version(record, f"{name} manifest")
+        for name, record in manifests.items()
+    } | {
+        _qa_record_version(record, f"{name} visual lint")
+        for name, record in lints.items()
+    }
+    if len(versions) != 1:
+        raise ControlPanelValidationError(
+            "QA evidence mixes manifest versions: "
+            + ", ".join(str(version) for version in sorted(versions))
+        )
+    return next(iter(versions))
+
+
+def _qa_capture_view(name: str) -> str:
+    return "" if name == "direct-file" else name.split("-", 1)[1]
+
+
+def _qa_relative_target(name: str) -> str:
+    view = _qa_capture_view(name)
+    return "index.html" + (f"#{view}" if view else "")
+
+
+def _qa_paths_are_fixed(name: str, manifest: Mapping[str, Any]) -> bool:
+    expected_pdf = "page.pdf" if name == "desktop-command" else None
+    return (
+        all(manifest.get(key) == value for key, value in _QA_CAPTURE_FILES.items())
+        and manifest.get("pdf_path") == expected_pdf
+    )
+
+
+def validate_qa(
+    candidate_dir: Path, qa_dir: Path, *, receipt_path: Path | None = None
+) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     candidate_record_path = candidate_dir / "candidate.json"
     candidate_record = _load_json(candidate_record_path, "candidate record")
@@ -12504,6 +13251,15 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
     request_counts: dict[str, int] = {}
     target_matches: dict[str, bool] = {}
     candidate_bindings: dict[str, bool] = {}
+    manifests = {
+        name: _load_json(qa_dir / name / "manifest.json", f"{name} manifest")
+        for name in CAPTURES
+    }
+    lints = {
+        name: _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
+        for name in LINT_CAPTURES
+    }
+    qa_version = _qa_uniform_version(manifests, lints)
     for name in CAPTURES:
         capture = qa_dir / name
         screenshot = capture / "screenshot.png"
@@ -12514,8 +13270,19 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
         request_counts[name] = len(
             _json_array(capture / "request-failures.json", f"{name} request evidence")
         )
-        manifest = _load_json(capture / "manifest.json", f"{name} manifest")
-        target_matches[name] = candidate_dir.name in str(manifest.get("target", ""))
+        manifest = manifests[name]
+        if qa_version == 1:
+            target_matches[name] = candidate_dir.name in str(manifest.get("target", ""))
+        else:
+            relative_target = _qa_relative_target(name)
+            target_matches[name] = (
+                manifest.get("html_directory_name") == candidate_dir.name
+                and manifest.get("target") == relative_target
+                and manifest.get("final_url") == relative_target
+                and lints.get(name, {"target": relative_target}).get("target")
+                == relative_target
+                and _qa_paths_are_fixed(name, manifest)
+            )
         candidate_bindings[name] = (
             manifest.get("candidate_record_sha256") == candidate_record_sha256
             and manifest.get("artifact_sha256") == candidate_artifact_sha256
@@ -12549,10 +13316,11 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
             ),
         ]
     )
+    if qa_version == QA_MANIFEST_VERSION:
+        checks.append(_qa_scan_check(qa_dir))
     lint_counts: dict[str, int] = {}
     for name in LINT_CAPTURES:
-        lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
-        count = lint.get("finding_count")
+        count = lints[name].get("finding_count")
         if not isinstance(count, int):
             raise ControlPanelValidationError(f"{name} visual lint count is invalid")
         lint_counts[name] = count
@@ -12601,7 +13369,7 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
             console_counts["direct-file"] == 0
             and request_counts["direct-file"] == 0
             and screenshot_dimensions["direct-file"] is not None,
-            "file:// evidence",
+            "direct-file capture evidence",
         )
     )
     pdf = qa_dir / "desktop-command" / "page.pdf"
@@ -12625,7 +13393,16 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
     }
     if not result["all_passed"]:
         raise ControlPanelValidationError("browser QA failed")
-    _write_exact(qa_dir / "qa-validation.json", canonical_json_bytes(result))
+    if receipt_path is None:
+        _write_exact(qa_dir / "qa-validation.json", canonical_json_bytes(result))
+    else:
+        resolved_qa = qa_dir.resolve()
+        resolved_receipt = receipt_path.resolve()
+        if resolved_qa in (resolved_receipt, *resolved_receipt.parents):
+            raise ControlPanelValidationError(
+                "the native QA receipt must be written outside the QA directory"
+            )
+        _write_exact(receipt_path, canonical_json_bytes(result))
     return result
 
 
@@ -12654,17 +13431,52 @@ def validate_stable_launcher_qa(
     console_counts: dict[str, int] = {}
     request_counts: dict[str, int] = {}
     screenshot_sizes: dict[str, int] = {}
+    launcher_manifests = {
+        name: _load_json(qa_dir / name / "manifest.json", f"{name} manifest")
+        for name in CAPTURES
+    }
+    launcher_lints = {
+        name: _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
+        for name in LINT_CAPTURES
+    }
+    qa_version = _qa_uniform_version(launcher_manifests, launcher_lints)
+    if qa_version == QA_MANIFEST_VERSION:
+        checks.append(_qa_scan_check(qa_dir))
     for name in CAPTURES:
         capture = qa_dir / name
-        manifest = _load_json(capture / "manifest.json", f"{name} manifest")
+        manifest = launcher_manifests[name]
         target = str(manifest.get("target", ""))
         final_url = str(manifest.get("final_url", ""))
-        targets[name] = target.split("#", 1)[0] == launcher_url
         target_fragment = target.split("#", 1)[1] if "#" in target else ""
         final_fragment = final_url.split("#", 1)[1] if "#" in final_url else ""
-        resolutions[name] = (
-            expected_final_fragment in final_url and target_fragment == final_fragment
-        )
+        if qa_version == 1:
+            targets[name] = target.split("#", 1)[0] == launcher_url
+            resolutions[name] = (
+                expected_final_fragment in final_url
+                and target_fragment == final_fragment
+            )
+        else:
+            target_path = target.split("#", 1)[0]
+            final_path = final_url.split("#", 1)[0]
+            relative_only = not any(
+                _QA_SCHEME_OR_ROOT.match(value) for value in (target_path, final_path)
+            )
+            directory_name = manifest.get("html_directory_name")
+            targets[name] = (
+                relative_only
+                and target_path != ""
+                and (launcher_path.parent / target_path).resolve().as_uri()
+                == launcher_url
+                and target_fragment == _qa_capture_view(name)
+                and isinstance(directory_name, str)
+                and directory_name != ""
+                and _qa_paths_are_fixed(name, manifest)
+            )
+            resolutions[name] = (
+                relative_only
+                and final_path == f"generations/{expected_generation_id}/index.html"
+                and target_fragment == final_fragment
+            )
         console_counts[name] = len(
             _json_array(capture / "console-events.json", f"{name} console evidence")
         )
@@ -12702,8 +13514,7 @@ def validate_stable_launcher_qa(
     )
     lint_counts: dict[str, int] = {}
     for name in LINT_CAPTURES:
-        lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
-        count = lint.get("finding_count")
+        count = launcher_lints[name].get("finding_count")
         if not isinstance(count, int):
             raise ControlPanelValidationError(f"{name} visual lint count is invalid")
         lint_counts[name] = count
@@ -13114,7 +13925,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2, 3}:
+    ) or retained_report_schema_version not in {1, 2, 3, 4}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )
@@ -13579,6 +14390,13 @@ def _parser() -> argparse.ArgumentParser:
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
+    qa.add_argument(
+        "--receipt",
+        type=Path,
+        help="write the native QA receipt here, outside --qa-dir (default: inside it)",
+    )
+    qa_inventory = commands.add_parser("qa-inventory")
+    qa_inventory.add_argument("--qa-dir", type=Path, required=True)
     launcher_qa = commands.add_parser("launcher-qa")
     launcher_qa.add_argument("--launcher", type=Path, required=True)
     launcher_qa.add_argument("--qa-dir", type=Path, required=True)
@@ -13733,7 +14551,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "qa":
-            result = validate_qa(args.candidate_dir, args.qa_dir)
+            result = validate_qa(
+                args.candidate_dir, args.qa_dir, receipt_path=args.receipt
+            )
+        elif args.command == "qa-inventory":
+            findings = qa_evidence_inventory_findings(args.qa_dir)
+            result = {"all_passed": not findings, "findings": findings}
+            if findings:
+                raise ControlPanelValidationError(
+                    "QA inventory scan failed: " + "; ".join(findings)
+                )
         elif args.command == "launcher-qa":
             result = validate_stable_launcher_qa(
                 args.launcher, args.qa_dir, args.expected_generation_id

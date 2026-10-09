@@ -38,6 +38,10 @@ REAL_CACHE_PATHS = (
     ".decomposition-index\\" + GEN + ".json",
     ".correlation-index\\" + GEN + ".json",
     "candidates\\" + GEN + "\\decomposition.json",
+    # Z2: the production run receipt, keyed by pipeline id and a 16-hex run key
+    # (134, now the longest cache tail; see `_production_receipt_tail`).
+    "pipelines\\" + "p" * 48 + "-" + "0" * 16 + "\\receipts\\"
+    "publish-hybrid-multi-asset-style-dynamic-fls.json",
 )
 
 
@@ -50,7 +54,7 @@ def _root(length: int, prefix: str = "C:\\Dev\\scratch\\") -> Path:
 
 def test_real_layout_literals_have_the_measured_lengths():
     assert [len(p) for p in REAL_OUTPUT_PATHS] == [183, 182, 168]
-    assert max(len(p) for p in REAL_CACHE_PATHS) == 102
+    assert max(len(p) for p in REAL_CACHE_PATHS) == 134
 
 
 def test_gate_never_underestimates_a_real_output_path():

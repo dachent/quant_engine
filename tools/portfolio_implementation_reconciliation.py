@@ -25,6 +25,7 @@ from xml.etree import ElementTree
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import decimal_text
 
 from portfolio_strategy_history import (
     _cell,
@@ -33,8 +34,13 @@ from portfolio_strategy_history import (
 )
 
 
-SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.3.0"
+#: Version 2 adds the governed account leg (QC-1 N66).  A version-1 contract is
+#: sealed: it keeps its bytes and the report reads it by its declared window.
+SCHEMA_VERSION: Final = 2
+BUILDER_VERSION: Final = "1.4.0"
+ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
+ACCOUNT_LEG_SERIES_SCHEMA: Final = "ordered-date-return/1"
+ACCOUNT_LEG_TOLERANCE: Final = 1e-8
 TRADE_SIDES: Final = frozenset({"BUY", "SELL"})
 INSUFFICIENT_EXACT_COMMON_DATA: Final = (
     "accepted as_of leaves insufficient exact-common data"
@@ -575,6 +581,127 @@ def _returns(
             )
         result[observed] = value
     return result
+
+
+def governed_account_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str,
+    accepted_as_of: date,
+) -> list[dict[str, str]]:
+    """The strategy's ACCOUNT_LIVE rows through the boundary, in digest form.
+
+    This is the ordered-date-return/1 row shape: one canonical decimal text per
+    date, so two ledger vintages of one series differ in digest only when their
+    bytes differ, and the values are compared separately.
+    """
+
+    by_date: dict[str, str] = {}
+    for row in rows:
+        if (
+            row.get("strategy_id") != strategy_id
+            or row.get("evidence_layer") != "ACCOUNT_LIVE"
+        ):
+            continue
+        observed = date.fromisoformat(str(row.get("date") or ""))
+        if observed > accepted_as_of:
+            continue
+        by_date[observed.isoformat()] = decimal_text(Decimal(str(row.get("return"))))
+    return [{"date": item, "return": by_date[item]} for item in sorted(by_date)]
+
+
+def account_series_sha256(rows: Sequence[Mapping[str, str]]) -> str:
+    return hashlib.sha256(
+        (
+            json.dumps(
+                list(rows), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def account_leg(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str,
+    accepted_as_of: date,
+    window_start: str,
+    window_end: str,
+    figure: float,
+    compared_observations: int,
+    error: type[Exception],
+) -> dict[str, Any]:
+    """Bind a published account return to the governed account-live series.
+
+    The governed series (BASELINE_ACCOUNT_LIVE) is the only account leg of a
+    strategy window.  The published figure must equal that series compounded
+    over every governed date in the window it declares; a figure that does not
+    is a second account return for the same window and is not published.
+    """
+
+    series = governed_account_rows(
+        rows, strategy_id=strategy_id, accepted_as_of=accepted_as_of
+    )
+    in_window = [item for item in series if window_start <= item["date"] <= window_end]
+    governed = (
+        _compound(float(item["return"]) for item in in_window) if in_window else None
+    )
+    if governed is None or abs(governed - figure) > ACCOUNT_LEG_TOLERANCE:
+        raise error(
+            "account return differs from the governed account-live series: "
+            f"{strategy_id} {window_start}..{window_end}"
+        )
+    return {
+        "basis": ACCOUNT_LEG_BASIS,
+        "compared_observations": compared_observations,
+        "cumulative_return": figure,
+        "series_schema": ACCOUNT_LEG_SERIES_SCHEMA,
+        "series_sha256": account_series_sha256(series),
+        "window_end": window_end,
+        "window_observations": len(in_window),
+        "window_start": window_start,
+    }
+
+
+def with_account_leg(
+    row: Mapping[str, Any],
+    ledger_rows: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str,
+    accepted_as_of: date,
+    model_basis: str | None = None,
+) -> dict[str, Any]:
+    """Return the strategy row with its governed account leg and basis labels."""
+
+    metrics = dict(row["return_reconciliation"])
+    if metrics.get("status") == UNAVAILABLE_POLICY_NOT_ADMITTED:
+        summary = row["account_live_return_summary"]
+        leg = account_leg(
+            ledger_rows,
+            strategy_id=strategy_id,
+            accepted_as_of=accepted_as_of,
+            window_start=str(summary["observed_start"]),
+            window_end=str(summary["observed_end"]),
+            figure=float(summary["cumulative_return"]),
+            compared_observations=int(summary["observations"]),
+            error=ImplementationReconciliationError,
+        )
+        return {**row, "account_leg": leg}
+    leg = account_leg(
+        ledger_rows,
+        strategy_id=strategy_id,
+        accepted_as_of=accepted_as_of,
+        window_start=str(metrics["observed_start"]),
+        window_end=str(metrics["observed_end"]),
+        figure=float(metrics["account_cumulative_return"]),
+        compared_observations=int(metrics["observations"]),
+        error=ImplementationReconciliationError,
+    )
+    metrics["account_basis"] = ACCOUNT_LEG_BASIS
+    if model_basis is not None:
+        metrics["model_basis"] = model_basis
+    return {**row, "account_leg": leg, "return_reconciliation": metrics}
 
 
 def _aggregate_events(events: Iterable[TradeEvent]) -> list[TradeEvent]:
@@ -1335,7 +1462,7 @@ def _ai_reconciliation(
     union_coverage = event_coverage(
         [event for role, rows in books.items() for event in rows], actual
     )
-    return {
+    result: dict[str, Any] = {
         **account_summary,
         "broker_execution_join": join,
         "connected_account_snapshot": {
@@ -1430,6 +1557,13 @@ def _ai_reconciliation(
         "trade_reconciliation_union": union_coverage,
         "verification": "VERIFIED",
     }
+    return with_account_leg(
+        result,
+        ledger.get("strategy_returns", []),
+        strategy_id="p123-ai-factor",
+        accepted_as_of=accepted_as_of,
+        model_basis="PROVIDER_LIVE_MODEL_RETURNS",
+    )
 
 
 def _tt_component_weights(workbook: Path) -> dict[str, Decimal]:
@@ -1862,7 +1996,7 @@ def _tt_reconciliation(
         date(2026, 4, 1),
         accepted_as_of=accepted_as_of,
     )
-    return {
+    result: dict[str, Any] = {
         "account_composition": {
             "component_account_counts_observed": component_counts,
             "current_position_snapshot": {
@@ -1964,6 +2098,13 @@ def _tt_reconciliation(
         "trade_reconciliation": coverage,
         "verification": "VERIFIED",
     }
+    return with_account_leg(
+        result,
+        ledger.get("strategy_returns", []),
+        strategy_id="tt-portfolio",
+        accepted_as_of=accepted_as_of,
+        model_basis="TT_SOURCE_MANIFEST_MODEL_RETURNS",
+    )
 
 
 def _market_prices(path: Path, *, accepted_as_of: date) -> dict[date, float]:
@@ -2247,7 +2388,7 @@ def _grizzly_reconciliation(
     model_common = _compound([model_proxy[item] for item in common])
     state_common = _compound([actual_state_proxy[item] for item in common])
     account_common = _compound([account_returns[item] for item in common])
-    return {
+    result: dict[str, Any] = {
         "costs": {
             "account_fees_and_commissions_usd": float(fees),
             "status": "PRE_TAX_OBSERVED_EXECUTION_COSTS_ONLY",
@@ -2343,6 +2484,13 @@ def _grizzly_reconciliation(
         "trade_reconciliation": coverage,
         "verification": "VERIFIED",
     }
+    return with_account_leg(
+        result,
+        ledger.get("strategy_returns", []),
+        strategy_id="grizzlybears-vtma",
+        accepted_as_of=accepted_as_of,
+        model_basis="SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY",
+    )
 
 
 def build_reconciliation(
