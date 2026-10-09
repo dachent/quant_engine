@@ -740,7 +740,9 @@ _PRE_R2_FIXTURE_SKIP_REASON = (
     "(test_good_a3_the_pipeline_reexec_seam_funds_only_funded_membership_rows); "
     "ruling: STATE/reports/2026-10-05-plan-evidence/repair-grouped-reviews/"
     "rulings-t0a-epochs-and-release-findings.md. The real predicate coverage "
-    "is the GOOD-A1/BAD-A1..A9 suite in that file."
+    "is the GOOD-A1/BAD-A1..A9 suite in that file. Option (c) of "
+    "repair-grouped-reviews/rulings-good-a3-coverage.md re-scopes the "
+    "pipeline re-exec proof to the fixture modernization follow-on above."
 )
 
 
