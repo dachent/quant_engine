@@ -131,7 +131,7 @@ def test_corrupt_retained_result_is_rejected_before_any_build(
     tmp_path: Path, work: Work, corrupted: str
 ) -> None:
     source_root, spec, retained, staged = _staged(tmp_path)
-    (Path(str(staged["candidate"])) / "correlation.json").write_bytes(b"{}\n")
+    (Path(str(staged["candidate"])) / corrupted).write_bytes(b"{}\n")
     work.builds = 0
     before = _tree(retained)
 

@@ -467,7 +467,7 @@ checks.push(check(
     disclosure: epochDisclosure,
   },
 ));
-const D8_STATUS_WORDS = /(PUBLISHED|PUBLICATION_READY|VERIFIED|READY|RELEASED|ACCEPTED|AVAILABLE|APPROVED|CERTIFIED|CLEARED|PASSED)/;
+const D8_STATUS_WORDS = /\b(PUBLISHED|PUBLICATION_READY|VERIFIED|READY|RELEASED|ACCEPTED|AVAILABLE|APPROVED|CERTIFIED|CLEARED|PASSED)\b/;
 const D8_BINDING_NOTE = "stage input, hash-bound at build";
 const D8_MANIFEST_FIRST_NOTE = "Recorded when this panel was built, before release. These are the epoch manifest's authority fields, not the release state; the release state is in the coordinated release record, not in this panel.";
 const dataNav = page.locator('[data-nav="data"]').first();

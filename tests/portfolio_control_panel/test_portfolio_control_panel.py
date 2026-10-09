@@ -2973,6 +2973,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             "strategy_id": ACTIVE_STRATEGY_IDS[0],
             "strategy_name": STRATEGY_NAMES[0],
             "symbol": "SYNTH",
+            "symbol_status": "AVAILABLE",
+            "symbol_reason": None,
         }
     ]
     assert data["counts"]["positions"] == 1

@@ -1532,7 +1532,7 @@ _TT_ACCOUNT_2 = "account-98f5986706ed53c5"
 # The real 13-row account-strategy-manifest, verbatim from the smoke9 run (panel
 # 07fe4351, report generation a839e452), read from
 # C:/Dev/q/t0a/pf/reporting/generations/a839e452.../account-strategy-manifest.json,
-# whose sha256 (86d9d9bc...) matches tests/acceptance/fixtures/smoke9_real_rows.json's
+# whose sha256 (86d9d9bc...) matches tests/acceptance/rows/smoke9_real_rows.json's
 # provenance.manifest_sha256. Only the fields `_census_assignment_only_epochs` reads
 # are kept.
 _SMOKE9_MANIFEST_ROWS = [

@@ -12,9 +12,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import date
+import html
 import importlib.util
 import json
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -412,3 +416,68 @@ def test_the_verifier_refuses_a_stale_layer_that_reports_a_comparison_status() -
     )
 
     assert panel._check_implementation_layers(rows)["stale_shapes_valid"] is False
+
+
+# ---- app.js:1103 rendering seam: real producer `contracts`, not literal fields ----
+#
+# Astra finding at app.js:1103: the pre-policy exclusion disclosure read
+# detail.pre_policy_exclusion / detail.return_attribution.contract_as_of_date, fields
+# the producer never emits.  The producer instead publishes, per contract kind, under
+# evidence_layers.implementation_reconciliation.contracts[kind] = {as_of_date, stale,
+# pre_policy}, plus one shared contracts.provider_return_policy = {policy_id,
+# effective_start} (see test_the_contract_context_labels_the_pre_policy_ai_contract_
+# with_its_dates above, and _implementation_contract_context in
+# tools/portfolio_control_panel.py).  This test renders the real producer's AI Factor
+# row (pre-policy reconciliation contract) through app.js and asserts the dated
+# exclusion disclosure, proving app.js consumes the producer's actual shape.
+
+
+def test_real_producer_contracts_render_the_dated_pre_policy_exclusion_disclosure(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("the shell tests need node")
+
+    underwriting = _underwriting()
+    ai_row = next(row for row in underwriting["rows"] if row["strategy_id"] == AI)
+    contracts = ai_row["evidence_layers"]["implementation_reconciliation"]["contracts"]
+    # Sanity: the real producer marks the AI Factor reconciliation contract
+    # pre-policy, with the dates this test expects app.js to render.
+    assert contracts["reconciliation"]["pre_policy"] is True
+    assert contracts["reconciliation"]["as_of_date"] == "2026-08-03"
+    assert contracts["provider_return_policy"] == POLICY
+
+    payload = {"strategy_underwriting": underwriting}
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    harness = Path(__file__).with_name("shell_harness.mjs")
+    completed = subprocess.run(
+        [
+            node,
+            str(harness),
+            str(REPOSITORY_ROOT / "apps" / "portfolio-control-panel" / "app.js"),
+            str(payload_path),
+            "renderUnderwriting",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["errors"] == [], result["errors"]
+    cell = re.sub(
+        r"\s+",
+        " ",
+        html.unescape(
+            re.sub(r"<[^>]+>", " ", result["dom"]["#underwriting-table"]["innerHTML"])
+        ),
+    ).strip()
+
+    assert (
+        "contract as of Aug 3, 2026, before the PROVIDER_ADMIT_OR_DECLARE_V1 "
+        "exclusion effective Aug 14, 2026"
+    ) in cell

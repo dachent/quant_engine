@@ -8663,6 +8663,36 @@ POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
 _POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
 _POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
 
+# E1 (ADJ 6a): the contract's portfolio-security-master source is
+# REQUIRED_NOT_READY (contract :5010-5105, blockers [476]), so an accepted
+# position can have no symbol today.  G1.3 requires the gap be explicit rather
+# than a bare dash; this is that explicit reason, named once so it cannot drift
+# between the producer and its tests.
+E1_SYMBOL_NOT_READY_REASON: Final = (
+    "Listing identity (ticker symbol) is not ready: the security master source "
+    "is required by the financial source contract but is not yet admitted, so "
+    "this position is identified by its provider security id only."
+)
+_POSITION_ACCEPTED_STATUS_PREFIX: Final = "AVAILABLE"
+
+
+def _position_symbol_status_and_reason(
+    row: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    """E1: state explicitly why an accepted position has no symbol.
+
+    AVAILABLE when the row carries a symbol; NOT_READY with the governing
+    reason when an accepted position (``status`` starting with ``AVAILABLE``)
+    has none; NOT_APPLICABLE otherwise (the row is not an accepted position,
+    e.g. the no-position sentinel row).
+    """
+
+    if row.get("symbol") is not None:
+        return "AVAILABLE", None
+    if str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
+        return "NOT_READY", E1_SYMBOL_NOT_READY_REASON
+    return "NOT_APPLICABLE", None
+
 
 def _panel_schema_version_for(report_schema_version: object) -> int:
     """The panel version a report version selects: custody coverage reports are 25."""
@@ -9586,17 +9616,21 @@ def _panel_data(
     classified_positions, position_snapshots = _classify_positions(
         positions, _position_cutoff_date(report)
     )
-    normalized_positions = [
-        {
-            **row,
-            "strategy_name": (
-                None
-                if row.get("strategy_id") is None
-                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
-            ),
-        }
-        for row in classified_positions
-    ]
+    normalized_positions = []
+    for row in classified_positions:
+        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        normalized_positions.append(
+            {
+                **row,
+                "strategy_name": (
+                    None
+                    if row.get("strategy_id") is None
+                    else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+                ),
+                "symbol_status": symbol_status,
+                "symbol_reason": symbol_reason,
+            }
+        )
 
     fact_by_item = {
         str(row.get("item")): row
@@ -12477,17 +12511,21 @@ def verify_candidate(
     classified_report_positions, expected_position_snapshots = _classify_positions(
         report_position_rows, _position_cutoff_date(report)
     )
-    expected_position_rows = [
-        {
-            **row,
-            "strategy_name": (
-                None
-                if row.get("strategy_id") is None
-                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
-            ),
-        }
-        for row in classified_report_positions
-    ]
+    expected_position_rows = []
+    for row in classified_report_positions:
+        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        expected_position_rows.append(
+            {
+                **row,
+                "strategy_name": (
+                    None
+                    if row.get("strategy_id") is None
+                    else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+                ),
+                "symbol_status": symbol_status,
+                "symbol_reason": symbol_reason,
+            }
+        )
     position_rows = _objects(data.get("positions"), "positions")
     checks.append(
         _check(

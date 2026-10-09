@@ -441,6 +441,23 @@ def test_a_v3_cash_line_without_the_new_fields_is_a_finding(tmp_path: Path) -> N
     assert "last_event_date" in invariant[0].message
 
 
+def test_a_v4_cash_line_without_the_new_fields_is_a_finding(tmp_path: Path) -> None:
+    """The same v3 exemption-by-declared-version gap, pinned for v4.
+
+    `_COVERAGE_REPORT_VERSIONS` is `frozenset({3, 4})`: both versions require
+    `last_event_date`/`coverage_end` on a derived cash line, so neither may be
+    silently exempted just because the fields are absent. This mirrors
+    ``test_a_v3_cash_line_without_the_new_fields_is_a_finding`` for 4, so a
+    change that dropped 4 from the versioned set (or widened the exemption by
+    field absence alone) would pass the v3 test but go unnoticed here.
+    """
+
+    findings = _findings(tmp_path, _declare(4), _custody(cash=_cash(versioned=False)))
+    invariant = [f for f in findings if f.klass == checks.BLOCKER_INVARIANT]
+    assert [f.entity for f in invariant] == ["current_capital:beta:cash:CASH1"]
+    assert "last_event_date" in invariant[0].message
+
+
 def test_a_declared_older_version_line_stays_exempt(tmp_path: Path) -> None:
     old = _cash(as_of=EARLY, versioned=False)
     findings = _findings(

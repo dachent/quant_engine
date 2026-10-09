@@ -927,6 +927,7 @@ def _underwriting_row(
     layer_status: str = "VERIFIED_CAUSAL_RETURN_ATTRIBUTION",
     comparison_status: str = "TESTED_EXACT_COMMON_DATES",
     gap: dict[str, Any] | None = None,
+    contracts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     layer = {"status": "AVAILABLE"}
     return {
@@ -938,6 +939,7 @@ def _underwriting_row(
             "design": layer,
             "implementation_reconciliation": {
                 "comparison_status": comparison_status,
+                "contracts": contracts or {},
                 "detail": detail,
                 "status": layer_status,
             },
@@ -1058,6 +1060,13 @@ def test_stale_tt_reconciliation_keeps_the_waterfall_with_its_window_and_as_of(
         layer_status="PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY",
         comparison_status="NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE",
         gap=gap,
+        contracts={
+            "return_attribution": {
+                "as_of_date": "2026-08-09",
+                "pre_policy": False,
+                "stale": False,
+            }
+        },
     )
     dom = _run(tmp_path, _underwriting(row), "renderUnderwriting")
     cell = _flat(dom, "#underwriting-table")
@@ -1106,7 +1115,24 @@ def test_ai_factor_rows_carry_the_pre_policy_contract_date(tmp_path: Path) -> No
             "status": "TESTED_EXACT_COMMON_DATES",
         },
     }
-    row = _underwriting_row("p123-ai-factor", "AI Factor [P123]", detail)
+    row = _underwriting_row(
+        "p123-ai-factor",
+        "AI Factor [P123]",
+        detail,
+        contracts={
+            "provider_return_policy": exclusion,
+            "reconciliation": {
+                "as_of_date": "2026-08-03",
+                "pre_policy": True,
+                "stale": False,
+            },
+            "return_attribution": {
+                "as_of_date": "2026-08-09",
+                "pre_policy": False,
+                "stale": False,
+            },
+        },
+    )
     dom = _run(tmp_path, _underwriting(row), "renderUnderwriting")
     cell = _flat(dom, "#underwriting-table")
 
