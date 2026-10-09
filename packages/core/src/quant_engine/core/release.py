@@ -1877,43 +1877,57 @@ def _verify_release_validation(
         for target in manifest.targets
     }
 
-    def _guarded_read(path: Path) -> bytes | None:
-        """The shared residency-guarded reader (ruling B): refuses a
-        non-resident cloud placeholder without hydrating it through the sync
-        engine, and reports every other IO/refusal as ``(None, reason)``."""
-
-        raw, _reason = read_release_validation_findings_bytes(path)
-        return raw
-
-    # Single-read rule (round-2 review, release.py:1884 probe): the override
-    # guard and the evaluator must reason about the SAME bytes, and every read
-    # must go through the residency-guarded reader (Kimi delta-2: a bare
-    # Path.read_bytes() hydrates a non-resident cloud placeholder through the
-    # sync engine and then evaluates it as if resident). An override is
-    # refused when the default-path bytes exist and differ (a stale-anchor
-    # restore), and the bytes that survive the guard are the only ones the
-    # evaluator sees. No selected findings path is reopened after its
-    # guarded read.
+    # Single-read rule (round-2/3 reviews, release.py:1884 probes): the
+    # override guard and the evaluator must reason about the SAME bytes AND
+    # the SAME read outcomes. Every read happens here, once, through the
+    # residency-guarded reader. A refused read is RETAINED as its refusal
+    # reason -- the evaluator never reopens that path (a placeholder that
+    # becomes readable after the guard must not commit). An override cannot
+    # substitute for an unreadable default: the on-disk anchor is not
+    # verifiable, so the root refuses fail-closed (round-4 review probe:
+    # OFFLINE default plus a stale override must not commit). When both
+    # readable, an override differing from the default refuses as a
+    # stale-anchor restore; the surviving bytes are the only ones evaluated
+    # and hashed.
     paths: dict[str, Path] = {}
     snapshot: dict[str, bytes] = {}
+    snapshot_reasons: dict[str, str] = {}
     for target in manifest.targets:
         root_id = target.root_id
         default_path = default_paths[root_id]
         override_path = overrides.get(root_id)
         if override_path is None or override_path.resolve() == default_path.resolve():
             paths[root_id] = default_path
-            default_bytes = _guarded_read(default_path)
+            default_bytes, default_reason = read_release_validation_findings_bytes(
+                default_path
+            )
             if default_bytes is not None:
                 snapshot[root_id] = default_bytes
+            else:
+                snapshot_reasons[root_id] = default_reason or (
+                    f"the findings file at {default_path} could not be read"
+                )
             continue
-        override_bytes = _guarded_read(override_path)
+        override_bytes, override_reason = read_release_validation_findings_bytes(
+            override_path
+        )
         if override_bytes is None:
             raise ReleaseValidationError(
                 f"release validation refuses root {root_id!r}: the override "
-                f"findings path {override_path} could not be read"
+                f"findings path {override_path} could not be read "
+                f"({override_reason})"
             )
-        default_bytes = _guarded_read(default_path)
-        if default_bytes is not None and override_bytes != default_bytes:
+        default_bytes, _default_reason = read_release_validation_findings_bytes(
+            default_path
+        )
+        if default_bytes is None:
+            raise ReleaseValidationError(
+                f"release validation refuses root {root_id!r}: the current "
+                f"findings at {default_path} could not be read "
+                f"({_default_reason}), so an override cannot be checked "
+                "against the on-disk anchor"
+            )
+        if override_bytes != default_bytes:
             raise ReleaseValidationError(
                 f"release validation refuses root {root_id!r}: an override findings "
                 "path was supplied whose bytes differ from this root's current "
@@ -1923,7 +1937,7 @@ def _verify_release_validation(
         paths[root_id] = override_path
         snapshot[root_id] = override_bytes
     may_publish, per_root_reason = evaluate_release_findings_set(
-        manifest.targets, paths, snapshot=snapshot
+        manifest.targets, paths, snapshot=snapshot, snapshot_reasons=snapshot_reasons
     )
     if may_publish:
         return

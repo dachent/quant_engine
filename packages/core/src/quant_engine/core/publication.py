@@ -2155,6 +2155,7 @@ def evaluate_release_findings_set(
     paths: Mapping[str, Path],
     *,
     snapshot: Mapping[str, bytes] | None = None,
+    snapshot_reasons: Mapping[str, str] | None = None,
 ) -> tuple[bool, dict[str, str | None]]:
     """``(may_publish, per_root_reason)`` for every target of one release (ruling B).
 
@@ -2176,6 +2177,11 @@ def evaluate_release_findings_set(
     replacement between the caller's guard and this evaluation cannot slip a
     different anchor past the check/use gap.
 
+    ``snapshot_reasons``, when given, supplies a retained refusal outcome for
+    a root whose guarded read already failed in the caller: that root refuses
+    with the caller's reason and is never reopened (a placeholder that
+    becomes readable after the guard must not commit; round-4 review probe).
+
     ``per_root_reason[root_id]`` is ``None`` for a clean, bound root, else its
     refusal reason or a ``blocking findings [...]`` summary, matching the text
     a single-target caller would have reported.
@@ -2189,6 +2195,10 @@ def evaluate_release_findings_set(
         path = paths[root_id]
         raw: bytes | None
         reason: str | None
+        if snapshot_reasons is not None and root_id in snapshot_reasons:
+            # A retained guard refusal: refuse without reopening the path.
+            per_root_reason[root_id] = snapshot_reasons[root_id]
+            continue
         if snapshot is not None and root_id in snapshot:
             raw, reason = snapshot[root_id], None
         else:
