@@ -32,6 +32,7 @@ from quant_engine.core.publication import (
     publish_generation,
     read_current,
     read_generation,
+    read_release_validation_findings_bytes,
 )
 
 
@@ -1877,17 +1878,22 @@ def _verify_release_validation(
     }
 
     def _guarded_read(path: Path) -> bytes | None:
-        try:
-            return path.read_bytes()
-        except OSError:
-            return None
+        """The shared residency-guarded reader (ruling B): refuses a
+        non-resident cloud placeholder without hydrating it through the sync
+        engine, and reports every other IO/refusal as ``(None, reason)``."""
+
+        raw, _reason = read_release_validation_findings_bytes(path)
+        return raw
 
     # Single-read rule (round-2 review, release.py:1884 probe): the override
-    # guard and the evaluator must reason about the SAME bytes. Every read
-    # happens here, once: an override is refused when the default-path bytes
-    # exist and differ (a stale-anchor restore), and the bytes that survive
-    # the guard are the only ones the evaluator sees. No selected findings
-    # path is reopened after its guarded read.
+    # guard and the evaluator must reason about the SAME bytes, and every read
+    # must go through the residency-guarded reader (Kimi delta-2: a bare
+    # Path.read_bytes() hydrates a non-resident cloud placeholder through the
+    # sync engine and then evaluates it as if resident). An override is
+    # refused when the default-path bytes exist and differ (a stale-anchor
+    # restore), and the bytes that survive the guard are the only ones the
+    # evaluator sees. No selected findings path is reopened after its
+    # guarded read.
     paths: dict[str, Path] = {}
     snapshot: dict[str, bytes] = {}
     for target in manifest.targets:
