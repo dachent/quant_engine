@@ -160,6 +160,9 @@ _SURFACE_SOURCE_BINDINGS: dict[str, tuple[str, ...]] = {
 # generation manifest itself). Rows naming inputs that are not a release
 # target's own generation output (tracker/audit/authority rows) are the
 # producer-ledger and per-root bindings' concern or carry no release target.
+# The lens rows are built from _LENS_SOURCE_KEYS below: each LIVE_ONLY lens
+# root has a provenance row "portfolio-decomposition-lens-<source_key>" whose
+# sha256 pins that root's lens content artifact bytes (round-2 review probe).
 _PROVENANCE_BINDINGS: dict[str, tuple[str, str | None]] = {
     "baseline-generation": ("portfolio-baseline", None),
     "baseline-catalog": ("portfolio-baseline", "portfolio-baseline.json"),
@@ -177,6 +180,13 @@ _PROVENANCE_BINDINGS: dict[str, tuple[str, str | None]] = {
         "weekly-returns",
         "weekly-returns.json",
     ),
+    **{
+        f"portfolio-decomposition-lens-{source_key}": (
+            source_key,
+            "analytics/decomposition.json",
+        )
+        for source_key in _LENS_SOURCE_KEYS
+    },
 }
 
 
