@@ -447,8 +447,7 @@ def _coherently_mutate_the_captured_day(rows: list[dict[str, Any]]) -> None:
     mutated_beginning = Decimal(by_day[DAY]["beginning_capital"]) + 100
     by_day[DAY]["beginning_capital"] = str(mutated_beginning)
     by_day[DAY]["return"] = str(
-        Decimal(by_day[NEXT_DAY]["beginning_capital"]) / mutated_beginning
-        - Decimal(1)
+        Decimal(by_day[NEXT_DAY]["beginning_capital"]) / mutated_beginning - Decimal(1)
     )
 
 

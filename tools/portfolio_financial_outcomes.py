@@ -1805,7 +1805,9 @@ def validate_financial_outcomes_with_deferred_ledger(
         _write_verification_ledger(final_spec, caller, work_counters, calls)
 
     try:
-        proof = _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+        proof = _validate_financial_outcomes(
+            spec, allow_synthetic, work_counters, calls
+        )
     except BaseException:
         finalize(spec)
         raise
