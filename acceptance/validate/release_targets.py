@@ -142,7 +142,7 @@ _CONTENT_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
 # The panel provenance rows that name portfolio-baseline's bytes (ruling B.2.2
 # example: "$.provenance[].sha256"): provenance artifact name -> the file inside
 # the baseline target's generation directory whose bytes that row's sha256 pins.
-_BASELINE_PROVENANCE_BINDINGS: tuple[tuple[str, str], ...] = (
+_BASELINE_PROVENANCE_BINDINGS: tuple[tuple[str, str | None], ...] = (
     ("baseline-generation", None),  # the manifest bytes: sha256 == generation id
     ("baseline-catalog", "portfolio-baseline.json"),
 )
@@ -436,30 +436,31 @@ def target_binding(
 
     # Ruling B.2.2 example: the baseline provenance rows name the baseline
     # generation's own bytes.
-    for artifact_name, artifact_id in _BASELINE_PROVENANCE_BINDINGS:
-        if root_id != "portfolio-baseline":
-            break
-        for row in _provenance_rows(panel, artifact_name):
-            observed = row.get("sha256")
-            expected = (
-                generation_id
-                if artifact_id is None
-                else _artifact_file_sha256(root_dir, generation_id, artifact_id)
-            )
-            if observed != expected:
-                pointer = row.get("_pointer", "$.provenance[]")
-                yield _finding(
-                    "release.target_binding",
-                    BLOCKER_AUTHORITY,
-                    root_id,
-                    observed,
-                    expected,
-                    PANEL,
-                    pointer,
-                    (),
-                    f"panel provenance row {artifact_name!r} does not match "
-                    "the baseline target's bytes",
+    if root_id == "portfolio-baseline":
+        for provenance_artifact, baseline_artifact in _BASELINE_PROVENANCE_BINDINGS:
+            for row in _provenance_rows(panel, provenance_artifact):
+                observed = row.get("sha256")
+                expected = (
+                    generation_id
+                    if baseline_artifact is None
+                    else _artifact_file_sha256(
+                        root_dir, generation_id, baseline_artifact
+                    )
                 )
+                if observed != expected:
+                    pointer = row.get("_pointer", "$.provenance[]")
+                    yield _finding(
+                        "release.target_binding",
+                        BLOCKER_AUTHORITY,
+                        root_id,
+                        observed,
+                        expected,
+                        PANEL,
+                        pointer,
+                        (),
+                        f"panel provenance row {provenance_artifact!r} does not match "
+                        "the baseline target's bytes",
+                    )
 
 
 def _contains_value(value: Any, needle: str) -> bool:
