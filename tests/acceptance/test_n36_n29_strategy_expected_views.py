@@ -37,7 +37,7 @@ from test_validate_generation import CUTOFF, Spec, _policy_fixture, build
 from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
 
-FIXTURE = Path(__file__).parent / "fixtures" / "smoke9_real_rows.json"
+FIXTURE = Path(__file__).parent / "rows" / "smoke9_real_rows.json"
 TT_BLOCKED_START = "2025-11-25"
 TT_BLOCKED_END = "2026-01-04"
 ROBUXIO = ("invested_capital.strategy.cutoff", "robuxio-crypto", "49997.10")
