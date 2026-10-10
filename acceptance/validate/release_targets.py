@@ -122,6 +122,14 @@ KNOWN_ROOTS: frozenset[str] = frozenset(
 
 # The artifact a lens generation carries whose bytes the panel's source_sha256 pins.
 _LENS_CONTENT_ARTIFACT_ID = "analytics/decomposition.json"
+# A lens ROOT's own generation keeps its content at the top: the decomposition
+# root's "analytics/decomposition.json" layout belongs to the decomposition
+# generation, not to the per-lens release targets (the run-P false blocker:
+# the bytes matched the panel digest exactly, at decomposition.json).
+_LENS_ROOT_CONTENT_CANDIDATES: tuple[str, ...] = (
+    _LENS_CONTENT_ARTIFACT_ID,
+    "decomposition.json",
+)
 
 # Content digests the panel carries for a simple root's files (ruling B.2.2:
 # "every content digest the panel carries for T's files must also equal the
@@ -280,17 +288,38 @@ def _lens_content_sha256(root_dir: Path, generation_id: str) -> str | None:
 
 
 def _artifact_file_sha256(
-    root_dir: Path, generation_id: str, artifact_id: str
+    root_dir: Path,
+    generation_id: str,
+    artifact_id: str,
+    *,
+    lens_root: bool = False,
 ) -> str | None:
-    """The sha256 of the artifact's actual bytes on disk, or None if absent."""
+    """The sha256 of the artifact's actual bytes on disk, or None if absent.
 
-    artifact_path = root_dir / "generations" / generation_id / artifact_id
-    if not artifact_path.is_file():
-        return None
-    try:
-        return hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    A LENS root's staged generation lays its content artifact out flat under
+    the generation directory while the manifest records the full id
+    (``analytics/decomposition.json`` staged as ``decomposition.json``): for
+    those roots the recorded candidates are tried in order. Every other
+    binding resolves the full id only - a basename fallback there could
+    false-match an unrelated artifact sharing the basename (Kimi round-2 on
+    PR 521).
+    """
+
+    generation = root_dir / "generations" / generation_id
+    if lens_root:
+        candidates = tuple(
+            generation / relative for relative in _LENS_ROOT_CONTENT_CANDIDATES
+        )
+    else:
+        candidates = (generation / artifact_id,)
+    for artifact_path in candidates:
+        if not artifact_path.is_file():
+            continue
+        try:
+            return hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return None
 
 
 def target_integrity(target: Mapping[str, Any], root_dir: Path) -> Iterator[Finding]:
@@ -434,7 +463,7 @@ def target_binding(
             # bytes, not only the manifest's own claim (round-1 review: the
             # declaration alone is not the target's bytes).
             actual_bytes_sha256 = _artifact_file_sha256(
-                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID
+                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID, lens_root=True
             )
             if actual_bytes_sha256 != manifest_declared:
                 yield _finding(
@@ -490,7 +519,10 @@ def target_binding(
                 current, f"$.{surface_pointer}"
             ):
                 actual = _artifact_file_sha256(
-                    root_dir, generation_id, surface_artifact
+                    root_dir,
+                    generation_id,
+                    surface_artifact,
+                    lens_root=root_id in _LENS_SOURCE_KEYS,
                 )
                 if actual != sha256:
                     yield _finding(
@@ -519,7 +551,12 @@ def target_binding(
             expected = (
                 generation_id
                 if baseline_artifact is None
-                else _artifact_file_sha256(root_dir, generation_id, baseline_artifact)
+                else _artifact_file_sha256(
+                    root_dir,
+                    generation_id,
+                    baseline_artifact,
+                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                )
             )
             if observed != expected:
                 pointer = row.get("_pointer", "$.provenance[]")

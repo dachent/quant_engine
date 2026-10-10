@@ -35,12 +35,18 @@ LENS_ARTIFACT_BYTES = b'{"decomposition": "fixture-bytes"}\n'
 LENS_ARTIFACT_SHA = hashlib.sha256(LENS_ARTIFACT_BYTES).hexdigest()
 
 
-def write_lens_artifact(root_dir: Path, generation_id: str) -> None:
-    """Write the lens content artifact whose sha256 is ``LENS_ARTIFACT_SHA``."""
+def write_lens_artifact(
+    root_dir: Path, generation_id: str, *, nested: bool = False
+) -> None:
+    """Write the lens content artifact whose sha256 is ``LENS_ARTIFACT_SHA``.
 
-    artifact = (
-        root_dir / "generations" / generation_id / "analytics" / "decomposition.json"
-    )
+    Lens generations stage the artifact FLAT (decomposition.json) while the
+    manifest records the full id — the layout the basename fallback resolves.
+    ``nested=True`` stages the full-id path (the full-id-first control).
+    """
+
+    relative = "analytics/decomposition.json" if nested else "decomposition.json"
+    artifact = root_dir / "generations" / generation_id / relative
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(LENS_ARTIFACT_BYTES)
 
@@ -672,3 +678,21 @@ def test_lens_provenance_rows_bind_to_their_owning_roots(tmp_path: Path) -> None
     assert [f.check_id for f in findings] == ["release.target_binding"]
     assert findings[0].klass == BLOCKER_AUTHORITY
     assert "portfolio-decomposition-lens-us-economic" in findings[0].message
+
+
+def test_a_non_lens_generation_staged_flat_still_blocks(tmp_path: Path) -> None:
+    """The scoping's discriminating fixture (Kimi round-2): the basename
+    fallback applies to lens roots only, so a NON-lens generation (the
+    decomposition root) that mis-stages its content flat must still block
+    even with the bytes matching the panel digest."""
+    panel = _panel_with_digests()
+    write_manifest(tmp_path, GOOD_GEN)  # declares analytics/decomposition.json
+    # the decomposition root mis-staged FLAT: same bytes, wrong layout
+    flat = tmp_path / "generations" / GOOD_GEN / "decomposition.json"
+    flat.write_bytes(DECOMPOSITION_ARTIFACT_BYTES)
+    target = make_target("factor-decomposition", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
