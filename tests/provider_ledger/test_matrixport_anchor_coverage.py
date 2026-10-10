@@ -96,15 +96,19 @@ def _manifest(files: Mapping[str, Path]) -> GenerationManifest:
     )
 
 
+def _csv_field(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"' if value else ""
+
+
 def _base_coverage_row(
     *,
     status: str = "complete_to_observed_boundary",
     terminal: str = "short_page",
     raw_rows: int = 1,
 ) -> str:
-    details = json.dumps({"page_size": 50, "raw_rows": raw_rows})
+    details = _csv_field(json.dumps({"page_size": 50, "raw_rows": raw_rows}))
     return (
-        f'"{details}",{TRADE_RECORD_ENDPOINT},,,{BASE_RUN_ID},derived,'
+        f"{details},{TRADE_RECORD_ENDPOINT},,,{BASE_RUN_ID},derived,"
         f"{status},{terminal},,1788412234002,2026-09-03T05:10:34.002000+00:00\n"
     )
 
@@ -120,11 +124,33 @@ def _base_request_row(
         {"end_time": end_ms, "limit": 50, "offset": 0, "start_time": start_ms}
     )
     observed_start = "2025-12-05T21:34:17.414000+00:00" if row_count else ""
+    fields = [""] * 29
+    fields[3] = "/strategy/api/v2/user/trade_record"
+    fields[5] = "GET"
+    fields[12] = observed_start
+    fields[13] = terminal
+    fields[14] = "/strategy/api/v2/user/trade_record"
+    fields[17] = "req-1"
+    fields[21] = safe
+    fields[23] = str(row_count)
+    fields[24] = BASE_RUN_ID
+    fields[25] = safe
+    fields[26] = "derived"
+    fields[27] = "200"
+    fields[28] = terminal
+    return ",".join(_csv_field(value) for value in fields) + "\n"
+
+
+def _inc_coverage_row_raw(
+    *,
+    status: str = "complete_to_observed_boundary",
+    terminal: str = "empty_page",
+    raw_rows: int = 0,
+) -> str:
+    details = _csv_field(json.dumps({"page_size": 50, "raw_rows": raw_rows}))
     return (
-        ",,796,/strategy/api/v2/user/trade_record,,GET,,,,"
-        f',"{observed_start}",1764970457414,"{observed_start}",{terminal},'
-        "/strategy/api/v2/user/trade_record,,abc,req-1,,,,"
-        f'"{safe}",def,{row_count},{BASE_RUN_ID},"{safe}",derived,200,{terminal}\n'
+        f"{details},{TRADE_RECORD_ENDPOINT},,,{INC_RUN_ID},derived,"
+        f"{status},{terminal},,1789756973919,2026-09-18T18:42:53.919000+00:00\n"
     )
 
 
@@ -133,11 +159,7 @@ def _inc_coverage_row(
     status: str = "complete_to_observed_boundary",
     terminal: str = "empty_page",
 ) -> str:
-    details = json.dumps({"page_size": 50, "raw_rows": 0})
-    return (
-        f'"{details}",{TRADE_RECORD_ENDPOINT},,,{INC_RUN_ID},derived,'
-        f"{status},{terminal},,1789756973919,2026-09-18T18:42:53.919000+00:00\n"
-    )
+    return _inc_coverage_row_raw(status=status, terminal=terminal)
 
 
 def _inc_request_line(
@@ -377,7 +399,10 @@ def test_matrixport_anchor_coverage_refuses_a_redemption(tmp_path: Path) -> None
         "/strategy/api/v2/user/trade_record,300,2026-03-01T00:00:00+00:00\n"
     )
     manifest, catalog, root = _anchor_fixture(
-        tmp_path, inc_strategy_trades=redemption
+        tmp_path,
+        inc_coverage=_inc_coverage_row_raw(raw_rows=1, terminal="short_page"),
+        inc_requests=[_inc_request_line(row_count=1, terminal="short_page")],
+        inc_strategy_trades=redemption,
     )
 
     with pytest.raises(ledger.ProviderLedgerError, match="redemption|order_type"):

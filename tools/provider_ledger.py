@@ -7785,6 +7785,370 @@ def _matrixport_flow_coverage(
     }
 
 
+_MATRIXPORT_TRADE_RECORD_ENDPOINT: Final = (
+    "GET https://mapi.matrixport.com/strategy/api/v2/user/trade_record"
+)
+_MATRIXPORT_TRADE_RECORD_PATH: Final = "/strategy/api/v2/user/trade_record"
+# MX-1(b): only a natural list terminal proves the list was read to its end.
+_MATRIXPORT_LIST_TERMINALS: Final = frozenset(
+    {"empty_page", "short_page", "no_next_id"}
+)
+# The trade_record list is windowed by start_time/end_time in epoch ms.
+_MS_PER_DAY: Final = 86_400_000
+
+
+def _matrixport_anchor_coverage(
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    known_accounts: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Prove the robuxio capital-anchor boundary through the trade_record chain.
+
+    Q1-F (owner ruling 2026-10-10): the incremental run's coverage and request
+    manifest are pinned in the generation; the base run it copies forward is
+    named by run id only, so its coverage.csv, request_manifest.csv and
+    strategy_trades.csv are hash-pinned declared inputs under the catalog's
+    ``anchor_coverage`` block.  MX-1 requires a complete status, a natural
+    list terminal, request windows whose end reaches the claimed boundary,
+    and windows that tile back to epoch with no gap.  MX-2: the chain must
+    contain exactly one subscription and no redemption.
+    """
+
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    if known_accounts != {account_id}:
+        raise ProviderLedgerError("Matrixport anchor coverage account scope differs")
+
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    inc_root = root / "output" / source_run_id
+
+    block = _object(
+        catalog.get("anchor_coverage"), "matrixport anchor_coverage"
+    )
+    base_run_id = _run_id(block.get("base_run_id"), "matrixport anchor_coverage.base_run_id")
+    base_run_end_ms = block.get("base_run_end_ms")
+    if (
+        not isinstance(base_run_end_ms, int)
+        or isinstance(base_run_end_ms, bool)
+        or base_run_end_ms <= 0
+    ):
+        raise ProviderLedgerError("matrixport anchor_coverage.base_run_end_ms is invalid")
+    base_root = root / "output" / base_run_id
+
+    def _load_window(
+        run_root: Path,
+        coverage_artifact: str,
+        request_artifact: str,
+        trades_artifact: str,
+        *,
+        pins: Mapping[str, Any] | None,
+        name: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+        coverage_path = _exact_file(
+            run_root, Path(coverage_artifact), f"{name} coverage"
+        )
+        trades_path = _exact_file(
+            run_root, Path(trades_artifact), f"{name} strategy trades"
+        )
+        if pins is None:
+            for artifact_id, path in (
+                (coverage_artifact, coverage_path),
+                (trades_artifact, trades_path),
+            ):
+                artifact = _find_manifest_artifact(manifest, artifact_id, name)
+                _verify_hash(path, artifact.sha256, name)
+        else:
+            pin_map = _object(pins.get("artifacts"), f"{name} pins")
+            for artifact_id, path in (
+                (coverage_artifact, coverage_path),
+                (trades_artifact, trades_path),
+            ):
+                if artifact_id not in pin_map:
+                    raise ProviderLedgerError(f"{name} pin for {artifact_id} is missing")
+                _verify_hash(path, pin_map[artifact_id], name)
+
+        coverage_rows = _read_csv_rows(
+            coverage_path,
+            {"details_json", "endpoint", "status", "terminal_reason"},
+            f"{name} coverage",
+        )
+        matches = [
+            row
+            for row in coverage_rows
+            if row.get("endpoint") == _MATRIXPORT_TRADE_RECORD_ENDPOINT
+        ]
+        if len(matches) != 1:
+            raise ProviderLedgerError(
+                f"{name} trade_record coverage is missing or ambiguous"
+            )
+        row = matches[0]
+        if row.get("status") != "complete_to_observed_boundary":
+            raise ProviderLedgerError(f"{name} trade_record coverage is incomplete")
+        terminal = row.get("terminal_reason")
+        if terminal not in _MATRIXPORT_LIST_TERMINALS:
+            raise ProviderLedgerError(
+                f"{name} trade_record terminal {terminal!r} is not a natural list terminal"
+            )
+        try:
+            details = json.loads(row["details_json"])
+        except json.JSONDecodeError as exc:
+            raise ProviderLedgerError(
+                f"{name} trade_record coverage details are not JSON"
+            ) from exc
+        raw_rows = details.get("raw_rows") if isinstance(details, Mapping) else None
+        if not isinstance(raw_rows, int) or isinstance(raw_rows, bool) or raw_rows < 0:
+            raise ProviderLedgerError(f"{name} trade_record coverage count is invalid")
+
+        trades = _read_csv_rows(
+            trades_path,
+            {"order_id", "order_type", "time_stamp_utc"},
+            f"{name} strategy trades",
+        )
+        return (
+            {"terminal": terminal, "raw_rows": raw_rows},
+            [],
+            trades,
+        )
+
+    def _read_base_requests(path: Path, pin: object, name: str) -> list[tuple[int, int]]:
+        _verify_hash(path, pin, name)
+        rows = _read_csv_rows(
+            path,
+            {"path", "safe_params", "page_terminal_reason"},
+            name,
+        )
+        windows: list[tuple[int, int]] = []
+        for row in rows:
+            if row.get("path") != _MATRIXPORT_TRADE_RECORD_PATH:
+                continue
+            try:
+                params = json.loads(row["safe_params"])
+            except json.JSONDecodeError as exc:
+                raise ProviderLedgerError(
+                    f"{name} trade_record request params are not JSON"
+                ) from exc
+            start = params.get("start_time")
+            end = params.get("end_time")
+            if (
+                not isinstance(start, int)
+                or isinstance(start, bool)
+                or not isinstance(end, int)
+                or isinstance(end, bool)
+                or start < 0
+                or end < start
+            ):
+                raise ProviderLedgerError(
+                    f"{name} trade_record request window is invalid"
+                )
+            windows.append((start, end))
+        return windows
+
+    def _read_inc_requests(path: Path, name: str) -> list[tuple[int, int]]:
+        artifact = _find_manifest_artifact(
+            manifest, "reports/request_manifest.jsonl", name
+        )
+        _verify_hash(path, artifact.sha256, name)
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProviderLedgerError(f"{name} is not readable UTF-8") from exc
+        windows = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ProviderLedgerError(
+                    f"{name} request line is not JSON"
+                ) from exc
+            if not isinstance(row, Mapping):
+                raise ProviderLedgerError(f"{name} request line is not an object")
+            if row.get("path") != _MATRIXPORT_TRADE_RECORD_PATH:
+                continue
+            try:
+                params = json.loads(_text(row.get("safe_params"), f"{name} safe_params"))
+            except json.JSONDecodeError as exc:
+                raise ProviderLedgerError(
+                    f"{name} trade_record request params are not JSON"
+                ) from exc
+            start = params.get("start_time")
+            end = params.get("end_time")
+            if (
+                not isinstance(start, int)
+                or isinstance(start, bool)
+                or not isinstance(end, int)
+                or isinstance(end, bool)
+                or start < 0
+                or end < start
+            ):
+                raise ProviderLedgerError(
+                    f"{name} trade_record request window is invalid"
+                )
+            windows.append((start, end))
+        return windows
+
+    # Base window: hash-pinned declared inputs, never a bare run id.
+    base_coverage, _, base_trades = _load_window(
+        base_root,
+        "csv/coverage.csv",
+        "csv/request_manifest.csv",
+        "csv/strategy_trades.csv",
+        pins=block,
+        name="Matrixport anchor base capture",
+    )
+    base_request_path = _exact_file(
+        base_root,
+        Path("csv/request_manifest.csv"),
+        "Matrixport anchor base capture request manifest",
+    )
+    base_pin_map = _object(
+        block.get("artifacts"), "matrixport anchor_coverage pins"
+    )
+    if "csv/request_manifest.csv" not in base_pin_map:
+        raise ProviderLedgerError(
+            "matrixport anchor_coverage pin for csv/request_manifest.csv is missing"
+        )
+    base_windows = _read_base_requests(
+        base_request_path,
+        base_pin_map["csv/request_manifest.csv"],
+        "Matrixport anchor base capture request manifest",
+    )
+
+    # Incremental window: pinned by the generation manifest itself.
+    inc_coverage, _, inc_trades = _load_window(
+        inc_root,
+        "csv/coverage.csv",
+        "reports/request_manifest.jsonl",
+        "csv/strategy_trades.csv",
+        pins=None,
+        name="Matrixport anchor incremental capture",
+    )
+    inc_windows = _read_inc_requests(
+        _exact_file(
+            inc_root,
+            Path("reports/request_manifest.jsonl"),
+            "Matrixport anchor incremental capture request manifest",
+        ),
+        "Matrixport anchor incremental capture request manifest",
+    )
+
+    # The lineage row must bind this generation to the pinned base run.
+    lineage_artifact = _find_manifest_artifact(
+        manifest, "csv/incremental_lineage.csv", "Matrixport anchor lineage"
+    )
+    lineage_path = _exact_file(
+        inc_root, Path("csv/incremental_lineage.csv"), "Matrixport anchor lineage"
+    )
+    _verify_hash(lineage_path, lineage_artifact.sha256, "Matrixport anchor lineage")
+    lineage_rows = _read_csv_rows(
+        lineage_path,
+        {"base_run_id", "base_run_end_ms"},
+        "Matrixport anchor lineage",
+    )
+    if len(lineage_rows) != 1:
+        raise ProviderLedgerError("Matrixport anchor lineage is missing or ambiguous")
+    (lineage_row,) = lineage_rows
+    if _run_id(lineage_row.get("base_run_id"), "Matrixport anchor lineage base_run_id") != base_run_id:
+        raise ProviderLedgerError("Matrixport anchor lineage base_run_id differs")
+    try:
+        lineage_end_ms = int(lineage_row["base_run_end_ms"])
+    except (TypeError, ValueError) as exc:
+        raise ProviderLedgerError(
+            "Matrixport anchor lineage base_run_end_ms is invalid"
+        ) from exc
+    if lineage_end_ms != base_run_end_ms:
+        raise ProviderLedgerError("Matrixport anchor lineage base_run_end_ms differs")
+
+    # MX-1(c): the base requests must run from epoch to the declared base end.
+    if not base_windows:
+        raise ProviderLedgerError(
+            "Matrixport anchor base capture has no trade_record request"
+        )
+    if min(start for start, _ in base_windows) != 0:
+        raise ProviderLedgerError(
+            "Matrixport anchor base capture does not start at epoch"
+        )
+    if max(end for _, end in base_windows) < base_run_end_ms:
+        raise ProviderLedgerError(
+            "Matrixport anchor base capture ends before its declared base_run_end_ms"
+        )
+    if base_coverage["raw_rows"] != len(base_trades):
+        raise ProviderLedgerError(
+            "Matrixport anchor base capture trade count differs"
+        )
+
+    # MX-1(d): the incremental window must tile onto the base with no gap.
+    if not inc_windows:
+        raise ProviderLedgerError(
+            "Matrixport anchor incremental capture has no trade_record request"
+        )
+    inc_start = min(start for start, _ in inc_windows)
+    inc_end = max(end for _, end in inc_windows)
+    if inc_start > base_run_end_ms:
+        raise ProviderLedgerError(
+            "Matrixport anchor windows leave a gap between the base and incremental runs"
+        )
+    if inc_coverage["raw_rows"] != len(inc_trades):
+        raise ProviderLedgerError(
+            "Matrixport anchor incremental capture trade count differs"
+        )
+
+    # MX-2: exactly one subscription, no redemption, across the tiled window.
+    all_trades = [*base_trades, *inc_trades]
+    seen_order_ids: set[str] = set()
+    subscriptions: list[dict[str, str]] = []
+    for trade in all_trades:
+        order_id = _text(trade.get("order_id"), "Matrixport anchor trade order_id")
+        if order_id in seen_order_ids:
+            continue
+        seen_order_ids.add(order_id)
+        order_type = str(trade.get("order_type") or "").strip()
+        if order_type == "1":
+            subscriptions.append(trade)
+        elif order_type == "2":
+            raise ProviderLedgerError(
+                "Matrixport anchor window contains a redemption"
+            )
+        else:
+            raise ProviderLedgerError(
+                "Matrixport anchor window carries an unknown order_type"
+            )
+    if len(subscriptions) != 1:
+        raise ProviderLedgerError(
+            "Matrixport anchor window must contain exactly one subscription"
+        )
+    try:
+        first_event = datetime.fromisoformat(
+            _text(
+                subscriptions[0].get("time_stamp_utc"),
+                "Matrixport anchor subscription time",
+            ).replace("Z", "+00:00")
+        ).date()
+    except ValueError as exc:
+        raise ProviderLedgerError(
+            "Matrixport anchor subscription time must be an ISO timestamp"
+        ) from exc
+
+    boundary = datetime.fromtimestamp(inc_end / 1000, tz=timezone.utc).date()
+    return {
+        account_id: {
+            "effective_end": boundary.isoformat(),
+            "effective_start": first_event.isoformat(),
+            "record_count": len(seen_order_ids),
+            "source_artifact_ids": [
+                f"{base_run_id}/csv/coverage.csv",
+                f"{base_run_id}/csv/request_manifest.csv",
+                f"{base_run_id}/csv/strategy_trades.csv",
+                "csv/coverage.csv",
+                "csv/incremental_lineage.csv",
+                "csv/strategy_trades.csv",
+                "reports/request_manifest.jsonl",
+            ],
+        }
+    }
+
+
 def _ibkr_flow_coverage(
     catalog: Mapping[str, Any],
     known_accounts: set[str],
@@ -8000,6 +8364,7 @@ def _admissions(
     ibkr_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     quantbase_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
     matrixport_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    matrixport_anchor_coverage: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
         set(_PROVIDER_CATALOGS)
@@ -8047,11 +8412,20 @@ def _admissions(
         # capture records no observed boundary (coverage.csv carries a completion row
         # "all_discovered_subscription_ids" with empty observed bounds), so they keep
         # their own window.
+        # Q1-F: Matrixport sleeve allocations take their coverage from the
+        # hash-pinned trade_record list chain (base run + incremental run),
+        # proved by _matrixport_anchor_coverage under MX-1/MX-2.  Without that
+        # claim the anchor admission ends at the last anchor (2025-12-05) and
+        # the robuxio cash line publishes NOT_READY dated 2025-12-05.
         coverage_claim = (
-            provider_flow_coverage.get(provider_id, {}).get(account_id)
-            if fact_type == "flows"
-            or (fact_type == "capital_anchors" and provider_id == "quantbase")
-            else None
+            dict(matrixport_anchor_coverage or {}).get(account_id)
+            if fact_type == "capital_anchors" and provider_id == "matrixport"
+            else (
+                provider_flow_coverage.get(provider_id, {}).get(account_id)
+                if fact_type == "flows"
+                or (fact_type == "capital_anchors" and provider_id == "quantbase")
+                else None
+            )
         )
         if coverage_claim is not None:
             coverage_start = _day(
@@ -9434,6 +9808,19 @@ def build_catalog(
             catalogs["matrixport"],
             provider_roots["matrixport"],
             {_CSV_FACT_ACCOUNT["matrixport"]},
+        ),
+        matrixport_anchor_coverage=(
+            # Q1-F: only when the catalog declares hash pins for the base
+            # capture does the anchor admission extend past the last anchor.
+            # A catalog without the block keeps the N56 window.
+            _matrixport_anchor_coverage(
+                manifests["matrixport"],
+                catalogs["matrixport"],
+                provider_roots["matrixport"],
+                {_CSV_FACT_ACCOUNT["matrixport"]},
+            )
+            if catalogs["matrixport"].get("anchor_coverage") is not None
+            else None
         ),
         quantbase_flow_coverage=_quantbase_flow_coverage(
             manifests["quantbase"],
