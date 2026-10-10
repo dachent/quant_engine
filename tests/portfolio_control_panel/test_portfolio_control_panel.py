@@ -14985,3 +14985,117 @@ def test_the_report_version_selects_the_panel_version() -> None:
     assert panel._panel_schema_version_for(3) == 25
     assert panel._panel_schema_version_for(4) == 25
     assert panel._panel_schema_version_for(True) == 24
+
+
+def test_a_pdf_locator_outside_the_streams_is_refused(tmp_path: Path) -> None:
+    """GLM round-1 on PR 520: a locator in the PDF scaffolding (an uncompressed
+    URI action outside any stream) must refuse."""
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n/URI (file:///C:/Users/x/sheet.pdf)\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert any("desktop-command/page.pdf" in f for f in findings)
+
+
+def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
+    tmp_path: Path,
+) -> None:
+    """The run-P false-positive class: zlib bytes containing a drive-letter
+    shape that is not a real locator must stay clean."""
+    import zlib as _zlib
+
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    # A precomputed deterministic case: the INFLATED content carries no
+    # locator, but the DEFLATE encoding contains a real drive-letter shape
+    # (the run-P false-positive class: compressed bytes matching the locator
+    # rule at random). Both directions are asserted so the fixture
+    # discriminates old vs new behavior.
+    import base64 as _base64
+
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    data_b64 = (
+        "cc4BNpB/r+Xs+3ln3QftNSJ6rONjOo+8Zo396wCSvDu5vHQ43MEZNIW1GMRB6ghZTQVTf8vI"
+        "ecvP7taLmKAj1/oPEXjcOz8647ZFvUWy7EBhiIy9bsn/nZj6j/dkcVrtIpeqpmFT0zIr0HW"
+        "4wYUqxtcARs0T3MbAybtJxOUx777VI/exGokDEo6vyszwo7NnAiy2KpI316gDdAPesUookm"
+        "mLowMuwpP3mllf8YJ+pZQuyp/IKXMFb99LLhOqqJVoxb2OBUM5XZx67aBTURC4lZOpU5Y9p"
+        "wv+Br/koSepYc6p2UD93/HqNiFJIjSt3dVj6hRNCNYzqruWxC1LnbgRpuEhXdYsN6NhWMHc"
+        "DlL9eQOTqLpY+EfeXjpNW2QXYXf//rvMLlrBRL0qlwFu"
+    )
+    content = _base64.b64decode(data_b64)
+    assert not absolute_locator_offsets(content)  # the inflated content is clean
+    body = _zlib.compress(content)
+    assert absolute_locator_offsets(body)  # the compressed bytes carry the shape
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length "
+        + str(len(body)).encode()
+        + b">>\nstream\n"
+        + body
+        + b"\nendstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert not any("page.pdf" in f and "locator" in f for f in findings)
+
+
+def test_a_failed_zlib_stream_is_scanned_raw(tmp_path: Path) -> None:
+    """A stream whose bytes fail zlib is readable text: its locator must refuse."""
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length 30>>\nstream\n"
+        b"file:///C:/not-really-compressed\n"
+        b"endstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert any("desktop-command/page.pdf" in f for f in findings)
+
+
+def test_a_second_stream_with_compressed_drive_shaped_bytes_is_clean(
+    tmp_path: Path,
+) -> None:
+    """Kimi's round-2 finding: the unanchored stream keyword also matched
+    inside every endstream, so bogus spans raw-scanned the following
+    stream's compressed bytes — the run-P false positive returned for any
+    multi-stream PDF. With the anchored keyword, a two-stream PDF whose
+    SECOND stream inflates to clean content must stay clean even when its
+    compressed bytes carry a drive shape (the delta-5 fixture's body)."""
+    import base64 as _base64
+    import zlib as _zlib
+
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    data_b64 = (
+        "cc4BNpB/r+Xs+3ln3QftNSJ6rONjOo+8Zo396wCSvDu5vHQ43MEZNIW1GMRB6ghZTQVTf8vI"
+        "ecvP7taLmKAj1/oPEXjcOz8647ZFvUWy7EBhiIy9bsn/nZj6j/dkcVrtIpeqpmFT0zIr0HW"
+        "4wYUqxtcARs0T3MbAybtJxOUx777VI/exGokDEo6vyszwo7NnAiy2KpI316gDdAPesUookm"
+        "mLowMuwpP3mllf8YJ+pZQuyp/IKXMFb99LLhOqqJVoxb2OBUM5XZx67aBTURC4lZOpU5Y9p"
+        "wv+Br/koSepYc6p2UD93/HqNiFJIjSt3dVj6hRNCNYzqruWxC1LnbgRpuEhXdYsN6NhWMHc"
+        "DlL9eQOTqLpY+EfeXjpNW2QXYXf//rvMLlrBRL0qlwFu"
+    )
+    content = _base64.b64decode(data_b64)
+    body = _zlib.compress(content)
+    assert absolute_locator_offsets(body)  # the compressed bytes carry the shape
+    first = _zlib.compress(b"first stream, nothing here\n")
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length "
+        + str(len(first)).encode()
+        + b">>\nstream\n"
+        + first
+        + b"\nendstream\n"
+        + b"2 0 obj\n<</Length "
+        + str(len(body)).encode()
+        + b">>\nstream\n"
+        + body
+        + b"\nendstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert not any("page.pdf" in f and "locator" in f for f in findings)
