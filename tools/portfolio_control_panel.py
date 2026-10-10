@@ -13159,12 +13159,17 @@ def qa_evidence_inventory_findings(qa_dir: Path) -> list[str]:
         if suffix in _QA_TEXT_SUFFIXES or suffix == ".pdf":
             data = path.read_bytes()
             is_pdf = suffix == ".pdf"
-            # A UNC pattern is meaningless inside compressed binary, so PDFs get the
-            # drive and file: rules only.
-            hits = qa_absolute_locator_offsets(data, unc=not is_pdf)
+            # A text locator rule is meaningless inside compressed binary: the
+            # raw bytes of a PDF's compressed streams match drive-letter shapes
+            # at random (the round-P false positive). PDFs are scanned in
+            # their inflated streams only, for both the drive and file: rules;
+            # a UNC pattern is equally meaningless there.
+            hits: list[int] = []
             if is_pdf:
                 for stream in _qa_pdf_streams(data):
                     hits.extend(qa_absolute_locator_offsets(stream, unc=False))
+            else:
+                hits = qa_absolute_locator_offsets(data, unc=True)
             if hits:
                 findings.append(f"{relative}: {len(hits)} absolute locator(s)")
         if "/" not in relative and path.name.lower().startswith("native-qa"):

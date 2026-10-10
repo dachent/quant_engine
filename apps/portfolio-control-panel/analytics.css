@@ -625,6 +625,14 @@ section[data-view="capital"] .callout-neutral {
 
 @media (max-width: 1120px) {
   .analytics-detail-grid { grid-template-columns: 1fr 1fr; }
+  /* Tablet: the topbar meta row (with the assessed-at-cutoff freshness
+     sentence) and the snapshot button must wrap instead of clip. The base
+     topbar styles are the sealed legacy snapshot; these overrides are the
+     editable surface. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+  .topbar-meta { flex-wrap: wrap; row-gap: 6px; min-width: 0; max-width: 100%; }
+  .topbar-meta .as-of { min-width: 0; max-width: 100%; white-space: normal; height: auto; }
+  .topbar .ghost-button { white-space: normal; height: auto; min-height: 32px; }
 }
 
 @media (max-width: 760px) {
