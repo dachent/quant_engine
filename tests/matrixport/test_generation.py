@@ -1039,3 +1039,35 @@ def test_catalog_without_anchor_coverage_is_unchanged(tmp_path: Path) -> None:
 
     catalog, _manifest, _catalog_bytes = build_generation(_spec(tmp_path))
     assert "anchor_coverage" not in catalog
+
+
+def test_anchor_coverage_catalog_shape_matches_the_ledger_reader(
+    tmp_path: Path,
+) -> None:
+    """Producer/consumer seam: the emitted block is the reader's contract.
+
+    tools/provider_ledger._matrixport_anchor_coverage reads
+    catalog["anchor_coverage"] as {base_run_id, base_run_end_ms, artifacts}
+    with artifacts a {relative_path: sha256} map; it refuses anything else.
+    """
+
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = _anchor_coverage_block(base_run)
+    _write_json(spec_path, document)
+
+    catalog, _manifest, catalog_bytes = build_generation(spec_path)
+
+    block = catalog["anchor_coverage"]
+    assert set(block) == {"base_run_id", "base_run_end_ms", "artifacts"}
+    assert isinstance(block["base_run_id"], str)
+    assert isinstance(block["base_run_end_ms"], int)
+    assert isinstance(block["artifacts"], dict)
+    assert all(
+        isinstance(sha, str) and len(sha) == 64
+        for sha in block["artifacts"].values()
+    )
+    # The catalog is canonical JSON: the block must round-trip byte-identical.
+    reloaded = json.loads(catalog_bytes.decode("utf-8"))
+    assert reloaded["anchor_coverage"] == block
