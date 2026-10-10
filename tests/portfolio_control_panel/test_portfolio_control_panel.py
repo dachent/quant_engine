@@ -15011,24 +15011,27 @@ def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
     view = qa / "desktop-command"
     view.mkdir(parents=True)
     # A precomputed deterministic case: the INFLATED content carries no
-    # locator, but the DEFLATE encoding contains the raw bytes b"X:" —
-    # the run-P false-positive class (compressed bytes matching a
-    # drive-letter shape at random).
-    data_b64 = (
-        "x76Yp+7K6wA+YCHBfsDJVNK0HjayxD2ooAc6Z24xk7LmFTsANhVO5JUn1fcDBR6i"
-        "ddjQpze4GXTUGqVmg9ok/rLuvKN2W6+Jp71lmDeqlMBr14lCFqnckCpZIvlHuVal"
-        "Qr/VHE+kt+IiOqAJXa2UlJU2fjnZAaky8fNAc9/BzztdhagprbS7SbjO6GEk8iia"
-        "Xtl4wYji9zoP0y9eudiAvazmtRYe3W9deVzLLiC2cfczkdWtMw0+5Bln4Y4ZqQjh"
-        "GtF6ZvNPx/hZUx4npuUGG85FkiwDtTvO0xtRhubYvT58HPh7KgOQy1VhCuTonCHk"
-        "oHDUfeRdwHDceQ4UjgCCI+ViVhjVCWTTztGoKFdcQpU5jslx8O8Y4kRtnQjteNkG"
-        "dWrvrW6GHXRLgi6cPu9jFBGGFZ7YsNoZUVbIi1b4GalFz5Ur7IvlTuqho8BCHcUv"
-        "WIgoDJVuTKEZ5v59pScf4vS0Zfq4KzsnVKg3NlS3D8rfe6C6tgEaQ8+ENtpqQ/qA"
-        "F8G8JE7KlA4jHOjdVw4u0g=="
-    )
+    # locator, but the DEFLATE encoding contains a real drive-letter shape
+    # (the run-P false-positive class: compressed bytes matching the locator
+    # rule at random). Both directions are asserted so the fixture
+    # discriminates old vs new behavior.
     import base64 as _base64
+    import zlib as _zlib
 
-    body = _zlib.compress(_base64.b64decode(data_b64))
-    assert b"X:" in body  # the compressed bytes carry the shape
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    data_b64 = (
+        "cc4BNpB/r+Xs+3ln3QftNSJ6rONjOo+8Zo396wCSvDu5vHQ43MEZNIW1GMRB6ghZTQVTf8vI"
+        "ecvP7taLmKAj1/oPEXjcOz8647ZFvUWy7EBhiIy9bsn/nZj6j/dkcVrtIpeqpmFT0zIr0HW"
+        "4wYUqxtcARs0T3MbAybtJxOUx777VI/exGokDEo6vyszwo7NnAiy2KpI316gDdAPesUookm"
+        "mLowMuwpP3mllf8YJ+pZQuyp/IKXMFb99LLhOqqJVoxb2OBUM5XZx67aBTURC4lZOpU5Y9p"
+        "wv+Br/koSepYc6p2UD93/HqNiFJIjSt3dVj6hRNCNYzqruWxC1LnbgRpuEhXdYsN6NhWMHc"
+        "DlL9eQOTqLpY+EfeXjpNW2QXYXf//rvMLlrBRL0qlwFu"
+    )
+    content = _base64.b64decode(data_b64)
+    assert not absolute_locator_offsets(content)  # the inflated content is clean
+    body = _zlib.compress(content)
+    assert absolute_locator_offsets(body)  # the compressed bytes carry the shape
     (view / "page.pdf").write_bytes(
         b"%PDF-1.4\n1 0 obj\n<</Length "
         + str(len(body)).encode()
