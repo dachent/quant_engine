@@ -678,3 +678,21 @@ def test_lens_provenance_rows_bind_to_their_owning_roots(tmp_path: Path) -> None
     assert [f.check_id for f in findings] == ["release.target_binding"]
     assert findings[0].klass == BLOCKER_AUTHORITY
     assert "portfolio-decomposition-lens-us-economic" in findings[0].message
+
+
+def test_a_non_lens_generation_staged_flat_still_blocks(tmp_path: Path) -> None:
+    """The scoping's discriminating fixture (Kimi round-2): the basename
+    fallback applies to lens roots only, so a NON-lens generation (the
+    decomposition root) that mis-stages its content flat must still block
+    even with the bytes matching the panel digest."""
+    panel = _panel_with_digests()
+    write_manifest(tmp_path, GOOD_GEN)  # declares analytics/decomposition.json
+    # the decomposition root mis-staged FLAT: same bytes, wrong layout
+    flat = tmp_path / "generations" / GOOD_GEN / "decomposition.json"
+    flat.write_bytes(DECOMPOSITION_ARTIFACT_BYTES)
+    target = make_target("factor-decomposition", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert [f.check_id for f in findings] == ["release.target_binding"]
+    assert findings[0].klass == BLOCKER_AUTHORITY
