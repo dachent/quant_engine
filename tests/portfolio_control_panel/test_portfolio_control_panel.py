@@ -15054,3 +15054,48 @@ def test_a_failed_zlib_stream_is_scanned_raw(tmp_path: Path) -> None:
     )
     findings = panel.qa_evidence_inventory_findings(qa)
     assert any("desktop-command/page.pdf" in f for f in findings)
+
+
+def test_a_second_stream_with_compressed_drive_shaped_bytes_is_clean(
+    tmp_path: Path,
+) -> None:
+    """Kimi's round-2 finding: the unanchored stream keyword also matched
+    inside every endstream, so bogus spans raw-scanned the following
+    stream's compressed bytes — the run-P false positive returned for any
+    multi-stream PDF. With the anchored keyword, a two-stream PDF whose
+    SECOND stream inflates to clean content must stay clean even when its
+    compressed bytes carry a drive shape (the delta-5 fixture's body)."""
+    import base64 as _base64
+    import zlib as _zlib
+
+    from acceptance.validate.generation import absolute_locator_offsets
+
+    data_b64 = (
+        "cc4BNpB/r+Xs+3ln3QftNSJ6rONjOo+8Zo396wCSvDu5vHQ43MEZNIW1GMRB6ghZTQVTf8vI"
+        "ecvP7taLmKAj1/oPEXjcOz8647ZFvUWy7EBhiIy9bsn/nZj6j/dkcVrtIpeqpmFT0zIr0HW"
+        "4wYUqxtcARs0T3MbAybtJxOUx777VI/exGokDEo6vyszwo7NnAiy2KpI316gDdAPesUookm"
+        "mLowMuwpP3mllf8YJ+pZQuyp/IKXMFb99LLhOqqJVoxb2OBUM5XZx67aBTURC4lZOpU5Y9p"
+        "wv+Br/koSepYc6p2UD93/HqNiFJIjSt3dVj6hRNCNYzqruWxC1LnbgRpuEhXdYsN6NhWMHc"
+        "DlL9eQOTqLpY+EfeXjpNW2QXYXf//rvMLlrBRL0qlwFu"
+    )
+    content = _base64.b64decode(data_b64)
+    body = _zlib.compress(content)
+    assert absolute_locator_offsets(body)  # the compressed bytes carry the shape
+    first = _zlib.compress(b"first stream, nothing here\n")
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length "
+        + str(len(first)).encode()
+        + b">>\nstream\n"
+        + first
+        + b"\nendstream\n"
+        + b"2 0 obj\n<</Length "
+        + str(len(body)).encode()
+        + b">>\nstream\n"
+        + body
+        + b"\nendstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert not any("page.pdf" in f and "locator" in f for f in findings)

@@ -13128,7 +13128,7 @@ def qa_absolute_locator_offsets(data: bytes, *, unc: bool = True) -> list[int]:
 
 def _qa_pdf_streams(data: bytes) -> list[bytes]:
     streams: list[bytes] = []
-    for match in re.finditer(rb"stream\r?\n", data):
+    for match in re.finditer(rb"(?<!end)stream\r?\n", data):
         end = data.find(b"endstream", match.end())
         if end < 0:
             continue
@@ -13170,7 +13170,7 @@ def qa_evidence_inventory_findings(qa_dir: Path) -> list[str]:
             hits: list[int] = []
             if is_pdf:
                 stream_spans: list[tuple[int, int]] = []
-                for match in re.finditer(rb"stream\r?\n", data):
+                for match in re.finditer(rb"(?<!end)stream\r?\n", data):
                     end = data.find(b"endstream", match.end())
                     if end < 0:
                         continue
