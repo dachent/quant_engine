@@ -122,6 +122,14 @@ KNOWN_ROOTS: frozenset[str] = frozenset(
 
 # The artifact a lens generation carries whose bytes the panel's source_sha256 pins.
 _LENS_CONTENT_ARTIFACT_ID = "analytics/decomposition.json"
+# A lens ROOT's own generation keeps its content at the top: the decomposition
+# root's "analytics/decomposition.json" layout belongs to the decomposition
+# generation, not to the per-lens release targets (the run-P false blocker:
+# the bytes matched the panel digest exactly, at decomposition.json).
+_LENS_ROOT_CONTENT_CANDIDATES: tuple[str, ...] = (
+    _LENS_CONTENT_ARTIFACT_ID,
+    "decomposition.json",
+)
 
 # Content digests the panel carries for a simple root's files (ruling B.2.2:
 # "every content digest the panel carries for T's files must also equal the
@@ -282,15 +290,24 @@ def _lens_content_sha256(root_dir: Path, generation_id: str) -> str | None:
 def _artifact_file_sha256(
     root_dir: Path, generation_id: str, artifact_id: str
 ) -> str | None:
-    """The sha256 of the artifact's actual bytes on disk, or None if absent."""
+    """The sha256 of the artifact's actual bytes on disk, or None if absent.
 
-    artifact_path = root_dir / "generations" / generation_id / artifact_id
-    if not artifact_path.is_file():
-        return None
-    try:
-        return hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    A staged generation may lay the artifact out flat under the generation
+    directory while the manifest records its full id (the lens roots do:
+    ``analytics/decomposition.json`` staged as ``decomposition.json``), so the
+    basename is tried after the full id.
+    """
+
+    generation = root_dir / "generations" / generation_id
+    candidates = (generation / artifact_id, generation / Path(artifact_id).name)
+    for artifact_path in candidates:
+        if not artifact_path.is_file():
+            continue
+        try:
+            return hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return None
 
 
 def target_integrity(target: Mapping[str, Any], root_dir: Path) -> Iterator[Finding]:
