@@ -288,18 +288,30 @@ def _lens_content_sha256(root_dir: Path, generation_id: str) -> str | None:
 
 
 def _artifact_file_sha256(
-    root_dir: Path, generation_id: str, artifact_id: str
+    root_dir: Path,
+    generation_id: str,
+    artifact_id: str,
+    *,
+    lens_root: bool = False,
 ) -> str | None:
     """The sha256 of the artifact's actual bytes on disk, or None if absent.
 
-    A staged generation may lay the artifact out flat under the generation
-    directory while the manifest records its full id (the lens roots do:
-    ``analytics/decomposition.json`` staged as ``decomposition.json``), so the
-    basename is tried after the full id.
+    A LENS root's staged generation lays its content artifact out flat under
+    the generation directory while the manifest records the full id
+    (``analytics/decomposition.json`` staged as ``decomposition.json``): for
+    those roots the recorded candidates are tried in order. Every other
+    binding resolves the full id only - a basename fallback there could
+    false-match an unrelated artifact sharing the basename (Kimi round-2 on
+    PR 521).
     """
 
     generation = root_dir / "generations" / generation_id
-    candidates = (generation / artifact_id, generation / Path(artifact_id).name)
+    if lens_root:
+        candidates = tuple(
+            generation / relative for relative in _LENS_ROOT_CONTENT_CANDIDATES
+        )
+    else:
+        candidates = (generation / artifact_id,)
     for artifact_path in candidates:
         if not artifact_path.is_file():
             continue
@@ -451,7 +463,7 @@ def target_binding(
             # bytes, not only the manifest's own claim (round-1 review: the
             # declaration alone is not the target's bytes).
             actual_bytes_sha256 = _artifact_file_sha256(
-                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID
+                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID, lens_root=True
             )
             if actual_bytes_sha256 != manifest_declared:
                 yield _finding(
@@ -507,7 +519,10 @@ def target_binding(
                 current, f"$.{surface_pointer}"
             ):
                 actual = _artifact_file_sha256(
-                    root_dir, generation_id, surface_artifact
+                    root_dir,
+                    generation_id,
+                    surface_artifact,
+                    lens_root=root_id in _LENS_SOURCE_KEYS,
                 )
                 if actual != sha256:
                     yield _finding(
@@ -536,7 +551,12 @@ def target_binding(
             expected = (
                 generation_id
                 if baseline_artifact is None
-                else _artifact_file_sha256(root_dir, generation_id, baseline_artifact)
+                else _artifact_file_sha256(
+                    root_dir,
+                    generation_id,
+                    baseline_artifact,
+                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                )
             )
             if observed != expected:
                 pointer = row.get("_pointer", "$.provenance[]")
