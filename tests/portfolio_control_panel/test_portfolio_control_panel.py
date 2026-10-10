@@ -15016,7 +15016,6 @@ def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
     # rule at random). Both directions are asserted so the fixture
     # discriminates old vs new behavior.
     import base64 as _base64
-    import zlib as _zlib
 
     from acceptance.validate.generation import absolute_locator_offsets
 
