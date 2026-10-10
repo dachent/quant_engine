@@ -135,7 +135,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
         "run_root",
         "schema_version",
     }
-    extra = set(spec) - required_keys - {"declared_exclusions"}
+    extra = set(spec) - required_keys - {"declared_exclusions", "anchor_coverage"}
     if extra:
         raise MatrixportGenerationError(
             f"spec contains unexpected keys: {sorted(extra)}"
@@ -158,6 +158,101 @@ def _load_spec(path: Path) -> dict[str, Any]:
             _text(entry.get("item"), f"declared_exclusions[{idx}].item")
             _text(entry.get("reason"), f"declared_exclusions[{idx}].reason")
             _text(entry.get("provenance"), f"declared_exclusions[{idx}].provenance")
+    _anchor = spec.get("anchor_coverage")
+    if _anchor is not None:
+        # Q1-F: the base capture a rederived incremental generation tiles onto
+        # is named by run id alone in the capture's lineage row.  The block
+        # declares that run's anchor files (coverage, request manifest,
+        # strategy trades) by content hash so the provider ledger can prove
+        # the capital-anchor boundary through the trade_record list chain.
+        block = _object(_anchor, "anchor_coverage")
+        _strict(
+            block,
+            {"base_run_id", "base_run_end_ms", "base_run_root", "artifacts"},
+            "anchor_coverage",
+        )
+        base_run_id = _text(block["base_run_id"], "anchor_coverage.base_run_id")
+        if ".." in base_run_id or "/" in base_run_id or "\\" in base_run_id:
+            raise MatrixportGenerationError(
+                "anchor_coverage.base_run_id is not a safe run identifier"
+            )
+        end_ms = _integer(block["base_run_end_ms"], "anchor_coverage.base_run_end_ms")
+        if end_ms <= 0:
+            raise MatrixportGenerationError(
+                "anchor_coverage.base_run_end_ms must be positive"
+            )
+        base_root = Path(_text(block["base_run_root"], "anchor_coverage.base_run_root"))
+        if not base_root.is_absolute() or base_root.is_symlink():
+            raise MatrixportGenerationError(
+                "anchor_coverage.base_run_root must be a real absolute directory"
+            )
+        if base_root.name != base_run_id:
+            raise MatrixportGenerationError(
+                "anchor_coverage.base_run_root name must equal base_run_id"
+            )
+        try:
+            base_root = base_root.resolve(strict=True)
+        except OSError as exc:
+            raise MatrixportGenerationError(
+                "anchor_coverage.base_run_root must be a real absolute directory"
+            ) from exc
+        pins: dict[str, str] = {}
+        for index, record in enumerate(
+            _objects(block["artifacts"], "anchor_coverage.artifacts")
+        ):
+            _strict(
+                record,
+                {"expected_sha256", "expected_size_bytes", "relative_path"},
+                f"anchor_coverage.artifacts[{index}]",
+            )
+            relative = _relative(
+                record["relative_path"], f"anchor_coverage.artifacts[{index}]"
+            )
+            if relative in pins:
+                raise MatrixportGenerationError(
+                    "anchor_coverage artifact paths must be unique"
+                )
+            try:
+                path = _source_path(base_root, relative)
+            except MatrixportGenerationError as exc:
+                raise MatrixportGenerationError(
+                    f"anchor_coverage source is missing or linked: {relative}"
+                ) from exc
+            actual_hash, actual_size = hash_file(path)
+            expected_hash = _text(
+                record["expected_sha256"],
+                f"anchor_coverage.artifacts[{index}].expected_sha256",
+            )
+            if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+                raise MatrixportGenerationError(
+                    f"anchor_coverage source hash differs: {relative}"
+                )
+            if actual_size != _integer(
+                record["expected_size_bytes"],
+                f"anchor_coverage.artifacts[{index}].expected_size_bytes",
+            ):
+                raise MatrixportGenerationError(
+                    f"anchor_coverage source size differs: {relative}"
+                )
+            pins[relative] = actual_hash
+        if set(pins) != {
+            "csv/coverage.csv",
+            "csv/request_manifest.csv",
+            "csv/strategy_trades.csv",
+        }:
+            raise MatrixportGenerationError(
+                "anchor_coverage must pin csv/coverage.csv, "
+                "csv/request_manifest.csv and csv/strategy_trades.csv"
+            )
+        spec["anchor_coverage"] = {
+            "base_run_id": base_run_id,
+            "base_run_end_ms": end_ms,
+            # The resolvable base location is part of the pinned contract:
+            # the provider ledger reads the base capture from this path,
+            # never from a guessed co-location with the incremental run.
+            "base_run_root": str(base_root),
+            "artifacts": pins,
+        }
     return spec
 
 
@@ -495,6 +590,8 @@ def build_generation(
         "request_count": baseline["request_count"],
         "source_run_id": run_id,
     }
+    if spec.get("anchor_coverage") is not None:
+        catalog["anchor_coverage"] = spec["anchor_coverage"]
     if declared_exclusions:
         catalog["declared_exclusions"] = [e.to_dict() for e in declared_exclusions]
     if manifest_undeclared:

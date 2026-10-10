@@ -924,3 +924,162 @@ def test_coverage_claim_round_trip_with_exclusions() -> None:
     reloaded = CoverageClaim.from_dict(serialized)
     assert reloaded == claim
     assert len(reloaded.declared_exclusions) == 2
+
+
+def _anchor_coverage_block(base_run: Path, *, end_ms: int = 1788412229513) -> dict:
+    """Spec block declaring the hash pins of the base capture's anchor files."""
+
+    artifacts = []
+    for relative in (
+        "csv/coverage.csv",
+        "csv/request_manifest.csv",
+        "csv/strategy_trades.csv",
+    ):
+        payload = (base_run / relative).read_bytes()
+        artifacts.append(
+            {
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": relative,
+            }
+        )
+    return {
+        "base_run_id": base_run.name,
+        "base_run_end_ms": end_ms,
+        "base_run_root": str(base_run.resolve()),
+        "artifacts": artifacts,
+    }
+
+
+def _base_run_tree(tmp_path: Path) -> Path:
+    base = tmp_path / "base-output" / "20260903T051029.331Z"
+    (base / "csv").mkdir(parents=True)
+    (base / "csv" / "coverage.csv").write_text(
+        "details_json,endpoint\n", encoding="utf-8"
+    )
+    (base / "csv" / "request_manifest.csv").write_text(
+        "endpoint,path\n", encoding="utf-8"
+    )
+    (base / "csv" / "strategy_trades.csv").write_text("order_id\n", encoding="utf-8")
+    return base
+
+
+def test_anchor_coverage_block_is_hash_pinned_into_the_catalog(
+    tmp_path: Path,
+) -> None:
+    """Q1-F: the spec may declare the base capture's anchor files by hash."""
+
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = _anchor_coverage_block(base_run)
+    _write_json(spec_path, document)
+
+    catalog, _manifest, _catalog_bytes = build_generation(spec_path)
+
+    block = catalog["anchor_coverage"]
+    assert block["base_run_id"] == "20260903T051029.331Z"
+    assert block["base_run_end_ms"] == 1788412229513
+    artifacts = block["artifacts"]
+    assert set(artifacts) == {
+        "csv/coverage.csv",
+        "csv/request_manifest.csv",
+        "csv/strategy_trades.csv",
+    }
+    for relative, pin in artifacts.items():
+        payload = (base_run / relative).read_bytes()
+        assert pin == hashlib.sha256(payload).hexdigest()
+    # The pins are declared inputs, not staged generation artifacts: the
+    # manifest artifact set is unchanged.
+    assert all(
+        not artifact.artifact_id.startswith("20260903T051029.331Z")
+        for artifact in _manifest.artifacts
+    )
+
+
+def test_anchor_coverage_block_refuses_a_hash_mismatch(tmp_path: Path) -> None:
+    """A declared pin that does not match the bytes fails the build."""
+
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    block = _anchor_coverage_block(base_run)
+    block["artifacts"][0]["expected_sha256"] = "0" * 64
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = block
+    _write_json(spec_path, document)
+
+    with pytest.raises(MatrixportGenerationError, match="anchor_coverage"):
+        build_generation(spec_path)
+
+
+def test_anchor_coverage_block_refuses_a_missing_base_file(tmp_path: Path) -> None:
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    block = _anchor_coverage_block(base_run)
+    (base_run / "csv" / "strategy_trades.csv").unlink()
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = block
+    _write_json(spec_path, document)
+
+    with pytest.raises(MatrixportGenerationError, match="anchor_coverage"):
+        build_generation(spec_path)
+
+
+def test_anchor_coverage_block_refuses_extra_keys(tmp_path: Path) -> None:
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    block = _anchor_coverage_block(base_run)
+    block["unexpected"] = True
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = block
+    _write_json(spec_path, document)
+
+    with pytest.raises(MatrixportGenerationError, match="anchor_coverage"):
+        build_generation(spec_path)
+
+
+def test_catalog_without_anchor_coverage_is_unchanged(tmp_path: Path) -> None:
+    """A spec without the block builds a catalog with no anchor_coverage key."""
+
+    catalog, _manifest, _catalog_bytes = build_generation(_spec(tmp_path))
+    assert "anchor_coverage" not in catalog
+
+
+def test_anchor_coverage_catalog_shape_matches_the_ledger_reader(
+    tmp_path: Path,
+) -> None:
+    """Producer/consumer seam: the emitted block is the reader's contract.
+
+    tools/provider_ledger._matrixport_anchor_coverage reads
+    catalog["anchor_coverage"] as {base_run_id, base_run_end_ms,
+    base_run_root, artifacts} with artifacts a {relative_path: sha256}
+    map; it refuses anything else.  base_run_root is the resolvable base
+    location the generation validated: the ledger must read the base from
+    it, not assume co-location with the incremental run.
+    """
+
+    spec_path = _spec(tmp_path)
+    base_run = _base_run_tree(tmp_path)
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    document["anchor_coverage"] = _anchor_coverage_block(base_run)
+    _write_json(spec_path, document)
+
+    catalog, _manifest, catalog_bytes = build_generation(spec_path)
+
+    block = catalog["anchor_coverage"]
+    assert set(block) == {
+        "base_run_id",
+        "base_run_end_ms",
+        "base_run_root",
+        "artifacts",
+    }
+    assert isinstance(block["base_run_id"], str)
+    assert isinstance(block["base_run_end_ms"], int)
+    assert block["base_run_root"] == str(base_run.resolve())
+    assert isinstance(block["artifacts"], dict)
+    assert all(
+        isinstance(sha, str) and len(sha) == 64 for sha in block["artifacts"].values()
+    )
+    # The catalog is canonical JSON: the block must round-trip byte-identical.
+    reloaded = json.loads(catalog_bytes.decode("utf-8"))
+    assert reloaded["anchor_coverage"] == block
