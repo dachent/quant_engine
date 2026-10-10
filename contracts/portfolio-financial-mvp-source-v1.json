@@ -4491,7 +4491,7 @@
     "CASH_RISK_FREE"
    ],
    "authority": "OWNER_APPROVED_FACTOR_INDUSTRY_AND_RISK_FREE_AUTHORITY_ISSUE_374",
-   "endpoint_or_artifact_selector": "French normalized source generation eaa83e6eec68eb071329d6414397237fe4702a79d6b99b698dc31d784628b24d, manifest 01a969f966147c0ee5d5ca246cb45c98c4c8b466eb53f787598cc568157d2c10, approved catalog 13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360; BIL source remains independently bound in style generation c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd",
+   "endpoint_or_artifact_selector": "French normalized source generation eaa83e6eec68eb071329d6414397237fe4702a79d6b99b698dc31d784628b24d, manifest 01a969f966147c0ee5d5ca246cb45c98c4c8b466eb53f787598cc568157d2c10, approved catalog 13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360; BIL source remains independently bound in style generation 6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d",
    "acquisition": {
     "adapter": "portfolio-public-decomposition-sources",
     "mode": "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE",
@@ -4559,7 +4559,7 @@
   },
   {
    "source_id": "public-etf-style-sector-and-market-prices",
-   "source_version": "portfolio-public-style-sources:c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd",
+   "source_version": "portfolio-public-style-sources:6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d",
    "strategy_version": {
     "status": "UNRESOLVED",
     "binding": "EFFECTIVE_STRATEGY_APPLICABILITY_AND_BENCHMARK_REQUIRED",
@@ -4584,7 +4584,7 @@
     "STRATEGY_BENCHMARK"
    ],
    "authority": "OWNER_APPROVED_STYLE_SECTOR_MARKET_AND_BENCHMARK_AUTHORITY_ISSUE_374",
-   "endpoint_or_artifact_selector": "style generation c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd, manifest ad750655c45587ce79bd74cba508cff097e3e0b6bb67d46959079adbcb219150, CSV d2688b31786c1d3bb915a64c525a15fd99d8df0f980270c13d8b8a8af0ca6b11; sector generation 43835f9569219c9335ea21e73aa98888b69906c92508c834453a10ae93b2a143, manifest 0712ea34a50bde9cb24d8438415748f687acfc72ca330e105e17d0c9237513cd; approved catalog 13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360; plan 151fd7c2a493377768749555a8f11b25f16aaca5595bceab47e341a2d6523dcd; benchmark daily-rebalanced-equal-weight:BTC-USD:ETH-USD:8d567f7589d114fbbac43303e875ae6944cd1dfdf78ddfa993aed9b6f6b5bb91, selected attribution generation ea9fbbbe33fc98df9cdae72598c10edc4db51de5c5596ba1dcca39093ea55a79, manifest 3f028751f061f4df09d4b910e6ebc26183fb0ba8207a841f25938c9e2044b323, catalog be09eb5717eacdccbc94de61621deee310761f9f9a1c6e3e4232a0ffa0053fbc",
+   "endpoint_or_artifact_selector": "style generation 6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d, manifest 04b356341b3e8fc6ef8b551c064b87eecd7d90b7f9a17ef24c3ed3330fe0e6db, CSV 2eecee673bdd8f0204e859fa21ed05323c50f738885f3418dd250e47f8bfab4c; sector generation 60cf00cd69d91a2e74da29ae3b636122ce58a80c0961a1ce35d4264b8336bcaf, manifest a998334dc35cf04daf2014b3d84d808928fcc0e811d8992391583d0bcbaba39f; approved catalog 13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360; plan 151fd7c2a493377768749555a8f11b25f16aaca5595bceab47e341a2d6523dcd; benchmark daily-rebalanced-equal-weight:BTC-USD:ETH-USD:8d567f7589d114fbbac43303e875ae6944cd1dfdf78ddfa993aed9b6f6b5bb91, selected attribution generation ea9fbbbe33fc98df9cdae72598c10edc4db51de5c5596ba1dcca39093ea55a79, manifest 3f028751f061f4df09d4b910e6ebc26183fb0ba8207a841f25938c9e2044b323, catalog be09eb5717eacdccbc94de61621deee310761f9f9a1c6e3e4232a0ffa0053fbc",
    "acquisition": {
     "adapter": "portfolio-public-style-sources",
     "mode": "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE",
@@ -4635,9 +4635,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd",
-    "sha256": "ad750655c45587ce79bd74cba508cff097e3e0b6bb67d46959079adbcb219150",
-    "as_of": "2026-09-04"
+    "generation_id": "6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d",
+    "sha256": "04b356341b3e8fc6ef8b551c064b87eecd7d90b7f9a17ef24c3ed3330fe0e6db",
+    "as_of": "2026-09-18"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -4671,7 +4671,7 @@
     "CRYPTO_RETURN"
    ],
    "authority": "OWNER_APPROVED_PUBLIC_CRYPTO_MARKET_SOURCE",
-   "endpoint_or_artifact_selector": "Yahoo history_adjusted Close for BTC-USD and ETH-USD; raw run 545058c0c6a757f461cbed3fcc5081c257e90a45efa5b3dfce91880a66742272, raw sha256 13c2bf7e9a1e517bdc2e8ab0a3fe949a0ab4ca7d9545d2faeb26951e31cb168c, raw manifest 6b3a923fd0802475c8afb05cee0fdec527943f36b9d7aeb1aa2355ae79e68fc1; normalized bundle c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd, CSV d2688b31786c1d3bb915a64c525a15fd99d8df0f980270c13d8b8a8af0ca6b11",
+   "endpoint_or_artifact_selector": "Yahoo history_adjusted Close for BTC-USD and ETH-USD; raw run 545058c0c6a757f461cbed3fcc5081c257e90a45efa5b3dfce91880a66742272, raw sha256 13c2bf7e9a1e517bdc2e8ab0a3fe949a0ab4ca7d9545d2faeb26951e31cb168c, raw manifest 6b3a923fd0802475c8afb05cee0fdec527943f36b9d7aeb1aa2355ae79e68fc1; normalized bundle 6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d, CSV 2eecee673bdd8f0204e859fa21ed05323c50f738885f3418dd250e47f8bfab4c",
    "acquisition": {
     "adapter": "agent-market-data-terminal-approved-route",
     "mode": "PUBLIC_NO_AUTH_AFTER_SOURCE_APPROVAL",
@@ -4720,9 +4720,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "c2b657d9d876ddc017716094c36467dbddf92025ad424f77419c353b1fb6b8dd",
-    "sha256": "ad750655c45587ce79bd74cba508cff097e3e0b6bb67d46959079adbcb219150",
-    "as_of": "2026-09-04"
+    "generation_id": "6751c984bbdea60b2db947426c2be8761428d94ed0856c9e76f3b6b7763edf6d",
+    "sha256": "04b356341b3e8fc6ef8b551c064b87eecd7d90b7f9a17ef24c3ed3330fe0e6db",
+    "as_of": "2026-09-18"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
