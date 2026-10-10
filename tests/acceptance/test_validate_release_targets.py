@@ -35,12 +35,18 @@ LENS_ARTIFACT_BYTES = b'{"decomposition": "fixture-bytes"}\n'
 LENS_ARTIFACT_SHA = hashlib.sha256(LENS_ARTIFACT_BYTES).hexdigest()
 
 
-def write_lens_artifact(root_dir: Path, generation_id: str) -> None:
-    """Write the lens content artifact whose sha256 is ``LENS_ARTIFACT_SHA``."""
+def write_lens_artifact(
+    root_dir: Path, generation_id: str, *, nested: bool = False
+) -> None:
+    """Write the lens content artifact whose sha256 is ``LENS_ARTIFACT_SHA``.
 
-    artifact = (
-        root_dir / "generations" / generation_id / "analytics" / "decomposition.json"
-    )
+    Lens generations stage the artifact FLAT (decomposition.json) while the
+    manifest records the full id — the layout the basename fallback resolves.
+    ``nested=True`` stages the full-id path (the full-id-first control).
+    """
+
+    relative = "analytics/decomposition.json" if nested else "decomposition.json"
+    artifact = root_dir / "generations" / generation_id / relative
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(LENS_ARTIFACT_BYTES)
 
