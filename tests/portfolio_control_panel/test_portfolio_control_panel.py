@@ -15010,10 +15010,29 @@ def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
     qa = tmp_path / "qa"
     view = qa / "desktop-command"
     view.mkdir(parents=True)
-    junk = b"\x58\x3a\x5c" + bytes(range(256)) * 4  # 'X:\' inside compressed junk
-    body = _zlib.compress(junk)
+    # A precomputed deterministic case: the INFLATED content carries no
+    # locator, but the DEFLATE encoding contains the raw bytes b"X:" —
+    # the run-P false-positive class (compressed bytes matching a
+    # drive-letter shape at random).
+    data_b64 = (
+        "x76Yp+7K6wA+YCHBfsDJVNK0HjayxD2ooAc6Z24xk7LmFTsANhVO5JUn1fcDBR6i"
+        "ddjQpze4GXTUGqVmg9ok/rLuvKN2W6+Jp71lmDeqlMBr14lCFqnckCpZIvlHuVal"
+        "Qr/VHE+kt+IiOqAJXa2UlJU2fjnZAaky8fNAc9/BzztdhagprbS7SbjO6GEk8iia"
+        "Xtl4wYji9zoP0y9eudiAvazmtRYe3W9deVzLLiC2cfczkdWtMw0+5Bln4Y4ZqQjh"
+        "GtF6ZvNPx/hZUx4npuUGG85FkiwDtTvO0xtRhubYvT58HPh7KgOQy1VhCuTonCHk"
+        "oHDUfeRdwHDceQ4UjgCCI+ViVhjVCWTTztGoKFdcQpU5jslx8O8Y4kRtnQjteNkG"
+        "dWrvrW6GHXRLgi6cPu9jFBGGFZ7YsNoZUVbIi1b4GalFz5Ur7IvlTuqho8BCHcUv"
+        "WIgoDJVuTKEZ5v59pScf4vS0Zfq4KzsnVKg3NlS3D8rfe6C6tgEaQ8+ENtpqQ/qA"
+        "F8G8JE7KlA4jHOjdVw4u0g=="
+    )
+    import base64 as _base64
+
+    body = _zlib.compress(_base64.b64decode(data_b64))
+    assert b"X:" in body  # the compressed bytes carry the shape
     (view / "page.pdf").write_bytes(
-        b"%PDF-1.4\n1 0 obj\n<</Length " + str(len(body)).encode() + b">>\nstream\n"
+        b"%PDF-1.4\n1 0 obj\n<</Length "
+        + str(len(body)).encode()
+        + b">>\nstream\n"
         + body
         + b"\nendstream\n%%EOF\n"
     )
