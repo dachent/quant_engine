@@ -295,6 +295,7 @@ def _anchor_fixture(
     catalog = {
         "catalog_schema_version": 2,
         "source_run_id": INC_RUN_ID,
+        "observed_boundary_date": "2026-09-18",
         "anchor_coverage": {
             "base_run_id": BASE_RUN_ID,
             "base_run_end_ms": BASE_END_MS,
@@ -593,6 +594,43 @@ def test_matrixport_anchor_coverage_accepts_a_consistent_duplicate_order_id(
     assert coverage[MX_ACCOUNT]["record_count"] == 1
 
 
+_ONE_DAY_MS = 86_400_000
+
+
+def test_matrixport_anchor_coverage_refuses_an_incremental_window_short_of_the_declared_boundary(
+    tmp_path: Path,
+) -> None:
+    """MX-1(d): an incremental end_time before observed_boundary_date fails.
+
+    Deriving effective_end from the window alone would silently shorten the
+    anchor admission to 2026-09-17 instead of refusing; the declared catalog
+    boundary is the authority, exactly as in _matrixport_flow_coverage.
+    """
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        inc_requests=[_inc_request_line(end_ms=INC_END_MS - _ONE_DAY_MS)],
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="boundary"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_an_incremental_window_overshooting_the_declared_boundary(
+    tmp_path: Path,
+) -> None:
+    """MX-1(d): an incremental end_time past observed_boundary_date over-claims
+    coverage beyond any observation and must fail closed too."""
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        inc_requests=[_inc_request_line(end_ms=INC_END_MS + _ONE_DAY_MS)],
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="boundary"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
 # --- Real-capture fixtures -------------------------------------------------
 #
 # The two OneDrive copies of the 2026-09-03 full capture plus the 2026-09-18
@@ -733,6 +771,7 @@ def test_retained_matrixport_captures_prove_the_2025_12_05_boundary(
     catalog = {
         "catalog_schema_version": 2,
         "source_run_id": INC_RUN_ID,
+        "observed_boundary_date": "2026-09-18",
         "anchor_coverage": {
             "base_run_id": BASE_RUN_ID,
             "base_run_end_ms": BASE_END_MS,

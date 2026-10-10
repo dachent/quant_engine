@@ -8172,6 +8172,18 @@ def _matrixport_anchor_coverage(
         ) from exc
 
     boundary = datetime.fromtimestamp(inc_end / 1000, tz=timezone.utc).date()
+    # MX-1(d): the window-derived boundary is not self-authenticating.  It
+    # must equal the catalog's declared observed boundary — shortfall
+    # silently shortens the anchor admission, overshoot over-claims coverage
+    # past any observation (mirrors _matrixport_flow_coverage).
+    observed_boundary = _day(
+        catalog.get("observed_boundary_date"),
+        "matrixport observed_boundary_date",
+    )
+    if boundary != observed_boundary:
+        raise ProviderLedgerError(
+            "Matrixport anchor window boundary differs from the declared boundary"
+        )
     return {
         account_id: {
             "effective_end": boundary.isoformat(),
