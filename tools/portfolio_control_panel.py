@@ -13159,15 +13159,35 @@ def qa_evidence_inventory_findings(qa_dir: Path) -> list[str]:
         if suffix in _QA_TEXT_SUFFIXES or suffix == ".pdf":
             data = path.read_bytes()
             is_pdf = suffix == ".pdf"
-            # A text locator rule is meaningless inside compressed binary: the
-            # raw bytes of a PDF's compressed streams match drive-letter shapes
-            # at random (the round-P false positive). PDFs are scanned in
-            # their inflated streams only, for both the drive and file: rules;
-            # a UNC pattern is equally meaningless there.
+            # A text locator rule is meaningless inside successfully compressed
+            # binary: the inflated content is what a reader sees. For a PDF,
+            # scan each stream's inflated bytes; a stream that fails zlib is
+            # scanned raw (its content is readable text); and the scaffolding
+            # outside every stream region (URI actions, /Info, unfiltered
+            # objects) is scanned raw too. The raw bytes of a successfully
+            # inflated stream are never scanned: compressed bytes match
+            # drive-letter shapes at random (the run-P false positive).
             hits: list[int] = []
             if is_pdf:
-                for stream in _qa_pdf_streams(data):
-                    hits.extend(qa_absolute_locator_offsets(stream, unc=False))
+                stream_spans: list[tuple[int, int]] = []
+                for match in re.finditer(rb"stream\r?\n", data):
+                    end = data.find(b"endstream", match.end())
+                    if end < 0:
+                        continue
+                    stream_spans.append((match.end(), end))
+                    stream = data[match.end() : end]
+                    try:
+                        inflated = zlib.decompressobj().decompress(stream)
+                    except zlib.error:
+                        inflated = stream
+                    hits.extend(qa_absolute_locator_offsets(inflated, unc=False))
+                outside = bytearray()
+                cursor = 0
+                for span_start, span_end in stream_spans:
+                    outside += data[cursor:span_start]
+                    cursor = span_end
+                outside += data[cursor:]
+                hits.extend(qa_absolute_locator_offsets(bytes(outside), unc=False))
             else:
                 hits = qa_absolute_locator_offsets(data, unc=True)
             if hits:

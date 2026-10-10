@@ -14985,3 +14985,51 @@ def test_the_report_version_selects_the_panel_version() -> None:
     assert panel._panel_schema_version_for(3) == 25
     assert panel._panel_schema_version_for(4) == 25
     assert panel._panel_schema_version_for(True) == 24
+
+
+def test_a_pdf_locator_outside_the_streams_is_refused(tmp_path: Path) -> None:
+    """GLM round-1 on PR 520: a locator in the PDF scaffolding (an uncompressed
+    URI action outside any stream) must refuse."""
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n/URI (file:///C:/Users/x/sheet.pdf)\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert any("desktop-command/page.pdf" in f for f in findings)
+
+
+def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
+    tmp_path: Path,
+) -> None:
+    """The run-P false-positive class: zlib bytes containing a drive-letter
+    shape that is not a real locator must stay clean."""
+    import zlib as _zlib
+
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    junk = b"\x58\x3a\x5c" + bytes(range(256)) * 4  # 'X:\' inside compressed junk
+    body = _zlib.compress(junk)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length %d>>\nstream\n" % len(body)
+        + body
+        + b"\nendstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert not any("page.pdf" in f and "locator" in f for f in findings)
+
+
+def test_a_failed_zlib_stream_is_scanned_raw(tmp_path: Path) -> None:
+    """A stream whose bytes fail zlib is readable text: its locator must refuse."""
+    qa = tmp_path / "qa"
+    view = qa / "desktop-command"
+    view.mkdir(parents=True)
+    (view / "page.pdf").write_bytes(
+        b"%PDF-1.4\n1 0 obj\n<</Length 30>>\nstream\n"
+        b"file:///C:/not-really-compressed\n"
+        b"endstream\n%%EOF\n"
+    )
+    findings = panel.qa_evidence_inventory_findings(qa)
+    assert any("desktop-command/page.pdf" in f for f in findings)
