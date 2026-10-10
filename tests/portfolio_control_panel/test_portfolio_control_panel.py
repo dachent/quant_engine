@@ -15013,7 +15013,7 @@ def test_a_compressed_stream_shaped_like_a_locator_is_not_a_finding(
     junk = b"\x58\x3a\x5c" + bytes(range(256)) * 4  # 'X:\' inside compressed junk
     body = _zlib.compress(junk)
     (view / "page.pdf").write_bytes(
-        b"%PDF-1.4\n1 0 obj\n<</Length %d>>\nstream\n" % len(body)
+        b"%PDF-1.4\n1 0 obj\n<</Length " + str(len(body)).encode() + b">>\nstream\n"
         + body
         + b"\nendstream\n%%EOF\n"
     )
