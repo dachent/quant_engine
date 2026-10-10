@@ -7822,28 +7822,41 @@ def _matrixport_anchor_coverage(
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
     inc_root = root / "output" / source_run_id
 
-    block = _object(
-        catalog.get("anchor_coverage"), "matrixport anchor_coverage"
+    block = _object(catalog.get("anchor_coverage"), "matrixport anchor_coverage")
+    base_run_id = _run_id(
+        block.get("base_run_id"), "matrixport anchor_coverage.base_run_id"
     )
-    base_run_id = _run_id(block.get("base_run_id"), "matrixport anchor_coverage.base_run_id")
     base_run_end_ms = block.get("base_run_end_ms")
     if (
         not isinstance(base_run_end_ms, int)
         or isinstance(base_run_end_ms, bool)
         or base_run_end_ms <= 0
     ):
-        raise ProviderLedgerError("matrixport anchor_coverage.base_run_end_ms is invalid")
-    base_root = root / "output" / base_run_id
+        raise ProviderLedgerError(
+            "matrixport anchor_coverage.base_run_end_ms is invalid"
+        )
+    # The base capture is resolved through the generation-time-validated
+    # base_run_root recorded in the catalog: the retained layout does not
+    # co-locate the base and incremental runs under one provider root.
+    base_root_text = _text(
+        block.get("base_run_root"), "matrixport anchor_coverage.base_run_root"
+    )
+    base_root = Path(base_root_text)
+    if (
+        not base_root.is_absolute()
+        or base_root.is_symlink()
+        or base_root.name != base_run_id
+    ):
+        raise ProviderLedgerError("matrixport anchor_coverage.base_run_root is invalid")
 
     def _load_window(
         run_root: Path,
         coverage_artifact: str,
-        request_artifact: str,
         trades_artifact: str,
         *,
         pins: Mapping[str, Any] | None,
         name: str,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         coverage_path = _exact_file(
             run_root, Path(coverage_artifact), f"{name} coverage"
         )
@@ -7864,7 +7877,9 @@ def _matrixport_anchor_coverage(
                 (trades_artifact, trades_path),
             ):
                 if artifact_id not in pin_map:
-                    raise ProviderLedgerError(f"{name} pin for {artifact_id} is missing")
+                    raise ProviderLedgerError(
+                        f"{name} pin for {artifact_id} is missing"
+                    )
                 _verify_hash(path, pin_map[artifact_id], name)
 
         coverage_rows = _read_csv_rows(
@@ -7904,13 +7919,11 @@ def _matrixport_anchor_coverage(
             {"order_id", "order_type", "time_stamp_utc"},
             f"{name} strategy trades",
         )
-        return (
-            {"terminal": terminal, "raw_rows": raw_rows},
-            [],
-            trades,
-        )
+        return ({"terminal": terminal, "raw_rows": raw_rows}, trades)
 
-    def _read_base_requests(path: Path, pin: object, name: str) -> list[tuple[int, int]]:
+    def _read_base_requests(
+        path: Path, pin: object, name: str
+    ) -> list[tuple[int, int]]:
         _verify_hash(path, pin, name)
         rows = _read_csv_rows(
             path,
@@ -7959,15 +7972,15 @@ def _matrixport_anchor_coverage(
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ProviderLedgerError(
-                    f"{name} request line is not JSON"
-                ) from exc
+                raise ProviderLedgerError(f"{name} request line is not JSON") from exc
             if not isinstance(row, Mapping):
                 raise ProviderLedgerError(f"{name} request line is not an object")
             if row.get("path") != _MATRIXPORT_TRADE_RECORD_PATH:
                 continue
             try:
-                params = json.loads(_text(row.get("safe_params"), f"{name} safe_params"))
+                params = json.loads(
+                    _text(row.get("safe_params"), f"{name} safe_params")
+                )
             except json.JSONDecodeError as exc:
                 raise ProviderLedgerError(
                     f"{name} trade_record request params are not JSON"
@@ -7988,11 +8001,21 @@ def _matrixport_anchor_coverage(
             windows.append((start, end))
         return windows
 
+    def _require_tiled(windows: list[tuple[int, int]], name: str) -> None:
+        """MX-1 tiling: sorted successive starts must never pass the running
+        max end, so an internal hole between disjoint windows fails closed."""
+        running_end: int | None = None
+        for start, end in sorted(windows):
+            if running_end is not None and start > running_end:
+                raise ProviderLedgerError(
+                    f"{name} trade_record request windows leave a gap"
+                )
+            running_end = end if running_end is None else max(running_end, end)
+
     # Base window: hash-pinned declared inputs, never a bare run id.
-    base_coverage, _, base_trades = _load_window(
+    base_coverage, base_trades = _load_window(
         base_root,
         "csv/coverage.csv",
-        "csv/request_manifest.csv",
         "csv/strategy_trades.csv",
         pins=block,
         name="Matrixport anchor base capture",
@@ -8002,9 +8025,7 @@ def _matrixport_anchor_coverage(
         Path("csv/request_manifest.csv"),
         "Matrixport anchor base capture request manifest",
     )
-    base_pin_map = _object(
-        block.get("artifacts"), "matrixport anchor_coverage pins"
-    )
+    base_pin_map = _object(block.get("artifacts"), "matrixport anchor_coverage pins")
     if "csv/request_manifest.csv" not in base_pin_map:
         raise ProviderLedgerError(
             "matrixport anchor_coverage pin for csv/request_manifest.csv is missing"
@@ -8016,10 +8037,9 @@ def _matrixport_anchor_coverage(
     )
 
     # Incremental window: pinned by the generation manifest itself.
-    inc_coverage, _, inc_trades = _load_window(
+    inc_coverage, inc_trades = _load_window(
         inc_root,
         "csv/coverage.csv",
-        "reports/request_manifest.jsonl",
         "csv/strategy_trades.csv",
         pins=None,
         name="Matrixport anchor incremental capture",
@@ -8049,7 +8069,10 @@ def _matrixport_anchor_coverage(
     if len(lineage_rows) != 1:
         raise ProviderLedgerError("Matrixport anchor lineage is missing or ambiguous")
     (lineage_row,) = lineage_rows
-    if _run_id(lineage_row.get("base_run_id"), "Matrixport anchor lineage base_run_id") != base_run_id:
+    if (
+        _run_id(lineage_row.get("base_run_id"), "Matrixport anchor lineage base_run_id")
+        != base_run_id
+    ):
         raise ProviderLedgerError("Matrixport anchor lineage base_run_id differs")
     try:
         lineage_end_ms = int(lineage_row["base_run_end_ms"])
@@ -8065,6 +8088,7 @@ def _matrixport_anchor_coverage(
         raise ProviderLedgerError(
             "Matrixport anchor base capture has no trade_record request"
         )
+    _require_tiled(base_windows, "Matrixport anchor base capture")
     if min(start for start, _ in base_windows) != 0:
         raise ProviderLedgerError(
             "Matrixport anchor base capture does not start at epoch"
@@ -8074,42 +8098,59 @@ def _matrixport_anchor_coverage(
             "Matrixport anchor base capture ends before its declared base_run_end_ms"
         )
     if base_coverage["raw_rows"] != len(base_trades):
-        raise ProviderLedgerError(
-            "Matrixport anchor base capture trade count differs"
-        )
+        raise ProviderLedgerError("Matrixport anchor base capture trade count differs")
 
     # MX-1(d): the incremental window must tile onto the base with no gap.
     if not inc_windows:
         raise ProviderLedgerError(
             "Matrixport anchor incremental capture has no trade_record request"
         )
+    _require_tiled(inc_windows, "Matrixport anchor incremental capture")
     inc_start = min(start for start, _ in inc_windows)
     inc_end = max(end for _, end in inc_windows)
     if inc_start > base_run_end_ms:
         raise ProviderLedgerError(
             "Matrixport anchor windows leave a gap between the base and incremental runs"
         )
-    if inc_coverage["raw_rows"] != len(inc_trades):
+    # The incremental stages the copy-forward chain state: rows restated from
+    # the 30d overlap are already counted by the base, so raw_rows balances
+    # against the rows this run's window contributes for the first time.
+    base_order_ids = {
+        _text(trade.get("order_id"), "Matrixport anchor trade order_id")
+        for trade in base_trades
+    }
+    inc_new_rows = sum(
+        1
+        for trade in inc_trades
+        if _text(trade.get("order_id"), "Matrixport anchor trade order_id")
+        not in base_order_ids
+    )
+    if inc_coverage["raw_rows"] != inc_new_rows:
         raise ProviderLedgerError(
             "Matrixport anchor incremental capture trade count differs"
         )
 
     # MX-2: exactly one subscription, no redemption, across the tiled window.
     all_trades = [*base_trades, *inc_trades]
-    seen_order_ids: set[str] = set()
+    seen_order_types: dict[str, str] = {}
     subscriptions: list[dict[str, str]] = []
     for trade in all_trades:
         order_id = _text(trade.get("order_id"), "Matrixport anchor trade order_id")
-        if order_id in seen_order_ids:
-            continue
-        seen_order_ids.add(order_id)
         order_type = str(trade.get("order_type") or "").strip()
+        first_type = seen_order_types.get(order_id)
+        if first_type is not None:
+            # The 30d overlap may restate a row, but a duplicate order_id
+            # whose order_type contradicts the first sighting fails closed.
+            if order_type != first_type:
+                raise ProviderLedgerError(
+                    "Matrixport anchor window carries a contradictory order_type"
+                )
+            continue
+        seen_order_types[order_id] = order_type
         if order_type == "1":
             subscriptions.append(trade)
         elif order_type == "2":
-            raise ProviderLedgerError(
-                "Matrixport anchor window contains a redemption"
-            )
+            raise ProviderLedgerError("Matrixport anchor window contains a redemption")
         else:
             raise ProviderLedgerError(
                 "Matrixport anchor window carries an unknown order_type"
@@ -8135,7 +8176,7 @@ def _matrixport_anchor_coverage(
         account_id: {
             "effective_end": boundary.isoformat(),
             "effective_start": first_event.isoformat(),
-            "record_count": len(seen_order_ids),
+            "record_count": len(seen_order_types),
             "source_artifact_ids": [
                 f"{base_run_id}/csv/coverage.csv",
                 f"{base_run_id}/csv/request_manifest.csv",

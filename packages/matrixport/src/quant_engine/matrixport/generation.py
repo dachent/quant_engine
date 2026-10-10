@@ -176,16 +176,12 @@ def _load_spec(path: Path) -> dict[str, Any]:
             raise MatrixportGenerationError(
                 "anchor_coverage.base_run_id is not a safe run identifier"
             )
-        end_ms = _integer(
-            block["base_run_end_ms"], "anchor_coverage.base_run_end_ms"
-        )
+        end_ms = _integer(block["base_run_end_ms"], "anchor_coverage.base_run_end_ms")
         if end_ms <= 0:
             raise MatrixportGenerationError(
                 "anchor_coverage.base_run_end_ms must be positive"
             )
-        base_root = Path(
-            _text(block["base_run_root"], "anchor_coverage.base_run_root")
-        )
+        base_root = Path(_text(block["base_run_root"], "anchor_coverage.base_run_root"))
         if not base_root.is_absolute() or base_root.is_symlink():
             raise MatrixportGenerationError(
                 "anchor_coverage.base_run_root must be a real absolute directory"
@@ -201,7 +197,9 @@ def _load_spec(path: Path) -> dict[str, Any]:
                 "anchor_coverage.base_run_root must be a real absolute directory"
             ) from exc
         pins: dict[str, str] = {}
-        for index, record in enumerate(_objects(block["artifacts"], "anchor_coverage.artifacts")):
+        for index, record in enumerate(
+            _objects(block["artifacts"], "anchor_coverage.artifacts")
+        ):
             _strict(
                 record,
                 {"expected_sha256", "expected_size_bytes", "relative_path"},
@@ -225,10 +223,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
                 record["expected_sha256"],
                 f"anchor_coverage.artifacts[{index}].expected_sha256",
             )
-            if (
-                _SHA256.fullmatch(expected_hash) is None
-                or actual_hash != expected_hash
-            ):
+            if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
                 raise MatrixportGenerationError(
                     f"anchor_coverage source hash differs: {relative}"
                 )
@@ -252,6 +247,10 @@ def _load_spec(path: Path) -> dict[str, Any]:
         spec["anchor_coverage"] = {
             "base_run_id": base_run_id,
             "base_run_end_ms": end_ms,
+            # The resolvable base location is part of the pinned contract:
+            # the provider ledger reads the base capture from this path,
+            # never from a guessed co-location with the incremental run.
+            "base_run_root": str(base_root),
             "artifacts": pins,
         }
     return spec

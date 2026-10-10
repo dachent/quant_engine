@@ -219,15 +219,19 @@ def _anchor_fixture(
     lineage: str | None = None,
     base_strategy_trades: str | None = None,
     inc_strategy_trades: str | None = None,
+    base_run_root: str | None = None,
 ) -> tuple[GenerationManifest, dict[str, Any], Path]:
     """Build the GOOD fixture: base window plus incremental window, tiled.
 
     Real shape, reduced bytes: the real 0903/0918 rows are reproduced by the
     mounted-capture test below; this fixture keeps the same columns and
-    semantics.
+    semantics.  The base capture deliberately lives OUTSIDE the incremental
+    provider root (``tmp_path / "retained-base"`` vs ``tmp_path / "output"``)
+    so the gate can only pass by resolving the recorded base_run_root.
     """
 
-    base_root = tmp_path / "output" / BASE_RUN_ID / "csv"
+    base_output = tmp_path / "retained-base" / BASE_RUN_ID
+    base_root = base_output / "csv"
     inc_root = tmp_path / "output" / INC_RUN_ID
     (inc_root / "csv").mkdir(parents=True, exist_ok=True)
     (inc_root / "reports").mkdir(parents=True, exist_ok=True)
@@ -240,7 +244,9 @@ def _anchor_fixture(
         base_root / "request_manifest.csv",
         _BASE_REQUEST_HEADER
         + "\n"
-        + "".join(base_requests if base_requests is not None else [_base_request_row()]),
+        + "".join(
+            base_requests if base_requests is not None else [_base_request_row()]
+        ),
     )
     trades_header = (
         "amount,currency,id,order_id,order_type,share,source_endpoint,"
@@ -253,7 +259,11 @@ def _anchor_fixture(
     base_trades_path = _write(
         base_root / "strategy_trades.csv",
         trades_header
-        + (base_strategy_trades if base_strategy_trades is not None else subscription_row),
+        + (
+            base_strategy_trades
+            if base_strategy_trades is not None
+            else subscription_row
+        ),
     )
 
     inc_coverage_path = _write(
@@ -288,6 +298,11 @@ def _anchor_fixture(
         "anchor_coverage": {
             "base_run_id": BASE_RUN_ID,
             "base_run_end_ms": BASE_END_MS,
+            "base_run_root": (
+                base_run_root
+                if base_run_root is not None
+                else str(base_output.resolve())
+            ),
             "artifacts": {
                 "csv/coverage.csv": _hash(base_coverage_path),
                 "csv/request_manifest.csv": _hash(base_request_path),
@@ -305,9 +320,7 @@ def test_matrixport_anchor_coverage_tiled_windows_extend_to_the_incremental_end(
 
     manifest, catalog, root = _anchor_fixture(tmp_path)
 
-    coverage = ledger._matrixport_anchor_coverage(
-        manifest, catalog, root, {MX_ACCOUNT}
-    )
+    coverage = ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
 
     claim = coverage[MX_ACCOUNT]
     assert claim["effective_start"] == "2025-12-05"
@@ -422,6 +435,164 @@ def test_matrixport_anchor_coverage_refuses_a_mismatched_lineage_end(
         ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
 
 
+def test_matrixport_anchor_coverage_refuses_a_second_subscription(
+    tmp_path: Path,
+) -> None:
+    """MX-2: two distinct subscription order_ids fail the exactly-one rule."""
+
+    second = (
+        "100,USDT,14215,7402822649690198017,1,100,"
+        "/strategy/api/v2/user/trade_record,300,2026-03-01T00:00:00+00:00\n"
+    )
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        inc_coverage=_inc_coverage_row_raw(raw_rows=1, terminal="short_page"),
+        inc_requests=[_inc_request_line(row_count=1, terminal="short_page")],
+        inc_strategy_trades=second,
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="exactly one subscription"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_a_base_window_short_of_the_declared_end(
+    tmp_path: Path,
+) -> None:
+    """MX-1(c): base request end_time before base_run_end_ms fails closed."""
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        base_requests=[_base_request_row(end_ms=BASE_END_MS - 1)],
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="base_run_end_ms"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_a_base_window_not_starting_at_epoch(
+    tmp_path: Path,
+) -> None:
+    """MX-1(c): a base window starting after epoch leaves [0, start) unproven."""
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        base_requests=[_base_request_row(start_ms=1)],
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="epoch"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_a_non_complete_status(
+    tmp_path: Path,
+) -> None:
+    """MX-1(a): anything but complete_to_observed_boundary fails closed."""
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        base_coverage=_base_coverage_row(status="partial"),
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="incomplete"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_an_unknown_order_type(
+    tmp_path: Path,
+) -> None:
+    """MX-2: an order_type that is neither subscription nor redemption fails."""
+
+    unknown = (
+        "100,USDT,14215,7402822649690198017,7,100,"
+        "/strategy/api/v2/user/trade_record,300,2026-03-01T00:00:00+00:00\n"
+    )
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        inc_coverage=_inc_coverage_row_raw(raw_rows=1, terminal="short_page"),
+        inc_requests=[_inc_request_line(row_count=1, terminal="short_page")],
+        inc_strategy_trades=unknown,
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="unknown order_type"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_a_trade_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    """MX-1: coverage raw_rows must equal the staged trade rows, per run."""
+
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        base_coverage=_base_coverage_row(raw_rows=2),
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="trade count differs"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_an_internal_window_hole(
+    tmp_path: Path,
+) -> None:
+    """MX-1 tiling: two disjoint windows inside one run leave an unproven hole.
+
+    min/max plus the base<->incremental seam cannot see it; only a sorted
+    successive-start check fails closed.
+    """
+
+    half = BASE_END_MS // 2
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        base_requests=[
+            _base_request_row(start_ms=0, end_ms=half),
+            _base_request_row(start_ms=half + 2, end_ms=BASE_END_MS),
+        ],
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="gap|tiles|window"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_refuses_a_contradictory_duplicate_order_id(
+    tmp_path: Path,
+) -> None:
+    """MX-2: a duplicate order_id whose order_type disagrees fails closed."""
+
+    contradictory = (
+        "49891.55,USDT,14214,7402822649690198016,2,57300.3869283637466547,"
+        "/strategy/api/v2/user/trade_record,300,2026-03-01T00:00:00+00:00\n"
+    )
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        # Restated order_id: no new rows, so the count check passes and the
+        # contradiction branch is what must fire.
+        inc_strategy_trades=contradictory,
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="contradict|order_type"):
+        ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+
+
+def test_matrixport_anchor_coverage_accepts_a_consistent_duplicate_order_id(
+    tmp_path: Path,
+) -> None:
+    """The 30d overlap legitimately restates the subscription row; same
+    order_id AND same order_type dedups silently."""
+
+    restated = (
+        "49891.55,USDT,14214,7402822649690198016,1,57300.3869283637466547,"
+        "/strategy/api/v2/user/trade_record,300,2025-12-05T21:34:17.414000+00:00\n"
+    )
+    manifest, catalog, root = _anchor_fixture(
+        tmp_path,
+        # A pure overlap restatement contributes no new rows to the window.
+        inc_strategy_trades=restated,
+    )
+
+    coverage = ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+    assert coverage[MX_ACCOUNT]["record_count"] == 1
+
+
 # --- Real-capture fixtures -------------------------------------------------
 #
 # The two OneDrive copies of the 2026-09-03 full capture plus the 2026-09-18
@@ -461,18 +632,36 @@ _RETAINED_CAPTURES = (
     not all(path.is_file() for path in _RETAINED_CAPTURES),
     reason="retained Matrixport capture evidence is not mounted",
 )
-def test_retained_matrixport_captures_prove_the_2025_12_05_boundary() -> None:
-    """The owner's own words as bytes: one subscription 2025-12-05, no redemption.
+def test_retained_matrixport_captures_prove_the_2025_12_05_boundary(
+    tmp_path: Path,
+) -> None:
+    """Execute the gate against the real retained layout (read-only).
 
-    Both OneDrive copies of the 0903 full run must be byte-identical, and the
-    tiled windows must contain exactly the one subscription trade and no
-    redemption.
+    The owner's own words as bytes: one subscription 2025-12-05, no redemption.
+    The base capture lives at dataMatrixport/output/<0903> while the
+    incremental lives under source-runs/matrixport-current-rederived — no
+    single root satisfies both, so this test only passes if the gate resolves
+    the base through the recorded base_run_root.  OneDrive bytes are copied
+    into the scratch tmp tree (OneDrive itself is never written); the two
+    copy-forward products the cleaned-up staging area no longer holds
+    (strategy_trades.csv, incremental_lineage.csv) are derived from the real
+    base bytes exactly as the copy-forward policy prescribes.
     """
 
     first, second = _RETAINED_CAPTURES[:2]
     assert first.read_bytes() == second.read_bytes()
 
-    base_csv = _QE_ROOT / "dataMatrixport" / "output" / BASE_RUN_ID / "csv"
+    real_base = _QE_ROOT / "dataMatrixport" / "output" / BASE_RUN_ID
+    real_inc = (
+        _QE_ROOT
+        / "dataMatrixport"
+        / "source-runs"
+        / "matrixport-current-rederived"
+        / "output"
+        / INC_RUN_ID
+    )
+
+    base_csv = real_base / "csv"
     with open(
         base_csv / "strategy_trades.csv", encoding="utf-8-sig", newline=""
     ) as handle:
@@ -483,16 +672,8 @@ def test_retained_matrixport_captures_prove_the_2025_12_05_boundary() -> None:
     assert trade["order_type"] == "1"
     assert trade["time_stamp_utc"] == "2025-12-05T21:34:17.414000+00:00"
 
-    inc_root = (
-        _QE_ROOT
-        / "dataMatrixport"
-        / "source-runs"
-        / "matrixport-current-rederived"
-        / "output"
-        / INC_RUN_ID
-    )
     with open(
-        inc_root / "csv" / "coverage.csv", encoding="utf-8-sig", newline=""
+        real_inc / "csv" / "coverage.csv", encoding="utf-8-sig", newline=""
     ) as handle:
         rows = [
             row
@@ -503,3 +684,76 @@ def test_retained_matrixport_captures_prove_the_2025_12_05_boundary() -> None:
     assert row["status"] == "complete_to_observed_boundary"
     assert row["terminal_reason"] == "empty_page"
     assert json.loads(row["details_json"])["raw_rows"] == 0
+
+    # Mirror the retained layout: base and incremental under disjoint roots.
+    base_root = tmp_path / "dataMatrixport" / "output" / BASE_RUN_ID
+    inc_root = (
+        tmp_path
+        / "dataMatrixport"
+        / "source-runs"
+        / "matrixport-current-rederived"
+        / "output"
+        / INC_RUN_ID
+    )
+    (base_root / "csv").mkdir(parents=True)
+    (inc_root / "csv").mkdir(parents=True)
+    (inc_root / "reports").mkdir(parents=True)
+
+    for name in ("coverage.csv", "request_manifest.csv", "strategy_trades.csv"):
+        (base_root / "csv" / name).write_bytes((base_csv / name).read_bytes())
+    (inc_root / "csv" / "coverage.csv").write_bytes(
+        (real_inc / "csv" / "coverage.csv").read_bytes()
+    )
+    (inc_root / "reports" / "request_manifest.jsonl").write_bytes(
+        (real_inc / "reports" / "request_manifest.jsonl").read_bytes()
+    )
+    # Copy-forward products per the lineage policy: the incremental run
+    # contributes no new trades (raw_rows == 0), so the staged trades equal
+    # the base trades and the lineage row binds base_run_id/base_run_end_ms.
+    (inc_root / "csv" / "strategy_trades.csv").write_bytes(
+        (base_csv / "strategy_trades.csv").read_bytes()
+    )
+    lineage = (
+        "base_run_id,base_run_end_ms,policy\n"
+        f"{BASE_RUN_ID},{BASE_END_MS},"
+        "copy_forward_then_overlay_30d_history_7d_nav\n"
+    )
+    (inc_root / "csv" / "incremental_lineage.csv").write_bytes(lineage.encode("utf-8"))
+
+    manifest = _manifest(
+        {
+            "csv/coverage.csv": inc_root / "csv" / "coverage.csv",
+            "csv/incremental_lineage.csv": inc_root / "csv" / "incremental_lineage.csv",
+            "csv/strategy_trades.csv": inc_root / "csv" / "strategy_trades.csv",
+            "reports/request_manifest.jsonl": inc_root
+            / "reports"
+            / "request_manifest.jsonl",
+        }
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "source_run_id": INC_RUN_ID,
+        "anchor_coverage": {
+            "base_run_id": BASE_RUN_ID,
+            "base_run_end_ms": BASE_END_MS,
+            "base_run_root": str(base_root.resolve()),
+            "artifacts": {
+                "csv/coverage.csv": _hash(base_root / "csv" / "coverage.csv"),
+                "csv/request_manifest.csv": _hash(
+                    base_root / "csv" / "request_manifest.csv"
+                ),
+                "csv/strategy_trades.csv": _hash(
+                    base_root / "csv" / "strategy_trades.csv"
+                ),
+            },
+        },
+    }
+
+    # root resolves only the incremental; the base is unreachable without
+    # anchor_coverage.base_run_root.
+    root = tmp_path / "dataMatrixport" / "source-runs" / "matrixport-current-rederived"
+    coverage = ledger._matrixport_anchor_coverage(manifest, catalog, root, {MX_ACCOUNT})
+    claim = coverage[MX_ACCOUNT]
+    assert claim["effective_start"] == "2025-12-05"
+    assert claim["effective_end"] == "2026-09-18"
+    assert claim["record_count"] == 1

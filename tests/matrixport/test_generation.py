@@ -954,8 +954,12 @@ def _anchor_coverage_block(base_run: Path, *, end_ms: int = 1788412229513) -> di
 def _base_run_tree(tmp_path: Path) -> Path:
     base = tmp_path / "base-output" / "20260903T051029.331Z"
     (base / "csv").mkdir(parents=True)
-    (base / "csv" / "coverage.csv").write_text("details_json,endpoint\n", encoding="utf-8")
-    (base / "csv" / "request_manifest.csv").write_text("endpoint,path\n", encoding="utf-8")
+    (base / "csv" / "coverage.csv").write_text(
+        "details_json,endpoint\n", encoding="utf-8"
+    )
+    (base / "csv" / "request_manifest.csv").write_text(
+        "endpoint,path\n", encoding="utf-8"
+    )
     (base / "csv" / "strategy_trades.csv").write_text("order_id\n", encoding="utf-8")
     return base
 
@@ -1047,8 +1051,11 @@ def test_anchor_coverage_catalog_shape_matches_the_ledger_reader(
     """Producer/consumer seam: the emitted block is the reader's contract.
 
     tools/provider_ledger._matrixport_anchor_coverage reads
-    catalog["anchor_coverage"] as {base_run_id, base_run_end_ms, artifacts}
-    with artifacts a {relative_path: sha256} map; it refuses anything else.
+    catalog["anchor_coverage"] as {base_run_id, base_run_end_ms,
+    base_run_root, artifacts} with artifacts a {relative_path: sha256}
+    map; it refuses anything else.  base_run_root is the resolvable base
+    location the generation validated: the ledger must read the base from
+    it, not assume co-location with the incremental run.
     """
 
     spec_path = _spec(tmp_path)
@@ -1060,13 +1067,18 @@ def test_anchor_coverage_catalog_shape_matches_the_ledger_reader(
     catalog, _manifest, catalog_bytes = build_generation(spec_path)
 
     block = catalog["anchor_coverage"]
-    assert set(block) == {"base_run_id", "base_run_end_ms", "artifacts"}
+    assert set(block) == {
+        "base_run_id",
+        "base_run_end_ms",
+        "base_run_root",
+        "artifacts",
+    }
     assert isinstance(block["base_run_id"], str)
     assert isinstance(block["base_run_end_ms"], int)
+    assert block["base_run_root"] == str(base_run.resolve())
     assert isinstance(block["artifacts"], dict)
     assert all(
-        isinstance(sha, str) and len(sha) == 64
-        for sha in block["artifacts"].values()
+        isinstance(sha, str) and len(sha) == 64 for sha in block["artifacts"].values()
     )
     # The catalog is canonical JSON: the block must round-trip byte-identical.
     reloaded = json.loads(catalog_bytes.decode("utf-8"))
