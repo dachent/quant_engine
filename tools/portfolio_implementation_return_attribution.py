@@ -1552,7 +1552,7 @@ def _tt_cash_return_contribution(
     start: date,
     end: date,
 ) -> dict[str, Any]:
-    """Link retained TT income and explicit fees to the broker return path."""
+    """Link retained TT income and explicit fees to the governed account-live series."""
 
     active_accounts = {
         str(account)
@@ -1614,7 +1614,7 @@ def _tt_cash_return_contribution(
             category: value * 100.0 for category, value in sorted(linked.items())
         },
         "observed_usd": dict(sorted(observed_usd.items())),
-        "status": "EXACT_RETAINED_CASH_EVENTS_LINKED_TO_BROKER_RETURN_PATH",
+        "status": "EXACT_RETAINED_CASH_EVENTS_LINKED_TO_GOVERNED_ACCOUNT_LIVE_SERIES",
     }
 
 
@@ -1839,9 +1839,7 @@ def _tt_attribution(
     # 2025-11-25..2026-01-02.
     account_returns = inherited_account_returns
     if not account_returns:
-        raise ReturnAttributionError(
-            "TT governed account-live series is unavailable"
-        )
+        raise ReturnAttributionError("TT governed account-live series is unavailable")
     model_returns = reconciliation._tt_manifest_model_returns(
         source_manifest, components, accepted_as_of=accepted_as_of
     )
@@ -2124,7 +2122,7 @@ def _tt_attribution(
             (
                 "DIVIDENDS_INTEREST_AND_FEES",
                 after_cash,
-                "Link retained Schwab dividends, interest, margin interest, and explicit fees to the broker return path.",
+                "Link retained Schwab dividends, interest, margin interest, and explicit fees to the governed account-live series.",
                 "EXACT_RETAINED_CASH_EVENTS",
             ),
         ],

@@ -1330,7 +1330,9 @@ def test_p123_explicit_zero_admission_is_bound_to_selected_receipt(
     )
 
 
-def _p123_governed_receipt_generation(tmp_path: Path) -> Path:
+def _p123_governed_receipt_generation(
+    tmp_path: Path, mutation: str | None = None
+) -> Path:
     """A receipt shaped like the governed producer: semantic authority_ref and
     the real exclusion-reason vocabulary.
 
@@ -1367,6 +1369,15 @@ def _p123_governed_receipt_generation(tmp_path: Path) -> Path:
         "reason": "NO_CURRENT_PRODUCT_CONSUMER",
         "authority_ref": f"contract:{semantic}#source_segments/portfolio123-model-generation;issue:303",
     }
+    if mutation == "raw_bound_authority":
+        # The consumer binds authority_ref to the contract *semantic* sha256;
+        # binding it to the raw digest (raw != semantic) must refuse.
+        disposition["authority_ref"] = (
+            f"contract:{raw}#source_segments/portfolio123-model-generation;issue:303"
+        )
+    elif mutation == "out_of_vocabulary_reason":
+        # The consumer accepts only the producer's two exclusion reasons.
+        disposition["reason"] = "UNRECOGNIZED_EXCLUSION_REASON"
     receipt = {
         "schema_version": 1,
         "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -1435,6 +1446,21 @@ def test_p123_policy_accepts_the_receipt_carried_semantic_authority_and_reason(
     assert result["authority_ref"].startswith(f"contract:{'9' * 64}#")
     assert result["contract_raw_sha256"] == "d" * 64
     assert result["contract_semantic_sha256"] == "9" * 64
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "raw_bound_authority",
+        "out_of_vocabulary_reason",
+    ],
+)
+def test_p123_governed_receipt_refuses_invalid_acceptance_branches(
+    tmp_path: Path, mutation: str
+) -> None:
+    root = _p123_governed_receipt_generation(tmp_path, mutation)
+    with pytest.raises(reconciliation.ImplementationReconciliationError):
+        reconciliation.p123_provider_return_policy(root, accepted_as_of=ACCEPTED_AS_OF)
 
 
 @pytest.mark.parametrize(
