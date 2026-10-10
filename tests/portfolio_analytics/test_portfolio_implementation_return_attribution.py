@@ -43,6 +43,191 @@ def _numeric_leaves(value: object) -> list[int | float]:
     return []
 
 
+def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Closure-matrix B2: the TT account leg is the governed ACCOUNT_LIVE
+    series, not the broker NAV/flow recomputation.
+
+    On 2025-11-25..2026-01-02 the two series differ; the bridge must publish
+    the governed figure so with_account_leg's governed-series proof holds.
+    """
+
+    # Governed account-live series (the contract's account leg).
+    governed = [
+        {
+            "date": "2026-01-05",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "tt-portfolio",
+        },
+        {
+            "date": "2026-01-06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.02",
+            "strategy_id": "tt-portfolio",
+        },
+    ]
+    # Broker NAV/flow recompute diverges from the governed series.
+    broker = [
+        {
+            "date": "2026-01-05",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.05",
+            "strategy_id": "tt-portfolio",
+            "beginning_capital": "1000",
+        },
+        {
+            "date": "2026-01-06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.05",
+            "strategy_id": "tt-portfolio",
+            "beginning_capital": "1050",
+        },
+    ]
+    ledger = {"strategy_returns": governed}
+    workbook = tmp_path / "wb.xlsx"
+    workbook.write_bytes(b"x")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(b"{}")
+    market = tmp_path / "mkt.json"
+    market.write_bytes(b"{}")
+
+    day0, day1 = date(2026, 1, 5), date(2026, 1, 6)
+    monkeypatch.setattr(
+        attribution.reconciliation, "_tt_component_weights", lambda _p: {"A": 1}
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_read_tt_source_manifest",
+        lambda *_a, **_k: {
+            "portfolio": {},
+            "source_manifest_id": "m",
+            "price_tape": {"artifact": attribution._sha256(market)},
+        },
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_tt_target_snapshots",
+        lambda *_a, **_k: {date(2025, 12, 31): {"SPY": 1.0}},
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_market_rows_many",
+        lambda *_a, **_k: {"SPY": {day0: {"Close": 100.0}, day1: {"Close": 101.0}}},
+    )
+    monkeypatch.setattr(attribution, "_tt_weighted_events", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        attribution.reconciliation, "_tt_actual_events", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(attribution, "_canonical_events", lambda rows: list(rows))
+    monkeypatch.setattr(attribution, "_tt_broker_returns", lambda *_a, **_k: broker)
+    monkeypatch.setattr(
+        attribution.reconciliation,
+        "_tt_manifest_model_returns",
+        lambda *_a, **_k: {day0: 0.01, day1: 0.02},
+    )
+    monkeypatch.setattr(
+        attribution.reconciliation,
+        "_pair_events_one_to_one",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(attribution, "_tt_state_path_return", lambda **_k: 0.0)
+    monkeypatch.setattr(
+        attribution,
+        "_tt_cash_return_contribution",
+        lambda **_k: {"effect_pp": 0.0},
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_tt_actual_holdings_return",
+        lambda **_k: ({}, 0.0, 0.0),
+    )
+
+    row = attribution._tt_attribution(
+        workbook=workbook,
+        source_manifest_path=manifest,
+        market_data=[market],
+        schwab={},
+        ledger=ledger,
+        accepted_as_of=date(2026, 1, 31),
+    )
+
+    governed_figure = 1.01 * 1.02 - 1
+    assert row["bridge"]["account_return"] == pytest.approx(governed_figure)
+    # The broker recompute is preserved as a diagnostic, not the bridge figure.
+    assert row["account_return_authority"]["broker_nav_flow_return"] == pytest.approx(
+        1.05 * 1.05 - 1
+    )
+
+
+def test_tt_attribution_refuses_when_governed_account_live_series_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The TT account leg is fail-closed: an empty governed ACCOUNT_LIVE series
+    refuses even when the broker recompute rows are non-empty.
+    """
+
+    broker = [
+        {
+            "date": "2026-01-05",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.05",
+            "strategy_id": "tt-portfolio",
+            "beginning_capital": "1000",
+        },
+    ]
+    ledger = {"strategy_returns": []}
+    workbook = tmp_path / "wb.xlsx"
+    workbook.write_bytes(b"x")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(b"{}")
+    market = tmp_path / "mkt.json"
+    market.write_bytes(b"{}")
+
+    monkeypatch.setattr(
+        attribution.reconciliation, "_tt_component_weights", lambda _p: {"A": 1}
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_read_tt_source_manifest",
+        lambda *_a, **_k: {
+            "portfolio": {},
+            "source_manifest_id": "m",
+            "price_tape": {"artifact": attribution._sha256(market)},
+        },
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_tt_target_snapshots",
+        lambda *_a, **_k: {date(2025, 12, 31): {"SPY": 1.0}},
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_market_rows_many",
+        lambda *_a, **_k: {"SPY": {date(2026, 1, 5): {"Close": 100.0}}},
+    )
+    monkeypatch.setattr(attribution, "_tt_weighted_events", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        attribution.reconciliation, "_tt_actual_events", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(attribution, "_canonical_events", lambda rows: list(rows))
+    monkeypatch.setattr(attribution, "_tt_broker_returns", lambda *_a, **_k: broker)
+
+    with pytest.raises(
+        attribution.ReturnAttributionError,
+        match="TT governed account-live series is unavailable",
+    ):
+        attribution._tt_attribution(
+            workbook=workbook,
+            source_manifest_path=manifest,
+            market_data=[market],
+            schwab={},
+            ledger=ledger,
+            accepted_as_of=date(2026, 1, 31),
+        )
+
+
 def test_frongello_link_closes_exactly_to_cumulative_return() -> None:
     first = date(2026, 1, 2)
     second = date(2026, 1, 5)

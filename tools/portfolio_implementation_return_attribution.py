@@ -1552,7 +1552,7 @@ def _tt_cash_return_contribution(
     start: date,
     end: date,
 ) -> dict[str, Any]:
-    """Link retained TT income and explicit fees to the broker return path."""
+    """Link retained TT income and explicit fees to the governed account-live series."""
 
     active_accounts = {
         str(account)
@@ -1614,7 +1614,7 @@ def _tt_cash_return_contribution(
             category: value * 100.0 for category, value in sorted(linked.items())
         },
         "observed_usd": dict(sorted(observed_usd.items())),
-        "status": "EXACT_RETAINED_CASH_EVENTS_LINKED_TO_BROKER_RETURN_PATH",
+        "status": "EXACT_RETAINED_CASH_EVENTS_LINKED_TO_GOVERNED_ACCOUNT_LIVE_SERIES",
     }
 
 
@@ -1826,16 +1826,20 @@ def _tt_attribution(
         accepted_as_of=accepted_as_of,
     )
     broker_rows = _tt_broker_returns(ledger, accepted_as_of=accepted_as_of)
-    account_returns = reconciliation._returns(
+    broker_account_returns = reconciliation._returns(
         broker_rows,
         strategy_id="tt-portfolio",
         evidence_layer="ACCOUNT_LIVE",
         accepted_as_of=accepted_as_of,
     )
+    # Closure-matrix B2: the account leg is the governed ACCOUNT_LIVE series.
+    # The broker NAV/flow recompute is retained only as the
+    # account_return_authority diagnostic; it is not the published account
+    # figure, because it diverges from the governed series on
+    # 2025-11-25..2026-01-02.
+    account_returns = inherited_account_returns
     if not account_returns:
-        raise ReturnAttributionError(
-            "TT broker-authoritative account path is unavailable"
-        )
+        raise ReturnAttributionError("TT governed account-live series is unavailable")
     model_returns = reconciliation._tt_manifest_model_returns(
         source_manifest, components, accepted_as_of=accepted_as_of
     )
@@ -2063,14 +2067,16 @@ def _tt_attribution(
     )
     exact_model = _compound(model_returns[item] for item in common)
     exact_account = _compound(account_returns[item] for item in common)
-    inherited_common = sorted(set(common) & set(inherited_account_returns))
-    inherited_account = _compound(
-        inherited_account_returns[item] for item in inherited_common
+    broker_common = sorted(set(common) & set(broker_account_returns))
+    broker_account = (
+        _compound(broker_account_returns[item] for item in broker_common)
+        if broker_common
+        else 0.0
     )
     overlap_exceptions = [
         item
-        for item in inherited_common
-        if abs(inherited_account_returns[item] - account_returns[item]) > 1e-6
+        for item in broker_common
+        if abs(broker_account_returns[item] - account_returns[item]) > 1e-6
     ]
     # Preserve the exact model endpoint while taking category deltas from the
     # independently price-recomputed counterfactual path.
@@ -2116,7 +2122,7 @@ def _tt_attribution(
             (
                 "DIVIDENDS_INTEREST_AND_FEES",
                 after_cash,
-                "Link retained Schwab dividends, interest, margin interest, and explicit fees to the broker return path.",
+                "Link retained Schwab dividends, interest, margin interest, and explicit fees to the governed account-live series.",
                 "EXACT_RETAINED_CASH_EVENTS",
             ),
         ],
@@ -2126,11 +2132,11 @@ def _tt_attribution(
     )
     return {
         "account_return_authority": {
-            "broker_nav_flow_return": exact_account,
-            "inherited_tracker_return_on_broker_common_dates": inherited_account,
-            "inherited_minus_broker_pp": (inherited_account - exact_account) * 100.0,
+            "broker_nav_flow_return": broker_account,
+            "governed_account_live_return": exact_account,
+            "governed_minus_broker_pp": (exact_account - broker_account) * 100.0,
             "overlap_exception_date_count": len(overlap_exceptions),
-            "status": "BROKER_NAV_FLOW_RECOMPUTATION_PROMOTED_FOR_RCCA",
+            "status": "GOVERNED_ACCOUNT_LIVE_SERIES_IS_THE_ACCOUNT_LEG",
         },
         "bridge": bridge,
         "event_counts": {
@@ -2162,9 +2168,9 @@ def _tt_attribution(
             "static_weight_reconstruction_return": actual_position_proxy,
             "matched_fill_diagnostic_pp": fill_effect * 100.0,
             "early_exit_diagnostic_pp": early_exit_effect * 100.0,
-            "broker_endpoint_return": exact_account,
+            "broker_endpoint_return": broker_account,
             "broker_minus_reconstructed_fill_return_pp": (
-                exact_account - holdings_fill_return
+                broker_account - holdings_fill_return
             )
             * 100.0,
             "status": "NOT_USED_FOR_CAUSAL_BRIDGE_INCOMPLETE_OPENING_POSITION_AND_WEIGHT_HISTORY",

@@ -395,7 +395,10 @@ def p123_provider_return_policy(
             raise ImplementationReconciliationError(
                 "P123 comparison authority identity differs"
             )
-    expected_authority = f"contract:{contract_raw}#source_segments/portfolio123-model-generation;issue:303"
+    # The producer (provider_ledger) binds authority_ref to the contract
+    # *semantic* sha256; the receipt carries both digests so the consumer can
+    # verify the pair without re-deriving either.
+    expected_authority = f"contract:{contract_semantic}#source_segments/portfolio123-model-generation;issue:303"
     for disposition in dispositions:
         if (
             disposition.get("source_segment_id") != "portfolio123-model-generation"
@@ -427,9 +430,16 @@ def p123_provider_return_policy(
         and row.get("data_class") == "PROVIDER_LIVE_RETURN"
         and row.get("item_id") == "PROVIDER_LIVE_RETURN"
     ]
+    # The producer's exclusion-reason vocabulary for an unmaterialized or
+    # unconsumed return class; the comparison requires an explicit exclusion
+    # reason, not one specific literal.
+    exclusion_reasons = {
+        "NO_CURRENT_PRODUCT_CONSUMER",
+        "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
+    }
     if (
         len(return_classes) != 1
-        or return_classes[0].get("reason") != "REQUIRED_DATA_CLASS_NOT_MATERIALIZED"
+        or return_classes[0].get("reason") not in exclusion_reasons
     ):
         raise ImplementationReconciliationError(
             "P123 comparison lacks return-class exclusion"
