@@ -1330,6 +1330,113 @@ def test_p123_explicit_zero_admission_is_bound_to_selected_receipt(
     )
 
 
+def _p123_governed_receipt_generation(tmp_path: Path) -> Path:
+    """A receipt shaped like the governed producer: semantic authority_ref and
+    the real exclusion-reason vocabulary.
+
+    The producer (provider_ledger.py) binds authority_ref to the contract
+    *semantic* sha256 and emits NO_CURRENT_PRODUCT_CONSUMER when the class has
+    no current product consumer. The consumer must accept that exact shape.
+    """
+
+    root = tmp_path / "provider-generation"
+    root.mkdir()
+    provider = {
+        "provider_id": "portfolio123",
+        "generation_id": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "catalog_sha256": "c" * 64,
+    }
+    raw, semantic, source_segment = "d" * 64, "9" * 64, "e" * 64
+    assert raw != semantic
+    disposition = {
+        "provider_id": "portfolio123",
+        "source_segment_id": "portfolio123-model-generation",
+        "source_segment_sha256": source_segment,
+        "item_id": "PROVIDER_LIVE_RETURN",
+        "item_kind": "PRODUCT_DATA_CLASS",
+        "data_class": "PROVIDER_LIVE_RETURN",
+        "action": "EXCLUDE",
+        "materialized_record_count": 0,
+        "target_facts": [],
+        "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "policy_version": "1",
+        "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+        "policy_effective_start": "2026-01-01",
+        "policy_effective_end": None,
+        "reason": "NO_CURRENT_PRODUCT_CONSUMER",
+        "authority_ref": f"contract:{semantic}#source_segments/portfolio123-model-generation;issue:303",
+    }
+    receipt = {
+        "schema_version": 1,
+        "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "admission_gate_status": "PASS",
+        "contract_raw_sha256": raw,
+        "contract_semantic_sha256": semantic,
+        "provider_generations": [
+            {
+                **provider,
+                "source_segment_id": "portfolio123-model-generation",
+                "source_segment_sha256": source_segment,
+            }
+        ],
+        "dispositions": [disposition],
+    }
+    receipt["disposition_sha256"] = hashlib.sha256(
+        reconciliation.canonical_json_bytes(receipt["dispositions"])
+    ).hexdigest()
+    ledger = {"provider_strategy_returns": [], "provider_generations": [provider]}
+    artifacts = []
+    for name, document, artifact_id in (
+        ("provider-ledger.json", ledger, "normalized/provider-ledger.json"),
+        (
+            "admit-or-declare-receipt.json",
+            receipt,
+            "normalized/admit-or-declare-receipt.json",
+        ),
+    ):
+        payload = reconciliation.canonical_json_bytes(document)
+        (root / name).write_bytes(payload)
+        artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    artifacts.append(
+        {
+            "artifact_id": "providers/portfolio123/generation.json",
+            "sha256": "b" * 64,
+            "size_bytes": 1,
+        }
+    )
+    (root / "generation.json").write_bytes(
+        reconciliation.canonical_json_bytes(
+            {
+                "verification": "VERIFIED",
+                "generation_id": "1" * 64,
+                "artifacts": artifacts,
+            }
+        )
+    )
+    return root
+
+
+def test_p123_policy_accepts_the_receipt_carried_semantic_authority_and_reason(
+    tmp_path: Path,
+) -> None:
+    root = _p123_governed_receipt_generation(tmp_path)
+    result = reconciliation.p123_provider_return_policy(
+        root, accepted_as_of=ACCEPTED_AS_OF
+    )
+    assert result["admitted_item_count"] == 0
+    assert result["reason"] == "NO_CURRENT_PRODUCT_CONSUMER"
+    assert result["authority_ref"].startswith(f"contract:{'9' * 64}#")
+    assert result["contract_raw_sha256"] == "d" * 64
+    assert result["contract_semantic_sha256"] == "9" * 64
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
