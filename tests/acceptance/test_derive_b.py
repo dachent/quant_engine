@@ -4092,7 +4092,7 @@ def test_base_run_with_duplicated_coverage_rows_is_ignored() -> None:
 
 
 def _native_base_manifest(base_entries: list[dict[str, object]]) -> dict[str, object]:
-    inputs = [
+    inputs: list[dict[str, object]] = [
         {"family": family, "path": f"{family}.csv"}
         for family in (
             "matrixport_generation_manifest",
