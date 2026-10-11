@@ -1815,6 +1815,81 @@ def test_tt_reconciliation_supplied_workbook_mismatch_is_diagnostic_not_refusal(
     assert result["verification"] == "VERIFIED"
 
 
+def test_tt_reconciliation_workbook_zero_common_dates_emits_null_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different-vintage workbook (every row past the cutoff) must emit a
+    null difference, never a bare Infinity that breaks the content-addressed
+    payload under RFC 8259."""
+    components = [f"component-{index}" for index in range(1, 7)]
+    weight = "0.1666666666666666666666666666666667"
+    index_rows = [[None, None, None, None, "name", "kind", "weight"]] + [
+        [None, None, None, None, component, period, weight]
+        for period in (1, 2)
+        for component in components
+    ]
+    return_rows = [["Date", *(f"Total ({item})" for item in components)]] + [
+        [observed, *([level] * len(components))]
+        for observed, level in (("2026-04-20", "100"), ("2026-04-21", "101"))
+    ]
+    rows_by_sheet = {
+        "Index": index_rows,
+        "raw_ttdata": return_rows,
+    }
+    monkeypatch.setattr(
+        reconciliation,
+        "_xlsx_rows",
+        lambda _path, sheet: rows_by_sheet[sheet],
+    )
+    result = reconciliation._tt_reconciliation(
+        Path("synthetic-tt.xlsx"),
+        _write_tt_source_manifest(tmp_path, components),
+        {
+            "strategy_returns": [
+                {
+                    "component_account_count": 3,
+                    "date": observed,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "return": value,
+                    "strategy_id": "tt-portfolio",
+                }
+                for observed, value in (
+                    ("2026-03-31", "0.008"),
+                    ("2026-04-01", "-0.018"),
+                    ("2026-04-02", "0.025"),
+                )
+            ],
+            "transactions": [
+                {
+                    "account_id": "tt-account",
+                    "source_record_id": "schwab:tt-pre-buy",
+                    "strategy_id": "tt-portfolio",
+                }
+            ],
+        },
+        {
+            "transactions": [
+                {
+                    "account_id": "tt-account",
+                    "event_date": "2026-04-02",
+                    "execution_price": "100",
+                    "fees_and_commission": "1",
+                    "kind": "Buy",
+                    "quantity": "10",
+                    "record_id": "tt-pre-buy",
+                    "symbol": "QQQ",
+                }
+            ],
+        },
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+    parity = result["workbook_parity"]
+    assert parity["status"] == "DIAGNOSTIC_DIRECT_SOURCE_AND_WORKBOOK_DIFFER"
+    assert parity["observations"] == 0
+    assert parity["maximum_absolute_daily_return_difference"] is None
+    json.dumps(result, allow_nan=False)
+
+
 def test_tt_reconciliation_fails_closed_on_manifest_weight_sum(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

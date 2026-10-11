@@ -1846,11 +1846,13 @@ def _tt_workbook_return_parity(
         workbook, components, accepted_as_of=accepted_as_of
     )
     common = sorted(set(manifest_returns) & set(workbook_returns))
-    maximum_difference = max(
-        (abs(manifest_returns[item] - workbook_returns[item]) for item in common),
-        default=float("inf"),
+    # The content-addressed payload must stay RFC 8259 JSON: never serialize inf.
+    maximum_difference = (
+        max((abs(manifest_returns[item] - workbook_returns[item]) for item in common))
+        if common
+        else None
     )
-    if not common or maximum_difference > 0.0000001:
+    if not common or maximum_difference is None or maximum_difference > 0.0000001:
         return {
             "observations": len(common),
             "observed_end": common[-1].isoformat() if common else None,

@@ -611,6 +611,5 @@ unavailable until their source facts are admitted:
 
 These are source-admission gaps, not missing formulas. The panel must continue
 to display their unavailable status and unresolved residual rather than infer a
-cause or manufacture a long-history result.# The reconciliation's --tt-workbook is OPTIONAL (2026-10-10 owner ruling): a supplied workbook
-# yields a MATCHED/DIAGNOSTIC parity row and is never a gate; omit it to run workbook-less.
+cause or manufacture a long-history result.
 
