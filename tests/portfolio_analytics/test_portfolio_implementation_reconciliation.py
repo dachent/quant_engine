@@ -1848,6 +1848,9 @@ def test_tt_reconciliation_fails_closed_on_manifest_nav_gap(
     components = [f"component-{index}" for index in range(1, 7)]
     manifest_path = _write_tt_source_manifest(tmp_path, components)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Drop an interior date from one component's history: every other
+    # component still carries it inside the component's own observed span,
+    # so the isolated-gap check must refuse.
     history = manifest["selected_components"][0]["performance"]["nav_history"]
     manifest["selected_components"][0]["performance"]["nav_history"] = [
         row for row in history if row["observed_date"] != "2026-04-01"
@@ -1859,6 +1862,136 @@ def test_tt_reconciliation_fails_closed_on_manifest_nav_gap(
         ).encode("utf-8")
     ).hexdigest()
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="TuringTrader component NAV history differs",
+    ):
+        reconciliation._tt_manifest_nav_integrity(
+            manifest,
+            components,
+            accepted_as_of=TT_ACCEPTED_AS_OF,
+        )
+
+
+def _load_tt_manifest(manifest_path: Path) -> dict[str, Any]:
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _rewrite_tt_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    manifest.pop("source_manifest_id", None)
+    manifest["source_manifest_id"] = hashlib.sha256(
+        json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _tt_ledger_schwab() -> tuple[dict[str, Any], dict[str, Any]]:
+    ledger = {
+        "strategy_returns": [
+            {
+                "component_account_count": 3,
+                "date": observed,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": value,
+                "strategy_id": "tt-portfolio",
+            }
+            for observed, value in (
+                ("2026-03-31", "0.008"),
+                ("2026-04-01", "-0.018"),
+                ("2026-04-02", "0.025"),
+            )
+        ],
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "source_record_id": "schwab:tt-pre-buy",
+                "strategy_id": "tt-portfolio",
+            }
+        ],
+    }
+    schwab = {
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "event_date": "2026-04-02",
+                "execution_price": "100",
+                "fees_and_commission": "1",
+                "kind": "Buy",
+                "quantity": "10",
+                "record_id": "tt-pre-buy",
+                "symbol": "QQQ",
+            }
+        ],
+    }
+    return ledger, schwab
+
+
+def test_tt_reconciliation_completes_with_real_shape_calendar_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Mirror the governed full-live-v3 manifests: two of the six components
+    # (tt-mach-3-v3, tt-mean-kitty-v2) start one day later and omit
+    # market-closure days the other four carry. The reconciliation must
+    # COMPLETE on this shape; the downstream return computation already
+    # intersects the calendars.
+    components = [f"component-{index}" for index in range(1, 7)]
+    manifest_path = _write_tt_source_manifest(tmp_path, components)
+    manifest = _load_tt_manifest(manifest_path)
+    omitted = {"2026-03-30", "2026-04-06"}
+    for row in manifest["selected_components"]:
+        if row["slug"] in {"component-2", "component-5"}:
+            history = row["performance"]["nav_history"]
+            row["performance"]["nav_history"] = [
+                item for item in history if item["observed_date"] not in omitted
+            ]
+    _rewrite_tt_manifest(manifest_path, manifest)
+
+    ledger, schwab = _tt_ledger_schwab()
+    result = reconciliation._tt_reconciliation(
+        None,
+        manifest_path,
+        ledger,
+        schwab,
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    assert result["verification"] == "VERIFIED"
+    assert result["return_reconciliation"]["observed_end"] == "2026-04-02"
+
+
+def test_tt_reconciliation_fails_closed_on_duplicate_nav_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = [f"component-{index}" for index in range(1, 7)]
+    manifest_path = _write_tt_source_manifest(tmp_path, components)
+    manifest = _load_tt_manifest(manifest_path)
+    history = manifest["selected_components"][0]["performance"]["nav_history"]
+    history.append(dict(history[-1]))
+    _rewrite_tt_manifest(manifest_path, manifest)
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="TuringTrader component NAV history differs",
+    ):
+        reconciliation._tt_reconciliation(
+            None,
+            manifest_path,
+            {"strategy_returns": [], "transactions": []},
+            {"transactions": []},
+            accepted_as_of=TT_ACCEPTED_AS_OF,
+        )
+
+
+def test_tt_reconciliation_fails_closed_on_non_monotone_nav_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = [f"component-{index}" for index in range(1, 7)]
+    manifest_path = _write_tt_source_manifest(tmp_path, components)
+    manifest = _load_tt_manifest(manifest_path)
+    history = manifest["selected_components"][0]["performance"]["nav_history"]
+    history[1], history[2] = history[2], history[1]
+    _rewrite_tt_manifest(manifest_path, manifest)
     with pytest.raises(
         reconciliation.ImplementationReconciliationError,
         match="TuringTrader component NAV history differs",

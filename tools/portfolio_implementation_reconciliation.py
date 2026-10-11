@@ -1233,7 +1233,12 @@ def _read_tt_source_manifest(
             "TuringTrader selected components differ"
         )
     slugs = [str(row.get("slug") or "") for row in selected]
-    if slugs != list(components):
+    if (
+        not slugs
+        or len(set(slugs)) != len(slugs)
+        or any(not slug for slug in slugs)
+        or (components and slugs != list(components))
+    ):
         raise ImplementationReconciliationError(
             "TuringTrader selected components differ"
         )
@@ -1683,11 +1688,31 @@ def _tt_manifest_nav_integrity(
                 "TuringTrader component NAV history differs"
             )
         calendars[component] = observed_dates
-    reference = set(calendars[components[0]])
-    if not reference or any(set(calendars[c]) != reference for c in components):
+    # Components legitimately diverge on market-closure days (the governed
+    # full-live manifests show tt-mach-3-v3 and tt-mean-kitty-v2 omitting days
+    # the other four carry), so byte-identical full histories are not the
+    # contract. The downstream return computation intersects the calendars;
+    # the integrity gate therefore validates each component on its own
+    # (monotone, duplicate-free, non-empty — done above), requires a non-empty
+    # shared intersection window, and fails closed on an isolated gap: a date
+    # every OTHER component carries but this one omits inside its own observed
+    # span.
+    common = set.intersection(*(set(calendars[c]) for c in components))
+    if not common:
         raise ImplementationReconciliationError(
             "TuringTrader component NAV history differs"
         )
+    observed_sets = {c: set(calendars[c]) for c in components}
+    for component in components:
+        observed = observed_sets[component]
+        others = set.intersection(
+            *(observed_sets[c] for c in components if c != component)
+        )
+        span = [item for item in others if min(observed) <= item <= max(observed)]
+        if any(item not in observed for item in span):
+            raise ImplementationReconciliationError(
+                "TuringTrader component NAV history differs"
+            )
 
 
 def _tt_model_returns(
@@ -2008,18 +2033,9 @@ def _tt_reconciliation(
 ) -> dict[str, object]:
     # Components and weights are pinned by the governed source manifest, not by
     # any workbook vintage (owner ruling 2026-10-10: the mix has not changed
-    # since inception). Bootstrap the slug order from a light read, then run the
-    # manifest's full self-validation and integrity checks.
-    manifest_slug_order = [
-        str(row.get("slug") or "")
-        for row in _json(source_manifest_path, "TuringTrader source manifest").get(
-            "selected_components", []
-        )
-        if isinstance(row, dict)
-    ]
-    source_manifest = _read_tt_source_manifest(
-        source_manifest_path, manifest_slug_order
-    )
+    # since inception). Validate the manifest once and derive the slug order
+    # from the validated payload.
+    source_manifest = _read_tt_source_manifest(source_manifest_path, ())
     component_weights = _tt_manifest_component_weights(source_manifest)
     components = list(component_weights)
     _tt_manifest_nav_integrity(
