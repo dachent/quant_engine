@@ -91,6 +91,19 @@ NATIVE_MATRIXPORT_FAMILIES = frozenset(
         "matrixport_owner_flow_request_manifest",
     }
 )
+# An optional, separately sha-pinned second (base) capture set for matrixport.
+# These two families are admitted together (both or neither), each exactly one
+# entry; when present their trade_record request windows are chained with the
+# selected generation's under custody_coverage_end.  They are NOT part of the
+# required NATIVE_MATRIXPORT_FAMILIES set and are never bound to the selected
+# generation's artifact pins: each base file is verified fail-closed by its own
+# declared sha256/bytes pin in the inputs manifest.
+NATIVE_MATRIXPORT_BASE_FAMILIES = frozenset(
+    {
+        "matrixport_owner_flow_base_coverage",
+        "matrixport_owner_flow_base_request_manifest",
+    }
+)
 
 
 class ManifestError(ValueError):
@@ -267,6 +280,26 @@ def native_matrixport_input_paths(
         if not isinstance(raw_path, str) or not raw_path:
             raise ManifestError(f"native Matrixport family {family!r} lacks a path")
         result[family] = resolve_input_path(qe_root, raw_path)
+    # The optional base-run capture set is admitted together: both families or
+    # neither, each exactly one entry, each verified by its own declared pin.
+    base_present = NATIVE_MATRIXPORT_BASE_FAMILIES.intersection(family_entries)
+    if base_present and base_present != NATIVE_MATRIXPORT_BASE_FAMILIES:
+        raise ManifestError(
+            "native Matrixport base-run capture families must be admitted together"
+        )
+    if base_present:
+        for family in sorted(NATIVE_MATRIXPORT_BASE_FAMILIES):
+            selected = family_entries[family]
+            if len(selected) != 1:
+                raise ManifestError(
+                    f"native Matrixport base family {family!r} must have exactly one entry"
+                )
+            raw_path = selected[0].get("path")
+            if not isinstance(raw_path, str) or not raw_path:
+                raise ManifestError(
+                    f"native Matrixport base family {family!r} lacks a path"
+                )
+            result[family] = resolve_input_path(qe_root, raw_path)
     return result
 
 
@@ -1605,12 +1638,22 @@ def custody_coverage_end(
     selection: object,
     coverage_rows: list[dict[str, str]] | None,
     request_lines: list[str] | None,
+    base_coverage_rows: list[dict[str, str]] | None = None,
+    base_request_lines: list[str] | None = None,
 ) -> date | str:
     """The unclamped coverage end of one custody cash line, from the raw captures.
 
     Owner flows and sleeve allocations are each proven through their own end and
     the line through the smaller one.  A fact type no capture proves past its
     last event ends at that last event (MX-2), never at a capture time.
+
+    When a separately sha-pinned base-run capture set is supplied for matrixport,
+    the trade_record windows of the base run are chained with the selected
+    generation's under the same scope/first-event/tiling rules
+    list_endpoint_coverage_end already applies (the base full-history window
+    carries the first event; the incremental window continues the chain), so the
+    capital_anchors boundary reaches the incremental end.  Absent the base set the
+    single selected window is used exactly as before.
     """
     owner, allocation = event_days.get("owner", []), event_days.get("allocation", [])
     if not owner:
@@ -1626,11 +1669,28 @@ def custody_coverage_end(
             list_endpoint_coverage_end(rows, lines, path, min(owner))
             for path in MATRIXPORT_WALLET_PATHS
         ]
+        anchor_lines = lines
+        if base_request_lines is not None and base_coverage_rows is not None:
+            # The base run may contribute its request windows only when its own
+            # trade_record coverage row is a single complete-to-observed-boundary
+            # natural-terminal row (MX-1): a base capture that did not read the
+            # list to its end proves no window.  The selected generation's
+            # coverage row still bounds the capture instant.
+            endpoint = f"{MATRIXPORT_COVERAGE_HOST}{MATRIXPORT_TRADE_RECORD_PATH}"
+            base_rows = [
+                row for row in base_coverage_rows if row.get("endpoint") == endpoint
+            ]
+            if (
+                len(base_rows) == 1
+                and base_rows[0].get("status") == "complete_to_observed_boundary"
+                and base_rows[0].get("terminal_reason") in NATURAL_LIST_TERMINALS
+            ):
+                anchor_lines = [*lines, *base_request_lines]
         claimed = {
             "flows": None if None in wallet else min(cast(list[date], wallet)),
             "capital_anchors": list_endpoint_coverage_end(
                 rows,
-                lines,
+                anchor_lines,
                 MATRIXPORT_TRADE_RECORD_PATH,
                 min(allocation) if allocation else None,
             ),
@@ -2619,6 +2679,8 @@ def derive(
     custody_event_days: dict[str, dict[str, list[date]]] = {}
     matrixport_coverage_rows: list[dict[str, str]] | None = None
     matrixport_request_lines: list[str] | None = None
+    matrixport_base_coverage_rows: list[dict[str, str]] | None = None
+    matrixport_base_request_lines: list[str] | None = None
     if schema_v3:
         try:
             with (qe_root / input_paths["quantbase_activity"]).open(
@@ -2668,6 +2730,19 @@ def derive(
                     matrixport_coverage_rows = list(csv.DictReader(handle))
                 matrixport_request_lines = (
                     (qe_root / input_paths["matrixport_owner_flow_request_manifest"])
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+            if "matrixport_owner_flow_base_coverage" in input_paths:
+                with (
+                    qe_root / input_paths["matrixport_owner_flow_base_coverage"]
+                ).open(encoding="utf-8-sig", newline="") as handle:
+                    matrixport_base_coverage_rows = list(csv.DictReader(handle))
+                matrixport_base_request_lines = (
+                    (
+                        qe_root
+                        / input_paths["matrixport_owner_flow_base_request_manifest"]
+                    )
                     .read_text(encoding="utf-8")
                     .splitlines()
                 )
@@ -3125,6 +3200,8 @@ def derive(
                 selection,
                 matrixport_coverage_rows,
                 matrixport_request_lines,
+                base_coverage_rows=matrixport_base_coverage_rows,
+                base_request_lines=matrixport_base_request_lines,
             )
             if isinstance(coverage, str):
                 add_not_derivable(
