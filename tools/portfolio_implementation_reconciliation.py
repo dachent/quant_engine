@@ -1678,7 +1678,12 @@ def _tt_manifest_nav_integrity(
                 raise ImplementationReconciliationError(
                     "TuringTrader component NAV history differs"
                 )
-            observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            try:
+                observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            except ValueError as exc:
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                ) from exc
             if observed <= accepted_as_of:
                 observed_dates.append(observed)
         if observed_dates != sorted(observed_dates) or len(set(observed_dates)) != len(
@@ -1778,7 +1783,12 @@ def _tt_manifest_model_returns(
                 raise ImplementationReconciliationError(
                     "TuringTrader component NAV history differs"
                 )
-            observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            try:
+                observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            except ValueError as exc:
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                ) from exc
             value = _decimal(item.get("value"))
             if value is None or value <= 0 or observed in component_levels:
                 raise ImplementationReconciliationError(
@@ -1824,6 +1834,7 @@ def _tt_workbook_return_parity(
     failures."""
     if workbook is None:
         return {
+            "maximum_absolute_daily_return_difference": None,
             "observed_end": None,
             "observed_start": None,
             "observations": 0,

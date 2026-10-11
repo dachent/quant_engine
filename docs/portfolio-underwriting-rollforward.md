@@ -126,7 +126,7 @@ published Portfolio123 generation:
   --grizzly-workbook '<exact-spxl-current-implementation-backtest.xlsx>' `
   --grizzly-blended-trade-history '<exact-current-all-backtest-plus-live-trades.csv>' `
   --grizzly-live-trade-history '<exact-current-live-only-trades.csv>' `
-  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
   --qsi-subscription-archive '<exact-qsi-archive.json>' `
   --qsi-current-subscription-archive '<exact-newest-qsi-subscription-zip>' `
   --qsi-appendix-workbook '<exact-qsi-appendix.xlsx>' `
@@ -261,6 +261,8 @@ publishes an account return that is not the governed account-live series (see
 ledger generation changes.
 
 ```powershell
+# The reconciliation's --tt-workbook is OPTIONAL (2026-10-10 owner ruling): a supplied
+# workbook yields a MATCHED/DIAGNOSTIC parity row and is never a gate; omit it to run workbook-less.
 & $enginePython tools\portfolio_implementation_reconciliation.py `
   --p123-generation-root '<exact-published-p123-generation>' `
   --ibkr-generation-root '<exact-ibkr-generation>' `
@@ -268,7 +270,7 @@ ledger generation changes.
   --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
   --schwab-catalog '<exact-schwab-generation.json>' `
   --provider-ledger-root '<exact-provider-ledger-generation>' `
-  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
   --grizzly-signals '<exact-current-live-only-trades.csv>' `
   --grizzly-blended-history '<exact-current-all-backtest-plus-live-trades.csv>' `
   --spxl-market-data '<exact-hash-bound-spxl-price.json>' `
@@ -282,7 +284,7 @@ ledger generation changes.
   --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
   --schwab-catalog '<exact-schwab-generation.json>' `
   --provider-ledger-root '<exact-provider-ledger-generation>' `
-  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
   --tt-market-data '<exact-hash-bound-tt-model-symbol-price.json>' `
   --tt-market-data '<exact-hash-bound-tt-broker-only-symbol-price.json>' `
   --grizzly-signals '<exact-current-live-only-trades.csv>' `
@@ -609,4 +611,6 @@ unavailable until their source facts are admitted:
 
 These are source-admission gaps, not missing formulas. The panel must continue
 to display their unavailable status and unresolved residual rather than infer a
-cause or manufacture a long-history result.
+cause or manufacture a long-history result.# The reconciliation's --tt-workbook is OPTIONAL (2026-10-10 owner ruling): a supplied workbook
+# yields a MATCHED/DIAGNOSTIC parity row and is never a gate; omit it to run workbook-less.
+
