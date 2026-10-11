@@ -126,7 +126,7 @@ published Portfolio123 generation:
   --grizzly-workbook '<exact-spxl-current-implementation-backtest.xlsx>' `
   --grizzly-blended-trade-history '<exact-current-all-backtest-plus-live-trades.csv>' `
   --grizzly-live-trade-history '<exact-current-live-only-trades.csv>' `
-  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
   --qsi-subscription-archive '<exact-qsi-archive.json>' `
   --qsi-current-subscription-archive '<exact-newest-qsi-subscription-zip>' `
   --qsi-appendix-workbook '<exact-qsi-appendix.xlsx>' `
@@ -268,7 +268,7 @@ ledger generation changes.
   --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
   --schwab-catalog '<exact-schwab-generation.json>' `
   --provider-ledger-root '<exact-provider-ledger-generation>' `
-  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
   --grizzly-signals '<exact-current-live-only-trades.csv>' `
   --grizzly-blended-history '<exact-current-all-backtest-plus-live-trades.csv>' `
   --spxl-market-data '<exact-hash-bound-spxl-price.json>' `
@@ -282,7 +282,7 @@ ledger generation changes.
   --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
   --schwab-catalog '<exact-schwab-generation.json>' `
   --provider-ledger-root '<exact-provider-ledger-generation>' `
-  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --tt-workbook '<optional-diagnostic-workbook.xlsx>' ` # optional: a supplied workbook yields a MATCHED/DIAGNOSTIC parity row, never a gate
   --tt-market-data '<exact-hash-bound-tt-model-symbol-price.json>' `
   --tt-market-data '<exact-hash-bound-tt-broker-only-symbol-price.json>' `
   --grizzly-signals '<exact-current-live-only-trades.csv>' `

@@ -1824,6 +1824,8 @@ def _tt_workbook_return_parity(
     failures."""
     if workbook is None:
         return {
+            "observed_end": None,
+            "observed_start": None,
             "observations": 0,
             "status": "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT",
         }
