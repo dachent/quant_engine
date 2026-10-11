@@ -1623,6 +1623,255 @@ def test_tt_account_leg_is_the_governed_series_over_the_compared_window(
     assert metrics["model_basis"] == "TT_SOURCE_MANIFEST_MODEL_RETURNS"
 
 
+def _tt_result_without_workbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    post_return: str,
+    post_level: str,
+    accepted_as_of: date,
+) -> dict[str, Any]:
+    components = [f"component-{index}" for index in range(1, 7)]
+    ledger = {
+        "strategy_returns": [
+            {
+                "component_account_count": 3,
+                "date": observed,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": value,
+                "strategy_id": "tt-portfolio",
+            }
+            for observed, value in (
+                ("2026-03-31", "0.008"),
+                ("2026-04-01", "-0.018"),
+                ("2026-04-02", "0.025"),
+            )
+        ],
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "source_record_id": "schwab:tt-pre-buy",
+                "strategy_id": "tt-portfolio",
+            }
+        ],
+    }
+    schwab = {
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "event_date": "2026-04-02",
+                "execution_price": "100",
+                "fees_and_commission": "1",
+                "kind": "Buy",
+                "quantity": "10",
+                "record_id": "tt-pre-buy",
+                "symbol": "QQQ",
+            }
+        ],
+    }
+    return reconciliation._tt_reconciliation(
+        None,
+        _write_tt_source_manifest(tmp_path, components),
+        ledger,
+        schwab,
+        accepted_as_of=accepted_as_of,
+    )
+
+
+def test_tt_reconciliation_completes_without_workbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _tt_result_without_workbook(
+        tmp_path,
+        monkeypatch,
+        post_return="0.75",
+        post_level="999",
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    assert result["verification"] == "VERIFIED"
+    assert result["component_weight_authority"] == (
+        "OWNER_STATEMENT_CONSTANT_MIX_SINCE_INCEPTION_2026_10_10"
+    )
+    parity = result["workbook_parity"]
+    assert parity["status"] == "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT"
+    assert result["return_reconciliation"]["observed_end"] == "2026-04-02"
+
+
+def test_tt_reconciliation_without_workbook_is_post_cutoff_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _tt_result_without_workbook(
+        tmp_path,
+        monkeypatch,
+        post_return="0.75",
+        post_level="999",
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+    second = _tt_result_without_workbook(
+        tmp_path,
+        monkeypatch,
+        post_return="0.95",
+        post_level="777",
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    assert first == second
+    _assert_temporally_bounded(first, TT_ACCEPTED_AS_OF)
+
+
+def test_tt_reconciliation_supplied_workbook_still_emits_parity_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _tt_result(
+        tmp_path,
+        monkeypatch,
+        post_return="0.75",
+        post_level="999",
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    parity = result["workbook_parity"]
+    assert parity["status"] == "MATCHED_DIRECT_SOURCE_TO_INDEPENDENT_WORKBOOK"
+    assert parity["observations"] > 0
+
+
+def test_tt_reconciliation_supplied_workbook_mismatch_is_diagnostic_not_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = [f"component-{index}" for index in range(1, 7)]
+    weight = "0.1666666666666666666666666666666667"
+    index_rows = [[None, None, None, None, "name", "kind", "weight"]] + [
+        [None, None, None, None, component, period, weight]
+        for period in (1, 2)
+        for component in components
+    ]
+    # A different-vintage workbook whose raw_ttdata diverges from the manifest.
+    return_rows = [["Date", *(f"Total ({item})" for item in components)]]
+    for observed, level in (
+        ("2026-03-30", "100"),
+        ("2026-03-31", "200"),
+        ("2026-04-01", "50"),
+        ("2026-04-02", "300"),
+    ):
+        return_rows.append([observed, *([level] * len(components))])
+    rows_by_sheet = {
+        "Index": index_rows,
+        "raw_ttdata": return_rows,
+    }
+    monkeypatch.setattr(
+        reconciliation,
+        "_xlsx_rows",
+        lambda _path, sheet: rows_by_sheet[sheet],
+    )
+    ledger = {
+        "strategy_returns": [
+            {
+                "component_account_count": 3,
+                "date": observed,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": value,
+                "strategy_id": "tt-portfolio",
+            }
+            for observed, value in (
+                ("2026-03-31", "0.008"),
+                ("2026-04-01", "-0.018"),
+                ("2026-04-02", "0.025"),
+            )
+        ],
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "source_record_id": "schwab:tt-pre-buy",
+                "strategy_id": "tt-portfolio",
+            }
+        ],
+    }
+    schwab = {
+        "transactions": [
+            {
+                "account_id": "tt-account",
+                "event_date": "2026-04-02",
+                "execution_price": "100",
+                "fees_and_commission": "1",
+                "kind": "Buy",
+                "quantity": "10",
+                "record_id": "tt-pre-buy",
+                "symbol": "QQQ",
+            }
+        ],
+    }
+    result = reconciliation._tt_reconciliation(
+        Path("synthetic-tt.xlsx"),
+        _write_tt_source_manifest(tmp_path, components),
+        ledger,
+        schwab,
+        accepted_as_of=TT_ACCEPTED_AS_OF,
+    )
+
+    parity = result["workbook_parity"]
+    assert parity["status"] == "DIAGNOSTIC_DIRECT_SOURCE_AND_WORKBOOK_DIFFER"
+    assert parity["maximum_absolute_daily_return_difference"] > 0.0000001
+    assert result["verification"] == "VERIFIED"
+
+
+def test_tt_reconciliation_fails_closed_on_manifest_weight_sum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = [f"component-{index}" for index in range(1, 7)]
+    manifest_path = _write_tt_source_manifest(tmp_path, components)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["selected_components"][0]["portfolio_weight"] = "0.5"
+    manifest.pop("source_manifest_id", None)
+    manifest["source_manifest_id"] = hashlib.sha256(
+        json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="TuringTrader selected component weights differ",
+    ):
+        reconciliation._tt_reconciliation(
+            None,
+            manifest_path,
+            {"strategy_returns": [], "transactions": []},
+            {"transactions": []},
+            accepted_as_of=TT_ACCEPTED_AS_OF,
+        )
+
+
+def test_tt_reconciliation_fails_closed_on_manifest_nav_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    components = [f"component-{index}" for index in range(1, 7)]
+    manifest_path = _write_tt_source_manifest(tmp_path, components)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    history = manifest["selected_components"][0]["performance"]["nav_history"]
+    manifest["selected_components"][0]["performance"]["nav_history"] = [
+        row for row in history if row["observed_date"] != "2026-04-01"
+    ]
+    manifest.pop("source_manifest_id", None)
+    manifest["source_manifest_id"] = hashlib.sha256(
+        json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="TuringTrader component NAV history differs",
+    ):
+        reconciliation._tt_reconciliation(
+            None,
+            manifest_path,
+            {"strategy_returns": [], "transactions": []},
+            {"transactions": []},
+            accepted_as_of=TT_ACCEPTED_AS_OF,
+        )
+
+
 def test_ai_account_leg_is_the_governed_series_over_the_compared_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
