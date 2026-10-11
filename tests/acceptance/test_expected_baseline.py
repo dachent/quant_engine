@@ -30,7 +30,7 @@ CURRENT_RAW_OUTPUT_SHA256 = {
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "2fc2dcd11d53a67798abbcd2c5f47021eecbbaabf7785747094b4d94b908f616",
+    "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS = frozenset(
     {
