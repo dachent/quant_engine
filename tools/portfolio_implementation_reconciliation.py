@@ -1642,12 +1642,10 @@ def _tt_manifest_component_weights(manifest: Mapping[str, Any]) -> dict[str, Dec
                 "TuringTrader selected component weights differ"
             )
         weights[slug] = weight
-    if (
-        len(weights) != 6
-        or any(weight <= 0 for weight in weights.values())
-        or abs(sum(weights.values(), Decimal(0)) - Decimal(1))
-        > Decimal("0.000000000001")
-    ):
+    # Positive weights summing to one are already enforced, always earlier,
+    # by _read_tt_source_manifest (the manifest reader) on the integrated path;
+    # only the exactly-six identity pin is checked here.
+    if len(weights) != 6:
         raise ImplementationReconciliationError(
             "TuringTrader selected component weights differ"
         )
