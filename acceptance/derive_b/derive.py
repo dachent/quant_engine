@@ -1631,6 +1631,62 @@ def quantbase_capture_end(ledger: dict[str, object], selection: object) -> date 
         return None
 
 
+def _coverage_row_capture_ms(row: dict[str, str]) -> int | None:
+    """The response instant of a coverage row in epoch milliseconds, or None.
+
+    The instant is an upper bound on every observation of the endpoint the row
+    covers: a capture cannot have observed a moment after it was made.
+    """
+    captured = row.get("updated_at_utc") or ""
+    try:
+        moment = datetime.fromisoformat(captured.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+        return None
+    return int(moment.timestamp() * 1000)
+
+
+def _clip_request_windows(request_lines: list[str], bound_ms: int) -> list[str]:
+    """The request manifest lines with every windowed end_time clipped to bound_ms.
+
+    A declared end past the observing capture's response instant is internally
+    inconsistent; the window proves only through the instant it was observed at.
+    Unwindowed and unreadable lines pass through unchanged - their handling
+    (full-history boundary or fail-closed) belongs to list_endpoint_coverage_end.
+    """
+    clipped: list[str] = []
+    for line in request_lines:
+        if not line.strip():
+            clipped.append(line)
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            clipped.append(line)
+            continue
+        if not isinstance(request, dict):
+            clipped.append(line)
+            continue
+        raw = request.get("safe_params")
+        try:
+            params = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            clipped.append(line)
+            continue
+        if isinstance(params, dict):
+            end = params.get("end_time")
+            if isinstance(end, int) and not isinstance(end, bool) and end > bound_ms:
+                params["end_time"] = bound_ms
+                request["safe_params"] = (
+                    json.dumps(params) if isinstance(raw, str) else params
+                )
+                clipped.append(json.dumps(request))
+                continue
+        clipped.append(line)
+    return clipped
+
+
 def custody_coverage_end(
     strategy_id: str,
     event_days: dict[str, list[date]],
@@ -1674,8 +1730,11 @@ def custody_coverage_end(
             # The base run may contribute its request windows only when its own
             # trade_record coverage row is a single complete-to-observed-boundary
             # natural-terminal row (MX-1): a base capture that did not read the
-            # list to its end proves no window.  The selected generation's
-            # coverage row still bounds the capture instant.
+            # list to its end proves no window.  The base row's own response
+            # instant bounds the base windows - a base capture cannot have
+            # observed a moment after it was made, whatever end_time its
+            # manifest declares - and the selected generation's coverage row
+            # still bounds the merged chain inside list_endpoint_coverage_end.
             endpoint = f"{MATRIXPORT_COVERAGE_HOST}{MATRIXPORT_TRADE_RECORD_PATH}"
             base_rows = [
                 row for row in base_coverage_rows if row.get("endpoint") == endpoint
@@ -1685,7 +1744,12 @@ def custody_coverage_end(
                 and base_rows[0].get("status") == "complete_to_observed_boundary"
                 and base_rows[0].get("terminal_reason") in NATURAL_LIST_TERMINALS
             ):
-                anchor_lines = [*lines, *base_request_lines]
+                base_capture_ms = _coverage_row_capture_ms(base_rows[0])
+                if base_capture_ms is not None:
+                    anchor_lines = [
+                        *lines,
+                        *_clip_request_windows(base_request_lines, base_capture_ms),
+                    ]
         claimed = {
             "flows": None if None in wallet else min(cast(list[date], wallet)),
             "capital_anchors": list_endpoint_coverage_end(

@@ -3979,6 +3979,118 @@ def test_base_run_capture_must_tile_back_to_the_first_event() -> None:
     assert ended == date(2025, 12, 5)
 
 
+def test_base_run_windows_are_clipped_by_the_base_capture_instant() -> None:
+    """A base manifest declaring an end_time past the base run's own observation
+    instant (the base trade_record row's updated_at_utc) is internally
+    inconsistent: the base capture cannot have observed a moment after it was
+    made.  The base window must be clipped by the base capture instant, so the
+    chained boundary derives the base capture day 2026-09-03, never the declared
+    2026-09-10 nor the selected generation's 2026-09-18."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-09-08T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    # Base captured 2026-09-03, but its manifest declares a window ending
+    # 2026-09-10 - seven days past the base run's observation instant.  An
+    # honest base window (ending at the 09-03 capture) leaves a gap before the
+    # incremental start 09-08, so the chain proves only through 2026-09-03.
+    base_rows = [_trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00")]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-10T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2026, 9, 3)
+
+
+def test_base_run_with_a_non_complete_coverage_row_is_ignored() -> None:
+    """MX-1 admission, negative: a base trade_record coverage row whose status is
+    not complete_to_observed_boundary proves no window, so the base request
+    manifest is ignored and the line fails closed at the last allocation
+    (2025-12-05) exactly as if no base set had been supplied."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    base_rows = [
+        _trade_row(
+            updated_at_utc="2026-09-03T05:10:29.331000+00:00",
+            status="partial",
+        )
+    ]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def test_base_run_with_duplicated_coverage_rows_is_ignored() -> None:
+    """MX-1 admission, negative: two base trade_record coverage rows make the
+    base capture ambiguous, so the base request manifest is ignored and the line
+    fails closed at the last allocation (2025-12-05)."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    base_rows = [
+        _trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00"),
+        _trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00"),
+    ]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
 def _native_base_manifest(base_entries: list[dict[str, object]]) -> dict[str, object]:
     inputs = [
         {"family": family, "path": f"{family}.csv"}
