@@ -1707,12 +1707,16 @@ def _tt_manifest_nav_integrity(
         )
     observed_sets = {c: set(calendars[c]) for c in components}
     for component in components:
-        observed = observed_sets[component]
+        component_days = observed_sets[component]
         others = set.intersection(
             *(observed_sets[c] for c in components if c != component)
         )
-        span = [item for item in others if min(observed) <= item <= max(observed)]
-        if any(item not in observed for item in span):
+        span = [
+            item
+            for item in others
+            if min(component_days) <= item <= max(component_days)
+        ]
+        if any(item not in component_days for item in span):
             raise ImplementationReconciliationError(
                 "TuringTrader component NAV history differs"
             )
@@ -2021,7 +2025,7 @@ def _tt_actual_events(
 
 
 def _tt_current_weights(
-    workbook: Path,
+    workbook: Path | None,
     components: Sequence[str],
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
