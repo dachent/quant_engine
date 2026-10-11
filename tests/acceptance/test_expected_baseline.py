@@ -21,12 +21,18 @@ HISTORICAL_V2_PATH = (
 HISTORICAL_V2_SHA256 = (
     "b87ab5bfd638d0ceb7d4415c05b5c43a7df7c48517519ddee0d815f4b9c6ce91"
 )
-CURRENT_09F6_HEAD = "09f6117513d57b8af7f18d3cdc655b3984ccfd44"
-CURRENT_AGREE_COUNT = 102
-CURRENT_NOT_DERIVABLE_COUNT = 14
+HISTORICAL_09F6_PATH = (
+    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-09f6-054ff579.json"
+)
+HISTORICAL_09F6_SHA256 = (
+    "054ff579f8a4e940055a9987869ed4353e8e86a613b98623a4001b40be91a2ec"
+)
+CURRENT_09F6_HEAD = "fc9a2d32ce81a785481946a8619a01026a01f10c"
+CURRENT_AGREE_COUNT = 103
+CURRENT_NOT_DERIVABLE_COUNT = 15
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "76e06eccafb9a9467a26f47d2b6956e2c7678d7297441df229cbe6f969d48954",
-    "b": "8bf77ff37d8d1da1f39e7c310ba5923c2bd9bdc82bee270a80fadc619213ae26",
+    "a": "ce2f17df9853a7bf3ff0df5b573bfdde378dfcecdabbd206761936d24b5d1253",
+    "b": "1b58190de03324ad26a1737de3debcc494b077f30bbf1001ce0b830b15b47654",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
@@ -78,6 +84,13 @@ def test_historical_v2_baseline_is_byte_exact() -> None:
     raw = HISTORICAL_V2_PATH.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == HISTORICAL_V2_SHA256
     _load(HISTORICAL_V2_PATH)
+
+
+def test_historical_09f6_baseline_is_byte_exact() -> None:
+    assert HISTORICAL_09F6_PATH.is_file(), f"missing {HISTORICAL_09F6_PATH}"
+    raw = HISTORICAL_09F6_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HISTORICAL_09F6_SHA256
+    _load(HISTORICAL_09F6_PATH)
 
 
 def test_header_schema() -> None:
@@ -280,7 +293,7 @@ def test_current_successor_identity_and_authority_coverage() -> None:
     rows = _rows(doc)
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
-    assert len(rows) == 116
+    assert len(rows) == 118
     for side in ("a", "b"):
         assert doc["derivations"][side]["code_commit"] == CURRENT_09F6_HEAD
         assert (
