@@ -3866,6 +3866,338 @@ def test_robuxio_shape_anchors_end_at_the_last_anchor() -> None:
     assert ended == date(2025, 12, 5)
 
 
+def test_base_run_capture_chains_the_anchor_to_the_incremental_end() -> None:
+    """Two-run raw capture: the 0903 base window start_time=0 reaches the first
+    allocation 2025-12-05 and the 0918 incremental continues to 2026-09-18.  When
+    the optional base capture set is supplied, custody_coverage_end chains the base
+    trade_record window with the selected generation's window under the same
+    scope/first-event/tiling rules list_endpoint_coverage_end already applies, so
+    the capital_anchors boundary derives 2026-09-18 (mirroring derive_a's admitted
+    two-run anchor window) instead of failing closed at 2025-12-05."""
+    derivation = load_derivation_module()
+    # The selected (0918) generation: wallet rows prove flows through 09-18; the
+    # only selected trade_record window starts 2026-08-04 (after the first event).
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    # The base (0903) run: full-history trade_record window from epoch.
+    base_rows = [_trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00")]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    # Without the base set: the single selected window cannot reach the first
+    # event, so MX-2 fail-closed ends the line at the last allocation 2025-12-05.
+    assert derivation.custody_coverage_end(
+        "robuxio-crypto", events, {}, None, selected_rows, selected_requests
+    ) == date(2025, 12, 5)
+    # With the base set supplied, the chained windows prove 2026-09-18.
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2026, 9, 18)
+
+
+def test_base_run_capture_with_a_gap_does_not_extend_past_the_hole() -> None:
+    """A base window that does not tile onto the incremental (a gap between the
+    base end and the incremental start) proves only through the base end."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    # Base window ends 2026-08-01, leaving a gap before the incremental start.
+    base_rows = [_trade_row(updated_at_utc="2026-08-01T05:10:29.331000+00:00")]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-08-01T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2026, 8, 1)
+
+
+def test_base_run_capture_must_tile_back_to_the_first_event() -> None:
+    """A base window that itself starts after the first event reaches nothing, so
+    the line still fails closed at the last allocation (MX-2)."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    # Base window starts 2026-01-01, after the first allocation 2025-12-05.
+    base_rows = [_trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00")]
+    base_requests = [
+        _request(
+            TRADE,
+            start_time=_ms("2026-01-01T00:00:00"),
+            end_time=_ms("2026-09-03T05:10:29"),
+        ),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def test_base_run_windows_are_clipped_by_the_base_capture_instant() -> None:
+    """A base manifest declaring an end_time past the base run's own observation
+    instant (the base trade_record row's updated_at_utc) is internally
+    inconsistent: the base capture cannot have observed a moment after it was
+    made.  The base window must be clipped by the base capture instant, so the
+    chained boundary derives the base capture day 2026-09-03, never the declared
+    2026-09-10 nor the selected generation's 2026-09-18."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-09-08T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    # Base captured 2026-09-03, but its manifest declares a window ending
+    # 2026-09-10 - seven days past the base run's observation instant.  An
+    # honest base window (ending at the 09-03 capture) leaves a gap before the
+    # incremental start 09-08, so the chain proves only through 2026-09-03.
+    base_rows = [_trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00")]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-10T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2026, 9, 3)
+
+
+def test_base_run_with_a_non_complete_coverage_row_is_ignored() -> None:
+    """MX-1 admission, negative: a base trade_record coverage row whose status is
+    not complete_to_observed_boundary proves no window, so the base request
+    manifest is ignored and the line fails closed at the last allocation
+    (2025-12-05) exactly as if no base set had been supplied."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    base_rows = [
+        _trade_row(
+            updated_at_utc="2026-09-03T05:10:29.331000+00:00",
+            status="partial",
+        )
+    ]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def test_base_run_with_duplicated_coverage_rows_is_ignored() -> None:
+    """MX-1 admission, negative: two base trade_record coverage rows make the
+    base capture ambiguous, so the base request manifest is ignored and the line
+    fails closed at the last allocation (2025-12-05)."""
+    derivation = load_derivation_module()
+    selected_rows = [*_wallet_rows(), _trade_row()]
+    selected_requests = [
+        *_wallet_requests(),
+        _request(
+            TRADE,
+            start_time=_ms("2026-08-04T05:10:29"),
+            end_time=_ms("2026-09-18T18:42:48"),
+        ),
+    ]
+    base_rows = [
+        _trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00"),
+        _trade_row(updated_at_utc="2026-09-03T05:10:29.331000+00:00"),
+    ]
+    base_requests = [
+        _request(TRADE, start_time=0, end_time=_ms("2026-09-03T05:10:29")),
+    ]
+    events = {"owner": [date(2025, 12, 5)], "allocation": [FIRST_ALLOCATION]}
+    ended = derivation.custody_coverage_end(
+        "robuxio-crypto",
+        events,
+        {},
+        None,
+        selected_rows,
+        selected_requests,
+        base_coverage_rows=base_rows,
+        base_request_lines=base_requests,
+    )
+    assert ended == date(2025, 12, 5)
+
+
+def _native_base_manifest(base_entries: list[dict[str, object]]) -> dict[str, object]:
+    inputs: list[dict[str, object]] = [
+        {"family": family, "path": f"{family}.csv"}
+        for family in (
+            "matrixport_generation_manifest",
+            "matrixport_subscription_details",
+            "matrixport_generation_catalog",
+            "matrixport_owner_flow_coverage",
+            "matrixport_owner_flow_request_manifest",
+        )
+    ]
+    inputs.extend(base_entries)
+    return {"inputs": inputs}
+
+
+def test_native_base_capture_families_are_optional_and_admitted_together() -> None:
+    derivation = load_derivation_module()
+    # Absent base set: exactly the five required families resolve, nothing more.
+    resolved = derivation.native_matrixport_input_paths(
+        _native_base_manifest([]), Path("/unused")
+    )
+    assert set(resolved) == {
+        "matrixport_generation_manifest",
+        "matrixport_subscription_details",
+        "matrixport_generation_catalog",
+        "matrixport_owner_flow_coverage",
+        "matrixport_owner_flow_request_manifest",
+    }
+    # Both base families resolve when supplied together.
+    both = derivation.native_matrixport_input_paths(
+        _native_base_manifest(
+            [
+                {"family": "matrixport_owner_flow_base_coverage", "path": "b_cov.csv"},
+                {
+                    "family": "matrixport_owner_flow_base_request_manifest",
+                    "path": "b_req.jsonl",
+                },
+            ]
+        ),
+        Path("/unused"),
+    )
+    assert both["matrixport_owner_flow_base_coverage"].name == "b_cov.csv"
+    assert both["matrixport_owner_flow_base_request_manifest"].name == "b_req.jsonl"
+    # One base family without the other fails closed.
+    with pytest.raises(derivation.ManifestError):
+        derivation.native_matrixport_input_paths(
+            _native_base_manifest(
+                [{"family": "matrixport_owner_flow_base_coverage", "path": "b.csv"}]
+            ),
+            Path("/unused"),
+        )
+    # A repeated base family fails closed.
+    with pytest.raises(derivation.ManifestError):
+        derivation.native_matrixport_input_paths(
+            _native_base_manifest(
+                [
+                    {
+                        "family": "matrixport_owner_flow_base_coverage",
+                        "path": "b1.csv",
+                    },
+                    {
+                        "family": "matrixport_owner_flow_base_coverage",
+                        "path": "b2.csv",
+                    },
+                    {
+                        "family": "matrixport_owner_flow_base_request_manifest",
+                        "path": "b.jsonl",
+                    },
+                ]
+            ),
+            Path("/unused"),
+        )
+
+
+def test_a_tampered_base_capture_sha_fails_closed(tmp_path: Path) -> None:
+    """The base-run capture set is verified fail-closed by its own declared
+    sha256/bytes pins: a tampered base request manifest aborts the derivation."""
+    derivation = load_derivation_module()
+    base_cov = tmp_path / "base_coverage.csv"
+    base_cov.write_text("endpoint,status\n", encoding="utf-8")
+    base_req = tmp_path / "base_request_manifest.jsonl"
+    base_req.write_bytes(b"{}\n")
+    pinned_cov = pinned_entry(base_cov)
+    pinned_cov["family"] = "matrixport_owner_flow_base_coverage"
+    # Pin the base request manifest, then tamper the file after pinning, keeping
+    # the byte size so the sha256 check is the one that fires.
+    pinned_req = pinned_entry(base_req)
+    pinned_req["family"] = "matrixport_owner_flow_base_request_manifest"
+    base_req.write_bytes(b"XX\n")
+    fixtures = write_manifest_role_fixtures(tmp_path)
+    entries = [unpinned_entry(path) for path in fixtures.values()]
+    entries.extend(
+        {"family": family, "path": f"{family}.csv", "sha256": None, "bytes": None}
+        for family in (
+            "matrixport_generation_manifest",
+            "matrixport_subscription_details",
+            "matrixport_generation_catalog",
+            "matrixport_owner_flow_coverage",
+            "matrixport_owner_flow_request_manifest",
+        )
+    )
+    entries.extend([pinned_cov, pinned_req])
+    manifest = {"schema": "qe-cp-acceptance-inputs/3", "inputs": entries}
+    with pytest.raises(derivation.ManifestError, match="sha256 mismatch"):
+        derivation.manifest_input_paths(manifest, tmp_path)
+
+
 def test_a_hash_bound_window_chain_back_to_the_first_event_extends_the_anchors() -> (
     None
 ):
