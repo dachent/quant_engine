@@ -261,6 +261,8 @@ publishes an account return that is not the governed account-live series (see
 ledger generation changes.
 
 ```powershell
+# The reconciliation's --tt-workbook is OPTIONAL (2026-10-10 owner ruling): a supplied
+# workbook yields a MATCHED/DIAGNOSTIC parity row and is never a gate; omit it to run workbook-less.
 & $enginePython tools\portfolio_implementation_reconciliation.py `
   --p123-generation-root '<exact-published-p123-generation>' `
   --ibkr-generation-root '<exact-ibkr-generation>' `
@@ -610,3 +612,4 @@ unavailable until their source facts are admitted:
 These are source-admission gaps, not missing formulas. The panel must continue
 to display their unavailable status and unresolved residual rather than infer a
 cause or manufacture a long-history result.
+

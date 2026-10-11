@@ -38,6 +38,13 @@ from portfolio_strategy_history import (
 #: sealed: it keeps its bytes and the report reads it by its declared window.
 SCHEMA_VERSION: Final = 2
 BUILDER_VERSION: Final = "1.4.0"
+#: Owner ruling (2026-10-10): the TT portfolio mix has not changed since
+#: inception, so the six selected components and their equal weights are pinned
+#: by the governed source manifest, not by any workbook vintage. The workbook is
+#: therefore an optional independent diagnostic, never a reconciliation gate.
+TT_COMPONENT_WEIGHT_AUTHORITY: Final = (
+    "OWNER_STATEMENT_CONSTANT_MIX_SINCE_INCEPTION_2026_10_10"
+)
 ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
 ACCOUNT_LEG_SERIES_SCHEMA: Final = "ordered-date-return/1"
 ACCOUNT_LEG_TOLERANCE: Final = 1e-8
@@ -1226,7 +1233,12 @@ def _read_tt_source_manifest(
             "TuringTrader selected components differ"
         )
     slugs = [str(row.get("slug") or "") for row in selected]
-    if slugs != list(components):
+    if (
+        not slugs
+        or len(set(slugs)) != len(slugs)
+        or any(not slug for slug in slugs)
+        or (components and slugs != list(components))
+    ):
         raise ImplementationReconciliationError(
             "TuringTrader selected components differ"
         )
@@ -1609,6 +1621,107 @@ def _tt_components(workbook: Path) -> list[str]:
     return list(_tt_component_weights(workbook))
 
 
+def _tt_manifest_component_weights(manifest: Mapping[str, Any]) -> dict[str, Decimal]:
+    """Pin the six component identities and weights from the governed source
+    manifest's ``selected_components`` (slug + portfolio_weight), not from any
+    workbook. The constant-mix authority is the owner statement of 2026-10-10;
+    the manifest carries the weights themselves."""
+    selected = manifest.get("selected_components")
+    if not isinstance(selected, list) or any(
+        not isinstance(row, dict) for row in selected
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader selected components differ"
+        )
+    weights: dict[str, Decimal] = {}
+    for row in selected:
+        slug = str(row.get("slug") or "").strip()
+        weight = _decimal(row.get("portfolio_weight"))
+        if not slug or weight is None or slug in weights:
+            raise ImplementationReconciliationError(
+                "TuringTrader selected component weights differ"
+            )
+        weights[slug] = weight
+    # Positive weights summing to one are already enforced, always earlier,
+    # by _read_tt_source_manifest (the manifest reader) on the integrated path;
+    # only the exactly-six identity pin is checked here.
+    if len(weights) != 6:
+        raise ImplementationReconciliationError(
+            "TuringTrader selected component weights differ"
+        )
+    return weights
+
+
+def _tt_manifest_nav_integrity(
+    manifest: Mapping[str, Any], components: Sequence[str], *, accepted_as_of: date
+) -> None:
+    """Fail-loud internal-consistency check replacing the workbook's validation
+    role: every component NAV history must be complete and monotone-dated over
+    its observed window, with no gaps in the shared live calendar."""
+    selected = {
+        str(row["slug"]): row
+        for row in manifest["selected_components"]
+        if isinstance(row, dict)
+    }
+    calendars: dict[str, list[date]] = {}
+    for component in components:
+        row = selected.get(component)
+        if row is None:
+            raise ImplementationReconciliationError(
+                "TuringTrader component NAV history differs"
+            )
+        observed_dates: list[date] = []
+        for item in row["performance"]["nav_history"]:
+            if not isinstance(item, dict):
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                )
+            try:
+                observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            except ValueError as exc:
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                ) from exc
+            if observed <= accepted_as_of:
+                observed_dates.append(observed)
+        if observed_dates != sorted(observed_dates) or len(set(observed_dates)) != len(
+            observed_dates
+        ):
+            raise ImplementationReconciliationError(
+                "TuringTrader component NAV history differs"
+            )
+        calendars[component] = observed_dates
+    # Components legitimately diverge on market-closure days (the governed
+    # full-live manifests show tt-mach-3-v3 and tt-mean-kitty-v2 omitting days
+    # the other four carry), so byte-identical full histories are not the
+    # contract. The downstream return computation intersects the calendars;
+    # the integrity gate therefore validates each component on its own
+    # (monotone, duplicate-free, non-empty — done above), requires a non-empty
+    # shared intersection window, and fails closed on an isolated gap: a date
+    # every OTHER component carries but this one omits inside its own observed
+    # span.
+    common = set.intersection(*(set(calendars[c]) for c in components))
+    if not common:
+        raise ImplementationReconciliationError(
+            "TuringTrader component NAV history differs"
+        )
+    observed_sets = {c: set(calendars[c]) for c in components}
+    for component in components:
+        component_days = observed_sets[component]
+        others = set.intersection(
+            *(observed_sets[c] for c in components if c != component)
+        )
+        span = [
+            item
+            for item in others
+            if min(component_days) <= item <= max(component_days)
+        ]
+        if any(item not in component_days for item in span):
+            raise ImplementationReconciliationError(
+                "TuringTrader component NAV history differs"
+            )
+
+
 def _tt_model_returns(
     workbook: Path, components: Sequence[str], *, accepted_as_of: date
 ) -> dict[date, float]:
@@ -1672,7 +1785,12 @@ def _tt_manifest_model_returns(
                 raise ImplementationReconciliationError(
                     "TuringTrader component NAV history differs"
                 )
-            observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            try:
+                observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            except ValueError as exc:
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                ) from exc
             value = _decimal(item.get("value"))
             if value is None or value <= 0 or observed in component_levels:
                 raise ImplementationReconciliationError(
@@ -1705,24 +1823,43 @@ def _tt_manifest_model_returns(
 
 
 def _tt_workbook_return_parity(
-    workbook: Path,
+    workbook: Path | None,
     manifest_returns: Mapping[date, float],
     components: Sequence[str],
     *,
     accepted_as_of: date,
 ) -> dict[str, object]:
+    """Optional independent-workbook diagnostic. The workbook is never a gate:
+    when absent the derivation is self-sufficient from the governed manifest,
+    and when supplied a mismatch is reported as a diagnostic row rather than a
+    refusal. The reconciliation refuses only on the manifest's own internal
+    failures."""
+    if workbook is None:
+        return {
+            "maximum_absolute_daily_return_difference": None,
+            "observed_end": None,
+            "observed_start": None,
+            "observations": 0,
+            "status": "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT",
+        }
     workbook_returns = _tt_model_returns(
         workbook, components, accepted_as_of=accepted_as_of
     )
     common = sorted(set(manifest_returns) & set(workbook_returns))
-    maximum_difference = max(
-        (abs(manifest_returns[item] - workbook_returns[item]) for item in common),
-        default=float("inf"),
+    # The content-addressed payload must stay RFC 8259 JSON: never serialize inf.
+    maximum_difference = (
+        max((abs(manifest_returns[item] - workbook_returns[item]) for item in common))
+        if common
+        else None
     )
-    if not common or maximum_difference > 0.0000001:
-        raise ImplementationReconciliationError(
-            "TT direct-source and workbook return parity differs"
-        )
+    if not common or maximum_difference is None or maximum_difference > 0.0000001:
+        return {
+            "observations": len(common),
+            "observed_end": common[-1].isoformat() if common else None,
+            "observed_start": common[0].isoformat() if common else None,
+            "maximum_absolute_daily_return_difference": maximum_difference,
+            "status": "DIAGNOSTIC_DIRECT_SOURCE_AND_WORKBOOK_DIFFER",
+        }
     return {
         "observations": len(common),
         "observed_end": common[-1].isoformat(),
@@ -1890,7 +2027,7 @@ def _tt_actual_events(
 
 
 def _tt_current_weights(
-    workbook: Path,
+    workbook: Path | None,
     components: Sequence[str],
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
@@ -1904,17 +2041,22 @@ def _tt_current_weights(
 
 
 def _tt_reconciliation(
-    workbook: Path,
+    workbook: Path | None,
     source_manifest_path: Path,
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
     *,
     accepted_as_of: date,
 ) -> dict[str, object]:
-    component_weights = _tt_component_weights(workbook)
+    # Components and weights are pinned by the governed source manifest, not by
+    # any workbook vintage (owner ruling 2026-10-10: the mix has not changed
+    # since inception). Validate the manifest once and derive the slug order
+    # from the validated payload.
+    source_manifest = _read_tt_source_manifest(source_manifest_path, ())
+    component_weights = _tt_manifest_component_weights(source_manifest)
     components = list(component_weights)
-    source_manifest = _read_tt_source_manifest(
-        source_manifest_path, components, component_weights
+    _tt_manifest_nav_integrity(
+        source_manifest, components, accepted_as_of=accepted_as_of
     )
     model_returns = _tt_manifest_model_returns(
         source_manifest, components, accepted_as_of=accepted_as_of
@@ -2041,6 +2183,10 @@ def _tt_reconciliation(
         "model_source": {
             "portfolio": source_manifest["portfolio"],
             "source_manifest_id": source_manifest["source_manifest_id"],
+        },
+        "component_weight_authority": TT_COMPONENT_WEIGHT_AUTHORITY,
+        "component_weights": {
+            component: str(component_weights[component]) for component in components
         },
         "workbook_parity": workbook_parity,
         "return_reconciliation": relative_metrics(
@@ -2511,7 +2657,7 @@ def build_reconciliation(
     ibkr_current_xml: Path,
     schwab_catalog_path: Path,
     provider_ledger_root: Path,
-    tt_workbook: Path,
+    tt_workbook: Path | None,
     tt_source_manifest: Path,
     grizzly_signals: Path,
     grizzly_blended_history: Path | None = None,
@@ -2620,9 +2766,10 @@ def build_reconciliation(
                 "size_bytes": identity[1],
             }
         )
+    if tt_workbook is not None:
+        sources.append(_source(tt_workbook, "turingtrader-current-api-workbook"))
     sources.extend(
         [
-            _source(tt_workbook, "turingtrader-current-api-workbook"),
             _source(tt_source_manifest, "turingtrader-source-manifest"),
             _source(
                 grizzly_signals,
@@ -2714,7 +2861,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ibkr-current-xml", type=Path, required=True)
     parser.add_argument("--schwab-catalog", type=Path, required=True)
     parser.add_argument("--provider-ledger-root", type=Path, required=True)
-    parser.add_argument("--tt-workbook", type=Path, required=True)
+    parser.add_argument("--tt-workbook", type=Path)
     parser.add_argument("--tt-source-manifest", type=Path, required=True)
     parser.add_argument("--grizzly-signals", type=Path, required=True)
     parser.add_argument("--grizzly-blended-history", type=Path)
