@@ -5410,6 +5410,318 @@ def test_capital_gate_fails_closed_on_an_unreadable_registry(
         materializer._current_capital_identity(baseline)
 
 
+# The 2026-09-17 cutoff book of baseline 347ed499 (the release tail's prepared
+# generation): seven SYSTEMATIC strategies, their member NAVs, and the OWNER_318
+# derived custody cash lines the producer adds to robuxio-crypto and
+# volatis-strategy (portfolio_baseline._build_current_capital).  The published
+# strategy value is NAV + cash; the systematic total is 426101.61285957407210153065004
+# and the NAV-only sum is exactly the cash total (1973.918694572) lower.
+_CUSTODY_BOOK: tuple[tuple[str, tuple[tuple[str, str], ...], str | None], ...] = (
+    ("grizzlybears-vtma", (("account-61092059d066f056", "51233.9"),), None),
+    ("p123-ai-factor", (("account-1b44c987969b9e47", "57200.875514128"),), None),
+    ("p123-eu", (("account-d69701da9143c430", "45464.686880028"),), None),
+    (
+        "qsi",
+        (
+            ("account-38b653b91ff43a10", "48309.42"),
+            ("account-98f5986706ed53c5", "10628.97"),
+        ),
+        None,
+    ),
+    (
+        "robuxio-crypto",
+        (("account-d2e5821e608e25f1", "51126.09177084639756872065004"),),
+        "93.97474435567453281",
+    ),
+    (
+        "tt-portfolio",
+        (
+            ("account-702c489650e59956", "3.81"),
+            ("account-a13937e26b8ae46d", "14520.86"),
+            ("account-c63d2a487e019790", "74492.29"),
+            ("account-cff10c44aedcf5e8", "12054.51"),
+        ),
+        None,
+    ),
+    (
+        "volatis-strategy",
+        (("account-58e75e8d952fa1b8", "59092.28"),),
+        "1879.943950216",
+    ),
+)
+# The weights baseline 347ed499 publishes, verbatim.
+_CUSTODY_PUBLISHED_WEIGHTS = {
+    "grizzlybears-vtma": "0.1202386906169365514680187219538178",
+    "p123-ai-factor": "0.1342423351328151495973869009638075",
+    "p123-eu": "0.1066991663676507355609811033524524",
+    "qsi": "0.1383200349899255585789323077457636",
+    "robuxio-crypto": "0.1202062253917873407377712384742153",
+    "tt-portfolio": "0.2372003929337603452714571839230204",
+    "volatis-strategy": "0.143093154567124318785452543586923",
+}
+_CUSTODY_SYSTEMATIC = "426101.61285957407210153065004"
+_CUSTODY_NAV_ONLY_SYSTEMATIC = "424127.69416500239756872065004"
+
+
+def _custody_cash_line(account_id: str, value: str) -> dict[str, Any]:
+    """One OWNER_318 derived cash line, shaped as the producer emits it."""
+
+    return {
+        "account_id": account_id,
+        "as_of_date": _GATE_DAY,
+        "basis": "DERIVED_ADMITTED_EXTERNAL_FLOWS_MINUS_SLEEVE_ALLOCATIONS_PLUS_REDEMPTIONS",
+        "coverage_end": "2026-09-18",
+        "current_value": _cc_amount(value),
+        "events": [
+            {
+                "event_date": "2025-12-05",
+                "event_sha256": "a" * 64,
+                "event_time_fx": None,
+                "native_currency": "USD",
+                "native_value": value,
+                "record_id": f"flow-{account_id}",
+                "signed_usd": value,
+            }
+        ],
+        "last_event_date": "2025-12-05",
+        "provider_id": "custody",
+        "status": "AVAILABLE",
+    }
+
+
+def _custody_cash_baseline(*, with_cash: bool = True) -> dict[str, Any]:
+    """The 347ed499 cutoff book as a gate input.
+
+    ``with_cash`` publishes it as the producer does since 91a88b5: each strategy's
+    value is its member NAVs plus its ``derived_cash`` lines, under the selected
+    ``custody_authority``.  Without it, the same NAVs are published NAV-only (the
+    pre-OWNER_318 profile) with weights recomputed over the NAV-only total.
+    """
+
+    from quant_engine.portfolio_ledger.models import decimal_text
+
+    def exact(values: list[Decimal]) -> Decimal:
+        with localcontext() as context:
+            context.prec = 100
+            return sum(values, Decimal(0))
+
+    values = {
+        strategy_id: exact(
+            [Decimal(nav) for _, nav in members]
+            + ([Decimal(cash)] if cash is not None and with_cash else [])
+        )
+        for strategy_id, members, cash in _CUSTODY_BOOK
+    }
+    total = exact(list(values.values()))
+    rows: list[dict[str, Any]] = []
+    for strategy_id, members, cash in _CUSTODY_BOOK:
+        if with_cash:
+            weight = _CUSTODY_PUBLISHED_WEIGHTS[strategy_id]
+        else:
+            with localcontext() as context:
+                context.prec = 34
+                weight = decimal_text(values[strategy_id] / total)
+        row: dict[str, Any] = {
+            "as_of_date": _GATE_DAY,
+            "current_value": _cc_amount(decimal_text(values[strategy_id])),
+            "current_weight": weight,
+            "members": [
+                {
+                    "account_id": account_id,
+                    "as_of_date": _GATE_DAY,
+                    "assignment_ids": [f"assignment-{account_id}"],
+                    "effective_end": None,
+                    "effective_start": "2026-01-01",
+                    "nav_record_id": f"nav-{account_id}",
+                    "source_key": "provider-ledger",
+                    "status": "AVAILABLE",
+                    "value": _cc_amount(nav),
+                }
+                for account_id, nav in members
+            ],
+            "reason": None,
+            "scope": "SYSTEMATIC",
+            "status": "AVAILABLE",
+            "strategy_id": strategy_id,
+        }
+        if cash is not None and with_cash:
+            row["derived_cash"] = [_custody_cash_line(members[0][0], cash)]
+        rows.append(row)
+    not_ready = {
+        "as_of_date": None,
+        "components": [],
+        "current_value": _cc_amount(None),
+        "reason": "not every component is current",
+        "status": "NOT_READY_AT_CUTOFF",
+    }
+    capital: dict[str, Any] = {
+        "basis": "LATEST_ADMITTED_USD_NAV_ON_OR_BEFORE_VALUATION_DATE",
+        "currency": "USD",
+        "reserve": dict(not_ready),
+        "retained_excluded": {
+            "as_of_date": None,
+            "components": [],
+            "current_value": _cc_amount("0"),
+            "reason": None,
+            "status": "AVAILABLE",
+        },
+        "strategies": rows,
+        "systematic": {
+            "as_of_date": _GATE_DAY,
+            "components": [entry[0] for entry in _CUSTODY_BOOK],
+            "current_value": _cc_amount(decimal_text(total)),
+            "reason": None,
+            "status": "AVAILABLE",
+        },
+        "total_liquid": dict(not_ready),
+        "valuation_date": _GATE_DAY,
+        "weight_basis": "CURRENT_CUTOFF",
+    }
+    if with_cash:
+        capital["custody_authority"] = {"census_id": "PORTFOLIO_CURRENT_CENSUS_V1"}
+    return {
+        "as_of_date": _GATE_DAY,
+        "assignments": [
+            {
+                "account_id": account_id,
+                "assignment_id": f"assignment-{account_id}",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "pool_id": "systematic-capital",
+                "strategy_id": strategy_id,
+                "strategy_mapping_disposition": "MAPPED",
+            }
+            for strategy_id, members, _ in _CUSTODY_BOOK
+            for account_id, _ in members
+        ],
+        "current_capital": capital,
+        "nav_observations": [
+            {
+                "account_id": account_id,
+                "as_of_date": _GATE_DAY,
+                "nav": _cc_amount(nav),
+                "record_id": f"nav-{account_id}",
+                "source_key": "provider-ledger",
+            }
+            for _, members, _ in _CUSTODY_BOOK
+            for account_id, nav in members
+        ],
+        "provider_admissions": [],
+        "strategies": [{"strategy_id": entry[0]} for entry in _CUSTODY_BOOK],
+    }
+
+
+def test_capital_gate_adds_the_owner_318_derived_custody_cash_lines() -> None:
+    """The release tail's refusal, on its own numbers: the producer publishes each
+    strategy at NAV + derived custody cash (OWNER_318), so the gate's recompute
+    must add the same cash lines.  Unmodified, it recomputed NAV only and refused
+    426101.61285957407210153065004 against 424127.69416500239756872065004."""
+
+    baseline = _custody_cash_baseline()
+    assert (
+        baseline["current_capital"]["systematic"]["current_value"]["value"]
+        == _CUSTODY_SYSTEMATIC
+    )
+
+    accepted, evidence = materializer._current_capital_identity(baseline)
+
+    assert evidence["problems"] == []
+    assert evidence["strategy_mismatches"] == []
+    assert evidence["component_mismatches"] == []
+    assert evidence["systematic_total_usd"] == _CUSTODY_SYSTEMATIC
+    assert evidence["derived_cash_usd"] == {
+        "robuxio-crypto": "93.97474435567453281",
+        "volatis-strategy": "1879.943950216",
+    }
+    assert accepted is True
+    assert evidence["identity_status"] == "NOT_READY"
+    assert evidence["not_ready_components"] == ["reserve", "total_liquid"]
+
+
+def test_capital_gate_still_accepts_a_nav_only_baseline_without_cash_lines() -> None:
+    """The pre-OWNER_318 profile is unchanged: no cash lines, NAV-only values."""
+
+    accepted, evidence = materializer._current_capital_identity(
+        _custody_cash_baseline(with_cash=False)
+    )
+
+    assert accepted is True
+    assert evidence["problems"] == []
+    assert evidence["strategy_mismatches"] == []
+    assert evidence["component_mismatches"] == []
+    assert evidence["systematic_total_usd"] == _CUSTODY_NAV_ONLY_SYSTEMATIC
+    assert evidence["derived_cash_usd"] == {}
+
+
+def _set_volatis_cash(baseline: dict[str, Any], value: str) -> dict[str, Any]:
+    (line,) = next(
+        row
+        for row in baseline["current_capital"]["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )["derived_cash"]
+    line["current_value"]["value"] = value
+    return line
+
+
+def test_capital_gate_refuses_a_cash_line_the_published_value_does_not_carry() -> None:
+    """A cash line one unit in the last place off the value it was added into."""
+
+    baseline = _custody_cash_baseline()
+    _set_volatis_cash(baseline, "1879.943950217")
+
+    accepted, evidence = materializer._current_capital_identity(baseline)
+
+    assert accepted is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["strategy_mismatches"] == ["volatis-strategy"]
+
+
+def test_capital_gate_refuses_a_cash_line_its_own_events_do_not_sum_to() -> None:
+    """A consistently tampered book: the cash line, the strategy value, the
+    systematic total and every weight all move together, so only the line's own
+    signed events can expose it."""
+
+    honest = _custody_cash_baseline()
+    tampered = copy.deepcopy(honest)
+    line = _set_volatis_cash(tampered, "1979.943950216")
+    assert line["events"][0]["signed_usd"] == "1879.943950216"
+    capital = tampered["current_capital"]
+    for row in capital["strategies"]:
+        if row["strategy_id"] == "volatis-strategy":
+            row["current_value"]["value"] = "61072.223950216"
+    capital["systematic"]["current_value"]["value"] = "426201.61285957407210153065004"
+    with localcontext() as context:
+        context.prec = 34
+        for row in capital["strategies"]:
+            row["current_weight"] = str(
+                Decimal(row["current_value"]["value"])
+                / Decimal("426201.61285957407210153065004")
+            )
+
+    accepted, evidence = materializer._current_capital_identity(tampered)
+
+    assert accepted is False
+    assert evidence["identity_status"] == "FAIL"
+    assert evidence["problems"] == [
+        "derived cash for volatis-strategy differs from its events"
+    ]
+
+
+def test_capital_gate_refuses_cash_lines_without_the_selected_custody_authority() -> (
+    None
+):
+    """The producer's own validator refuses cash with no selected authority."""
+
+    baseline = _custody_cash_baseline()
+    del baseline["current_capital"]["custody_authority"]
+
+    accepted, evidence = materializer._current_capital_identity(baseline)
+
+    assert accepted is False
+    assert evidence["problems"] == ["derived cash lacks the selected custody authority"]
+
+
 Mutator = Callable[[Path], None]
 
 
