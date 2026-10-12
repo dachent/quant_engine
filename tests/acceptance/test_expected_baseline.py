@@ -27,12 +27,24 @@ HISTORICAL_09F6_PATH = (
 HISTORICAL_09F6_SHA256 = (
     "054ff579f8a4e940055a9987869ed4353e8e86a613b98623a4001b40be91a2ec"
 )
-CURRENT_09F6_HEAD = "fc9a2d32ce81a785481946a8619a01026a01f10c"
+HISTORICAL_FC9A_SHA256 = (
+    "1584761a58de8a69b51c2b3fabbdfc6c3ba2b62d0a0171aaf6de9f54982bde4b"
+)
+HISTORICAL_FC9A_PATH = (
+    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-fc9a-1584761a.json"
+)
+CURRENT_SUCCESSOR_HEAD = "49df41d22f53d55f2493a976f546a1df6bed9341"
 CURRENT_AGREE_COUNT = 103
 CURRENT_NOT_DERIVABLE_COUNT = 15
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "ce2f17df9853a7bf3ff0df5b573bfdde378dfcecdabbd206761936d24b5d1253",
-    "b": "1b58190de03324ad26a1737de3debcc494b077f30bbf1001ce0b830b15b47654",
+    "a": "c03c5803c0ed0629f6ca84e831500f835ac264e486ca6e95136396a8af6c83df",
+    "b": "4ae7231426698fe36a48a9fa70979062439efcf89eb29aecb5ae55c9433491b0",
+}
+CURRENT_ORACLE_MANIFEST_SHA256 = {
+    # A runs the r1 manifest (derive_a rejects the PR526 base families by
+    # design); B runs r2 with the 0903 base-run pins.
+    "a": "7909bc528c71327f6c03b81254f5a9e954fbe7e737a6c56b2a181b6ddc2ffc3b",
+    "b": "9254fdf79b69d9497aa5c5ea1a9fbdbde5abfe0a3255567c4d8b0a8d963d62db",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
@@ -91,6 +103,13 @@ def test_historical_09f6_baseline_is_byte_exact() -> None:
     raw = HISTORICAL_09F6_PATH.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == HISTORICAL_09F6_SHA256
     _load(HISTORICAL_09F6_PATH)
+
+
+def test_historical_fc9a_baseline_is_byte_exact() -> None:
+    assert HISTORICAL_FC9A_PATH.is_file(), f"missing {HISTORICAL_FC9A_PATH}"
+    raw = HISTORICAL_FC9A_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HISTORICAL_FC9A_SHA256
+    _load(HISTORICAL_FC9A_PATH)
 
 
 def test_header_schema() -> None:
@@ -291,17 +310,31 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
 def test_current_successor_identity_and_authority_coverage() -> None:
     doc = _load()
     rows = _rows(doc)
+    assert doc["head"] == CURRENT_SUCCESSOR_HEAD
+    assert doc["inventory_sha256"] == (
+        "f8d9d72b7c1a8780b5a6505151f464a292d480aa17015d267e97ba86347d748f"
+    )
+    assert doc["pointer_map_sha256"] == (
+        "641cb4cff0e287c1824b7604659a633cb107e9095f146d68b809df4eeafba2a5"
+    )
+    assert doc["admission_decision_sha256"] == (
+        "5688face907c55d439eae9eb9d03342f4f4a7935707ac3a5666aef08929a97c5"
+    )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
     assert len(rows) == 118
     for side in ("a", "b"):
-        assert doc["derivations"][side]["code_commit"] == CURRENT_09F6_HEAD
+        assert doc["derivations"][side]["code_commit"] == CURRENT_SUCCESSOR_HEAD
         assert (
             doc["derivations"][side]["raw_output_sha256"]
             == CURRENT_RAW_OUTPUT_SHA256[side]
         )
+        assert (
+            doc["derivations"][side]["manifest_sha256"]
+            == CURRENT_ORACLE_MANIFEST_SHA256[side]
+        )
         assert {row[f"derivation_{side}"]["code_commit"] for row in doc["metrics"]} == {
-            CURRENT_09F6_HEAD
+            CURRENT_SUCCESSOR_HEAD
         }
     pointers = [pointer for row in rows for pointer in row.get("authority_pointer", [])]
     for row in rows:
