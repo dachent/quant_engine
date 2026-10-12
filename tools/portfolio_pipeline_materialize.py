@@ -3285,6 +3285,61 @@ def _capital_in_effect(
     return started and (end is None or valuation <= end)
 
 
+def _derived_cash_parts(
+    block: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    valuation: date,
+    problems: list[str],
+) -> dict[str, list[tuple[Decimal, date]]]:
+    """Each strategy's derived custody cash lines as ``(value, as_of)`` parts.
+
+    Since OWNER_318 the producer (``portfolio_baseline._build_current_capital``)
+    publishes a strategy's value as its member NAVs plus its ``derived_cash`` lines,
+    dated by the oldest of them.  The lines are read as claims too: each must be an
+    AVAILABLE USD amount dated on or before the cutoff, equal to the exact sum of its
+    own signed events, none dated after the line; and lines exist only under the
+    block's selected ``custody_authority``, as the producer's validator requires.
+    """
+
+    parts: dict[str, list[tuple[Decimal, date]]] = {}
+    for row in rows:
+        lines = row.get("derived_cash", [])
+        if not isinstance(lines, list) or not all(
+            isinstance(line, dict) for line in lines
+        ):
+            raise MaterializationError(_CURRENT_CAPITAL_DIFFERS)
+        if not lines:
+            continue
+        strategy = str(row.get("strategy_id"))
+        for line in lines:
+            value = _capital_amount(line.get("current_value"))
+            day = _capital_day(line.get("as_of_date"))
+            events = line.get("events")
+            if (
+                value is None
+                or day is None
+                or day > valuation
+                or line.get("status") != _CAPITAL_AVAILABLE
+                or not isinstance(events, list)
+                or not events
+                or not all(isinstance(event, dict) for event in events)
+            ):
+                raise MaterializationError(_CURRENT_CAPITAL_DIFFERS)
+            signed = [
+                _decimal(event.get("signed_usd"), "derived cash event")
+                for event in events
+            ]
+            event_days = [_capital_day(event.get("event_date")) for event in events]
+            if _capital_sum(signed) != value or any(
+                event_day is None or event_day > day for event_day in event_days
+            ):
+                problems.append(f"derived cash for {strategy} differs from its events")
+            parts.setdefault(strategy, []).append((value, day))
+    if parts and not block.get("custody_authority"):
+        problems.append("derived cash lacks the selected custody authority")
+    return parts
+
+
 def _current_capital_identity(
     baseline: Mapping[str, Any],
 ) -> tuple[bool, dict[str, Any]]:
@@ -3293,8 +3348,9 @@ def _current_capital_identity(
     The block is read as a claim.  Its rows must be exactly the strategies the
     baseline's own registry names (``strategies``).  Every strategy value, every
     aggregate and the weights are then recomputed here from ``nav_observations``
-    x ``assignments`` (and the reserve's AUTHORITATIVE NAV admissions) without
-    calling the baseline builder.  A lie fails; a component that is honestly
+    x ``assignments``, plus each strategy's OWNER_318 derived custody cash lines
+    (see ``_derived_cash_parts``), and the reserve's AUTHORITATIVE NAV admissions,
+    without calling the baseline builder.  A lie fails; a component that is honestly
     NOT_READY is reported as such in the evidence and never counted as PASS.
     """
 
@@ -3344,6 +3400,7 @@ def _current_capital_identity(
     if registered != published:
         return False, {
             "component_mismatches": [],
+            "derived_cash_usd": {},
             "identity_status": "FAIL",
             "not_ready_components": [],
             "problems": problems,
@@ -3434,13 +3491,16 @@ def _current_capital_identity(
         ):
             members[strategy].add(account)
 
+    cash = _derived_cash_parts(block, rows, valuation, problems)
     expected: dict[str, tuple[Decimal | None, date | None]] = {}
     for strategy, accounts in members.items():
         if not accounts or any(account not in latest for account in accounts):
             expected[strategy] = (None, None)
         else:
+            # NAV + derived custody cash, as the producer publishes it (OWNER_318).
             expected[strategy] = _capital_total(
                 [(latest[account][1], latest[account][0]) for account in accounts]
+                + cash.get(strategy, [])
             )
     mismatched: list[str] = []
     for row in rows:
@@ -3565,6 +3625,10 @@ def _current_capital_identity(
     total_liquid = aggregates["total_liquid"][0]
     return identity_status != "FAIL", {
         "component_mismatches": component_mismatches,
+        "derived_cash_usd": {
+            strategy: str(_capital_sum([value for value, _ in parts]))
+            for strategy, parts in sorted(cash.items())
+        },
         "identity_status": identity_status,
         "not_ready_components": not_ready,
         "problems": problems,
