@@ -1,26 +1,26 @@
 {
-  "admission_decision_sha256": "aad35afc4b00b2b11922f5003b0c107d317d1d60b910526443f7266b9f2efae9",
+  "admission_decision_sha256": "5688face907c55d439eae9eb9d03342f4f4a7935707ac3a5666aef08929a97c5",
   "control": "R8",
   "conventions": "Expected values retain agreed derivation A values without averaging; not-derivable rows retain paired derivation reasons; the financial contract locator resolves under the selected repository root while retained owner-policy and receipt authorities resolve under their declared QE or archive roots.",
   "cutoff": "2026-09-17",
   "derivations": {
     "a": {
-      "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
-      "raw_output_sha256": "ce2f17df9853a7bf3ff0df5b573bfdde378dfcecdabbd206761936d24b5d1253"
+      "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
+      "raw_output_sha256": "c03c5803c0ed0629f6ca84e831500f835ac264e486ca6e95136396a8af6c83df"
     },
     "b": {
-      "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
-      "raw_output_sha256": "1b58190de03324ad26a1737de3debcc494b077f30bbf1001ce0b830b15b47654"
+      "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
+      "raw_output_sha256": "4ae7231426698fe36a48a9fa70979062439efcf89eb29aecb5ae55c9433491b0"
     }
   },
-  "generated_utc": "2026-10-11T14:37:18.572+00:00",
-  "head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
-  "inventory_sha256": "5693effbe66bb721f7c92129b1a1ce0384c440e7b28ea1be60ab0158561a79a8",
+  "generated_utc": "2026-10-12T09:12:14.265+00:00",
+  "head": "49df41d22f53d55f2493a976f546a1df6bed9341",
+  "inventory_sha256": "f8d9d72b7c1a8780b5a6505151f464a292d480aa17015d267e97ba86347d748f",
   "metric_spec": "C",
   "metrics": [
     {
       "a_actual": "0.19",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-07-17",
       "authority_pointer": [
         {
@@ -146,14 +146,14 @@
         }
       ],
       "b_actual": "0.19",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.19"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.19"
       },
       "entity": "account-0acb9e17da731d0e",
@@ -170,7 +170,7 @@
     },
     {
       "a_actual": "57200.88",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -296,14 +296,14 @@
         }
       ],
       "b_actual": "57200.88",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "57200.88"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "57200.88"
       },
       "entity": "account-1b44c987969b9e47",
@@ -320,7 +320,7 @@
     },
     {
       "a_actual": "48309.42",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -446,14 +446,14 @@
         }
       ],
       "b_actual": "48309.42",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "48309.42"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "48309.42"
       },
       "entity": "account-38b653b91ff43a10",
@@ -470,7 +470,7 @@
     },
     {
       "a_actual": "59092.28",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -596,14 +596,14 @@
         }
       ],
       "b_actual": "59092.28",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "59092.28"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "59092.28"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -622,7 +622,7 @@
     },
     {
       "a_actual": "51233.90",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -748,14 +748,14 @@
         }
       ],
       "b_actual": "51233.90",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51233.90"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51233.90"
       },
       "entity": "account-61092059d066f056",
@@ -772,7 +772,7 @@
     },
     {
       "a_actual": "3.81",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -898,14 +898,14 @@
         }
       ],
       "b_actual": "3.81",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "3.81"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "3.81"
       },
       "entity": "account-702c489650e59956",
@@ -922,7 +922,7 @@
     },
     {
       "a_actual": "10628.97",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1048,14 +1048,14 @@
         }
       ],
       "b_actual": "10628.97",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "10628.97"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "10628.97"
       },
       "entity": "account-98f5986706ed53c5",
@@ -1072,7 +1072,7 @@
     },
     {
       "a_actual": "14520.86",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1198,14 +1198,14 @@
         }
       ],
       "b_actual": "14520.86",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "14520.86"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "14520.86"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -1222,7 +1222,7 @@
     },
     {
       "a_actual": "74492.29",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1348,14 +1348,14 @@
         }
       ],
       "b_actual": "74492.29",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "74492.29"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "74492.29"
       },
       "entity": "account-c63d2a487e019790",
@@ -1372,7 +1372,7 @@
     },
     {
       "a_actual": "12054.51",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1498,14 +1498,14 @@
         }
       ],
       "b_actual": "12054.51",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "12054.51"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "12054.51"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -1522,7 +1522,7 @@
     },
     {
       "a_actual": "51126.09",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1648,14 +1648,14 @@
         }
       ],
       "b_actual": "51126.09",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51126.09"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51126.09"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -1676,7 +1676,7 @@
     },
     {
       "a_actual": "45464.69",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1802,14 +1802,14 @@
         }
       ],
       "b_actual": "45464.69",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "45464.69"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "45464.69"
       },
       "entity": "account-d69701da9143c430",
@@ -1826,7 +1826,7 @@
     },
     {
       "a_actual": "426101.61",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -1952,14 +1952,14 @@
         }
       ],
       "b_actual": "426101.61",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "426101.61"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "426101.61"
       },
       "entity": "portfolio",
@@ -1992,7 +1992,7 @@
     },
     {
       "a_actual": "51233.90",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2118,14 +2118,14 @@
         }
       ],
       "b_actual": "51233.90",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51233.90"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51233.90"
       },
       "entity": "grizzlybears-vtma",
@@ -2144,7 +2144,7 @@
     },
     {
       "a_actual": "57200.88",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2270,14 +2270,14 @@
         }
       ],
       "b_actual": "57200.88",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "57200.88"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "57200.88"
       },
       "entity": "p123-ai-factor",
@@ -2296,7 +2296,7 @@
     },
     {
       "a_actual": "45464.69",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2422,14 +2422,14 @@
         }
       ],
       "b_actual": "45464.69",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "45464.69"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "45464.69"
       },
       "entity": "p123-eu",
@@ -2448,7 +2448,7 @@
     },
     {
       "a_actual": "58938.39",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2574,14 +2574,14 @@
         }
       ],
       "b_actual": "58938.39",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "58938.39"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "58938.39"
       },
       "entity": "qsi",
@@ -2600,7 +2600,7 @@
     },
     {
       "a_actual": "51220.07",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2726,14 +2726,14 @@
         }
       ],
       "b_actual": "51220.07",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51220.07"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "51220.07"
       },
       "entity": "robuxio-crypto",
@@ -2762,7 +2762,7 @@
     },
     {
       "a_actual": "101071.47",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -2888,14 +2888,14 @@
         }
       ],
       "b_actual": "101071.47",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "101071.47"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "101071.47"
       },
       "entity": "tt-portfolio",
@@ -2914,7 +2914,7 @@
     },
     {
       "a_actual": "60972.22",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3040,14 +3040,14 @@
         }
       ],
       "b_actual": "60972.22",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "60972.22"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "60972.22"
       },
       "entity": "volatis-strategy",
@@ -3070,7 +3070,7 @@
     },
     {
       "a_actual": "93.97",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3196,14 +3196,14 @@
         }
       ],
       "b_actual": "93.97",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "93.97"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "93.97"
       },
       "entity": "robuxio-crypto",
@@ -3231,7 +3231,7 @@
     },
     {
       "a_actual": "1879.94",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3357,14 +3357,14 @@
         }
       ],
       "b_actual": "1879.94",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "1879.94"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "1879.94"
       },
       "entity": "volatis-strategy",
@@ -3385,7 +3385,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3511,14 +3511,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-1b44c987969b9e47",
@@ -3534,7 +3534,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3660,14 +3660,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-38b653b91ff43a10",
@@ -3683,7 +3683,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3809,14 +3809,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -3834,7 +3834,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -3960,14 +3960,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-61092059d066f056",
@@ -3983,7 +3983,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4109,14 +4109,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-702c489650e59956",
@@ -4132,7 +4132,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4258,14 +4258,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-98f5986706ed53c5",
@@ -4281,7 +4281,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4407,14 +4407,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -4430,7 +4430,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4556,14 +4556,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-c63d2a487e019790",
@@ -4579,7 +4579,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4705,14 +4705,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -4728,7 +4728,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -4854,14 +4854,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -4881,7 +4881,7 @@
     },
     {
       "a_actual": "2026-09-17",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5007,14 +5007,14 @@
         }
       ],
       "b_actual": "2026-09-17",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-17"
       },
       "entity": "account-d69701da9143c430",
@@ -5030,7 +5030,7 @@
     },
     {
       "a_actual": "2026-09-18",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5156,14 +5156,14 @@
         }
       ],
       "b_actual": "2026-09-18",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-18"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-18"
       },
       "entity": "robuxio-crypto|matrixport|account-d2e5821e608e25f1",
@@ -5191,7 +5191,7 @@
     },
     {
       "a_actual": "2026-09-18",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5317,14 +5317,14 @@
         }
       ],
       "b_actual": "2026-09-18",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-18"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "2026-09-18"
       },
       "entity": "volatis-strategy|quantbase|account-58e75e8d952fa1b8",
@@ -5345,7 +5345,7 @@
     },
     {
       "a_actual": "5",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5471,14 +5471,14 @@
         }
       ],
       "b_actual": "5",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "5"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "5"
       },
       "entity": "account-1b44c987969b9e47",
@@ -5496,7 +5496,7 @@
     },
     {
       "a_actual": "0",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5622,14 +5622,14 @@
         }
       ],
       "b_actual": "0",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "entity": "account-38b653b91ff43a10",
@@ -5647,7 +5647,7 @@
     },
     {
       "a_actual": "11",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5773,14 +5773,14 @@
         }
       ],
       "b_actual": "11",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "11"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "11"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -5799,7 +5799,7 @@
     },
     {
       "a_actual": "0",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -5925,14 +5925,14 @@
         }
       ],
       "b_actual": "0",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "entity": "account-61092059d066f056",
@@ -5950,7 +5950,7 @@
     },
     {
       "a_actual": "4",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6076,14 +6076,14 @@
         }
       ],
       "b_actual": "4",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "4"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "4"
       },
       "entity": "account-702c489650e59956",
@@ -6101,7 +6101,7 @@
     },
     {
       "a_actual": "0",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6227,14 +6227,14 @@
         }
       ],
       "b_actual": "0",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "entity": "account-98f5986706ed53c5",
@@ -6252,7 +6252,7 @@
     },
     {
       "a_actual": "1",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6378,14 +6378,14 @@
         }
       ],
       "b_actual": "1",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "1"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "1"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -6403,7 +6403,7 @@
     },
     {
       "a_actual": "4",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6529,14 +6529,14 @@
         }
       ],
       "b_actual": "4",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "4"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "4"
       },
       "entity": "account-c63d2a487e019790",
@@ -6554,7 +6554,7 @@
     },
     {
       "a_actual": "0",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6680,14 +6680,14 @@
         }
       ],
       "b_actual": "0",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -6705,7 +6705,7 @@
     },
     {
       "a_actual": "0",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6831,14 +6831,14 @@
         }
       ],
       "b_actual": "0",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -6865,7 +6865,7 @@
     },
     {
       "a_actual": "14",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -6991,14 +6991,14 @@
         }
       ],
       "b_actual": "14",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "14"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "14"
       },
       "entity": "account-d69701da9143c430",
@@ -7016,7 +7016,7 @@
     },
     {
       "a_actual": "20748.40",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7142,14 +7142,14 @@
         }
       ],
       "b_actual": "20748.40",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "20748.40"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "20748.40"
       },
       "entity": "account-1b44c987969b9e47",
@@ -7168,7 +7168,7 @@
     },
     {
       "a_actual": "0.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7294,14 +7294,14 @@
         }
       ],
       "b_actual": "0.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "entity": "account-38b653b91ff43a10",
@@ -7320,7 +7320,7 @@
     },
     {
       "a_actual": "47120.06",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7446,14 +7446,14 @@
         }
       ],
       "b_actual": "47120.06",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "47120.06"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "47120.06"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -7473,7 +7473,7 @@
     },
     {
       "a_actual": "0.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7599,14 +7599,14 @@
         }
       ],
       "b_actual": "0.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "entity": "account-61092059d066f056",
@@ -7625,7 +7625,7 @@
     },
     {
       "a_actual": "-72220.15",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7751,14 +7751,14 @@
         }
       ],
       "b_actual": "-72220.15",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "-72220.15"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "-72220.15"
       },
       "entity": "account-702c489650e59956",
@@ -7777,7 +7777,7 @@
     },
     {
       "a_actual": "0.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -7903,14 +7903,14 @@
         }
       ],
       "b_actual": "0.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "entity": "account-98f5986706ed53c5",
@@ -7929,7 +7929,7 @@
     },
     {
       "a_actual": "7500.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8055,14 +8055,14 @@
         }
       ],
       "b_actual": "7500.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "7500.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "7500.00"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -8081,7 +8081,7 @@
     },
     {
       "a_actual": "22050.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8207,14 +8207,14 @@
         }
       ],
       "b_actual": "22050.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "22050.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "22050.00"
       },
       "entity": "account-c63d2a487e019790",
@@ -8233,7 +8233,7 @@
     },
     {
       "a_actual": "0.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8359,14 +8359,14 @@
         }
       ],
       "b_actual": "0.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -8385,7 +8385,7 @@
     },
     {
       "a_actual": "0.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8511,14 +8511,14 @@
         }
       ],
       "b_actual": "0.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.00"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -8546,7 +8546,7 @@
     },
     {
       "a_actual": "34035.50",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8672,14 +8672,14 @@
         }
       ],
       "b_actual": "34035.50",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "34035.50"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "34035.50"
       },
       "entity": "account-d69701da9143c430",
@@ -8698,7 +8698,7 @@
     },
     {
       "a_actual": "49997.10",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8824,14 +8824,14 @@
         }
       ],
       "b_actual": "49997.10",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "49997.10"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "49997.10"
       },
       "entity": "robuxio-crypto",
@@ -8859,7 +8859,7 @@
     },
     {
       "a_actual": "50000.00",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -8985,14 +8985,14 @@
         }
       ],
       "b_actual": "50000.00",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "50000.00"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "50000.00"
       },
       "entity": "volatis-strategy",
@@ -9013,7 +9013,7 @@
     },
     {
       "a_actual": "0.043211694123",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9139,14 +9139,14 @@
         }
       ],
       "b_actual": "0.0432116941",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.043211694123"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0432116941"
       },
       "entity": "account-1b44c987969b9e47",
@@ -9165,7 +9165,7 @@
     },
     {
       "a_actual": "0.206784222500",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9291,14 +9291,14 @@
         }
       ],
       "b_actual": "0.2067842225",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.206784222500"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.2067842225"
       },
       "entity": "account-38b653b91ff43a10",
@@ -9317,7 +9317,7 @@
     },
     {
       "a_actual": "0.195657364162",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9443,14 +9443,14 @@
         }
       ],
       "b_actual": "0.1956573642",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.195657364162"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1956573642"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -9470,7 +9470,7 @@
     },
     {
       "a_actual": "0.035090482505",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9596,14 +9596,14 @@
         }
       ],
       "b_actual": "0.0350904825",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.035090482505"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0350904825"
       },
       "entity": "account-61092059d066f056",
@@ -9622,7 +9622,7 @@
     },
     {
       "a_actual": "0.050835289126",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9748,14 +9748,14 @@
         }
       ],
       "b_actual": "0.0508352891",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.050835289126"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0508352891"
       },
       "entity": "account-702c489650e59956",
@@ -9774,7 +9774,7 @@
     },
     {
       "a_actual": "0.206349620449",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -9900,14 +9900,14 @@
         }
       ],
       "b_actual": "0.2063496204",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.206349620449"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.2063496204"
       },
       "entity": "account-98f5986706ed53c5",
@@ -9926,7 +9926,7 @@
     },
     {
       "a_actual": "0.002020725087",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10052,14 +10052,14 @@
         }
       ],
       "b_actual": "0.0020207251",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.002020725087"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0020207251"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -10078,7 +10078,7 @@
     },
     {
       "a_actual": "0.016369796725",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10204,14 +10204,14 @@
         }
       ],
       "b_actual": "0.0163697967",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.016369796725"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0163697967"
       },
       "entity": "account-c63d2a487e019790",
@@ -10230,7 +10230,7 @@
     },
     {
       "a_actual": "0.037575884790",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10356,14 +10356,14 @@
         }
       ],
       "b_actual": "0.0375758848",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.037575884790"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0375758848"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -10382,7 +10382,7 @@
     },
     {
       "a_actual": "0.031351912114",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10508,14 +10508,14 @@
         }
       ],
       "b_actual": "0.0313519121",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.031351912114"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0313519121"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -10543,7 +10543,7 @@
     },
     {
       "a_actual": "0.405739236967",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10669,14 +10669,14 @@
         }
       ],
       "b_actual": "0.4057392370",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.405739236967"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.4057392370"
       },
       "entity": "account-d69701da9143c430",
@@ -10695,7 +10695,7 @@
     },
     {
       "a_actual": "0.035090482505",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10821,14 +10821,14 @@
         }
       ],
       "b_actual": "0.0350904825",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.035090482505"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0350904825"
       },
       "entity": "grizzlybears-vtma",
@@ -10847,7 +10847,7 @@
     },
     {
       "a_actual": "0.043211694123",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -10973,14 +10973,14 @@
         }
       ],
       "b_actual": "0.0432116941",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.043211694123"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0432116941"
       },
       "entity": "p123-ai-factor",
@@ -10999,7 +10999,7 @@
     },
     {
       "a_actual": "0.405739236967",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11125,14 +11125,14 @@
         }
       ],
       "b_actual": "0.4057392370",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.405739236967"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.4057392370"
       },
       "entity": "p123-eu",
@@ -11151,7 +11151,7 @@
     },
     {
       "a_actual": "0.206705826527",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11277,14 +11277,14 @@
         }
       ],
       "b_actual": "0.2067058265",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.206705826527"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.2067058265"
       },
       "entity": "qsi",
@@ -11303,7 +11303,7 @@
     },
     {
       "a_actual": "0.031351912114",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11429,14 +11429,14 @@
         }
       ],
       "b_actual": "0.0313519121",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.031351912114"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0313519121"
       },
       "entity": "robuxio-crypto",
@@ -11464,7 +11464,7 @@
     },
     {
       "a_actual": "0.022676762040",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11590,14 +11590,14 @@
         }
       ],
       "b_actual": "0.0226767620",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.022676762040"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0226767620"
       },
       "entity": "tt-portfolio",
@@ -11616,7 +11616,7 @@
     },
     {
       "a_actual": "0.195657364162",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11742,14 +11742,14 @@
         }
       ],
       "b_actual": "0.1956573642",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.195657364162"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1956573642"
       },
       "entity": "volatis-strategy",
@@ -11771,7 +11771,7 @@
     },
     {
       "a_actual": "0.024531782896",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -11897,14 +11897,14 @@
         }
       ],
       "b_actual": "0.0245317829",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024531782896"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0245317829"
       },
       "entity": "account-1b44c987969b9e47",
@@ -11923,7 +11923,7 @@
     },
     {
       "a_actual": "0.140913076778",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12049,14 +12049,14 @@
         }
       ],
       "b_actual": "0.1409130768",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.140913076778"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1409130768"
       },
       "entity": "account-38b653b91ff43a10",
@@ -12075,7 +12075,7 @@
     },
     {
       "a_actual": "0.676508598689",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12201,14 +12201,14 @@
         }
       ],
       "b_actual": "0.6765085987",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.676508598689"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.6765085987"
       },
       "entity": "account-58e75e8d952fa1b8",
@@ -12228,7 +12228,7 @@
     },
     {
       "a_actual": "0.024678000000",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12354,14 +12354,14 @@
         }
       ],
       "b_actual": "0.0246780000",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024678000000"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0246780000"
       },
       "entity": "account-61092059d066f056",
@@ -12380,7 +12380,7 @@
     },
     {
       "a_actual": "0.140624882627",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12506,14 +12506,14 @@
         }
       ],
       "b_actual": "0.1406248826",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.140624882627"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1406248826"
       },
       "entity": "account-98f5986706ed53c5",
@@ -12532,7 +12532,7 @@
     },
     {
       "a_actual": "0.008541704507",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12658,14 +12658,14 @@
         }
       ],
       "b_actual": "0.0085417045",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.008541704507"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0085417045"
       },
       "entity": "account-a13937e26b8ae46d",
@@ -12684,7 +12684,7 @@
     },
     {
       "a_actual": "0.025740189555",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12810,14 +12810,14 @@
         }
       ],
       "b_actual": "0.0257401896",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.025740189555"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0257401896"
       },
       "entity": "account-c63d2a487e019790",
@@ -12836,7 +12836,7 @@
     },
     {
       "a_actual": "0.030469983510",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -12962,14 +12962,14 @@
         }
       ],
       "b_actual": "0.0304699835",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.030469983510"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0304699835"
       },
       "entity": "account-cff10c44aedcf5e8",
@@ -12988,7 +12988,7 @@
     },
     {
       "a_actual": "0.024397203618",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13114,14 +13114,14 @@
         }
       ],
       "b_actual": "0.0243972036",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024397203618"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0243972036"
       },
       "entity": "account-d2e5821e608e25f1",
@@ -13149,7 +13149,7 @@
     },
     {
       "a_actual": "0.330273816246",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13275,14 +13275,14 @@
         }
       ],
       "b_actual": "0.3302738162",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.330273816246"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.3302738162"
       },
       "entity": "account-d69701da9143c430",
@@ -13301,7 +13301,7 @@
     },
     {
       "a_actual": "0.024678000000",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13427,14 +13427,14 @@
         }
       ],
       "b_actual": "0.0246780000",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024678000000"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0246780000"
       },
       "entity": "grizzlybears-vtma",
@@ -13453,7 +13453,7 @@
     },
     {
       "a_actual": "0.024531782896",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13579,14 +13579,14 @@
         }
       ],
       "b_actual": "0.0245317829",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024531782896"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0245317829"
       },
       "entity": "p123-ai-factor",
@@ -13605,7 +13605,7 @@
     },
     {
       "a_actual": "0.330273816246",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13731,14 +13731,14 @@
         }
       ],
       "b_actual": "0.3302738162",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.330273816246"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.3302738162"
       },
       "entity": "p123-eu",
@@ -13757,7 +13757,7 @@
     },
     {
       "a_actual": "0.140861092980",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -13883,14 +13883,14 @@
         }
       ],
       "b_actual": "0.1408610930",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.140861092980"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1408610930"
       },
       "entity": "qsi",
@@ -13909,7 +13909,7 @@
     },
     {
       "a_actual": "0.024397203618",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14035,14 +14035,14 @@
         }
       ],
       "b_actual": "0.0243972036",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.024397203618"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0243972036"
       },
       "entity": "robuxio-crypto",
@@ -14070,7 +14070,7 @@
     },
     {
       "a_actual": "0.028441498710",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14196,14 +14196,14 @@
         }
       ],
       "b_actual": "0.0284414987",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.028441498710"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.0284414987"
       },
       "entity": "tt-portfolio",
@@ -14222,7 +14222,7 @@
     },
     {
       "a_actual": "0.676508598689",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14348,14 +14348,14 @@
         }
       ],
       "b_actual": "0.6765085987",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.676508598689"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.6765085987"
       },
       "entity": "volatis-strategy",
@@ -14377,7 +14377,7 @@
     },
     {
       "a_actual": "7",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14503,14 +14503,14 @@
         }
       ],
       "b_actual": "7",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "7"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "7"
       },
       "entity": "portfolio",
@@ -14535,7 +14535,7 @@
         "tt-portfolio",
         "volatis-strategy"
       ],
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14669,10 +14669,10 @@
         "tt-portfolio",
         "volatis-strategy"
       ],
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": [
           "grizzlybears-vtma",
           "p123-ai-factor",
@@ -14684,7 +14684,7 @@
         ]
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": [
           "grizzlybears-vtma",
           "p123-ai-factor",
@@ -14725,7 +14725,7 @@
     },
     {
       "a_actual": "0.120238690617",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -14851,14 +14851,14 @@
         }
       ],
       "b_actual": "0.1202386906",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.120238690617"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1202386906"
       },
       "entity": "grizzlybears-vtma",
@@ -14891,7 +14891,7 @@
     },
     {
       "a_actual": "0.134242335133",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15017,14 +15017,14 @@
         }
       ],
       "b_actual": "0.1342423351",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.134242335133"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1342423351"
       },
       "entity": "p123-ai-factor",
@@ -15057,7 +15057,7 @@
     },
     {
       "a_actual": "0.106699166368",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15183,14 +15183,14 @@
         }
       ],
       "b_actual": "0.1066991664",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.106699166368"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1066991664"
       },
       "entity": "p123-eu",
@@ -15223,7 +15223,7 @@
     },
     {
       "a_actual": "0.138320034990",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15349,14 +15349,14 @@
         }
       ],
       "b_actual": "0.1383200350",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.138320034990"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1383200350"
       },
       "entity": "qsi",
@@ -15389,7 +15389,7 @@
     },
     {
       "a_actual": "0.120206225392",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15515,14 +15515,14 @@
         }
       ],
       "b_actual": "0.1202062254",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.120206225392"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1202062254"
       },
       "entity": "robuxio-crypto",
@@ -15555,7 +15555,7 @@
     },
     {
       "a_actual": "0.237200392934",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15681,14 +15681,14 @@
         }
       ],
       "b_actual": "0.2372003929",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.237200392934"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.2372003929"
       },
       "entity": "tt-portfolio",
@@ -15721,7 +15721,7 @@
     },
     {
       "a_actual": "0.143093154567",
-      "a_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "a_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "as_of": "2026-09-17",
       "authority_pointer": [
         {
@@ -15847,14 +15847,14 @@
         }
       ],
       "b_actual": "0.1430931546",
-      "b_head": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+      "b_head": "49df41d22f53d55f2493a976f546a1df6bed9341",
       "critical": true,
       "derivation_a": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.143093154567"
       },
       "derivation_b": {
-        "code_commit": "fc9a2d32ce81a785481946a8619a01026a01f10c",
+        "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
         "value": "0.1430931546"
       },
       "entity": "volatis-strategy",
@@ -17868,7 +17868,7 @@
       "window": "ITD"
     }
   ],
-  "pointer_map_sha256": "92107134c13cc089bd6713f120bd2f7c766410a7f1d5a5528ca0b94878f9095f",
+  "pointer_map_sha256": "641cb4cff0e287c1824b7604659a633cb107e9095f146d68b809df4eeafba2a5",
   "release_rule": "4.5D",
   "schema": "qe-cp-expected-baseline/1",
   "spec_version": "v5"

@@ -27,12 +27,18 @@ HISTORICAL_09F6_PATH = (
 HISTORICAL_09F6_SHA256 = (
     "054ff579f8a4e940055a9987869ed4353e8e86a613b98623a4001b40be91a2ec"
 )
-CURRENT_09F6_HEAD = "fc9a2d32ce81a785481946a8619a01026a01f10c"
+HISTORICAL_FC9A_SHA256 = (
+    "1584761a58de8a69b51c2b3fabbdfc6c3ba2b62d0a0171aaf6de9f54982bde4b"
+)
+HISTORICAL_FC9A_PATH = (
+    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-fc9a-1584761a.json"
+)
+CURRENT_09F6_HEAD = "49df41d22f53d55f2493a976f546a1df6bed9341"
 CURRENT_AGREE_COUNT = 103
 CURRENT_NOT_DERIVABLE_COUNT = 15
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "ce2f17df9853a7bf3ff0df5b573bfdde378dfcecdabbd206761936d24b5d1253",
-    "b": "1b58190de03324ad26a1737de3debcc494b077f30bbf1001ce0b830b15b47654",
+    "a": "c03c5803c0ed0629f6ca84e831500f835ac264e486ca6e95136396a8af6c83df",
+    "b": "4ae7231426698fe36a48a9fa70979062439efcf89eb29aecb5ae55c9433491b0",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
@@ -91,6 +97,13 @@ def test_historical_09f6_baseline_is_byte_exact() -> None:
     raw = HISTORICAL_09F6_PATH.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == HISTORICAL_09F6_SHA256
     _load(HISTORICAL_09F6_PATH)
+
+
+def test_historical_fc9a_baseline_is_byte_exact() -> None:
+    assert HISTORICAL_FC9A_PATH.is_file(), f"missing {HISTORICAL_FC9A_PATH}"
+    raw = HISTORICAL_FC9A_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HISTORICAL_FC9A_SHA256
+    _load(HISTORICAL_FC9A_PATH)
 
 
 def test_header_schema() -> None:
