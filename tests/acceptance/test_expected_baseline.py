@@ -329,6 +329,10 @@ def test_current_successor_identity_and_authority_coverage() -> None:
             doc["derivations"][side]["raw_output_sha256"]
             == CURRENT_RAW_OUTPUT_SHA256[side]
         )
+        assert (
+            doc["derivations"][side]["manifest_sha256"]
+            == CURRENT_ORACLE_MANIFEST_SHA256[side]
+        )
         assert {row[f"derivation_{side}"]["code_commit"] for row in doc["metrics"]} == {
             CURRENT_SUCCESSOR_HEAD
         }

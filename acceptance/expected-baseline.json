@@ -6,14 +6,16 @@
   "derivations": {
     "a": {
       "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
+      "manifest_sha256": "7909bc528c71327f6c03b81254f5a9e954fbe7e737a6c56b2a181b6ddc2ffc3b",
       "raw_output_sha256": "c03c5803c0ed0629f6ca84e831500f835ac264e486ca6e95136396a8af6c83df"
     },
     "b": {
       "code_commit": "49df41d22f53d55f2493a976f546a1df6bed9341",
+      "manifest_sha256": "9254fdf79b69d9497aa5c5ea1a9fbdbde5abfe0a3255567c4d8b0a8d963d62db",
       "raw_output_sha256": "4ae7231426698fe36a48a9fa70979062439efcf89eb29aecb5ae55c9433491b0"
     }
   },
-  "generated_utc": "2026-10-12T09:12:14.265+00:00",
+  "generated_utc": "2026-10-12T10:55:34.908+00:00",
   "head": "49df41d22f53d55f2493a976f546a1df6bed9341",
   "inventory_sha256": "f8d9d72b7c1a8780b5a6505151f464a292d480aa17015d267e97ba86347d748f",
   "metric_spec": "C",
