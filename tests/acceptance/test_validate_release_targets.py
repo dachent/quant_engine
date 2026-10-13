@@ -751,3 +751,53 @@ def test_a_flat_factor_decomposition_digest_mismatch_still_blocks_threefold(
         "$.factor_analysis.source_sha256",
         "$.provenance[0]",
     }
+
+
+def test_a_non_flat_root_resolves_its_declared_artifact_id_only(
+    tmp_path: Path,
+) -> None:
+    """The scoping's discriminating fixture (Kimi round-2 on PR 521, retargeted
+    by PR 530 once factor-decomposition joined the flat set): a root OUTSIDE
+    _FLAT_CONTENT_ROOTS (weekly-returns) resolves its declared artifact id
+    only. Its matching bytes staged anywhere else -- the flat-layout candidate
+    basename, a nested alternative, a same-basename decoy in another
+    generation -- must still block at all three binding locations."""
+    assert "weekly-returns" not in rt._FLAT_CONTENT_ROOTS
+    weekly_sha = _sha(WEEKLY_ARTIFACT_BYTES)
+    panel = base_panel()
+    panel["meta"]["weekly_returns_sha256"] = weekly_sha
+    panel["weekly_returns"]["source_sha256"] = weekly_sha
+    panel["provenance"] = [
+        {"artifact": "portfolio-weekly-return-generation", "sha256": weekly_sha}
+    ]
+    write_manifest(tmp_path, GOOD_GEN)
+    generation = tmp_path / "generations" / GOOD_GEN
+    for decoy in (
+        generation / "decomposition.json",
+        generation / "analytics" / "decomposition.json",
+        generation / "analytics" / "weekly-returns.json",
+        tmp_path / "generations" / PREVIOUS_GEN / "weekly-returns.json",
+    ):
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_bytes(WEEKLY_ARTIFACT_BYTES)
+    target = make_target("weekly-returns", tmp_path, GOOD_GEN)
+
+    findings = list(rt.target_binding(target, panel, tmp_path))
+
+    assert all(f.check_id == "release.target_binding" for f in findings)
+    assert all(f.klass == BLOCKER_AUTHORITY for f in findings)
+    by_path = {f.json_path: f for f in findings}
+    assert set(by_path) == {
+        "meta.weekly_returns_sha256",
+        "$.weekly_returns.source_sha256",
+        "$.provenance[0]",
+    }
+    # Nothing was resolved: the content and surface findings observe no bytes,
+    # the provenance finding expects none.
+    assert by_path["meta.weekly_returns_sha256"].observed is None
+    assert by_path["$.weekly_returns.source_sha256"].observed is None
+    assert by_path["$.provenance[0]"].expected is None
+
+    # Control: the same panel binds clean once the declared id is staged.
+    (generation / "weekly-returns.json").write_bytes(WEEKLY_ARTIFACT_BYTES)
+    assert list(rt.target_binding(target, panel, tmp_path)) == []
