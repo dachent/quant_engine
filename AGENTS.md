@@ -115,6 +115,12 @@ portfolio baseline both before preparation work and after the baseline stage.
 Keep the allocation authority used by dependence distinct from that staged
 portfolio baseline. Report skips and unresolved acceptance gaps explicitly.
 
+For a full period refresh (new provider data through release commit), follow
+[`docs/period-refresh-runbook.md`](docs/period-refresh-runbook.md) after the
+attended generation itself; it covers the admission chain, the release tail
+ceremony, the 20-target validation findings the commit gate requires, and the
+post-commit checks.
+
 ## Execution rules
 
 <!-- RCCA_SCOPE_POLICY BEGIN -->
