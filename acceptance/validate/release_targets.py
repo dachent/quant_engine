@@ -131,6 +131,23 @@ _LENS_ROOT_CONTENT_CANDIDATES: tuple[str, ...] = (
     "decomposition.json",
 )
 
+# Roots whose own staged generation lays the content artifact out flat: every
+# lens root, plus the factor-decomposition root -- its generation stages the
+# manifest-declared ``analytics/decomposition.json`` FLAT as
+# ``<gen>/decomposition.json`` (the layout the real 09-23 release carries, the
+# release-root binding defect: three binding paths demanded the full id and
+# refused the committed release with observed=null). Scoping stays explicit:
+# the content, surface and provenance bindings below resolve the full id only
+# for every root outside this set (Kimi round-2 on PR 521; pinned by
+# test_a_non_flat_root_resolves_its_declared_artifact_id_only). The lens-pointer
+# source_sha256 byte check (_lens_pointers, reached by lens AND hybrid-* roots)
+# applies the flat fallback unconditionally -- pre-existing, not governed here.
+# The flat factor-decomposition layout is pinned synthetically by
+# test_the_factor_decomposition_generation_staged_flat_binds_clean.
+_FLAT_CONTENT_ROOTS: frozenset[str] = frozenset(_LENS_SOURCE_KEYS) | {
+    "factor-decomposition"
+}
+
 # Content digests the panel carries for a simple root's files (ruling B.2.2:
 # "every content digest the panel carries for T's files must also equal the
 # target's bytes"): panel json-pointer -> the file inside the target's
@@ -292,21 +309,24 @@ def _artifact_file_sha256(
     generation_id: str,
     artifact_id: str,
     *,
-    lens_root: bool = False,
+    flat_layout: bool = False,
 ) -> str | None:
     """The sha256 of the artifact's actual bytes on disk, or None if absent.
 
-    A LENS root's staged generation lays its content artifact out flat under
-    the generation directory while the manifest records the full id
-    (``analytics/decomposition.json`` staged as ``decomposition.json``): for
-    those roots the recorded candidates are tried in order. Every other
-    binding resolves the full id only - a basename fallback there could
-    false-match an unrelated artifact sharing the basename (Kimi round-2 on
-    PR 521).
+    ``flat_layout`` is set for a root whose staged generation lays its content
+    artifact out flat under the generation directory while the manifest
+    records the full id (``analytics/decomposition.json`` staged as
+    ``decomposition.json``): the _FLAT_CONTENT_ROOTS set (lens roots plus
+    factor-decomposition), and the lens-pointer check. For those the
+    _LENS_ROOT_CONTENT_CANDIDATES are tried in order, full id first --
+    ``artifact_id`` is not consulted, so every flat-layout binding must name
+    ``analytics/decomposition.json``. Every other binding resolves the full id
+    only - a basename fallback there could false-match an unrelated artifact
+    sharing the basename (Kimi round-2 on PR 521).
     """
 
     generation = root_dir / "generations" / generation_id
-    if lens_root:
+    if flat_layout:
         candidates = tuple(
             generation / relative for relative in _LENS_ROOT_CONTENT_CANDIDATES
         )
@@ -463,7 +483,7 @@ def target_binding(
             # bytes, not only the manifest's own claim (round-1 review: the
             # declaration alone is not the target's bytes).
             actual_bytes_sha256 = _artifact_file_sha256(
-                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID, lens_root=True
+                root_dir, generation_id, _LENS_CONTENT_ARTIFACT_ID, flat_layout=True
             )
             if actual_bytes_sha256 != manifest_declared:
                 yield _finding(
@@ -490,7 +510,12 @@ def target_binding(
         panel_digest = _content_digest_at(panel, digest_pointer)
         if panel_digest is None:
             continue
-        actual = _artifact_file_sha256(root_dir, generation_id, artifact_id)
+        actual = _artifact_file_sha256(
+            root_dir,
+            generation_id,
+            artifact_id,
+            flat_layout=root_id in _FLAT_CONTENT_ROOTS,
+        )
         if actual != panel_digest:
             yield _finding(
                 "release.target_binding",
@@ -522,7 +547,7 @@ def target_binding(
                     root_dir,
                     generation_id,
                     surface_artifact,
-                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                    flat_layout=root_id in _FLAT_CONTENT_ROOTS,
                 )
                 if actual != sha256:
                     yield _finding(
@@ -555,7 +580,7 @@ def target_binding(
                     root_dir,
                     generation_id,
                     baseline_artifact,
-                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                    flat_layout=root_id in _FLAT_CONTENT_ROOTS,
                 )
             )
             if observed != expected:
