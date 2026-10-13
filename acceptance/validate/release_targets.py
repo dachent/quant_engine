@@ -131,6 +131,17 @@ _LENS_ROOT_CONTENT_CANDIDATES: tuple[str, ...] = (
     "decomposition.json",
 )
 
+# Roots whose own staged generation lays the content artifact out flat: every
+# lens root, plus the factor-decomposition root -- its generation stages the
+# manifest-declared ``analytics/decomposition.json`` FLAT as
+# ``<gen>/decomposition.json`` (the layout the real 09-23 release carries, the
+# release-root binding defect: three binding paths demanded the full id and
+# refused the committed release with observed=null). Scoping stays explicit --
+# no basename fallback for any other root (Kimi round-2 on PR 521).
+_FLAT_CONTENT_ROOTS: frozenset[str] = frozenset(_LENS_SOURCE_KEYS) | {
+    "factor-decomposition"
+}
+
 # Content digests the panel carries for a simple root's files (ruling B.2.2:
 # "every content digest the panel carries for T's files must also equal the
 # target's bytes"): panel json-pointer -> the file inside the target's
@@ -490,7 +501,12 @@ def target_binding(
         panel_digest = _content_digest_at(panel, digest_pointer)
         if panel_digest is None:
             continue
-        actual = _artifact_file_sha256(root_dir, generation_id, artifact_id)
+        actual = _artifact_file_sha256(
+            root_dir,
+            generation_id,
+            artifact_id,
+            lens_root=root_id in _FLAT_CONTENT_ROOTS,
+        )
         if actual != panel_digest:
             yield _finding(
                 "release.target_binding",
@@ -522,7 +538,7 @@ def target_binding(
                     root_dir,
                     generation_id,
                     surface_artifact,
-                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                    lens_root=root_id in _FLAT_CONTENT_ROOTS,
                 )
                 if actual != sha256:
                     yield _finding(
@@ -555,7 +571,7 @@ def target_binding(
                     root_dir,
                     generation_id,
                     baseline_artifact,
-                    lens_root=root_id in _LENS_SOURCE_KEYS,
+                    lens_root=root_id in _FLAT_CONTENT_ROOTS,
                 )
             )
             if observed != expected:

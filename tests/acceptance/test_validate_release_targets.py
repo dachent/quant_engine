@@ -680,19 +680,74 @@ def test_lens_provenance_rows_bind_to_their_owning_roots(tmp_path: Path) -> None
     assert "portfolio-decomposition-lens-us-economic" in findings[0].message
 
 
-def test_a_non_lens_generation_staged_flat_still_blocks(tmp_path: Path) -> None:
-    """The scoping's discriminating fixture (Kimi round-2): the basename
-    fallback applies to lens roots only, so a NON-lens generation (the
-    decomposition root) that mis-stages its content flat must still block
-    even with the bytes matching the panel digest."""
-    panel = _panel_with_digests()
-    write_manifest(tmp_path, GOOD_GEN)  # declares analytics/decomposition.json
-    # the decomposition root mis-staged FLAT: same bytes, wrong layout
+def _decomposition_panel(flat_sha: str) -> dict[str, Any]:
+    """A panel carrying every digest location that binds the factor-decomposition
+    root's content artifact bytes: the meta content digest, the surface
+    ``factor_analysis.source_sha256``, and the provenance row
+    ``portfolio-factor-decomposition-generation`` -- all naming ``flat_sha``."""
+
+    panel = base_panel()
+    panel["meta"]["decomposition_sha256"] = flat_sha
+    panel["factor_analysis"]["source_sha256"] = flat_sha
+    panel["provenance"] = [
+        {
+            "artifact": "portfolio-factor-decomposition-generation",
+            "sha256": flat_sha,
+        }
+    ]
+    return panel
+
+
+def test_the_factor_decomposition_generation_staged_flat_binds_clean(
+    tmp_path: Path,
+) -> None:
+    """The flat-layout defect: the decomposition root's own generation stages
+    its content artifact FLAT as ``<gen>/decomposition.json`` (the layout the
+    real 09-23 release carries), while the manifest records the full id. With
+    every panel digest location naming the flat bytes' sha256, the
+    factor-decomposition target must bind clean -- no findings."""
+    write_manifest(tmp_path, GOOD_GEN)
     flat = tmp_path / "generations" / GOOD_GEN / "decomposition.json"
+    flat.parent.mkdir(parents=True, exist_ok=True)
     flat.write_bytes(DECOMPOSITION_ARTIFACT_BYTES)
+    flat_sha = _sha(DECOMPOSITION_ARTIFACT_BYTES)
+    panel = _decomposition_panel(flat_sha)
+    target = make_target("factor-decomposition", tmp_path, GOOD_GEN)
+
+    assert list(rt.target_binding(target, panel, tmp_path)) == []
+
+
+def test_a_flat_factor_decomposition_digest_mismatch_still_blocks_threefold(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed preserved: flat-staged bytes that do NOT match the panel
+    digests must still fire at all three binding locations (content, surface,
+    provenance) -- the flat resolution widens the layout, never the binding."""
+    write_manifest(tmp_path, GOOD_GEN)
+    flat = tmp_path / "generations" / GOOD_GEN / "decomposition.json"
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_bytes(b"mismatched-flat-bytes\n")
+    actual_sha = _sha(b"mismatched-flat-bytes\n")
+    panel = _decomposition_panel(_sha(DECOMPOSITION_ARTIFACT_BYTES))
     target = make_target("factor-decomposition", tmp_path, GOOD_GEN)
 
     findings = list(rt.target_binding(target, panel, tmp_path))
 
-    assert [f.check_id for f in findings] == ["release.target_binding"]
-    assert findings[0].klass == BLOCKER_AUTHORITY
+    assert [f.check_id for f in findings] == [
+        "release.target_binding",
+        "release.target_binding",
+        "release.target_binding",
+    ]
+    assert all(f.klass == BLOCKER_AUTHORITY for f in findings)
+    by_path = {f.json_path: f for f in findings}
+    # The content and surface findings report the target's actual bytes as
+    # observed; the provenance finding reports the panel row as observed
+    # (the module's existing convention for provenance rows).
+    assert by_path["meta.decomposition_sha256"].observed == actual_sha
+    assert by_path["$.factor_analysis.source_sha256"].observed == actual_sha
+    assert by_path["$.provenance[0]"].observed == _sha(DECOMPOSITION_ARTIFACT_BYTES)
+    assert {f.json_path for f in findings} == {
+        "meta.decomposition_sha256",
+        "$.factor_analysis.source_sha256",
+        "$.provenance[0]",
+    }
