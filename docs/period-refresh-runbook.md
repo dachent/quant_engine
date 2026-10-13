@@ -2,8 +2,9 @@
 
 The complete procedure for refreshing the control panel with a new period of
 provider data and committing the release. Every command below was executed for
-the 2026-09-17-cutoff release (`ab216539b6f7dd1098b8c496ab86cf2eb0bb1901703
-8edb7fc9aa04b69f1077e`, released 2026-10-13). Read
+the 2026-09-17-cutoff release (release id `ab216539b6f7dd1098b8c496ab86cf2eb
+0bb19017038edb7fc9aa04b69f1077e`, recorded in the coordination root's
+`CURRENT_RELEASE.json`, released 2026-10-13). Read
 `docs/attended-generation-runbook.md` first for the run-stage details; this
 file covers the full cycle including the release tail. Where a flag is not
 shown, run the subcommand with `--help` and read the argparse source — flags
@@ -29,8 +30,9 @@ change between cycles and this document is not regenerated automatically.
   failure.
 - **Never hand-write a governed artifact** (findings, semantic gate payload,
   specs, release journal). Every step below has a producer command; use it.
-  (Moving aside regenerable tail outputs before a re-run — see step 4.0 — is
-  not an edit of a governed artifact: the tail regenerates them.)
+  (Moving aside regenerable tail outputs before a re-run — see the section-4
+  preamble — is not an edit of a governed artifact: the tail regenerates
+  them.)
 
 ## 1. Capture the new period data
 
