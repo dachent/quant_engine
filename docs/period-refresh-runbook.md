@@ -72,12 +72,12 @@ pattern: `provider_ledger_generation_root`, `expected_staged_baseline`,
 From the frozen run worktree (repo root = the run HEAD, `--python` = that
 worktree's venv):
 
-```
-.venv\Scripts\python.exe tools/portfolio_pipeline_materialize.py attended ^
-  --repo-root <run-worktree> --python <run-worktree>\.venv\Scripts\python.exe ^
-  --workspace-root <workspace root> ^
-  --output-root <cycle>\out --retained-cache-root <cycle>\cache ^
-  --requested-as-of <cutoff> --evaluated-on <evaluation-date> ^
+```powershell
+.venv\Scripts\python.exe tools/portfolio_pipeline_materialize.py attended `
+  --repo-root <run-worktree> --python <run-worktree>\.venv\Scripts\python.exe `
+  --workspace-root <workspace root> `
+  --output-root <cycle>\out --retained-cache-root <cycle>\cache `
+  --requested-as-of <cutoff> --evaluated-on <evaluation-date> `
   --preparation-spec <input-spec.json> --qa-hold --execute
 ```
 
