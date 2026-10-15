@@ -6097,3 +6097,84 @@ def test_n62_a_panel_without_position_classes_still_counts_every_row() -> None:
     panel = {"counts": {"positions": 2}, "positions": [{}, {}]}
 
     assert list(checks.check_counts(_counts_context(panel))) == []
+
+
+# ------------------------------------------------------- period-aware acceptance
+
+
+def _baseline(tmp_path: Path, cutoff: str | None) -> Path:
+    document: dict[str, Any] = {
+        "metrics": [
+            {
+                "metric_id": "capital.portfolio.liquid.cutoff",
+                "entity": "portfolio",
+                "expected": "7001",
+            }
+        ]
+    }
+    if cutoff is not None:
+        document["cutoff"] = cutoff
+    path = tmp_path / "baseline.json"
+    path.write_bytes(_dump(document))
+    return path
+
+
+def test_cli_refuses_cutoff_that_differs_from_baseline_cutoff(tmp_path: Path) -> None:
+    gen_dir = build(tmp_path)
+    out = tmp_path / "findings.json"
+    baseline = _baseline(tmp_path, CUTOFF)
+    assert (
+        _cli(
+            str(gen_dir),
+            "--expected",
+            str(baseline),
+            "--cutoff",
+            "2099-01-01",
+            "--out",
+            str(out),
+        )
+        == 2
+    )
+    assert not out.exists()
+    # A baseline that declares no cutoff cannot vouch for any requested period.
+    undeclared = _baseline(tmp_path, None)
+    assert _cli(str(gen_dir), "--expected", str(undeclared), "--cutoff", CUTOFF) == 2
+
+
+def test_cli_matching_cutoff_is_still_accepted(tmp_path: Path) -> None:
+    gen_dir = build(tmp_path)
+    out = tmp_path / "findings.json"
+    baseline = _baseline(tmp_path, CUTOFF)
+    code = _cli(
+        str(gen_dir), "--expected", str(baseline), "--cutoff", CUTOFF, "--out", str(out)
+    )
+    assert code in (0, 1)  # validated against the oracle, not refused
+    assert json.loads(out.read_text(encoding="utf-8"))["expected_baseline_sha256"]
+
+
+def test_independent_no_oracle_marks_the_run_and_forbids_a_baseline(
+    tmp_path: Path,
+) -> None:
+    gen_dir = build(tmp_path)
+    out, details = tmp_path / "findings.json", tmp_path / "details.json"
+    code = _cli(
+        str(gen_dir),
+        "--independent-no-oracle",
+        "--cutoff",
+        "2099-01-01",
+        "--out",
+        str(out),
+        "--details-out",
+        str(details),
+    )
+    assert code in (0, 1)
+    assert json.loads(details.read_text(encoding="utf-8"))["mode"] == (
+        "INDEPENDENT_NO_ORACLE"
+    )
+    assert (
+        json.loads(out.read_text(encoding="utf-8"))["expected_baseline_sha256"] is None
+    )
+    baseline = _baseline(tmp_path, CUTOFF)
+    both = ("--independent-no-oracle", "--cutoff", CUTOFF, "--expected", str(baseline))
+    assert _cli(str(gen_dir), *both) == 2
+    assert _cli(str(gen_dir), "--independent-no-oracle") == 2

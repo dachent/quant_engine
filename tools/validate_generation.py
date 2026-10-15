@@ -209,6 +209,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-pointer", type=Path, help="CURRENT_RELEASE.json")
     parser.add_argument("--corrections", type=Path, help="correction records (#326)")
     parser.add_argument(
+        "--independent-no-oracle",
+        action="store_true",
+        help="validate against no expected baseline (requires --cutoff, forbids "
+        "--expected); the only way to check a cutoff the baseline does not declare",
+    )
+    parser.add_argument(
         "--no-discover",
         action="store_true",
         help="do not look outside the generation for pointer/crosswalk/release",
@@ -226,10 +232,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         not_derivable: list[dict[str, Any]] = []
         expected_cutoff: str | None = None
         expected_sha: str | None = None
+        if args.independent_no_oracle and (
+            args.expected is not None or not args.cutoff
+        ):
+            raise ContractError(
+                "--independent-no-oracle requires --cutoff and cannot be combined "
+                "with --expected"
+            )
         if args.expected is not None:
             expected, not_derivable, expected_cutoff, expected_sha = load_expected(
                 args.expected
             )
+            # A baseline is valid only for the cutoff it declares: comparing its
+            # rows to another period would present one period's expectations as
+            # another period's acceptance.
+            if args.cutoff and (
+                to_date(expected_cutoff) is None
+                or to_date(args.cutoff) != to_date(expected_cutoff)
+            ):
+                raise ContractError(
+                    f"--cutoff {args.cutoff} does not match the expected baseline's "
+                    f"declared cutoff ({expected_cutoff}); re-baseline the period or "
+                    "run with --independent-no-oracle and no --expected"
+                )
         corrections = (
             load_corrections(args.corrections) if args.corrections is not None else None
         )
@@ -295,6 +320,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "generation_id": generation_id,
                     "cutoff": cutoff.isoformat(),
                     "cutoff_source": cutoff_source,
+                    "mode": (
+                        "INDEPENDENT_NO_ORACLE"
+                        if args.independent_no_oracle
+                        else "EXPECTED_BASELINE"
+                        if expected is not None
+                        else "NO_EXPECTED_BASELINE"
+                    ),
                     "reference_notes": generation.external.notes,
                     "rollup": rollup(findings),
                     "expected_exclusions": expected_exclusions(context),
