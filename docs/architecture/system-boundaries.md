@@ -111,6 +111,21 @@ flowchart LR
 - Portfolio123 is the only initial agent skill. A skill is an operator surface,
   not a second copy of provider logic or data.
 
+## Enforcement
+
+The rules above are enforced in the required Quality check by
+`tools/check_architecture.py` (ARCH-BOUNDARY-001). It censuses layer edges
+(`docs/architecture/allowed-edges.json` is generated from the rules), private
+reach-ins, submodule bypass imports, dynamic loading (`spec_from_file_location`,
+`exec_module`, `sys.path` writes, `_tool(...)` and subprocess calls on
+`tools/*.py`), undeclared third-party imports and provider-id literals outside
+provider-named tools. Today's violations are recorded per rule and file in
+`.policy/architecture-allowlist.json`; the check passes only when the census
+matches it exactly, so a new violation fails and a removed one must be ratcheted
+out with `tools/check_architecture.py --update-allowlist`, which refuses to
+raise any count or add any entry. `docs/architecture/import-graph.json` is the
+as-built package and tools edge list from the same pass (`--write-docs`).
+
 ## Shared source envelope
 
 Every source adapter implements the same operational concepts:
