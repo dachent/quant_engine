@@ -101,7 +101,13 @@ worktree's venv):
 - Validate the panel generation: `tools/validate_generation.py <gen-dir>
   --expected acceptance/expected-baseline.json --cutoff <cutoff>
   --crosswalk <epoch-generation>\authority\account-assignment-crosswalk.json`.
-  Zero `BLOCKER_*` is the gate.
+  Zero `BLOCKER_*` is the gate. **The baseline's declared `cutoff` must equal
+  `--cutoff`**: an expected baseline is valid only for its own period, so the
+  validator exits 2 on a mismatch (or on a baseline that declares no cutoff).
+  For a period with no re-baselined oracle, run
+  `tools/validate_generation.py <gen-dir> --independent-no-oracle --cutoff
+  <cutoff>` (no `--expected`); the details document records
+  `mode: INDEPENDENT_NO_ORACLE` and the oracle checks stay `NOT_READY`.
 
 ## 4. Release tail (the ceremony)
 
@@ -153,8 +159,8 @@ new tail would collide with them.
 7. **Validation findings (the commit gate requires findings for all 20
    release targets):** `tools/validate_generation.py
    <dataPortfolio>\control-panel\generations\<gid>
-   --expected acceptance/expected-baseline.json --cutoff <cutoff>` (writes the
-   panel findings), then `tools/validate_release_targets.py --spec
+   --expected acceptance/expected-baseline.json --cutoff <cutoff>` (cutoff must
+   equal the baseline's declared cutoff; writes the panel findings), then `tools/validate_release_targets.py --spec
    <production-spec.json> --release-id <release-id>` (writes the other 19;
    refuses unless the panel findings are clean). Missing findings files are
    the PR481 commit-gate refusal.
