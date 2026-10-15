@@ -604,6 +604,24 @@ def _template_snapshot(path: Path) -> tuple[bytes, str]:
     return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"), sha256
 
 
+def _frontend_styles_source(
+    template_root: Path, legacy: tuple[Path, bytes, str]
+) -> tuple[Path, bytes, str]:
+    """The stylesheet the panel ships: the in-repo one when it exists, else the legacy input.
+
+    ``styles.css`` has no source in the repository; the builder has copied it from the
+    legacy panel input.  A ``styles.css`` committed beside the other templates is read
+    like them (normalised to LF, bound by its raw digest) and wins; without one the
+    legacy bytes are used unchanged, so a checkout that has not committed it still builds.
+    """
+
+    in_repo = template_root / "styles.css"
+    if not in_repo.is_file():
+        return legacy
+    content, raw_sha256 = _template_snapshot(in_repo)
+    return in_repo, content, raw_sha256
+
+
 def _validated_strategy_evidence(
     evidence: Mapping[str, Any],
     strategy_ids: set[str],
@@ -11455,9 +11473,9 @@ def _rendered_files(
     legacy_data_path, _legacy_data_content, legacy_data_sha256 = legacy_snapshots[
         "legacy_data"
     ]
-    legacy_styles_path, legacy_styles_content, legacy_styles_sha256 = legacy_snapshots[
-        "source:styles.css"
-    ]
+    legacy_styles_path, legacy_styles_content, legacy_styles_sha256 = (
+        _frontend_styles_source(template_root, legacy_snapshots["source:styles.css"])
+    )
     files = {
         "index.html": template_files["index.html"],
         "styles.css": legacy_styles_content,
