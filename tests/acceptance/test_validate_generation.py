@@ -6139,6 +6139,11 @@ def test_cli_refuses_cutoff_that_differs_from_baseline_cutoff(tmp_path: Path) ->
     # A baseline that declares no cutoff cannot vouch for any requested period.
     undeclared = _baseline(tmp_path, None)
     assert _cli(str(gen_dir), "--expected", str(undeclared), "--cutoff", CUTOFF) == 2
+    # ...and equally when --cutoff is omitted (the cutoff would be inferred from
+    # the generation while the cutoff-less oracle rows are still applied).
+    assert _cli(str(gen_dir), "--expected", str(undeclared)) == 2
+    unparseable = _baseline(tmp_path, "not-a-date")
+    assert _cli(str(gen_dir), "--expected", str(unparseable)) == 2
 
 
 def test_cli_matching_cutoff_is_still_accepted(tmp_path: Path) -> None:

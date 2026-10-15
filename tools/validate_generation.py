@@ -245,11 +245,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             # A baseline is valid only for the cutoff it declares: comparing its
             # rows to another period would present one period's expectations as
-            # another period's acceptance.
-            if args.cutoff and (
-                to_date(expected_cutoff) is None
-                or to_date(args.cutoff) != to_date(expected_cutoff)
-            ):
+            # another period's acceptance. A baseline that declares no (or an
+            # unparseable) cutoff cannot vouch for any period, with or without
+            # --cutoff.
+            if to_date(expected_cutoff) is None:
+                raise ContractError(
+                    "the expected baseline declares no valid cutoff; it cannot be "
+                    "bound to a period (use --independent-no-oracle with --cutoff "
+                    "and no --expected)"
+                )
+            if args.cutoff and to_date(args.cutoff) != to_date(expected_cutoff):
                 raise ContractError(
                     f"--cutoff {args.cutoff} does not match the expected baseline's "
                     f"declared cutoff ({expected_cutoff}); re-baseline the period or "
