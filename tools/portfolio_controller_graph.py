@@ -128,6 +128,7 @@ _PATH_STAGES = {
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
+    "tools/ci.py": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
     # real delivery artifact); no producer imports it.
