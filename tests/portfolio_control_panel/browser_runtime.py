@@ -60,7 +60,7 @@ def resolve_browser_runtime(repository_root: Path) -> BrowserRuntime | None:
                 encoding="utf-8",
                 errors="replace",
                 env=environment,
-                timeout=10,
+                timeout=60,  # a loaded hosted runner needs >10s to import playwright
             )
         except (OSError, subprocess.SubprocessError):
             return None

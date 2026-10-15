@@ -320,3 +320,17 @@ def test_ci_lock_contains_only_full_action_shas_and_checksummed_tools() -> None:
     gitleaks = ci_lock["tools"]["gitleaks"]
     assert len(gitleaks["sha256"]) == 64
     int(gitleaks["sha256"], 16)
+
+
+def test_quality_runs_the_architecture_gate_with_committed_contract_files() -> None:
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "python tools/check_architecture.py" in quality
+    assert "tools/check_architecture.py" in quality.split("mypy", 1)[1]
+    for relative in (
+        ".policy/architecture-allowlist.json",
+        "docs/architecture/allowed-edges.json",
+        "docs/architecture/import-graph.json",
+    ):
+        assert (REPOSITORY_ROOT / relative).is_file(), relative
