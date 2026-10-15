@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -133,6 +134,8 @@ def _argv(command: str) -> list[str]:
     argv = shlex.split(command, posix=True)
     if argv[0] in {"python", "python3"}:
         argv[0] = sys.executable
+    # CreateProcess does not apply PATHEXT, so `npm` (npm.cmd) needs resolving.
+    argv[0] = shutil.which(argv[0]) or argv[0]
     return argv
 
 
