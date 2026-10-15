@@ -13870,7 +13870,7 @@ try {
     errorHidden: document.querySelector("#error-state")?.hidden ?? null,
     errorText: document.querySelector("#error-state")?.textContent?.trim() ?? "",
     portfolioAsOf: document.querySelector("#portfolio-as-of")?.textContent?.trim() ?? "",
-    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[7]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[7]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
+    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[9]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[9]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
     positionDateTexts: Array.from(document.querySelectorAll("#position-table tbody tr"), row => row.cells[5]?.firstChild?.textContent?.trim() ?? ""),
     injectedPositionNodes: document.querySelectorAll("#position-table [data-f2-f7-position-probe]").length,
     injectedDateScripts: document.querySelectorAll("#allocation-table script[data-f2-f7-probe]").length,
