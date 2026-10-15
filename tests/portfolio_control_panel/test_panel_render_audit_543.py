@@ -1081,8 +1081,8 @@ def test_F33_tones_come_from_an_explicit_table_and_completeness_proofs_are_not_p
         calls=[{"fn": "toneForStatus", "args": [token]} for token in tones],
     )
     assert {
-        token: item["value"]
-        for token, item in zip(tones, result["returns"], strict=True)
+        status: item["value"]
+        for status, item in zip(tones, result["returns"], strict=True)
     } == tones
 
 
