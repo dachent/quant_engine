@@ -139,9 +139,10 @@ def _argv(command: str) -> list[str]:
 def run(steps: Sequence[Step]) -> int:
     for step in steps:
         print(f"\n== {step.name}\n$ {step.command[:200]}", flush=True)
-        done = subprocess.run(
-            _argv(step.command), cwd=ROOT, env={**os.environ, **step.env}
-        )
+        # Hosted runners carry no GIT_* overrides and the suppression check
+        # rejects them, so drop whatever the calling shell or agent exported.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        done = subprocess.run(_argv(step.command), cwd=ROOT, env={**env, **step.env})
         if done.returncode:
             print(f"FAILED ({done.returncode}): {step.name}", file=sys.stderr)
             return done.returncode
