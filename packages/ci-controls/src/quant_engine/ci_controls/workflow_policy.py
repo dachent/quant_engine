@@ -36,6 +36,9 @@ MERGE_READINESS_PERMISSIONS = {
 }
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
+ARCHITECTURE_GATE_COMMAND = (
+    "uv run --frozen --no-sync python tools/check_architecture.py"
+)
 LOCKED_AUDIT_COMMAND = (
     "uv audit --locked --python-version 3.11 --preview-features audit-command"
 )
@@ -560,6 +563,17 @@ def validate_workflow_document(
                 workflow_name,
                 "ISSUE_TOKEN_ENV_INVALID",
                 "issue guard requires one explicit reconciler token reference",
+            )
+        )
+    if workflow_name == "quality.yml" and not any(
+        str(step.get("run", "")).strip() == ARCHITECTURE_GATE_COMMAND
+        for _, _, step in _workflow_steps(document)
+    ):
+        findings.append(
+            Finding(
+                workflow_name,
+                "ARCHITECTURE_GATE_MISSING",
+                "quality must run the architecture boundary gate",
             )
         )
     if workflow_name == "security.yml":
