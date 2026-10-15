@@ -38,25 +38,36 @@ def test_every_test_directory_is_run_by_quality() -> None:
     on_disk = {
         path.name
         for path in (REPOSITORY_ROOT / "tests").iterdir()
-        if path.is_dir() and any(path.rglob("test_*.py"))
+        if path.is_dir()
+        and any(
+            found
+            for pattern in ("test_*.py", "*_test.py")
+            for found in path.rglob(pattern)
+        )
     }
     assert sorted(on_disk - listed) == [], "add the directory to the pytest step"
     assert sorted(listed - on_disk) == [], "pytest step names a missing directory"
 
 
-def test_every_workspace_package_is_checked_and_on_the_mypy_path() -> None:
+def test_every_workspace_member_is_registered_and_checked() -> None:
     mypy_line = _quality_command("uv run --frozen --no-sync mypy")
     mypy_path = set(PYPROJECT["tool"]["mypy"]["mypy_path"])
     members = set(PYPROJECT["tool"]["uv"]["workspace"]["members"])
-    packages = {
-        f"packages/{path.name}"
-        for path in (REPOSITORY_ROOT / "packages").iterdir()
+    on_disk = {
+        f"{root}/{path.name}"
+        for root in ("packages", "apps")
+        for path in (REPOSITORY_ROOT / root).iterdir()
         if (path / "pyproject.toml").is_file()
     }
-    assert packages <= members, "package missing from [tool.uv.workspace].members"
-    for package in sorted(packages):
-        assert f"{package}/src" in mypy_line, f"{package} not type-checked in Quality"
-        assert f"{package}/src" in mypy_path, f"{package} missing from mypy_path"
+    assert on_disk <= members, "member missing from [tool.uv.workspace].members"
+    for member in sorted(members):
+        assert (REPOSITORY_ROOT / member / "pyproject.toml").is_file(), member
+        if member.startswith("packages/"):
+            assert f"{member}/src" in mypy_line, f"{member} not type-checked in Quality"
+            assert f"{member}/src" in mypy_path, f"{member} missing from mypy_path"
+        else:
+            # Apps are not importable packages; Quality runs their own test step.
+            assert f"{member}/tests" in QUALITY, f"{member} tests not run in Quality"
 
 
 def test_ci_entrypoint_reproduces_every_required_job() -> None:
