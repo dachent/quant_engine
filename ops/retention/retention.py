@@ -70,6 +70,9 @@ STORES = [
 ]
 GENERATION_DIRS = {"generations", "candidates"}
 
+# ReleaseState values (core/release.py) that need no further action.
+SETTLED_RELEASE_STATES = {"COMMITTED", "ROLLED_BACK"}
+
 IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 IO_REPARSE_TAG_SYMLINK = 0xA000000C
 
@@ -79,7 +82,7 @@ def _is_link(p: pathlib.Path) -> bool:
         tag = getattr(os.lstat(p), "st_reparse_tag", 0)
     except OSError:
         return False
-    return tag in (IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK)
+    return p.is_symlink() or tag in (IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK)
 
 
 def _load(p: pathlib.Path):
@@ -138,6 +141,18 @@ def _committed_state(portfolio: pathlib.Path) -> tuple[str, bytes, dict]:
             "release.json does not match the authority pointer's "
             "release_manifest_sha256; refusing to derive a keep-set from it"
         )
+    # A release that was prepared but not committed leaves CURRENT_RELEASE.json on
+    # the previous release while its proposed generations are not in any keep-set
+    # and it holds no lock until commit. Any journal that is not settled blocks.
+    outstanding = []
+    for other in sorted((coordination / "releases").glob("*/journal.json")):
+        state = json.loads(other.read_bytes().decode("utf-8")).get("state")
+        if state not in SETTLED_RELEASE_STATES:
+            outstanding.append(f"{other.parent.name[:16]}: {state}")
+    if outstanding:
+        raise CensusError(
+            "an unsettled release exists (" + ", ".join(outstanding) + "); do not sweep"
+        )
     snapshot = authority_bytes + b"\0" + journal_bytes
     return release_id, snapshot, json.loads(manifest_bytes)
 
@@ -170,19 +185,33 @@ def _walk(root: pathlib.Path, errors: list[str]):
                 dirnames.remove(name)
                 if not os.path.exists(d / name):
                     errors.append(f"unresolved link: {d / name}")
+        for name in filenames:
+            if _is_link(d / name) and not os.path.exists(d / name):
+                errors.append(f"unresolved link: {d / name}")
         yield d, dirnames, filenames
 
 
-def _dir_size(root: pathlib.Path, errors: list[str]) -> tuple[int, int]:
-    total = files = 0
+def _dir_stats(root: pathlib.Path, errors: list[str]) -> tuple[int, str]:
+    """(total bytes, inventory digest) of a generation directory.
+
+    The digest covers every file's relative path, size and mtime, so a file
+    added or changed after review changes the plan and aborts the apply.
+    """
+    total = 0
+    lines = []
     for d, _dirnames, filenames in _walk(root, errors):
         for name in filenames:
             try:
-                total += (d / name).lstat().st_size
-                files += 1
+                stat_result = (d / name).lstat()
             except OSError as error:
                 errors.append(f"unreadable file: {d / name}: {error}")
-    return total, files
+                continue
+            total += stat_result.st_size
+            relative = (d / name).relative_to(root).as_posix()
+            lines.append(
+                f"{relative}\t{stat_result.st_size}\t{stat_result.st_mtime_ns}"
+            )
+    return total, hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()
 
 
 def find_generation_dirs(portfolio: pathlib.Path, errors: list[str]):
@@ -215,7 +244,7 @@ def _plan(portfolio: pathlib.Path, depth: int):
     keep_ids = {g for ids in keep.values() for g in ids}
     errors: list[str] = []
     kept: list[tuple[str, int]] = []
-    dead: list[tuple[str, int]] = []
+    dead: list[tuple[str, int, str]] = []
     for gd in find_generation_dirs(portfolio, errors):
         try:
             children = sorted(gd.iterdir())
@@ -229,25 +258,24 @@ def _plan(portfolio: pathlib.Path, depth: int):
                 continue
             if not child.is_dir():
                 continue
-            size, _files = _dir_size(child, errors)
-            (kept if child.name in keep_ids else dead).append((rel, size))
+            size, inventory = _dir_stats(child, errors)
+            if child.name in keep_ids:
+                kept.append((rel, size))
+            else:
+                dead.append((rel, size, inventory))
     if errors:
         raise CensusError(
             f"census incomplete ({len(errors)} problem(s)); nothing may be deleted:\n  "
             + "\n  ".join(errors[:10])
         )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "release_id": release_id,
-                "depth": depth,
-                "snapshot": hashlib.sha256(snapshot).hexdigest(),
-                "dead": sorted(rel for rel, _ in dead),
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
-    return release_id, snapshot, kept, dead, digest
+    body = {
+        "release_id": release_id,
+        "depth": depth,
+        "snapshot": hashlib.sha256(snapshot).hexdigest(),
+        "dead": sorted([list(item) for item in dead]),
+    }
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    return release_id, snapshot, kept, dead, {**body, "plan_digest": digest}
 
 
 def sweep(
@@ -257,34 +285,36 @@ def sweep(
     plan_out: pathlib.Path | None = None,
     reviewed_plan: pathlib.Path | None = None,
 ) -> int:
-    release_id, snapshot, kept, dead, digest = _plan(portfolio, depth)
+    release_id, snapshot, kept, dead, plan = _plan(portfolio, depth)
+    digest = plan["plan_digest"]
     print(f"release {release_id[:16]}  depth {depth}  plan {digest[:16]}\n")
     kept_bytes = sum(size for _, size in kept)
-    dead_bytes = sum(size for _, size in dead)
+    dead_bytes = sum(size for _, size, _inv in dead)
     if plan_out is not None:
-        plan_out.write_bytes(
-            json.dumps(
-                {"plan_digest": digest, "release_id": release_id, "dead": dead},
-                indent=1,
-            ).encode()
-        )
+        plan_out.write_bytes(json.dumps(plan, indent=1, sort_keys=True).encode())
     blocked: list[tuple[str, OSError]] = []
     if apply:
         if reviewed_plan is None:
             raise CensusError("--apply requires --reviewed-plan from a dry run")
         reviewed = json.loads(reviewed_plan.read_bytes().decode("utf-8"))
-        if reviewed.get("plan_digest") != digest:
+        # The whole reviewed document must equal the fresh plan: matching only
+        # the digest field would let an edited `dead` list ride on a valid digest.
+        if reviewed != json.loads(json.dumps(plan)):
             raise CensusError(
                 "reviewed plan does not match the current census; re-run the dry run"
             )
         lock = _acquire_release_lock(portfolio)
         try:
-            for rel, size in dead:
-                # Check-then-act: the committed state must be unchanged at the
-                # moment of each removal, not only when the keep-set was derived.
+            for rel, size, inventory in dead:
+                # Check-then-act: the committed state and the directory's contents
+                # must be unchanged at the moment of each removal.
                 _, now, _manifest = _committed_state(portfolio)
                 if now != snapshot:
                     raise CensusError("the release changed during the sweep; aborted")
+                recheck: list[str] = []
+                _, current = _dir_stats(portfolio / rel, recheck)
+                if recheck or current != inventory:
+                    raise CensusError(f"{rel} changed after review; aborted")
                 try:
                     shutil.rmtree(_extended(portfolio / rel), onerror=_force_remove)
                 except OSError as e:

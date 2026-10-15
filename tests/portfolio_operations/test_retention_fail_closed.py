@@ -155,3 +155,86 @@ def test_held_release_lock_aborts_apply(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="coordination lock"):
         retention.sweep(portfolio, 2, True, reviewed_plan=plan)
     assert (generations / "stale").exists()
+
+
+def test_unsettled_prepared_release_elsewhere_blocks_the_sweep(tmp_path: Path) -> None:
+    portfolio, _, generations = _fixture(tmp_path)
+    other = portfolio / retention.COORDINATION / "releases" / "rel2"
+    other.mkdir()
+    (other / "journal.json").write_text(
+        json.dumps({"release_id": "rel2", "state": "PREPARED"})
+    )
+    with pytest.raises(SystemExit, match="unsettled release"):
+        retention.sweep(portfolio, 2, False)
+    (other / "journal.json").write_text(
+        json.dumps({"release_id": "rel2", "state": "ROLLED_BACK"})
+    )
+    assert retention.sweep(portfolio, 2, False) == 0  # settled: no longer blocks
+    assert (generations / "stale").exists()
+
+
+def test_edited_reviewed_plan_with_a_valid_digest_is_refused(tmp_path: Path) -> None:
+    portfolio, _, generations = _fixture(tmp_path)
+    plan = tmp_path / "plan.json"
+    _review(portfolio, plan)
+    document = json.loads(plan.read_text(encoding="utf-8"))
+    document["dead"] = [["dataPortfolio/x/generations/live", 4, "0" * 64]]
+    plan.write_text(json.dumps(document), encoding="utf-8")  # digest untouched
+    with pytest.raises(SystemExit, match="does not match the current census"):
+        retention.sweep(portfolio, 2, True, reviewed_plan=plan)
+    assert (generations / "live").exists() and (generations / "stale").exists()
+
+
+def test_contents_added_to_a_dead_generation_after_review_abort(
+    tmp_path: Path,
+) -> None:
+    portfolio, _, generations = _fixture(tmp_path)
+    plan = tmp_path / "plan.json"
+    _review(portfolio, plan)
+    (generations / "stale" / "added-after-review.bin").write_bytes(b"new")
+    with pytest.raises(SystemExit, match="does not match the current census"):
+        retention.sweep(portfolio, 2, True, reviewed_plan=plan)
+    assert (generations / "stale" / "added-after-review.bin").exists()
+
+
+def test_content_changing_between_plan_and_removal_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    portfolio, _, generations = _fixture(tmp_path)
+    plan = tmp_path / "plan.json"
+    _review(portfolio, plan)
+    real = retention._dir_stats
+    calls = {"n": 0}
+
+    def mutate_after_plan(root: Path, errors: list[str]):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        # The fresh census (live + stale) runs first; the per-removal recheck of
+        # the dead directory is the next call, after a file appears in it.
+        if calls["n"] == 3:
+            (generations / "stale" / "late.bin").write_bytes(b"late")
+        return real(root, errors)
+
+    monkeypatch.setattr(retention, "_dir_stats", mutate_after_plan)
+    with pytest.raises(SystemExit, match="changed after review"):
+        retention.sweep(portfolio, 2, True, reviewed_plan=plan)
+    assert (generations / "stale" / "late.bin").exists()
+
+
+def test_dangling_file_link_aborts_the_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    portfolio, _, generations = _fixture(tmp_path)
+    (generations / "stale" / "dangling.lnk").write_bytes(b"x")
+    real_is_link, real_exists = retention._is_link, retention.os.path.exists
+    # Creating a real dangling symlink needs privilege on Windows; stand one in.
+    monkeypatch.setattr(
+        retention, "_is_link", lambda p: p.name == "dangling.lnk" or real_is_link(p)
+    )
+    monkeypatch.setattr(
+        retention.os.path,
+        "exists",
+        lambda p: False if str(p).endswith("dangling.lnk") else real_exists(p),
+    )
+    with pytest.raises(SystemExit, match="unresolved link"):
+        retention.sweep(portfolio, 2, False)
+    assert (generations / "stale").exists()

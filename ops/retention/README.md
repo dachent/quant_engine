@@ -18,8 +18,14 @@ in-flight release needs. Before any deletion it also:
   and the journal against the release id;
 * aborts on any directory-walk error, unreadable path or dangling link (an
   incomplete census cannot authorize a delete);
+* refuses to run while any release journal is unsettled (`PREPARED`,
+  `COMMITTING`, `ROLLING_BACK`, `RECOVERY_FAILED`): a prepared release's
+  proposed generations are in no keep-set and it holds no lock until commit;
 * requires `--reviewed-plan`, the file a dry run wrote with `--plan-out`, and
-  deletes only when its digest equals the freshly computed plan;
+  deletes only when the whole reviewed document equals the freshly computed
+  plan, which binds every dead generation's file inventory (path, size, mtime):
+  anything added or changed after review aborts the apply, and the inventory is
+  re-checked again immediately before each removal;
 * holds `release.lock` (the coordination mutex a release uses) and re-reads the
   committed state before each removal, so a release that moves to `PREPARED`
   mid-sweep stops it.
