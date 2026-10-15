@@ -102,7 +102,10 @@ execution record. Pull-request validation never receives this write authority.
 
 ## Local proof
 
-Use a repository-local uv cache on this synced Windows worktree:
+`tools/ci.py` runs the required checks from the workflow files themselves, so the
+local gate cannot drift from the hosted one. Each job name is the required
+status context it reproduces: `quality` (`windows-2025 / Python 3.11`),
+`data-boundary`, `secrets`, `dependency-audit` and `workflow-policy`.
 
 ```powershell
 $ErrorActionPreference = "Stop"
@@ -111,17 +114,19 @@ $env:UV_CACHE_DIR = "$PWD\.codex-bootstrap\uv-cache"
 $env:UV_LINK_MODE = "copy"
 $env:UV_PYTHON = "3.11"
 $env:UV_PYTHON_DOWNLOADS = "never"
-uv lock --check
 uv sync --frozen --all-groups --all-packages --python 3.11
-uv run --frozen --no-sync ruff format --check .
-uv run --frozen --no-sync ruff check .
-uv run --frozen --no-sync mypy packages/alpaca/src packages/ci-controls/src packages/core/src packages/fidelity/src packages/ibkr/src packages/matrixport/src packages/portfolio-ledger/src packages/portfolio123/src packages/schwab/src packages/web-contracts/src tools/account_strategy_manifest.py tools/alpaca_generation.py tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py tools/fidelity_generation.py tools/ibkr_generation.py tools/matrixport_generation.py tools/portfolio123_generation.py tools/schwab_generation.py tools/quantbase_generation.py tools/portfolio_provenance.py tools/provider_ledger.py tools/portfolio_baseline.py tools/portfolio_report.py tools/portfolio_control_panel.py tools/portfolio_decomposition.py tools/portfolio_correlation.py tools/portfolio_driver_map.py tools/portfolio_target_series.py tools/portfolio_strategy_history.py tools/portfolio_implementation_reconciliation.py tools/portfolio_implementation_return_attribution.py tools/portfolio_release_builder.py tools/portfolio_pipeline_materialize.py tools/portfolio_financial_mvp_contract.py tools/data_pipeline.py tools/data_recovery_rehearsal.py tools/provider_security_quarantine.py tools/p123_security_quarantine.py tools/verify_portfolio123_skill_installation.py
-uv run --frozen --no-sync python tools/check_gitleaks_suppressions.py
-uv run --frozen --no-sync pytest -q --disable-socket tests/alpaca tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/market_data tests/matrixport tests/portfolio123 tests/quantbase tests/portfolio_ledger tests/provider_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/portfolio_analytics tests/portfolio_attribution tests/portfolio_operations tests/schwab tests/schwab_app tests/web_contracts tests/governance
-uv build --all-packages --no-sources --python 3.11
-uv audit --locked --python-version 3.11 --preview-features audit-command
-python tools/check_repository_boundary.py --root . --policy .policy/data-boundary.toml
+uv run --frozen --no-sync python tools/ci.py
 ```
+
+Pass job names to run a subset (`tools/ci.py quality`), `--list` to print the
+commands without running them and `--skip-setup` to skip the install steps on a
+warm checkout. The script needs the pinned uv (`0.11.x`, see `required-version`
+in `pyproject.toml`), Node 24 for the panel browser tests, and `gitleaks` on
+`PATH` for the `secrets` job; a missing tool fails the job rather than skipping
+it. `tests/ci/test_ci_completeness.py` fails when a test directory or workspace
+package is added without being registered in the Quality step lists. A Quality
+run on this workstation takes roughly as long as the hosted job (about 30
+minutes); run it in the background.
 
 Generated environments, caches, and `dist/` artifacts are ignored and are not
 acceptance artifacts. CI uses synthetic inputs only and carries no live-network
