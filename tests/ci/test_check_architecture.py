@@ -77,18 +77,48 @@ def test_allowed_patterns_do_not_fire(tmp_path: Path) -> None:
 
 
 def test_new_violation_fails_and_removed_one_is_stale() -> None:
-    allowed = {"DYNAMIC": {"tools/a.py": 2}}
-    assert arch.compare({"DYNAMIC": {"tools/a.py": 3}}, allowed) == (
-        ["DYNAMIC tools/a.py: 3 > allowed 2"],
+    allowed = {"DYNAMIC": {"tools/a.py": {"sys.path": 2}}}
+    assert arch.compare({"DYNAMIC": {"tools/a.py": {"sys.path": 3}}}, allowed) == (
+        ["DYNAMIC tools/a.py [sys.path]: 3 > allowed 2"],
         [],
     )
-    assert arch.compare({"DYNAMIC": {"tools/b.py": 1}}, allowed)[0] == [
-        "DYNAMIC tools/b.py: 1 > allowed 0"
+    assert arch.compare({"DYNAMIC": {"tools/b.py": {"sys.path": 1}}}, allowed)[0] == [
+        "DYNAMIC tools/b.py [sys.path]: 1 > allowed 0"
     ]
     assert arch.compare({"DYNAMIC": {}}, allowed) == (
         [],
-        ["DYNAMIC tools/a.py: 0 < allowed 2"],
+        ["DYNAMIC tools/a.py [sys.path]: 0 < allowed 2"],
     )
+
+
+def test_swapping_one_violation_for_another_in_an_allowlisted_file_fails() -> None:
+    allowed = {"PRIVATE": {"tools/a.py": {"tools:x._old": 1}}}
+    swapped = {"PRIVATE": {"tools/a.py": {"tools:y._new": 1}}}
+    new, stale = arch.compare(swapped, allowed)
+    assert new == ["PRIVATE tools/a.py [tools:y._new]: 1 > allowed 0"]
+    assert stale == ["PRIVATE tools/a.py [tools:x._old]: 0 < allowed 1"]
+
+
+def test_relative_cross_package_import_is_a_layer_violation(tmp_path: Path) -> None:
+    deep = "packages/alpaca/src/quant_engine/alpaca/sub/deep.py"
+    files = {
+        ALPACA: "from ..schwab import api",
+        deep: "from ...schwab import api; from ...core import x",
+    }
+    found = arch.census(files, root=tmp_path)
+    assert ("LAYER", ALPACA, 1, "alpaca->schwab") in found
+    assert ("LAYER", deep, 1, "alpaca->schwab") in found
+    assert not [f for f in found if f[1] == deep and f[3] == "alpaca->core"]
+
+
+def test_stale_import_graph_package_edges_fail_the_default_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stale = tmp_path / "import-graph.json"
+    stale.write_text(json.dumps({"package_edges": [["x", "y", 1]]}), encoding="utf-8")
+    monkeypatch.setattr(arch, "GRAPH", stale)
+    assert arch.main([]) == 1
+    assert "import-graph.json package edges are stale" in capsys.readouterr().err
 
 
 def test_live_tree_matches_allowlist_and_contract_files() -> None:
