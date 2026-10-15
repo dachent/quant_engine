@@ -1,0 +1,59 @@
+{
+  "allowed_package_imports": {
+    "alpaca": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "ci_controls": [],
+    "core": [],
+    "fidelity": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "ibkr": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "matrixport": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "portfolio123": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "portfolio_ledger": [
+      "core"
+    ],
+    "schwab": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "turingtrader": [
+      "core",
+      "portfolio_ledger",
+      "web_contracts"
+    ],
+    "web_contracts": [
+      "core"
+    ]
+  },
+  "generated_by": "tools/check_architecture.py --write-docs",
+  "packages_must_not_import": [
+    "tools modules",
+    "ops",
+    "acceptance",
+    "apps"
+  ],
+  "source": "docs/architecture/system-boundaries.md (Dependency rules)",
+  "tools_must_not_import": [
+    "acceptance",
+    "ops"
+  ]
+}

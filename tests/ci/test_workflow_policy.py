@@ -239,3 +239,18 @@ def test_ci_lock_rejects_short_action_sha(tmp_path: Path) -> None:
         assert str(exc) == "CI_LOCK_ACTION_SHA_INVALID"
     else:
         raise AssertionError("short action SHA was accepted")
+
+
+def test_quality_must_run_the_architecture_gate() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    steps = mutated["jobs"]["quality"]["steps"]  # type: ignore[index]
+    steps[:] = [
+        step
+        for step in steps
+        if "check_architecture.py" not in str(step.get("run", ""))
+    ]
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "ARCHITECTURE_GATE_MISSING" in _codes(findings)
