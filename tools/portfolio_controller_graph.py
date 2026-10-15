@@ -125,6 +125,7 @@ _PATH_STAGES = {
     # path raises "unmapped relevant production change" instead of being
     # treated as harmless -- two of these tripped that gate during the #374
     # integration, one of them on a pure type-annotation change.
+    "tools/check_architecture.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
