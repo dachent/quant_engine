@@ -2,6 +2,9 @@
   "use strict";
 
   const data = window.PORTFOLIO_DATA;
+  // F48: the comparison and heat-map scales are named, and the labels below read them.
+  const COMPARISON_WEEKS = 13;
+  const WEEKLY_FULL_INTENSITY_RETURN = 0.08;
   const performanceLineageMismatch = data?.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
   const performanceLineageReason = String(data?.meta?.performance_lineage?.reason || "Report performance is withheld because its source lineage does not match the accepted identity.");
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -23,9 +26,56 @@
   };
 
   const formatDateHtml = (value) => safe(formatDate(value));
+  // F07/F23/F24: how many days a dated figure is older than the portfolio cutoff.  Derived
+  // from the two dates only; a date at or after the cutoff, or a missing date, is no flag.
+  const dayNumber = (value) => {
+    const parsed = new Date(`${String(value || "").slice(0, 10)}T00:00:00Z`);
+    return Number.isNaN(parsed.getTime()) ? null : Math.floor(parsed.getTime() / 86400000);
+  };
+  const daysBeforeCutoff = (value) => {
+    const cutoff = dayNumber(data?.meta?.portfolio_as_of);
+    const day = dayNumber(value);
+    return cutoff == null || day == null || day >= cutoff ? 0 : cutoff - day;
+  };
+  const olderThanCutoffText = (value) => {
+    const days = daysBeforeCutoff(value);
+    return days > 0 ? `older than cutoff by ${integer.format(days)} day${days === 1 ? "" : "s"}` : "";
+  };
+  const olderThanCutoffTag = (value) => {
+    const text = olderThanCutoffText(value);
+    return text ? `<span class="stale-tag">${safe(text)}</span>` : "";
+  };
+  const staleSuffix = (value) => { const tag = olderThanCutoffTag(value); return tag ? ` · ${tag}` : ""; };
+  // F50: a null effective end is an open interval, not an unknown date.
+  const endDateHtml = (value) => (value ? formatDateHtml(value) : "open");
+  // F13/F50: a producer annualization label can already carry its own parenthesis.
+  const annualizationSuffix = (label) => (label ? (String(label).includes("(") ? ` · ${safe(label)}` : ` (${safe(label)})`) : "");
+  // F27/F39/F50: values far from order one are shown in scientific notation, never as 0.000.
+  const smallDecimal = (value, digits = 6) => {
+    const parsed = number(value);
+    if (parsed == null) return "—";
+    return parsed !== 0 && Math.abs(parsed) < 10 ** -digits ? parsed.toExponential(2) : parsed.toFixed(digits);
+  };
 
+  // F15/F17/F33: an explicit status -> tone table.  The expressions below remain only for
+  // tokens the table does not name.  A validated model and a not-validated model are named
+  // here, and a "*_NOT_COMPLETENESS_PROOF" disposition is never a positive one.
+  const STATUS_TONES = Object.freeze({
+    MODEL_VALIDATED_FOR_PM_USE: "positive",
+    MODEL_COMPUTED_NOT_VALIDATED: "warning",
+    MODEL_UNAVAILABLE: "danger",
+    NOT_VALIDATED: "warning",
+    VALIDATED: "positive",
+    tested: "positive",
+    not_testable: "warning",
+    partial_only: "warning",
+    not_same_vintage: "warning",
+  });
   function toneForStatus(status = "") {
+    if (Object.hasOwn(STATUS_TONES, String(status))) return STATUS_TONES[String(status)];
     const text = String(status).toUpperCase();
+    if (/NOT_COMPLETENESS_PROOF$/.test(text)) return "neutral";
+    if (/(^|_)NOT_VALIDATED$/.test(text)) return STATUS_TONES.NOT_VALIDATED;
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE|NO_ACCEPTED_FACT_PATH/.test(text)) return "danger";
     if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND/.test(text)) return "warning";
     if (/PASS|AVAILABLE|COMPLETE|PUBLISHED|VERIFIED/.test(text)) return "positive";
@@ -76,6 +126,15 @@
     PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY: "Partial: reconciliation ready, causal attribution not ready",
     UPPER_BOUND_CONTRACT_CAP_PRE_TAX: "Upper bound (contract cap)",
     DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV: "Diagnostic proxy not official provider NAV",
+    // F15: `implementation_gap_status` carries the producer's lower-case audit tokens.
+    tested: "Tested",
+    not_testable: "Not testable",
+    partial_only: "Partial only",
+    not_same_vintage: "Not same vintage",
+    // F33: dispositions that say a fact is observed without proving it complete.
+    OBSERVED_NOT_COMPLETENESS_PROOF: "Observed; not a completeness proof",
+    NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF: "No reported events; not a completeness proof",
+    NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF: "No reported fact; not a completeness proof",
   };
   const ACCOUNT_MANIFEST_AUTHORITY_LABELS = Object.freeze({
     INDEPENDENT_EXACT_REBUILD: "Independent exact rebuild",
@@ -116,17 +175,28 @@
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
-  const tableMarkup = (headers, rows, caption = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  // F20/F12: `footer` is the markup of a <tfoot> body (total rows computed from the rows shown).
+  const tableMarkup = (headers, rows, caption = null, footer = "") => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
-  const providerName = (providerId) => ({
+  // F04: the operator sees a strategy's name, never its id slug, where the payload can map it.
+  const strategyNameById = (strategyId) => (data.strategies || []).find((row) => row.strategy_id === strategyId)?.strategy_name || strategyId;
+  const PROVIDER_NAMES = Object.freeze({
     alpaca: "Alpaca",
     fidelity: "Fidelity",
     ibkr: "IBKR",
+    internal: "Internal",
+    "john hancock": "John Hancock",
     matrixport: "Matrixport",
     portfolio123: "Portfolio123",
     quantbase: "Quantbase",
     schwab: "Schwab",
-  })[String(providerId || "").toLowerCase()] || String(providerId || "Provider");
+  });
+  // F35: a provider id the table does not name is title-cased, never printed as a raw id.
+  const providerName = (providerId) => {
+    const key = String(providerId || "").toLowerCase();
+    if (Object.hasOwn(PROVIDER_NAMES, key)) return PROVIDER_NAMES[key];
+    return key ? key.replaceAll("_", " ").replace(/\b[a-z]/g, (letter) => letter.toUpperCase()) : "Provider";
+  };
   const evidenceCoverage = (row) => {
     if (performanceLineageMismatch) return `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`;
     const evidence = row.provider_evidence;
@@ -134,17 +204,26 @@
     const account = evidence.account;
     const provider = evidence.provider;
     // The provider generation date is when the provider data was captured; the accepted
-    // cutoff is the portfolio as-of.  A capture after the cutoff says so (K1).
-    const captureDate = String(evidence.generation_as_of_date || "").slice(0, 10);
-    const cutoffDate = String(data.meta?.portfolio_as_of || "").slice(0, 10);
-    const afterCutoff = captureDate !== "" && cutoffDate !== "" && captureDate > cutoffDate;
-    const parts = [afterCutoff
-      ? `Provider capture ${formatDate(captureDate)} (post-cutoff capture; data through ${formatDate(cutoffDate)})`
-      : `Provider capture ${formatDate(evidence.generation_as_of_date)}`];
+    // cutoff is the portfolio as-of.  A capture after the cutoff is named once per table
+    // by postCutoffCaptureNote (K1, F26), not repeated on every row.
+    const parts = [`Provider capture ${formatDate(evidence.generation_as_of_date)}`];
     if (account) parts.push(`${providerName(account.provider_id || evidence.provider_id)} account-live TWR: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`);
     if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns · governed provider-ledger classification, not brokerage-account authority`);
     if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
+  };
+  // F26: one note per table, naming how many strategies carry a capture after the cutoff.
+  const postCutoffCaptureNote = () => {
+    const cutoffDate = String(data.meta?.portfolio_as_of || "").slice(0, 10);
+    const strategies = Array.isArray(data.strategies) ? data.strategies : [];
+    const late = strategies.filter((row) => cutoffDate !== "" && String(row.provider_evidence?.generation_as_of_date || "").slice(0, 10) > cutoffDate);
+    return late.length
+      ? `Post-cutoff capture: ${integer.format(late.length)} of ${integer.format(strategies.length)} provider captures are dated after the ${formatDate(cutoffDate)} cutoff; the data they carry runs through the cutoff.`
+      : "";
+  };
+  const evidenceCaption = (title) => {
+    const note = postCutoffCaptureNote();
+    return note ? `${title}. ${note}` : title;
   };
   const evidenceAvailability = (row) => {
     if (performanceLineageMismatch) return `<span class="cell-secondary">— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
@@ -175,7 +254,7 @@
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
     const providerAnnualizedLabel = row.provider_annualization?.label;
-    return `${statusText(status)}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.provider_comparison_observed_start)}–${formatDateHtml(row.provider_comparison_observed_end)} · ${integer.format(row.provider_comparison_observations || 0)} observations</span><span class="cell-secondary">Account ${pct(row.provider_account_cumulative_return)} · reference ${pct(row.provider_reference_cumulative_return)} · cumulative gap ${pct(row.provider_cumulative_gap)} · active annualized ${pct(row.provider_active_return_annualized)}${providerAnnualizedLabel ? ` (${safe(providerAnnualizedLabel)})` : ""}</span><span class="cell-secondary">Tracking error ${pct(row.provider_tracking_error_annualized)} · information ratio ${decimal(row.provider_information_ratio)} · beta ${decimal(row.provider_beta)} · correlation ${decimal(row.provider_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.provider_upside_capture)} · down capture ${pct(row.provider_downside_capture)} · relative drawdown ${pct(row.provider_relative_drawdown)} · cash drag ${statusText(row.cash_drag_status)} · ${safe(row.cash_drag_reason)}</span><span class="cell-secondary">${safe(row.provider_comparison_disposition)}</span>`;
+    return `${statusText(status)}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.provider_comparison_observed_start)}–${formatDateHtml(row.provider_comparison_observed_end)} · ${integer.format(row.provider_comparison_observations || 0)} observations${staleSuffix(row.provider_comparison_observed_end)}</span><span class="cell-secondary">Account ${pct(row.provider_account_cumulative_return)} · reference ${pct(row.provider_reference_cumulative_return)} · cumulative gap ${pct(row.provider_cumulative_gap)} · active annualized ${pct(row.provider_active_return_annualized)}${annualizationSuffix(providerAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.provider_tracking_error_annualized)} · information ratio ${decimal(row.provider_information_ratio)} · beta ${decimal(row.provider_beta)} · correlation ${decimal(row.provider_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.provider_upside_capture)} · down capture ${pct(row.provider_downside_capture)} · relative drawdown ${pct(row.provider_relative_drawdown)} · cash drag ${statusText(row.cash_drag_status)} · ${safe(row.cash_drag_reason)}</span><span class="cell-secondary">${safe(row.provider_comparison_disposition)}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
   };
   const costDisclosure = (row) => {
     const amount = number(row.annual_external_cost_usd) == null ? "Pre-tax cost unavailable" : `${currencyExact(row.annual_external_cost_usd)} annually`;
@@ -192,7 +271,7 @@
     } else {
       rate = `${pct(row.annual_external_cost_rate_pre_tax, 2)} of sleeve value (denominator date not published by this report schema)`;
     }
-    return `<span class="cell-primary">${safe(row.cost_status)}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
+    return `<span class="cell-primary">${safe(humanStatus(row.cost_status))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   // N55: who authorized the current benchmark assignment.  An owner-made override is
   // named explicitly; a row that has never been overridden retains the prior status quo
@@ -206,7 +285,7 @@
     const authority = row.benchmark_assignment_authority
       ? `<span class="cell-secondary">Assignment authority: ${safe(BENCHMARK_ASSIGNMENT_AUTHORITY_LABELS[row.benchmark_assignment_authority] || humanStatus(row.benchmark_assignment_authority))}</span>`
       : "";
-    const assignment = `<span class="cell-primary">Benchmark ${statusText(row.benchmark_assignment_status)}</span><span class="cell-secondary">Effective ${formatDateHtml(row.benchmark_effective_start)}–${formatDateHtml(row.benchmark_effective_end)} · ${safe(row.benchmark_id || "No admitted benchmark")}</span><span class="cell-secondary">${safe(row.benchmark_rationale || "No benchmark rationale recorded")}</span>${authority}`;
+    const assignment = `<span class="cell-primary">Benchmark ${statusText(row.benchmark_assignment_status)}</span><span class="cell-secondary">Effective ${formatDateHtml(row.benchmark_effective_start)}–${endDateHtml(row.benchmark_effective_end)} · ${safe(row.benchmark_id || "No admitted benchmark")}</span><span class="cell-secondary">${safe(row.benchmark_rationale || "No benchmark rationale recorded")}</span>${authority}`;
     // N55 (general): `benchmark_comparison_reason` is the not-ready reason surface for the
     // benchmark comparison path; render it beside the disposition whenever published.
     const reason = row.benchmark_comparison_reason ? `<span class="cell-secondary">${safe(row.benchmark_comparison_reason)}</span>` : "";
@@ -214,11 +293,11 @@
     // A5: `benchmark_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.
     const benchmarkAnnualizedLabel = row.benchmark_annualization?.label;
-    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${pct(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${benchmarkAnnualizedLabel ? ` (${safe(benchmarkAnnualizedLabel)})` : ""}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
+    return `${assignment}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.benchmark_comparison_observed_start)}–${formatDateHtml(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${pct(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}${annualizationSuffix(benchmarkAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>${reason}`;
   };
   const hwmQualification = (row) => {
     if (performanceLineageMismatch) return { status: "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH", note: performanceLineageReason };
-    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: row.hwm_exclusion_reason || "Explicit policy exclusion; not a computed size threshold" };
+    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: row.hwm_exclusion_reason || "No exclusion reason recorded in the payload" };
     if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
     if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
     if (row.hwm_freshness_status === "BOUNDARY_MISMATCH") return { status: "UNAVAILABLE_EVIDENCE_BOUNDARY_MISMATCH", note: `Daily NAV ends ${formatDate(row.nav_observed_end)} but freshness evidence ends ${formatDate(row.hwm_freshness_observed_end)}; HWM remains blocked until the boundaries agree` };
@@ -316,12 +395,14 @@
     const basis = typeof dependence?.weight_basis === "string" ? dependence.weight_basis : "";
     const authority = dependence?.weight_authority && typeof dependence.weight_authority === "object" ? dependence.weight_authority : null;
     const asOf = typeof authority?.as_of_date === "string" ? authority.as_of_date : null;
+    // F07: a weight set dated before the cutoff says by how many days.
+    const staleNote = asOf && olderThanCutoffText(asOf) ? `; ${olderThanCutoffText(asOf)}` : "";
     if (basis === "CURRENT_CUTOFF") return "Current portfolio (cutoff weights)";
     if (basis.startsWith("POLICY_")) {
       const policy = typeof authority?.policy_id === "string" ? authority.policy_id : weightBasisText(basis);
-      return `Policy weights (${policy}${asOf ? `, as of ${asOf}` : ""})`;
+      return `Policy weights (${policy}${asOf ? `, as of ${asOf}` : ""}${staleNote})`;
     }
-    return `${weightBasisText(basis)}${asOf ? ` (as of ${asOf})` : ""}`;
+    return `${weightBasisText(basis)}${asOf ? ` (as of ${asOf}${staleNote})` : ""}`;
   };
   // N62: "current holdings" are the rows of the latest accepted snapshot at the cutoff.  The
   // panel producer classifies every row; a payload without classes is listed whole and says so.
@@ -403,14 +484,31 @@
   };
   const accountDimension = data?.account_summary || [];
   const accountLabels = new Map();
+  // F03: the producer's own account label (for example a masked number and registration) is
+  // the account's name.  The numbered "<Provider> account N" label is only the fallback for
+  // an account that publishes none, and it depends on the order of the opaque ids.
   Object.entries(accountDimension.reduce((groups, row) => {
     const provider = providerName(row.provider_id || row.provider);
-    (groups[provider] ||= []).push(row.account_id);
+    (groups[provider] ||= []).push(row);
     return groups;
-  }, {})).forEach(([provider, ids]) => ids.sort().forEach((accountId, index) => accountLabels.set(accountId, `${provider} account ${index + 1}`)));
+  }, {})).forEach(([provider, rows]) => rows
+    .sort((left, right) => String(left.account_id).localeCompare(String(right.account_id)))
+    .forEach((row, index) => accountLabels.set(
+      row.account_id,
+      typeof row.account_label === "string" && row.account_label.trim() !== "" ? row.account_label.trim() : `${provider} account ${index + 1}`,
+    )));
   let selectedContextAccount = "ALL";
   let selectedContextStrategy = "ALL";
   const accountLabel = (accountId) => accountLabels.get(accountId) || "Unrecognized account";
+  // F04/F35: an operator cell names the provider and the account, never a raw id.  A row with
+  // no account id is a provider-level row; an id the account dimension does not know is said
+  // to be unrecognized rather than printed.
+  const accountProviderText = (row) => {
+    const provider = row?.provider_id ? providerName(row.provider_id) : "";
+    if (!row?.account_id) return provider;
+    const label = accountLabel(row.account_id);
+    return provider && !label.startsWith(provider) ? `${provider} · ${label}` : label;
+  };
   const matchesContext = (row) => (selectedContextAccount === "ALL" || row.account_id === selectedContextAccount)
     && (selectedContextStrategy === "ALL" || row.strategy_name === selectedContextStrategy || row.strategy_id === selectedContextStrategy);
   const targetState = (row) => {
@@ -422,6 +520,30 @@
   const modelState = (row) => row.status === "AVAILABLE"
     ? "MODEL_VALIDATED_FOR_PM_USE"
     : row.status === "DIAGNOSTIC_ONLY" ? "MODEL_COMPUTED_NOT_VALIDATED" : "MODEL_UNAVAILABLE";
+  // F01/F02: a strategy has one row per lens x surface (x source), and those rows disagree.  The
+  // Portfolio view reduces all of them by a declared rule, never by whichever row happens to be
+  // listed first: validated if any row is validated, otherwise diagnostic-only if any is, and the
+  // counts are always stated so a diagnostic-only or unavailable surface is not hidden.  A lens
+  // that publishes surfaces is read through them; its lens-level series repeats its default surface.
+  const factorRowsForStrategy = (strategyName) => {
+    const rows = [];
+    (factorLensModes.LIVE_ONLY || activeFactorLenses()).forEach((lens) => {
+      const surfaces = lens?.surfaces && typeof lens.surfaces === "object" ? Object.values(lens.surfaces) : [lens];
+      surfaces.forEach((surface) => (surface?.series || []).forEach((item) => { if (item.series_id === strategyName) rows.push(item); }));
+    });
+    return rows;
+  };
+  const factorModelSummary = (strategyName) => {
+    const rows = factorRowsForStrategy(strategyName);
+    const validated = rows.filter((item) => item.status === "AVAILABLE").length;
+    const diagnostic = rows.filter((item) => item.status === "DIAGNOSTIC_ONLY").length;
+    const unavailable = rows.length - validated - diagnostic;
+    const state = !rows.length ? "MODEL_UNAVAILABLE" : validated ? "MODEL_VALIDATED_FOR_PM_USE" : diagnostic ? "MODEL_COMPUTED_NOT_VALIDATED" : "MODEL_UNAVAILABLE";
+    const note = rows.length
+      ? `PM-validated on ${integer.format(validated)} of ${integer.format(rows.length)} lens/surface rows; diagnostic only ${integer.format(diagnostic)}; unavailable ${integer.format(unavailable)}`
+      : "No lens or surface publishes this strategy";
+    return { state, note, validated, diagnostic, unavailable, total: rows.length };
+  };
   const sourceState = (row) => {
     const strategy = strategyByName(row.series_id);
     const available = number(row.coverage?.aligned_observations) > 0
@@ -501,11 +623,10 @@
     }).join("");
     $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
     const implementationRows = data.strategies.map((row) => {
-      const factorRow = (factorLensModes.LIVE_ONLY || activeFactorLenses()).flatMap((lens) => lens.series || []).find((item) => item.series_id === row.strategy_name);
-      const factorState = factorRow ? modelState(factorRow) : "MODEL_UNAVAILABLE";
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(row.cost_status)}</td><td>${statusText(factorState)}</td></tr>`;
+      const factor = factorModelSummary(row.strategy_name);
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(humanStatus(row.cost_status))}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
     });
-    $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows);
+    $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows, evidenceCaption("Implementation, costs, and model readiness"));
     const constructionPoints = performanceLineageMismatch
       ? [
         `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`,
@@ -536,16 +657,62 @@
     return `<span class="cell-secondary">Weight is the share of the snapshot's recorded systematic perimeter${detail ? ` (${detail})` : ""}</span>`;
   };
 
+  // F06/F22: the reserve at the cutoff.  The custody current-capital block is read when the
+  // payload carries it; otherwise the panel's own capital block gives the same status and date.
+  // A reserve that is not ready is shown as not ready, never sized.
+  const reserveCurrentState = () => {
+    const custody = data.custody_current_capital?.reserve;
+    if (custody && typeof custody === "object") {
+      const raw = custody.current_value && typeof custody.current_value === "object" ? custody.current_value.value : custody.value;
+      const value = number(raw) == null ? null : raw;
+      return { status: custody.status ?? null, value, ready: custody.status === "AVAILABLE" && value != null };
+    }
+    const state = capitalState("reserve");
+    return { status: state.status, value: state.value, ready: state.ready };
+  };
+  const allocationCurrent = (row) => {
+    if (row.scope === "RESERVE") {
+      const reserve = reserveCurrentState();
+      return { value: reserve.ready ? number(reserve.value) : null, weight: null, status: reserve.ready ? null : reserve.status || "NOT_READY" };
+    }
+    const strategy = strategyByName(row.strategy_name);
+    return strategy ? { value: number(strategy.current_value_usd), weight: number(strategy.systematic_weight), status: null } : { value: null, weight: null, status: null };
+  };
+  const sumOf = (values) => values.reduce((total, value) => total + value, 0);
+
   function renderAllocationTable() {
     const accepted = data.allocations.filter((row) => (allocationFilter === "all" || row.scope === allocationFilter)
       && (selectedContextStrategy === "ALL" || row.strategy_name === selectedContextStrategy || row.strategy_id === selectedContextStrategy));
-    const rows = accepted.map((row) => {
+    const snapshotDates = [...new Set(accepted.map((row) => String(row.as_of_date || "").slice(0, 10)).filter(Boolean))].sort();
+    const snapshotLabel = snapshotDates.length === 1 ? formatDate(snapshotDates[0]) : "per-row date";
+    const currents = accepted.map(allocationCurrent);
+    const rows = accepted.map((row, index) => {
       const target = targetState(row);
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id || "reserve-classification")}</span></td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
+      const current = currents[index];
+      const currentValue = current.value != null ? currency(current.value) : current.status ? statusText(current.status) : "—";
+      const identity = "Reserve classification";
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
     });
+    // F20: a total only for the additive columns, from the rows shown.  A current value that is
+    // not ready is left out of its total and the footer says how many.
+    const snapshotValues = accepted.map((row) => number(row.current_value_usd)).filter((value) => value != null);
+    const snapshotWeights = accepted.map((row) => number(row.systematic_weight)).filter((value) => value != null);
+    const currentValues = currents.map((item) => item.value).filter((value) => value != null);
+    const currentWeights = currents.map((item) => item.weight).filter((value) => value != null);
+    const notReady = accepted.length - currentValues.length;
+    const footer = accepted.length
+      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
+      : "";
     const table = $("#allocation-table");
     table.dataset.visibleRows = String(accepted.length);
-    table.innerHTML = tableMarkup([["Strategy / identity"], ["Scope"], ["Actual value", "numeric"], ["Actual weight", "numeric"], ["Accepted target", "numeric"], ["Drift", "numeric"], ["Target state"], ["As of"]], rows.length ? rows : [emptyRow(8)]);
+    table.innerHTML = tableMarkup([["Strategy / identity"], ["Scope"], [`Snapshot value (as of ${snapshotLabel})`, "numeric"], [`Snapshot weight (as of ${snapshotLabel})`, "numeric"], ["Current value (cutoff)", "numeric"], ["Current weight", "numeric"], ["Accepted target", "numeric"], ["Drift", "numeric"], ["Target state"], ["As of"]], rows.length ? rows : [emptyRow(10)], null, footer);
+    const note = $("#allocation-snapshot-note");
+    if (note) {
+      const gaps = snapshotDates.map(daysBeforeCutoff).filter((days) => days > 0);
+      note.textContent = !snapshotDates.length ? "" : gaps.length
+        ? `Snapshot value and weight are dated ${snapshotDates.map(formatDate).join(", ")}, up to ${integer.format(Math.max(...gaps))} days before the ${formatDate(data.meta?.portfolio_as_of)} cutoff; current value and weight are the cutoff figures.`
+        : `Snapshot dates ${snapshotDates.map(formatDate).join(", ")} are not before the ${formatDate(data.meta?.portfolio_as_of)} cutoff.`;
+    }
   }
 
   function renderLifecycleTable() {
@@ -580,7 +747,7 @@
     const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td>${symbolCell(row)}</td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDateHtml(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
     positionTable.dataset.visibleRows = String(accepted.length);
-    positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)]);
+    positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity (units)", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)]);
     $("#position-summary").textContent = `${integer.format(accepted.length)} matching`;
     const historyNote = positionHistoryNote();
     $("#position-history-note").textContent = historyNote;
@@ -602,7 +769,7 @@
       ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}` : capitalNotReadyNote()],
       ["Current strategies", String(data.counts.strategies), "Reserve is not a strategy"],
       ["Accounts", String(data.counts.accounts), "Stable internal identities"],
-      ["Positions", data.fact_status.positions, data.counts.positions ? positionKpiNote() : "No accepted position source", data.counts.positions ? "warning" : "danger"],
+      ["Positions", humanStatus(data.fact_status.positions), data.counts.positions ? positionKpiNote() : "No accepted position source", data.counts.positions ? "warning" : "danger"],
     ]);
   }
 
@@ -612,13 +779,13 @@
     renderInvestedCapital();
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
     const maxCount = Math.max(...providers.map(([, count]) => count), 1);
-    $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
+    $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(providerName(provider))}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
     const rows = data.strategies.map((row) => {
       const qualification = hwmQualification(row);
       const navStatus = performanceLineageMismatch ? "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" : row.nav_status;
       return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
-    $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows);
+    $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows, evidenceCaption("Current strategy evidence"));
     renderLifecycleTable();
     renderPositionTable();
     renderLeverageDisclosures();
@@ -640,7 +807,7 @@
       ["Authority", humanStatus(capital.authority_profile), `Policy ${safe(capital.policy_id)}`],
     ]);
     const currentRows = [
-      ...capital.current_by_strategy.map((row) => `<tr><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
+      ...capital.current_by_strategy.map((row) => `<tr><td>${safe(strategyNameById(row.strategy_id))}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
       `<tr><td><strong>Portfolio total</strong></td><td class="numeric"><strong>${currency(capital.current_aggregate_usd)}</strong></td></tr>`,
     ];
     $("#invested-capital-current-table").innerHTML = tableMarkup([["Strategy"], ["Invested capital", "numeric"]], currentRows);
@@ -650,7 +817,7 @@
     const selectedRows = selectedStrategyId === null ? [] : capital.daily_by_strategy.filter((row) => row.strategy_id === selectedStrategyId);
     const dailyRows = [
       ...capital.daily_aggregate.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>Portfolio total</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
-      ...selectedRows.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
+      ...selectedRows.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>${safe(strategyNameById(row.strategy_id))}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
     ];
     $("#invested-capital-daily-table").innerHTML = tableMarkup([["Date"], ["Strategy"], ["Invested capital", "numeric"]], dailyRows);
   }
@@ -661,7 +828,9 @@
   // sink the operating model forbids. Rendered state-faithfully: an empty list means the
   // measure was not evaluated rather than that it is zero, an unavailable amount keeps the
   // source's own reason token, and nothing is aggregated across data classes.
-  const LEVERAGE_MAX_ROWS = 250;
+  // F05: the detail table is paged like the positions table; the coverage table counts every row.
+  const LEVERAGE_PAGE_SIZE = 250;
+  let leveragePage = 0;
 
   // D6: the report labels each account row with its role.  A product account is the
   // unmarked case; a reserve account or one with no current assignment is named
@@ -691,13 +860,16 @@
         "warning",
       ]]);
       $("#leverage-coverage-table").innerHTML = tableMarkup([["Data class"], ["Coverage"], ["Observations", "numeric"]], [emptyRow(3)]);
-      $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], [emptyRow(5)]);
+      $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount (USD or source status)", "numeric"], ["Coverage and reason"]], [emptyRow(5)]);
       truncation.textContent = "";
+      const emptyPager = $("#leverage-pagination");
+      if (emptyPager) emptyPager.hidden = true;
       return;
     }
     const observed = rows.filter((row) => row.coverage_status === "OBSERVED_ONLY");
     const unavailable = rows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
-    status.textContent = unavailable.length ? "Observed only" : "Observed";
+    // F43: the badge says how many rows were observed and how many were not, never "observed only".
+    status.textContent = unavailable.length ? `Observed ${integer.format(observed.length)} / unavailable ${integer.format(unavailable.length)}` : "Observed";
     status.className = unavailable.length ? "badge badge-warning" : "badge badge-positive";
     const classes = [...new Set(rows.map((row) => row.data_class))].sort();
     renderKpis("#leverage-kpis", [
@@ -712,33 +884,41 @@
     }
     const coverageRows = [...coverage.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, count]) => {
       const [dataClass, coverageStatus, reason] = JSON.parse(key);
-      return `<tr><td>${safe(dataClass)}</td><td><span class="cell-primary">${statusText(coverageStatus)}</span>${reason ? `<span class="cell-secondary">${safe(reason)}</span>` : ""}</td><td class="numeric">${integer.format(count)}</td></tr>`;
+      return `<tr><td>${safe(humanStatus(dataClass))}</td><td><span class="cell-primary">${statusText(coverageStatus)}</span>${reason ? `<span class="cell-secondary">${safe(reason)}</span>` : ""}</td><td class="numeric">${integer.format(count)}</td></tr>`;
     });
     $("#leverage-coverage-table").innerHTML = tableMarkup([["Data class"], ["Coverage"], ["Observations", "numeric"]], coverageRows);
-    const shown = rows.slice(0, LEVERAGE_MAX_ROWS);
+    const pageCount = Math.max(1, Math.ceil(rows.length / LEVERAGE_PAGE_SIZE));
+    leveragePage = Math.min(leveragePage, pageCount - 1);
+    const shown = rows.slice(leveragePage * LEVERAGE_PAGE_SIZE, (leveragePage + 1) * LEVERAGE_PAGE_SIZE);
     const detailRows = shown.map((row) => {
       const amount = row.amount && typeof row.amount === "object" ? row.amount : null;
       const measure = amount && amount.status === "AVAILABLE" && amount.value !== null
         ? currencyExact(amount.value)
         : statusText(amount ? amount.status : "UNAVAILABLE");
-      const account = [row.provider_id, row.account_id].filter(Boolean).join(" · ");
-      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}${accountRoleNote(row)}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
+      const account = accountProviderText(row);
+      return `<tr><td><span class="cell-primary">${safe(humanStatus(row.data_class))}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(humanStatus(row.measurement_basis))}</span>` : ""}</td><td>${safe(account || "—")}${accountRoleNote(row)}</td><td>${safe(row.strategy_id ? strategyNameById(row.strategy_id) : "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
     });
-    $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], detailRows);
+    $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount (USD or source status)", "numeric"], ["Coverage and reason"]], detailRows);
+    const firstShown = leveragePage * LEVERAGE_PAGE_SIZE + 1;
     truncation.textContent = rows.length > shown.length
-      ? `Showing ${integer.format(shown.length)} of ${integer.format(rows.length)} observations; the coverage table above counts every one.`
+      ? `Showing ${integer.format(firstShown)}–${integer.format(firstShown + shown.length - 1)} of ${integer.format(rows.length)} observations; the coverage table above counts every one.`
       : "";
+    const pager = $("#leverage-pagination");
+    if (pager) pager.hidden = pageCount <= 1;
+    $("#leverage-page-status").textContent = `Page ${leveragePage + 1} of ${pageCount}`;
+    $("#leverage-page-previous").disabled = leveragePage === 0;
+    $("#leverage-page-next").disabled = leveragePage >= pageCount - 1;
   }
 
   function renderPerformanceComparison() {
     if (performanceLineageMismatch) {
-      $("#performance-comparison").innerHTML = `<div class="metric-block"><div class="metric-label">Account context</div><div class="metric-value metric-value-compact">${safe(selectedContextAccount === "ALL" ? "All accounts" : accountLabel(selectedContextAccount))}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">Strategy context</div><div class="metric-value metric-value-compact">${safe(selectedContextStrategy === "ALL" ? "Select one strategy" : selectedContextStrategy)}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">13-week strategy return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Benchmark</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Relative return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div>`;
+      $("#performance-comparison").innerHTML = `<div class="metric-block"><div class="metric-label">Account context</div><div class="metric-value metric-value-compact">${safe(selectedContextAccount === "ALL" ? "All accounts" : accountLabel(selectedContextAccount))}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">Strategy context</div><div class="metric-value metric-value-compact">${safe(selectedContextStrategy === "ALL" ? "Select one strategy" : selectedContextStrategy)}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">${COMPARISON_WEEKS}-week strategy return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Benchmark</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Relative return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div>`;
       return;
     }
     const weeklyData = data.weekly_returns;
     const strategyRow = selectedContextStrategy === "ALL" ? null : weeklyData?.series?.find((row) => row.primary_group === "STRATEGY" && (row.series_id === selectedContextStrategy || row.display_name === selectedContextStrategy));
     const benchmarkRow = weeklyData?.series?.find((row) => row.primary_group === "CORE_BENCHMARK" || row.display_groups?.includes("CORE_BENCHMARK"));
-    const completedWeeks = (weeklyData?.weeks || []).filter((week) => week !== weeklyData.current_week?.week_start).slice(-13);
+    const completedWeeks = (weeklyData?.weeks || []).filter((week) => week !== weeklyData.current_week?.week_start).slice(-COMPARISON_WEEKS);
     const cumulative = (row) => {
       if (!row) return null;
       const values = completedWeeks.map((week) => row.primary_group === "STRATEGY" ? row.values_by_mode?.LIVE_ONLY?.[week] : row.values?.[week]);
@@ -748,8 +928,63 @@
     const strategyReturn = cumulative(strategyRow);
     const benchmarkReturn = cumulative(benchmarkRow);
     const relative = strategyReturn == null || benchmarkReturn == null ? null : strategyReturn - benchmarkReturn;
-    $("#performance-comparison").innerHTML = `<div class="metric-block"><div class="metric-label">Account context</div><div class="metric-value metric-value-compact">${safe(selectedContextAccount === "ALL" ? "All accepted accounts" : accountLabel(selectedContextAccount))}</div><div class="metric-note">Persistent context; external account numbers are not shown</div></div><div class="metric-block"><div class="metric-label">Strategy context</div><div class="metric-value metric-value-compact">${safe(strategyRow?.display_name || (selectedContextStrategy === "ALL" ? "Select one strategy" : selectedContextStrategy))}</div><div class="metric-note">Account-live source remains separate from model acceptance</div></div><div class="metric-block"><div class="metric-label">13-week strategy return</div><div class="metric-value">${pct(strategyReturn)}</div><div class="metric-note">${strategyReturn == null ? "Unavailable unless every selected live-only week is accepted" : "Compounded accepted live-only weeks"}</div></div><div class="metric-block"><div class="metric-label">Benchmark</div><div class="metric-value">${pct(benchmarkReturn)}</div><div class="metric-note">${safe(benchmarkRow?.display_name || "No accepted core benchmark")}</div></div><div class="metric-block"><div class="metric-label">Relative return</div><div class="metric-value">${pct(relative)}</div><div class="metric-note">Arithmetic difference over the same completed weeks</div></div>`;
+    $("#performance-comparison").innerHTML = `<div class="metric-block"><div class="metric-label">Account context</div><div class="metric-value metric-value-compact">${safe(selectedContextAccount === "ALL" ? "All accepted accounts" : accountLabel(selectedContextAccount))}</div><div class="metric-note">Persistent context; external account numbers are not shown</div></div><div class="metric-block"><div class="metric-label">Strategy context</div><div class="metric-value metric-value-compact">${safe(strategyRow?.display_name || (selectedContextStrategy === "ALL" ? "Select one strategy" : selectedContextStrategy))}</div><div class="metric-note">Account-live source remains separate from model acceptance</div></div><div class="metric-block"><div class="metric-label">${COMPARISON_WEEKS}-week strategy return</div><div class="metric-value">${pct(strategyReturn)}</div><div class="metric-note">${strategyReturn == null ? "Unavailable unless every selected live-only week is accepted" : "Compounded accepted live-only weeks"}</div></div><div class="metric-block"><div class="metric-label">Benchmark</div><div class="metric-value">${pct(benchmarkReturn)}</div><div class="metric-note">${safe(benchmarkRow?.display_name || "No accepted core benchmark")}</div></div><div class="metric-block"><div class="metric-label">Relative return</div><div class="metric-value">${pct(relative)}</div><div class="metric-note">Arithmetic difference over the same completed weeks</div></div>`;
   }
+
+  // F08: a governed HWM proof publishes its whole daily index path.  The panel shows what an
+  // operator reads from it: the point count and date range, the last point, the high-water point
+  // and the lowest point.  The values are the payload's own strings.
+  const hwmPathSummary = (proof) => {
+    const path = Array.isArray(proof?.index_path) ? proof.index_path : [];
+    if (!path.length) return "no index path published";
+    const pointDate = (point) => point?.date || point?.as_of_date || "";
+    const indexOf = (point) => Number(point.index);
+    let high = path[0];
+    let low = path[0];
+    path.forEach((point) => {
+      if (indexOf(point) > indexOf(high)) high = point;
+      if (indexOf(point) < indexOf(low)) low = point;
+    });
+    const last = path[path.length - 1];
+    const range = pointDate(path[0]) && pointDate(last) ? ` ${safe(pointDate(path[0]))}..${safe(pointDate(last))}` : "";
+    const at = (point) => (pointDate(point) ? ` on ${safe(pointDate(point))}` : "");
+    return `${integer.format(path.length)} daily points${range}; last ${safe(last.index)}${at(last)}; high-water point ${safe(high.index)}${at(high)}; lowest point ${safe(low.index)}${at(low)}`;
+  };
+  // F08: how old the calculation is against the age the policy allows.
+  const hwmAgeText = (proof) => {
+    const age = number(proof?.calculation_age_days);
+    const allowed = number(proof?.maximum_age_days);
+    if (age == null) return "age not published";
+    return `${integer.format(age)} days old${allowed == null ? "" : ` (maximum ${integer.format(allowed)})`}`;
+  };
+  // F10/F09: the date a second sleeve is first funded, from the invested-capital history.  Before
+  // it the perimeter has one funded sleeve, so a path that starts earlier describes that sleeve.
+  const sleeveFundingStarts = () => {
+    const rows = Array.isArray(data.invested_capital?.daily_by_strategy) ? data.invested_capital.daily_by_strategy : [];
+    const first = new Map();
+    rows.forEach((row) => {
+      const day = String(row.date || "").slice(0, 10);
+      if (!day || !(number(row.invested_capital_usd) > 0)) return;
+      if (!first.has(row.strategy_id) || day < first.get(row.strategy_id)) first.set(row.strategy_id, day);
+    });
+    return [...first.entries()].sort((left, right) => left[1].localeCompare(right[1]) || String(left[0]).localeCompare(String(right[0])));
+  };
+  const perimeterStartText = (proof) => {
+    const starts = sleeveFundingStarts();
+    if (starts.length < 2 || starts[1][1] <= starts[0][1]) return "";
+    const pathStart = String(proof?.index_path?.[0]?.date || proof?.index_path?.[0]?.as_of_date || "").slice(0, 10);
+    if (pathStart && pathStart >= starts[1][1]) return "";
+    return `Perimeter start: only ${strategyNameById(starts[0][0])} is funded from ${starts[0][1]} until ${starts[1][1]}, when ${strategyNameById(starts[1][0])} is first funded; the index path before ${starts[1][1]} describes one sleeve, not the ${integer.format(starts.length)}-sleeve perimeter.`;
+  };
+  // F10: the policy ids the HWM figures cite, named side by side so a mismatch is visible.
+  const hwmPolicyText = (proof, candidate) => {
+    const proofPolicy = proof?.policy_id || candidate?.policy_id || null;
+    const summaryPolicy = data.hwm_summary?.policy_id || null;
+    if (!proofPolicy && !summaryPolicy) return "";
+    const differ = proofPolicy && summaryPolicy && proofPolicy !== summaryPolicy;
+    return `Policy ids: governed proof ${proofPolicy || "not published"}; HWM summary ${summaryPolicy || "not published"}${differ ? "; the two policy ids differ" : ""}.`;
+  };
+  const STRESS_LIMIT_POSITION = 0.375;
 
   function renderRisk() {
     const includedHwm = data.strategies.filter((row) => row.hwm_scope === "INCLUDED").map((row) => ({ row, qualification: hwmQualification(row) }));
@@ -761,9 +996,13 @@
     // sentence "no numeric HWM is calculated" is only true without a candidate.
     const hwmCandidate = data.advisory.hwm_candidate && typeof data.advisory.hwm_candidate === "object" ? data.advisory.hwm_candidate : null;
     const hwmNotAccepted = hwmCandidate
-      ? `Numeric HWM not accepted (${hwmCandidate.not_accepted_register || "register"}: ${humanStatus(hwmCandidate.not_accepted_reason || data.advisory.hwm_numerical_reason).toLowerCase()}). Governed PORT-HWM-4 candidate shown, pending owner acceptance`
+      ? `Numeric HWM not accepted (${hwmCandidate.not_accepted_register || "register"}: ${humanStatus(hwmCandidate.not_accepted_reason || data.advisory.hwm_numerical_reason).toLowerCase()}). Governed ${hwmCandidate.policy_id || data.hwm_governed_proof?.policy_id || "HWM"} candidate shown, pending owner acceptance`
       : "";
     const hwmNumericSentence = hwmCandidate ? hwmNotAccepted : "no numeric HWM is calculated while unavailable";
+    // F10: the KPI is the numerical HWM's own status; its tone follows that status, not the perimeter's.
+    const hwmKpiTone = data.advisory.hwm_numerical_status
+      ? ({ danger: "danger", warning: "warning", positive: "positive" })[toneForStatus(data.advisory.hwm_numerical_status)] || ""
+      : unavailableHwm.length ? "danger" : "positive";
     renderKpis("#risk-kpis", performanceLineageMismatch ? [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Stress scenario", "danger"],
       ["Systematic HWM", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
@@ -771,23 +1010,30 @@
       ["MWR evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; ${hwmNumericSentence}`, unavailableHwm.length ? "danger" : "positive"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_numerical_status || data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; ${hwmNumericSentence}.${data.advisory.hwm_numerical_status ? ` Governed perimeter: ${humanStatus(data.advisory.hwm_status)}.` : ""}`, hwmKpiTone],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
-      ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Receipt-complete flows; completeness of the flow path is not proven (see rows)", data.counts.mwr_available ? "positive" : "danger"],
+      ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, typeof data.fact_status?.flows === "string" ? `Receipt-complete flows; flow fact ${humanStatus(data.fact_status.flows).toLowerCase()} (see rows)` : "Receipt-complete flows; flow-path completeness is not declared in this payload (see rows)", data.counts.mwr_available ? "positive" : "danger"],
     ]);
     const stress = number(data.advisory.correlation_one_stress);
     const limit = number(data.advisory.hwm_limit);
     const comparable = Number.isFinite(stress) && Number.isFinite(limit);
     const passes = comparable && stress <= limit;
     const breaches = comparable && stress > limit;
-    $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">${safe(stressWeightLabel())}</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${breaches ? "status-text danger" : ""}">${pct(stress)}</div></div>${breaches ? `<div class="callout callout-danger">Stress exceeds the ${pct(limit)} HWM boundary. This is advisory evidence, not a liquidation instruction.</div>` : ""}`;
+    // F30: the bar's scale puts the governed limit at a fixed place on the track, so the fill and the
+    // limit marker both follow advisory.hwm_limit; a stress below zero fills nothing.
+    const barScale = comparable && limit > 0 ? limit / STRESS_LIMIT_POSITION : Number.isFinite(stress) && stress > 0 ? stress * 1.25 : 1;
+    const barWidth = Number.isFinite(stress) ? Math.max(0, Math.min(100, stress / barScale * 100)) : 0;
+    const limitMarker = Number.isFinite(limit) && limit > 0 ? `<span class="scenario-limit" aria-hidden="true" style="left:${(limit / barScale * 100).toFixed(2)}%"></span>` : "";
+    const limitBadge = $("#stress-limit-badge");
+    if (limitBadge) limitBadge.textContent = Number.isFinite(limit) ? `${pct(limit)} HWM boundary` : "HWM boundary not declared";
+    $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">${safe(stressWeightLabel())}</div><div class="scenario-track">${limitMarker}<span class="scenario-fill ${passes ? "pass" : ""}" style="width:${barWidth.toFixed(2)}%"></span></div><div class="scenario-value ${breaches ? "status-text danger" : ""}">${pct(stress)}</div></div>${breaches ? `<div class="callout callout-danger">Stress exceeds the ${pct(limit)} HWM boundary. This is advisory evidence, not a liquidation instruction.</div>` : ""}`;
     const unavailableHwmSummary = (data.hwm_summary.uncovered_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${humanStatus(item.qualification_gap)} · last accepted ${formatDate(item.last_accepted_date)} · ${item.freshness_reason || "No freshness reason recorded"}`).join(" · ");
     const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${hwmObservationSummary(row)}`).join(" · ");
     const portableProof = data.hwm_portable_proof;
     const portableProofContext = data.advisory.hwm_numerical_status === "AVAILABLE" ? "The governed financial HWM remains independently available; these portable values do not replace it." : "The governed financial HWM remains unavailable; these portable values do not replace or populate it.";
-    const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable PORT-HWM-4 proof only: path ${portableProof.index_path.map((point) => safe(point.index)).join(" → ")}; index ${safe(portableProof.current_index)}, HWM ${safe(portableProof.current_hwm)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDateHtml(portableProof.complete_through)}, evaluated ${formatDateHtml(portableProof.evaluated_on)} (${integer.format(portableProof.calculation_age_days)} days old; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
+    const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable ${safe(portableProof.policy_id || "HWM")} proof only: ${hwmPathSummary(portableProof)}; index ${safe(portableProof.current_index)}, HWM ${safe(portableProof.current_hwm)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDateHtml(portableProof.complete_through)}, evaluated ${formatDateHtml(portableProof.evaluated_on)} (${hwmAgeText(portableProof)}; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
     const governedProof = data.hwm_governed_proof;
-    const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — PENDING OWNER ACCEPTANCE</strong><br>${hwmCandidate ? `${safe(hwmNotAccepted)}. Candidate result` : "Governed PORT-HWM-4 result (ACCEPTED_GOVERNED)"}: path ${governedProof.index_path.map((point) => safe(point.index)).join(" → ")}; index ${safe(governedProof.current_index)}, HWM ${safe(governedProof.current_hwm)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDateHtml(governedProof.complete_through)}, evaluated ${formatDateHtml(governedProof.evaluated_on)} (${integer.format(governedProof.calculation_age_days)} days old; ${statusText(governedProof.age_status)}). Basis ${safe(governedProof.return_basis)}. Receipt ${safe(governedProof.receipt_sha256.slice(0, 12))}….</div>` : "";
+    const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — PENDING OWNER ACCEPTANCE</strong><br>${hwmCandidate ? `${safe(hwmNotAccepted)}. Candidate result` : `Governed ${safe(governedProof.policy_id || "HWM")} result (${safe(humanStatus(governedProof.financial_acceptance || "UNSPECIFIED"))})`}: ${hwmPathSummary(governedProof)}; index ${safe(governedProof.current_index)}, HWM ${safe(governedProof.current_hwm)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDateHtml(governedProof.complete_through)}, evaluated ${formatDateHtml(governedProof.evaluated_on)} (${hwmAgeText(governedProof)}; ${statusText(governedProof.age_status)}). Basis ${safe(humanStatus(governedProof.return_basis || "UNAVAILABLE"))}. ${safe(hwmPolicyText(governedProof, hwmCandidate))} ${safe(perimeterStartText(governedProof))} Receipt ${safe(String(governedProof.receipt_sha256 || "").slice(0, 12))}….</div>` : "";
     $("#hwm-status").innerHTML = performanceLineageMismatch
       ? `<div class="validation-card"><div><strong>Report performance withheld</strong><span>— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span></div><div class="validation-score">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</div></div><div class="callout callout-neutral">Report-derived return, MWR, observation-count, return-path, and HWM qualification evidence is withheld until the source-lineage identity matches.</div>`
       : `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? (hwmCandidate ? "The numerical full-systematic HWM is not accepted while any included sleeve is unqualified." : "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified.") : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
@@ -806,11 +1052,14 @@
         return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td></tr>`;
       }
       const acceptedReturn = row.twr;
-      const returnStatus = row.twr_status;
+      // F13: the producer's enum says inferred flow timing for every available row; the row's own
+      // flow_timing says whether any flow timing was inferred.  Without one the label is the base status.
+      const returnStatus = row.flow_timing ? row.twr_status : String(row.twr_status || "").replace(/_WITH_INFERRED_FLOW_TIMING$/, "");
+      const flowTiming = row.flow_timing ? `<span class="cell-secondary">${safe(humanStatus(row.flow_timing))}</span>` : "";
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -869,6 +1118,12 @@
     return source != null && source.startsWith("-") && /[1-9]/.test(source);
   };
   const manifestMoney = (value) => manifestFixed(value, 2);
+  // F11: the manifest stores the observed maximum drawdown as a positive depth; every other
+  // drawdown in the panel is signed.  It is shown signed, from the same decimal string.
+  const manifestDrawdown = (value) => {
+    const source = manifestDecimal(value);
+    return source == null || source.startsWith("-") || !/[1-9]/.test(source) ? source : `-${source}`;
+  };
   const manifestPct = (value) => {
     const shifted = manifestShift(value, 2);
     return shifted == null ? "—" : `${manifestFixed(shifted, 2)}%`;
@@ -878,6 +1133,15 @@
       return safe(row.status);
     }
     return `${safe(row.status)}: ${safe(row.blocking_reason || "blocking reason unavailable")}`;
+  };
+
+  // F12: the manifest rows are not additive (an internal transfer is capital in on one row and
+  // withdrawn on another), so no column is summed.  The consolidated figure is the governed
+  // invested-capital result's own aggregate.
+  const manifestFooter = () => {
+    const aggregate = data.invested_capital?.current_aggregate_usd;
+    const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
+    return `${total}<tr><td colspan="13" class="cell-secondary">Rows are not additive: internal transfers appear in both capital in and withdrawn, so the epoch columns are not summed.</td></tr>`;
   };
 
   function renderAccountManifest() {
@@ -936,15 +1200,15 @@
       if (row.status !== "OK") {
         return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
-      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}${sleeveRow(row) ? `<span class="cell-secondary">sleeve allocation</span>` : ""}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}${sleeveRow(row) ? `<span class="cell-secondary">sleeve allocation</span>` : ""}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(manifestDrawdown(row.observed_max_drawdown)) ? "is-negative" : ""}">${manifestPct(manifestDrawdown(row.observed_max_drawdown))}</td></tr>`;
     });
     $("#account-manifest-table").innerHTML = tableMarkup([
       ["Account"], ["Strategy"], ["Observed interval"],
       ["Capital in", "numeric", sleeveHeader], ["Withdrawn", "numeric"], ["Net capital", "numeric", sleeveHeader],
       ["Current", "numeric"], ["Gain", "numeric", sleeveHeader],
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
-      ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
-    ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
+      ["Observed HWM (index, base 100)", "numeric"], ["Observed Max DD (signed)", "numeric"],
+    ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`, manifestFooter());
     legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Capital in = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Capital in − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Capital in, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. ${governedCapitalSupplied ? "Governed invested capital (the deposits) and the strategy cash line are reported separately." : "Governed invested capital was not supplied to this build: on these rows Capital in is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;
@@ -966,6 +1230,12 @@
     }
   }
 
+  // F32: the execution effect each underwriting row declares.  A payload that declares none keeps the
+  // policy statement, and says that it is policy text.
+  const underwritingEffects = (key) => [...new Set((data.strategy_underwriting?.rows || []).map((row) => row.advisory_disposition?.[key]).filter((value) => typeof value === "string"))];
+  const advisoryExecutionEffect = () => underwritingEffects("execution_effect").join(" / ") || "NONE";
+  const advisoryExecutionEffectNote = () => (underwritingEffects("execution_effect").length ? "Read-only advisory surface; declared by every underwriting row" : "Policy statement: read-only advisory surface; no row declares an execution effect");
+
   function renderSignals() {
     const gapTested = data.strategies.filter((row) => row.implementation_gap_status === "tested").length;
     const knownCost = data.strategies.filter((row) => String(row.cost_status).startsWith("known")).length;
@@ -973,7 +1243,7 @@
       ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, "Provider versus account evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
-      ["Automated action", "NONE", "Read-only advisory surface", "reserve"],
+      ["Automated action", advisoryExecutionEffect(), advisoryExecutionEffectNote(), "reserve"],
     ]);
     // A5: the account-live CAGR and strategy-level MWR each carry an annualization label
     // (basis/window, already marked "(<1 year)" when short) that must render beside the
@@ -981,18 +1251,33 @@
     // renders separately with its own annualization label so the two numbers and their
     // labels are never crossed. Neither CAGR nor MWR has its own cell, so both join the
     // account-cumulative cell rather than being silently dropped.
+    // F19: each strategy's account-live window starts on its own date; the header cannot, so the cell does.
+    const accountWindowStart = (row) => row.provider_evidence?.account?.observed_start || null;
     const implementationRows = data.strategies.map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
       const cagrLabel = row.account_live_cagr_annualization?.label;
       const mwrLabel = row.mwr_annualization?.label;
       const cumulativeCell = performanceLineageMismatch
         ? withheld
-        : `${pct(row.account_live_cumulative_return)}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${cagrLabel ? ` (${safe(cagrLabel)})` : ""}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${mwrLabel ? ` (${safe(mwrLabel)})` : ""}</span>` : ""}`;
+        : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${formatDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows);
-    const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : (row.value_usd || row.value || "—"))}</td></tr>`);
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"));
+    // F36: a blocking item's value is shown beside its gap text, and a check's tolerance and maximum
+    // difference are shown when the report publishes them (or said not to be published).
+    const reconciliationEvidence = (row) => {
+      const parts = [];
+      if (row.known_gap) parts.push(operatorText(row.known_gap));
+      const value = row.value_usd ?? row.value;
+      if (value != null && value !== "") parts.push(`value ${value}`);
+      if (row.check_id) {
+        parts.push(row.tolerance != null ? `tolerance ${row.tolerance}` : "tolerance not published");
+        parts.push(row.maximum_absolute_difference != null ? `maximum absolute difference ${smallDecimal(row.maximum_absolute_difference)}` : "difference not published");
+      }
+      return parts.join(" · ") || "—";
+    };
+    const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(reconciliationEvidence(row))}</td></tr>`);
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
 
@@ -1074,7 +1359,7 @@
       ["Model/account gaps", `${underwriting.counts.quantified_model_account_gap}/${underwriting.counts.strategies}`, "Exact-common-date totals; causes remain separate", underwriting.counts.quantified_model_account_gap ? "warning" : "danger"],
       ["Regime comparisons", `${underwriting.counts.empirical_regime_comparison}/${underwriting.counts.strategies}`, "Pre-live thresholds and version-matched empirical range", underwriting.counts.empirical_regime_comparison ? "positive" : "warning"],
     ]);
-    $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic. Automatic drop, allocation, readiness, execution, and order authority are all <strong>NONE</strong>.`;
+    $("#underwriting-boundary").innerHTML = `<strong>${safe(underwriting.policy_id)}</strong> · policy <code>${safe(underwriting.policy_sha256.slice(0, 14))}…</code> · evidence layers are never silently concatenated. Long-history membership requires an exact version match; implementation fidelity uses account-live exact-common-date evidence. Regime underwriting admits complete accepted-calendar weeks only; partial first, last, and current weeks are excluded. Regime results are observable behavior diagnostics, not proof of hidden strategy logic. Allocation effect <strong>${safe(underwritingEffects("allocation_effect").join(" / ") || "not declared")}</strong> and execution effect <strong>${safe(underwritingEffects("execution_effect").join(" / ") || "not declared")}</strong> on every row; automatic drop, readiness, and order authority are policy-fixed at <strong class="policy-text" title="Policy statement; the payload carries no field for it">NONE</strong>.`;
     const rows = underwriting.rows.map((row) => {
       const layers = row.evidence_layers;
       const history = row.long_history;
@@ -1213,6 +1498,8 @@
   function factorEvidenceComposition(row) {
     const composition = row.series_composition || {};
     if (!composition.status) {
+      // F38: a series with no model has no composition to declare; only a fitted legacy analysis lacks the contract.
+      if (row.status === "UNAVAILABLE") return `<div class="callout callout-warning"><strong>Evidence composition:</strong> No composition: series unavailable. No backtest-history claim is made.${safe(rejectedBucketNote(row))}</div>`;
       return `<div class="callout callout-warning"><strong>Evidence composition:</strong> This legacy analysis does not declare live-versus-backtest row composition. No backtest-history claim is made.${safe(rejectedBucketNote(row))}</div>`;
     }
     const liveCount = Number(composition.live_observations || 0);
@@ -1265,8 +1552,10 @@
     const latest = path[path.length - 1];
     const latestBetas = factorIds.map((factor) => `<div><span>${safe(factor)} beta</span><strong>${decimal((latest.betas || latest.exposures || {})[factor])}</strong></div>`).join("");
     const comparison = dynamic.holdout_comparison || {};
-    return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor betas</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(dynamic.validation || "TRAIN_ONLY_SELECTION")}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor beta path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div><div class="metric-list">${latestBetas}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Latest beta date</span><strong>${safe(latest.date)}</strong></div><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
+    return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor betas</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(dynamic.validation || "UNAVAILABLE"))}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor beta path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div><div class="metric-list">${latestBetas}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Latest beta date</span><strong>${safe(latest.date)}</strong></div><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
   }
+
+  const ORTHOGONAL_DATED_ROW_CAP = 120;
 
   function orthogonalAttributionMarkup(row) {
     const attribution = row.orthogonal_attribution;
@@ -1275,23 +1564,32 @@
     const interval = row.interval_association || {};
     const coefficients = attribution.mode_coefficients;
     const perDate = Array.isArray(attribution.per_date) ? attribution.per_date : [];
-    const modeRows = perDate.flatMap((dated, index) => {
-      const datedCoefficients = Array.isArray(coefficients) ? coefficients[index] : coefficients || {};
+    // F39: a static fit's coefficients are one set, shown once; the dated rows carry only what is
+    // dated (the contribution) and are capped, with the count said.  A coefficient list with one
+    // entry per date keeps its coefficient on each dated row.
+    const staticCoefficients = coefficients && !Array.isArray(coefficients) ? coefficients : null;
+    const allModeRows = perDate.flatMap((dated, index) => {
+      const datedCoefficients = Array.isArray(coefficients) ? coefficients[index] : staticCoefficients ? {} : coefficients || {};
       const contributions = dated.mode_contributions || {};
       return [...new Set([...Object.keys(datedCoefficients || {}), ...Object.keys(contributions)])]
         .sort()
-        .map((mode) => `<tr><td>${safe(dated.date || "—")}</td><td>${safe(dated.partition || "UNAVAILABLE")}</td><td>${safe(mode)}</td><td class="numeric">${decimal(datedCoefficients?.[mode])}</td><td class="numeric">${pct(contributions[mode], 3)}</td></tr>`);
+        .map((mode) => `<tr><td>${safe(dated.date || "—")}</td><td>${safe(humanStatus(dated.partition || "UNAVAILABLE"))}</td><td>${safe(mode)}</td><td class="numeric">${staticCoefficients ? "static fit" : decimal(datedCoefficients?.[mode])}</td><td class="numeric">${pct(contributions[mode], 3)}</td></tr>`);
     });
-    const staticRows = !perDate.length && coefficients && !Array.isArray(coefficients)
-      ? Object.entries(coefficients).map(([mode, value]) => `<tr><td>—</td><td>TRAIN</td><td>${safe(mode)}</td><td class="numeric">${decimal(value)}</td><td class="numeric">—</td></tr>`)
+    const modeRows = allModeRows.slice(0, ORTHOGONAL_DATED_ROW_CAP);
+    const staticRows = staticCoefficients
+      ? Object.entries(staticCoefficients).map(([mode, value]) => `<tr><td>—</td><td>Train</td><td>${safe(mode)}</td><td class="numeric">${decimal(value)}</td><td class="numeric">—</td></tr>`)
       : [];
     const riskBudget = attribution.train_fitted_risk_budget || {};
-    const riskRows = Object.entries(riskBudget.euler_allocations || {})
-      .map(([mode, value]) => `<tr><td>${safe(mode)}</td><td class="numeric">${decimal(value)}</td><td>${safe(riskBudget.interpretation || "UNAVAILABLE")}</td></tr>`);
+    // F27: the Euler allocations are of order 1e-5 to 1e-3 and a three-decimal figure cannot rank
+    // them, so each is shown as its share of the total of the same values.
+    const eulerEntries = Object.entries(riskBudget.euler_allocations || {});
+    const eulerTotal = sumOf(eulerEntries.map(([, value]) => Number(value)).filter(Number.isFinite));
+    const riskRows = eulerEntries
+      .map(([mode, value]) => `<tr><td>${safe(mode)}</td><td class="numeric">${eulerTotal > 0 && number(value) != null ? pct(Number(value) / eulerTotal, 2) : smallDecimal(value)}</td><td>${safe(humanStatus(riskBudget.interpretation || "UNAVAILABLE"))}</td></tr>`);
     const identityText = identity.surface === "ORTHOGONAL_RISK_ATTRIBUTION"
-      ? `${identity.surface} · ${identity.model_id || "UNAVAILABLE_MODEL_ID"} · ${identity.methodology_manifest_sha256 || "UNAVAILABLE_METHODOLOGY_ID"}`
-      : "UNAVAILABLE_ORTHOGONAL_IDENTITY";
-    return `<div class="grid grid-12" style="margin-top:16px"><div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Orthogonal risk attribution</div><h3>Mixed modes, separate from raw factor betas</h3></div><span class="badge ${attribution.status === "AVAILABLE" ? "badge-positive" : "badge-warning"}">${safe(humanStatus(attribution.status || "UNAVAILABLE"))}</span></div><div class="callout callout-neutral"><strong>Named surface:</strong> ${safe(identityText)}. ${safe(attribution.method_id || "UNAVAILABLE_METHOD")}. Mode IDs are mixed orthogonal coordinates, not raw factor betas. <strong>Information set:</strong> ${safe(interval.evaluation_information_set || "UNAVAILABLE")}. <strong>Holdout interpretation:</strong> ${safe(interval.holdout_display_claim || "UNAVAILABLE")}</div>${(modeRows.length || staticRows.length) ? `<div class="table-wrap wide"><table><caption>Orthogonal mixed-mode coefficients and dated contributions</caption>${tableMarkup([["Date"], ["Partition"], ["Mixed mode"], ["Coefficient", "numeric"], ["Contribution", "numeric"]], [...staticRows, ...modeRows])}</table></div>` : `<div class="callout callout-warning">No orthogonal mode coefficients or contributions are available for this selected model.</div>`}${riskRows.length ? `<div class="table-wrap"><table><caption>Train-fitted orthogonal risk allocation</caption>${tableMarkup([["Mixed mode"], ["Euler allocation", "numeric"], ["Risk interpretation"]], riskRows)}</table></div>` : ""}</div></div>`;
+      ? `${humanStatus(identity.surface)} · ${identity.model_id || "model id not published"} · ${identity.methodology_manifest_sha256 || "methodology id not published"}`
+      : "orthogonal identity not published";
+    return `<div class="grid grid-12" style="margin-top:16px"><div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Orthogonal risk attribution</div><h3>Mixed modes, separate from raw factor betas</h3></div><span class="badge ${attribution.status === "AVAILABLE" ? "badge-positive" : "badge-warning"}">${safe(humanStatus(attribution.status || "UNAVAILABLE"))}</span></div><div class="callout callout-neutral"><strong>Named surface:</strong> ${safe(identityText)}. ${safe(attribution.method_id || "method not published")}. Mode IDs are mixed orthogonal coordinates, not raw factor betas. <strong>Information set:</strong> ${safe(interval.evaluation_information_set || "UNAVAILABLE")}. <strong>Holdout interpretation:</strong> ${safe(interval.holdout_display_claim || "UNAVAILABLE")}</div>${(modeRows.length || staticRows.length) ? `<div class="table-wrap wide"><table id="orthogonal-coefficient-table"><caption>Orthogonal mixed-mode coefficients and dated contributions</caption>${tableMarkup([["Date"], ["Partition"], ["Mixed mode"], ["Coefficient (mode loading)", "numeric"], ["Contribution (return per period)", "numeric"]], [...staticRows, ...modeRows])}</table></div>${allModeRows.length > modeRows.length ? `<p class="cell-secondary">Showing the first ${integer.format(modeRows.length)} of ${integer.format(allModeRows.length)} dated contribution rows${staticCoefficients ? "; the coefficients are the static fit listed once above" : ""}.</p>` : ""}` : `<div class="callout callout-warning">No orthogonal mode coefficients or contributions are available for this selected model.</div>`}${riskRows.length ? `<div class="table-wrap"><table id="orthogonal-risk-table"><caption>Train-fitted orthogonal risk allocation</caption>${tableMarkup([["Mixed mode"], ["Euler allocation (share of total)", "numeric"], ["Risk interpretation"]], riskRows)}</table></div>` : ""}</div></div>`;
   }
 
   function renderFactorDetail() {
@@ -1311,7 +1609,7 @@
         const inference = row.diagnostics?.inference || {};
         const reason = row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
         const diagnosticBetaRows = (row.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
-        const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
+        const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table id="factor-diagnostic-beta-table"><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta (return per unit factor return)", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
         const diagnosticAlpha = row.alpha || {};
         const diagnosticAlphaMarkup = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Diagnostic net alpha</div><div class="metric-value">${pct(diagnosticAlpha.net_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.net_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic gross alpha</div><div class="metric-value">${pct(diagnosticAlpha.gross_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.gross_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic periodic alpha</div><div class="metric-value">${pct(diagnosticAlpha.periodic_intercept, 3)}</div><div class="metric-note">${safe(diagnosticAlpha.confidence_status || "UNAVAILABLE")} · annualized SE ${pct(diagnosticAlpha.annualized_standard_error)}</div></div></div>`;
         const diagnosticSummary = row.contribution_summary;
@@ -1322,7 +1620,7 @@
           `<tr><td>Residual</td><td>Realized minus fitted</td><td class="numeric">${pct(diagnosticSummary.residual_mean, 3)}</td></tr>`,
           `<tr><td>Realized</td><td>Observed excess return</td><td class="numeric">${pct(diagnosticSummary.realized_mean, 3)}</td></tr>`,
         ] : [];
-        const diagnosticContributions = diagnosticSummary ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic · holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED · n=${integer.format(diagnosticSummary.observations)}</span></div><p>Means use the dated model contribution rows, including changing dynamic betas. Maximum return identity error: ${safe(diagnosticSummary.maximum_reconciliation_error)}.</p><div class="table-wrap"><table><caption>Diagnostic holdout factor contributions and residuals</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], diagnosticContributionRows)}</table></div></div>` : `<div class="callout callout-neutral">Diagnostic contribution and residual summary unavailable: no dated model contributions are supplied.</div>`;
+        const diagnosticContributions = diagnosticSummary ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic · holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED · n=${integer.format(diagnosticSummary.observations)}</span></div><p>Means use the dated model contribution rows, including changing dynamic betas. Maximum return identity error: ${safe(smallDecimal(diagnosticSummary.maximum_reconciliation_error))}.</p><div class="table-wrap"><table id="factor-diagnostic-contribution-table"><caption>Diagnostic holdout factor contributions and residuals</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], diagnosticContributionRows)}</table></div></div>` : `<div class="callout callout-neutral">Diagnostic contribution and residual summary unavailable: no dated model contributions are supplied.</div>`;
         $("#factor-detail").innerHTML = `${compositionMarkup}<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>${integer.format(aligned)} aligned observations are retained.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations.</p></div></div><div class="callout callout-warning">The computed alpha, betas, contributions, and residuals remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions.</div>${diagnosticAlphaMarkup}${diagnosticBetas}${diagnosticContributions}<div class="callout callout-neutral"><strong>Training design:</strong> n=${integer.format(design.design_observations || 0)} · rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${statusText(design.unregularized_status || "UNAVAILABLE")}. <strong>Inference:</strong> ${statusText(inference.status || "UNAVAILABLE")}.</div>${dynamicAnalysisMarkup(row)}${orthogonalAttributionMarkup(row)}`;
         prepareScrollableTableRegions();
         return;
@@ -1358,9 +1656,9 @@
       : "Static exposures are an independent returns-based lens and are not concatenated with dynamic, sector, or industry models.";
     const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${statusText(proxy.candidate_disposition || "UNAVAILABLE")}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
     const proxyTable = proxyRows.length
-      ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
+      ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table id="factor-proxy-table"><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
-    $("#factor-detail").innerHTML = `${compositionMarkup}<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} sealed out-of-sample observations; above zero beats the training-mean baseline</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date model coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${safe(coverageText)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted betas / loadings</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${orthogonalAttributionMarkup(row)}${dynamicAnalysisMarkup(row)}`;
+    $("#factor-detail").innerHTML = `${compositionMarkup}<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} sealed out-of-sample observations; above zero beats the training-mean baseline</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date model coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${safe(coverageText)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(smallDecimal(summary.maximum_reconciliation_error))}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted betas / loadings</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(row.evidence_layer))}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table id="factor-contribution-table"><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${orthogonalAttributionMarkup(row)}${dynamicAnalysisMarkup(row)}`;
     prepareScrollableTableRegions();
   }
 
@@ -1411,10 +1709,12 @@
     $("#factor-source-selector").innerHTML = sourceOptions.map((item) => `<button type="button" class="segment ${item.key === selectedFactorSource ? "is-active" : ""}" data-factor-source="${safe(item.key)}" aria-pressed="${item.key === selectedFactorSource}">${safe(item.label)}</button>`).join("");
     $$('[data-factor-source]').forEach((button) => button.addEventListener("click", () => { selectedFactorSource = button.dataset.factorSource; selectedFactorSeries = null; renderAttribution(); }));
     const sourceRows = Array.isArray(analysis.sources) ? analysis.sources : [];
-    const sourceSummary = sourceRows.map((item) => `${item.source_label || item.source_key} · through ${item.as_of_date}`).join(" · ") || "Single accepted historical proof generation";
+    // F24: lenses are dated separately; one older than the cutoff says by how many days.
+    const lensDate = (item) => item.as_of_date ?? analysis.as_of_date;
+    const sourceSummaryHtml = sourceRows.map((item) => `${safe(item.source_label || item.source_key)} · through ${safe(item.as_of_date)}${staleSuffix(lensDate(item))}`).join(" · ") || `Single accepted historical proof generation${analysis.as_of_date ? ` through ${safe(analysis.as_of_date)}${staleSuffix(analysis.as_of_date)}` : ""}`;
     const proxyGovernance = analysis.proxy_governance || {};
     const semantics = lensSemantics[analysis.lens_id] || { question: "What return drivers explain the strategy?", method: "Returns-based decomposition.", beta: "Beta is fitted return sensitivity.", caveat: "No holdings inference is made." };
-    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")} · ${safe(selectedFactorEvidenceMode)} · ${safe(surfaceLabels[selectedFactorSurface] || humanStatus(selectedFactorSurface))}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br><strong>Selection boundary:</strong> ${safe(humanStatus(proxyGovernance.selection_boundary || "UNAVAILABLE_NOT_DECLARED"))}. ${safe(sourceSummary)}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Static and dynamic are separately planned, computed, and published surfaces. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
+    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(humanStatus(analysis.return_basis || "UNAVAILABLE"))} · ${safe(humanStatus(selectedFactorEvidenceMode))} · ${safe(surfaceLabels[selectedFactorSurface] || humanStatus(selectedFactorSurface))}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br><strong>Selection boundary:</strong> ${safe(humanStatus(proxyGovernance.selection_boundary || "UNAVAILABLE_NOT_DECLARED"))}. ${sourceSummaryHtml}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Static and dynamic are separately planned, computed, and published surfaces. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
     renderUnderwriting();
     renderFactorKpis(analysis);
     $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
@@ -1427,11 +1727,11 @@
       const composition = row.series_composition || {};
       const compositionText = composition.status
         ? `${integer.format(composition.live_observations || 0)} live + ${integer.format(composition.backtest_observations_used || 0)} backtest<span class="cell-secondary">${safe(humanStatus(composition.status))} · inception ${formatDateHtml(composition.live_inception)}</span>`
-        : `Undeclared legacy composition<span class="cell-secondary">No backtest-history claim</span>`;
+        : row.status === "UNAVAILABLE" ? `No composition: series unavailable<span class="cell-secondary">No backtest-history claim</span>` : `Undeclared legacy composition<span class="cell-secondary">No backtest-history claim</span>`;
       const coverageText = factorCoverageText(row);
       return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td><span class="cell-primary">${safe(row.coverage?.observed_start || "—")}–${safe(row.coverage?.observed_end || "—")}</span><span class="cell-secondary">${safe(coverageText)}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
     });
-    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Aligned / source intervals"], ["Aligned", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Aligned / source intervals"], ["Aligned (observations)", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : row.status === "DIAGNOSTIC_ONLY" ? "is-diagnostic" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
     renderFactorDetail();
@@ -1475,6 +1775,12 @@
         ? observed.drawdown_regimes?.both_strategies_underwater
         : null;
     const selectedPeriod = horizon || drawdown;
+    // F28: with a horizon or drawdown window selected, the selected-period figure is that window's own.
+    // A window that has no value (or is absent for this pair) shows no value and its status; it never
+    // falls back to the full-overlap Pearson, which is shown on its own line.
+    const windowSelected = selectedCorrelationWindow !== "full";
+    const selectedCorrelation = windowSelected ? selectedPeriod?.correlation : observed.pearson;
+    const selectedObservations = windowSelected ? selectedPeriod?.observations : coverage.common_observations;
     const composition = (series) => {
       const item = dependence.series_composition?.[series];
       if (!item) return "";
@@ -1484,7 +1790,7 @@
       ? `<div class="callout callout-neutral"><strong>${safe(shortSeries(left))}</strong>: ${safe(composition(left))}<br /><strong>${safe(shortSeries(right))}</strong>: ${safe(composition(right))}</div>`
       : "";
     $("#correlation-detail-title").textContent = `${shortSeries(left)} × ${shortSeries(right)}`;
-    detail.innerHTML = `<div class="validation-card"><div><strong>Observed status</strong><span>${safe(coverage.evidence_layer || "No compatible measured layer")}</span></div><div class="validation-score">${statusText(observed.status)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Full-overlap Pearson</dt><dd>${decimal(observed.pearson)}</dd></div><div><dt>Spearman</dt><dd>${decimal(observed.spearman)}</dd></div><div><dt>Selected period</dt><dd>${decimal(selectedPeriod?.correlation ?? observed.pearson)}</dd></div><div><dt>Selected sample</dt><dd>${integer.format(selectedPeriod?.observations ?? coverage.common_observations)}</dd></div><div><dt>Selected interval</dt><dd>${safe(selectedPeriod?.observed_start || coverage.observed_start || "—")}–${safe(selectedPeriod?.observed_end || coverage.observed_end || "—")}</dd></div><div><dt>Rolling window</dt><dd>${integer.format(observed.rolling_pearson.window_observations || 0)} observations · ${decimal(observed.rolling_pearson.latest)}</dd></div></dl><dl class="detail-list"><div><dt>Calendar</dt><dd>${safe(coverage.frequency)}</dd></div><div><dt>Missing left / right</dt><dd>${integer.format(coverage.missing_from_left)} / ${integer.format(coverage.missing_from_right)}</dd></div><div><dt>Either in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.either_strategy_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.either_strategy_underwater?.observations || 0)} obs.</dd></div><div><dt>Both in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.both_strategies_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.both_strategies_underwater?.observations || 0)} obs.</dd></div><div><dt>Conceptual prior</dt><dd>${decimal(blend.conceptual_prior)}</dd></div><div><dt>Implementation mapping</dt><dd>${statusText(implementation.status)}</dd></div></dl></div>${compositionBlock}<div class="callout ${observed.status === "AVAILABLE" ? "callout-neutral" : "callout-danger"}">${statusText(blend.decision_status)}. ${safe(blend.conceptual_prior_note)}</div>`;
+    detail.innerHTML = `<div class="validation-card"><div><strong>Observed status</strong><span>${safe(coverage.evidence_layer ? humanStatus(coverage.evidence_layer) : "No compatible measured layer")}</span></div><div class="validation-score">${statusText(observed.status)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Full-overlap Pearson</dt><dd>${decimal(observed.pearson)}</dd></div><div><dt>Spearman</dt><dd>${decimal(observed.spearman)}</dd></div><div><dt>Selected period</dt><dd>${decimal(selectedCorrelation)}</dd></div>${windowSelected ? `<div><dt>Selected-period status</dt><dd>${statusText(selectedPeriod?.status || "UNAVAILABLE")}</dd></div>` : ""}<div><dt>Selected sample</dt><dd>${selectedObservations == null ? "—" : integer.format(selectedObservations)}${windowSelected ? " weekday observations" : ""}</dd></div><div><dt>Selected interval</dt><dd>${safe((windowSelected ? selectedPeriod?.observed_start : coverage.observed_start) || "—")}–${safe((windowSelected ? selectedPeriod?.observed_end : coverage.observed_end) || "—")}</dd></div><div><dt>Rolling window</dt><dd>${integer.format(observed.rolling_pearson.window_observations || 0)} observations · ${decimal(observed.rolling_pearson.latest)}</dd></div></dl><dl class="detail-list"><div><dt>Calendar</dt><dd>${safe(humanStatus(coverage.frequency))}</dd></div><div><dt>Missing observations left / right</dt><dd>${integer.format(coverage.missing_from_left)} / ${integer.format(coverage.missing_from_right)}</dd></div><div><dt>Either in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.either_strategy_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.either_strategy_underwater?.observations || 0)} obs.</dd></div><div><dt>Both in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.both_strategies_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.both_strategies_underwater?.observations || 0)} obs.</dd></div><div><dt>Conceptual prior</dt><dd>${decimal(blend.conceptual_prior)}</dd></div><div><dt>Implementation mapping</dt><dd>${statusText(implementation.status)}</dd></div></dl></div>${compositionBlock}<div class="callout ${observed.status === "AVAILABLE" ? "callout-neutral" : "callout-danger"}">${statusText(blend.decision_status)}. ${safe(blend.conceptual_prior_note)}</div>`;
   }
 
   function renderCorrelationMatrix() {
@@ -1497,7 +1803,7 @@
     if (selectedMatrix === "observed_pearson" && selectedCorrelationWindow !== "full") {
       if (dependence.horizon_matrices[selectedCorrelationWindow]) {
         matrix = dependence.horizon_matrices[selectedCorrelationWindow];
-        label = [`Observed Pearson · ${selectedCorrelationWindow} sessions`, "Trailing accepted weekday observations · no holiday inference"];
+        label = [`Observed Pearson · ${selectedCorrelationWindow} weekday observations`, "Trailing accepted weekday observations · no holiday inference"];
       } else if (selectedCorrelationWindow === "either_drawdown") {
         matrix = dependence.drawdown_matrices.either_strategy_underwater;
         label = ["Correlation · either strategy in drawdown", "Conditioned on either wealth index below its prior running HWM"];
@@ -1542,8 +1848,11 @@
     modeBadge.textContent = combined ? "HYBRID BACKTEST + LIVE" : "LIVE ONLY · AUTHORITY";
     modeBadge.classList.toggle("badge-warning", combined);
     modeBadge.classList.toggle("badge-positive", !combined);
+    // F45: a partly eligible hybrid view names the strategies left out of it, not only a tooltip.
+    const blockedHybrid = Array.isArray(data.hybrid_mode_gate?.blocked_strategies) ? data.hybrid_mode_gate.blocked_strategies : [];
+    const blockedHybridText = blockedHybrid.length ? ` Excluded from this view (live only): ${blockedHybrid.map((item) => `${item.strategy_name} (${humanStatus(item.compatibility_status || "UNAVAILABLE").toLowerCase()})`).join("; ")}.` : "";
     $("#evidence-mode-boundary").textContent = combined
-      ? "Exploratory hybrid view: only version-matched backtest observations before live inception are included. Live observations win from inception onward. This mode cannot change readiness, allocation, or risk-control authority."
+      ? `Exploratory hybrid view: only version-matched backtest observations before live inception are included. Live observations win from inception onward. This mode cannot change readiness, allocation, or risk-control authority.${blockedHybridText}`
       : "Live-only evidence is the authoritative default for readiness, allocation, and risk controls.";
     $$('[data-evidence-mode]').forEach((button) => {
       const available = Boolean(dependenceModes[button.dataset.evidenceMode]);
@@ -1552,6 +1861,7 @@
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
       if (!available) button.title = button.dataset.evidenceMode === "LIVE_PLUS_BACKTEST" && data.hybrid_mode_gate.status !== "ELIGIBLE_PROVEN_COMPATIBLE" ? data.hybrid_mode_gate.reason : "This accepted correlation generation has no backtest mode";
+      else if (button.dataset.evidenceMode === "LIVE_PLUS_BACKTEST" && data.hybrid_mode_gate?.status !== "ELIGIBLE_PROVEN_COMPATIBLE" && data.hybrid_mode_gate?.reason) button.title = data.hybrid_mode_gate.reason;
     });
     renderKpis("#dependence-kpis", [
       ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, combined ? "Version-matched pre-live backtest plus authoritative live" : "Exact-date live observations", "positive"],
@@ -1564,12 +1874,19 @@
     const selected = dependence.cells.find((item) => pairKey(item.left, item.right) === selectedPair) || dependence.cells[0];
     renderCorrelationDetail(selected.left, selected.right);
     const centralLoss = centralCase.loss == null ? "Unavailable" : pct(centralCase.loss);
-    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Conservative bound</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Governs readiness · ${safe(corrOne.method || corrOne.status)}</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Central case</div><div class="metric-value">${centralLoss}</div><div class="metric-note">Descriptive only · ${safe(centralCase.status)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(corrOne.reconciliation_difference)}</div><div class="metric-note">${safe(corrOne.status)}</div></div>`;
+    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Conservative bound</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Governs readiness · ${safe(humanStatus(corrOne.method || corrOne.status))}</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Central case</div><div class="metric-value">${centralLoss}</div><div class="metric-note">Descriptive only · ${safe(centralCase.status)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(smallDecimal(corrOne.reconciliation_difference))}</div><div class="metric-note">${safe(humanStatus(corrOne.status))}</div></div>`;
     const componentRows = corrOne.components.map((row) => `<tr><td>${safe(row.series_id)}</td><td class="numeric">${pct(row.allocation_weight)}</td><td class="numeric">${pct(row.conservative_loss_fraction ?? row.adverse_loss_fraction)}</td><td class="numeric">${pct(row.loss_contribution)}</td></tr>`);
-    $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Conservative loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")]);
+    // F20: weight and contribution add across the components shown; the conservative loss fraction does not.
+    const componentWeights = corrOne.components.map((row) => number(row.allocation_weight)).filter((value) => value != null);
+    const componentLosses = corrOne.components.map((row) => number(row.loss_contribution)).filter((value) => value != null);
+    const componentFooter = componentRows.length ? `<tr><th scope="row">Total</th><td class="numeric">${componentWeights.length ? pct(sumOf(componentWeights)) : "—"}</td><td class="numeric"></td><td class="numeric">${componentLosses.length ? pct(sumOf(componentLosses)) : "—"}</td></tr>` : "";
+    $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Conservative loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")], null, componentFooter);
     $("#economic-cluster-summary").innerHTML = `<strong>${statusText(clusterBudget.status)}</strong> · ${safe(humanStatus(clusterBudget.budget_rule))}. The frozen audit reference was ${pct(clusterBudget.historical_audit_reference.full_systematic_loss)} and ${pct(clusterBudget.historical_audit_reference.after_rejected_sleeves_loss)} after rejected sleeves; the operative control above is recomputed from current accepted components.`;
     const clusterRows = clusterBudget.clusters.map((cluster) => `<tr><td><span class="cell-primary">${safe(cluster.label)}</span><span class="cell-secondary">${safe(cluster.cluster_id)}</span></td><td>${safe(cluster.members.map(shortSeries).join(" · "))}</td><td class="numeric">${pct(cluster.allocation_weight)}</td><td class="numeric">${pct(cluster.loss_contribution)}</td><td>${cluster.observed_pair_correlation_minimum == null ? "—" : `${decimal(cluster.observed_pair_correlation_minimum)}–${decimal(cluster.observed_pair_correlation_maximum)}`}</td><td>${statusText(cluster.budget_status)}<span class="cell-secondary">${safe(cluster.rationale)}</span></td></tr>`);
-    $("#economic-cluster-table").innerHTML = tableMarkup([["Driver cluster"], ["Members"], ["Aggregate weight", "numeric"], ["Adverse-loss budget", "numeric"], ["Observed pair range"], ["Budget state / rationale"]], clusterRows);
+    const clusterWeights = clusterBudget.clusters.map((cluster) => number(cluster.allocation_weight)).filter((value) => value != null);
+    const clusterLosses = clusterBudget.clusters.map((cluster) => number(cluster.loss_contribution)).filter((value) => value != null);
+    const clusterFooter = clusterRows.length ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${clusterWeights.length ? pct(sumOf(clusterWeights)) : "—"}</td><td class="numeric">${clusterLosses.length ? pct(sumOf(clusterLosses)) : "—"}</td><td colspan="2"></td></tr>` : "";
+    $("#economic-cluster-table").innerHTML = tableMarkup([["Driver cluster"], ["Members"], ["Aggregate weight", "numeric"], ["Adverse-loss contribution", "numeric"], ["Observed pair range"], ["Budget state / rationale"]], clusterRows, null, clusterFooter);
   }
 
   const weekly = data?.weekly_returns;
@@ -1642,7 +1959,7 @@
     const value = weeklyValue(row, selectedWeeklyCell.week);
     const meta = weeklyMeta(row, selectedWeeklyCell.week);
     $("#weekly-detail-title").textContent = `${row.display_name} · week of ${selectedWeeklyCell.week}`;
-    $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return</strong><span>${value == null ? "No accepted observation in this week" : "Compounded from accepted daily returns"}</span></div><div class="validation-score">${value == null ? "UNAVAILABLE" : pct(value, 2)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Canonical series</dt><dd>${safe(row.series_id)}</dd></div><div><dt>Group</dt><dd>${safe(weeklyGroupLabels[row.primary_group] || row.primary_group)}</dd></div><div><dt>Return basis</dt><dd>${statusText(row.return_basis)}</dd></div><div><dt>Calendar week</dt><dd>${safe(selectedWeeklyCell.week)} — ${safe(weeklyEnd(selectedWeeklyCell.week))}</dd></div></dl><dl class="detail-list"><div><dt>Source</dt><dd>${safe(row.source_key)}</dd></div><div><dt>Evidence mode</dt><dd>${row.primary_group === "STRATEGY" ? statusText(selectedWeeklyMode) : "NOT APPLICABLE"}</dd></div><div><dt>Accepted observations</dt><dd>${meta ? `${meta.dailyCount} · ${safe(meta.actualStart)} — ${safe(meta.actualEnd)}` : "UNAVAILABLE"}</dd></div><div><dt>Coverage / calendar</dt><dd>${meta ? `${statusText(meta.coverageStatus)} · ${statusText(meta.calendarBasis)}${meta.boundaryReasons.length ? ` · ${meta.boundaryReasons.map(statusText).join(", ")}` : ""}` : statusText(row.absent_value_status)}</dd></div></dl></div>`;
+    $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return</strong><span>${value == null ? "No accepted observation in this week" : "Compounded from accepted daily returns"}</span></div><div class="validation-score">${value == null ? "UNAVAILABLE" : pct(value, 2)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Canonical series</dt><dd>${safe(row.series_id)}</dd></div><div><dt>Group</dt><dd>${safe(weeklyGroupLabels[row.primary_group] || row.primary_group)}</dd></div><div><dt>Return basis</dt><dd>${statusText(row.return_basis)}</dd></div><div><dt>Calendar week</dt><dd>${safe(selectedWeeklyCell.week)} — ${safe(weeklyEnd(selectedWeeklyCell.week))}</dd></div></dl><dl class="detail-list"><div><dt>Source</dt><dd>${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}</dd></div><div><dt>Evidence mode</dt><dd>${row.primary_group === "STRATEGY" ? statusText(selectedWeeklyMode) : "NOT APPLICABLE"}</dd></div><div><dt>Accepted observations</dt><dd>${meta ? `${meta.dailyCount} · ${safe(meta.actualStart)} — ${safe(meta.actualEnd)}` : "UNAVAILABLE"}</dd></div><div><dt>Coverage / calendar</dt><dd>${meta ? `${statusText(meta.coverageStatus)} · ${statusText(meta.calendarBasis)}${meta.boundaryReasons.length ? ` · ${meta.boundaryReasons.map(statusText).join(", ")}` : ""}` : statusText(row.absent_value_status)}</dd></div></dl></div>`;
   }
 
   function renderWeeklyTable() {
@@ -1661,14 +1978,14 @@
       ["Unavailable cells", String(missingCells), "Missing is never zero", missingCells ? "warning" : "positive"],
       performanceLineageMismatch && selectedWeeklyGroup === "STRATEGY"
         ? ["Strategy evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"]
-        : ["Strategy evidence", selectedWeeklyMode, selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
+        : ["Strategy evidence", humanStatus(selectedWeeklyMode), selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
     ]);
     const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
-    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(row.return_basis)} · ${safe(row.source_key)}</span></th>${weeks.map((week) => {
+    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(humanStatus(row.return_basis))} · ${safe(humanStatus(String(row.source_key || "").replaceAll("-", "_")))}</span></th>${weeks.map((week) => {
       const value = weeklyValue(row, week);
       const meta = weeklyMeta(row, week);
       const numeric = value == null ? null : Number(value);
-      const intensity = numeric == null ? 0 : Math.min(1, Math.abs(numeric) / 0.08);
+      const intensity = numeric == null ? 0 : Math.min(1, Math.abs(numeric) / WEEKLY_FULL_INTENSITY_RETURN);
       const partial = meta?.coverageStatus === "PARTIAL_BOUNDARY";
       return `<td><button type="button" class="weekly-cell ${numeric == null ? "is-unavailable" : numeric < 0 ? "is-negative" : "is-positive"} ${partial ? "is-partial" : ""}" style="--weekly-intensity:${intensity}" data-weekly-series="${safe(row.series_id)}" data-weekly-week="${safe(week)}" aria-label="${safe(row.display_name)} ${safe(week)} ${numeric == null ? "unavailable" : pct(value, 2)}${partial ? " partial boundary" : ""}">${numeric == null ? "—" : pct(value, 1)}</button></td>`;
     }).join("")}</tr>`).join("");
@@ -1744,7 +2061,7 @@
     const driverMap = data.candidate_driver_map;
     if (driverMap) {
       const coverage = driverMap.coverage;
-      $("#candidate-boundary").textContent = `Frozen evidence through ${driverMap.as_of_date} · driver map ${data.meta.candidate_driver_map_sha256.slice(0, 14)}… · ${humanStatus(coverage.refresh_status)}. Descriptive ordering only; no capital authority.`;
+      $("#candidate-boundary").textContent = `Frozen evidence through ${driverMap.as_of_date} · driver map ${data.meta?.candidate_driver_map_sha256 ? `${String(data.meta.candidate_driver_map_sha256).slice(0, 14)}…` : "digest not published"} · ${humanStatus(coverage.refresh_status)}. Descriptive ordering only; no capital authority.`;
       renderKpis("#candidate-kpis", [
         ["Research status", humanStatus(driverMap.research_status), "Dated evidence, not current", "warning"],
         ["Candidates", String(coverage.candidate_count), `${integer.format(coverage.measured_candidate_count)} measured · ${integer.format(coverage.unavailable_candidate_count)} unavailable`],
@@ -1759,7 +2076,7 @@
     } else {
       $("#candidate-boundary").textContent = `Frozen ${appendix.as_of_date} audit appendix · source ${appendix.source_sha256.slice(0, 14)}… · no refresh or capital authority.`;
       renderKpis("#candidate-kpis", [
-        ["Appendix status", appendix.status, "Dated research evidence", "warning"],
+        ["Appendix status", humanStatus(appendix.status), "Dated research evidence", "warning"],
         ["Candidates", String(appendix.providers.length), "Not Strategy identities"],
         ["Tier 1", String(appendix.tier_counts["Tier 1"] || 0), "Diligence priority only"],
         ["Capital authority", "NONE", "No selection or allocation", "reserve"],
@@ -1789,7 +2106,7 @@
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
       return row.missing_interval_reason || "No missing interval declared";
     };
-    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span>${accountRoleNote(row)}</th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
+    const matrixRows = visible.map((row) => `<tr data-fact-path-status="${safe(row.status)}"><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(row.account_id ? accountLabel(row.account_id) : "Provider-level (no account)")}</span><span class="cell-secondary">${safe(providerName(row.provider_id))}</span>${accountRoleNote(row)}</th><td data-label="Fact / cadence"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(row.cadence || "Cadence unavailable")}</span></td><td data-label="Path status">${statusText(row.status)}</td><td data-label="Declared boundary">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}<span class="cell-secondary">${safe(row.boundary_basis || "Boundary basis unavailable")}</span></td><td data-label="Observed evidence">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}<span class="cell-secondary">${integer.format(row.record_count || 0)} accepted records · ${integer.format(row.unavailable_amount_count || 0)} unavailable amounts</span></td><td data-label="Named missing interval">${safe(intervalText(row))}</td><td data-label="Authority / disposition">${safe(row.authority || "Authority unavailable")}<span class="cell-secondary">${safe(typeof row.disposition === "object" ? [row.disposition.code, row.disposition.effect].filter(Boolean).join(": ") : row.disposition || "Disposition unavailable")}</span></td></tr>`);
     const matrixTable = $("#fact-coverage-matrix-table");
     matrixTable.dataset.totalRows = String(factMatrix.length);
     matrixTable.dataset.noPathRows = String(noPathRows.length);
@@ -1800,7 +2117,7 @@
     // no fact type, boundary basis or record count, so none is shown as unknown or zero.
     const windowRows = (data.observation_windows || []).map((row) => {
       if (row.window_type === "PROVIDER_SOURCE") {
-        return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(row.provider_id || "Provider")}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}</td><td class="numeric" data-label="Records">—</td><td data-label="Boundary basis">${safe(row.boundary || "Boundary text not recorded")}</td></tr>`;
+        return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(providerName(row.provider_id))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}</td><td class="numeric" data-label="Records">—</td><td data-label="Boundary basis">${safe(row.boundary || "Boundary text not recorded")}</td></tr>`;
       }
       const accounting = row.fact_type === "positions" ? positionTotalAccounting(row.record_count, row.observed_end) : "";
       const recordNote = row.fact_type === "positions"
@@ -1808,9 +2125,9 @@
         : "";
       return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))} · ${safe(row.cadence || "Cadence unavailable")}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}</td><td class="numeric" data-label="Records">${integer.format(row.record_count || 0)}${recordNote}</td><td data-label="Boundary basis">${safe(row.boundary_basis || "Boundary basis unavailable")}</td></tr>`;
     });
-    $("#observation-windows-table").innerHTML = tableMarkup([["Fact / window"], ["Status"], ["Declared"], ["Observed"], ["Records", "numeric"], ["Boundary basis"]], windowRows.length ? windowRows : [emptyRow(6, "No observation-window contract")]);
+    $("#observation-windows-table").innerHTML = tableMarkup([["Fact / window"], ["Status"], ["Declared"], ["Observed"], ["Records (count)", "numeric"], ["Boundary basis"]], windowRows.length ? windowRows : [emptyRow(6, "No observation-window contract")]);
 
-    const attributionRows = (data.attribution_dispositions || []).map((row) => `<tr><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(accountLabel(row.account_id))}</span><span class="cell-secondary">${safe(providerName(row.provider_id))} · ${safe(row.account_id)}</span></th><td data-label="Effective interval">${formatDateHtml(row.effective_start)}–${formatDateHtml(row.effective_end)}</td><td data-label="Period">${safe(row.period || "Period unavailable")}</td><td data-label="Authority">${safe(row.authority || "Authority unavailable")}</td><td data-label="Disposition">${statusText(row.disposition)}</td></tr>`);
+    const attributionRows = (data.attribution_dispositions || []).map((row) => `<tr><th scope="row" data-label="Account / provider"><span class="cell-primary">${safe(row.account_id ? accountLabel(row.account_id) : "Provider-level (no account)")}</span><span class="cell-secondary">${safe(providerName(row.provider_id))}</span></th><td data-label="Effective interval">${formatDateHtml(row.effective_start)}–${formatDateHtml(row.effective_end)}</td><td data-label="Period">${safe(row.period || "Period unavailable")}</td><td data-label="Authority">${safe(row.authority || "Authority unavailable")}</td><td data-label="Disposition">${statusText(row.disposition)}</td></tr>`);
     $("#attribution-dispositions-table").innerHTML = tableMarkup([["Account / provider"], ["Effective interval"], ["Period"], ["Authority"], ["Disposition"]], attributionRows.length ? attributionRows : [emptyRow(5, "No attribution dispositions")]);
   }
 
@@ -1847,24 +2164,35 @@
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
       ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} carry an explicit retained disposition`, cleanFacts === factRows.length ? "positive" : "warning"],
-      ["External connections", "0", "Direct-file local operation", "reserve"],
+      ["External connections", "0", "Policy statement: direct-file local operation; not counted from the payload", "reserve"],
     ]);
     const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status / escalation"], ["Observation window / Freshness evaluated"], ["TTL / reconciled"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
     renderFactScopeTables();
     $("#input-bindings").innerHTML = `<div class="binding-card"><div><strong>Portfolio report</strong><span>generation ${safe(data.meta.report_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.report_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Factor / alpha</strong><span>generation ${safe(data.meta.decomposition_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.decomposition_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Dependence</strong><span>generation ${safe(data.meta.correlation_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.correlation_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · sha256 ${safe(data.candidate_appendix.source_sha256.slice(0, 12))}…</span></div><div class="binding-note">${statusText(data.candidate_appendix.status)}</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals. Each input was read from its stage's current pointer and refused unless its generation was verified and complete. This panel was sealed before release and records no release state.</div>`;
-    const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDateHtml(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
+    const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
     renderLimitations();
+    // F37: the route is chosen by the item's id.  The five coverage exceptions the report declares
+    // each name their own action; an item the table does not name keeps the generic one.
     const routes = {
       "full-systematic-hwm-unavailable": ["risk", "Qualify accepted daily NAV freshness across the governed HWM perimeter"],
       "current-strategy-attribution-partial": ["capital", "Adjudicate pool-only assignment intervals; current mapped positions remain valid"],
       "historical-strategy-attribution-unresolved": ["risk", "Adjudicate historical General intervals before complete account-by-strategy performance"],
+      "positions-partial": ["data", "Obtain accepted position snapshots for the providers the coverage row names"],
+      "account-nav-coverage-partial": ["data", "Obtain complete daily account NAV for the accounts the coverage row names"],
+      "transaction-coverage-partial": ["data", "Obtain the missing transaction records, or formally disposition the gap"],
+      "flow-coverage-partial": ["data", "Obtain the missing cash-flow records, or formally disposition the gap"],
     };
+    // A blocking item carries no fact type or policy id; its coverage row (same item id) does.
+    const coverageByItem = new Map((Array.isArray(data.coverage) ? data.coverage : []).map((row) => [row.item, row]));
     const remediationRows = data.blocking_items.map((item) => {
-      const [view, action] = item.category === "DATA_FRESHNESS"
-        ? ["data", `Refresh or formally disposition the required ${humanStatus(item.fact_type)} evidence under ${item.policy_id}; reconciled ${formatDate(item.reconciled_on)}`]
-        : routes[item.item] || ["data", "Resolve the declared coverage exception in its producing generation"];
+      const detail = coverageByItem.get(item.item) || item;
+      const [view, action] = Object.hasOwn(routes, item.item)
+        ? routes[item.item]
+        : detail.category === "DATA_FRESHNESS"
+          ? ["data", `Refresh or formally disposition the required ${humanStatus(detail.fact_type)} evidence under ${detail.policy_id}; reconciled ${formatDate(detail.reconciled_on)}`]
+          : ["data", "Resolve the declared coverage exception in its producing generation"];
       const focus = view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
       return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap ? operatorText(item.known_gap) : "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}"${focus} aria-label="Open ${safe(VIEW_TITLES[view])} evidence for ${safe(humanStatus(item.item))}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
     });
@@ -1889,6 +2217,8 @@
     const renderer = viewRenderers[name];
     if (!renderer || (renderedViews.has(name) && !dirtyViews.has(name))) return;
     renderer();
+    // F47: tables built by a render (not only at load) are keyboard-reachable regions too.
+    prepareScrollableTableRegions();
     renderedViews.add(name);
     dirtyViews.delete(name);
   }
@@ -1910,8 +2240,11 @@
     }
   }
 
+  // F47: a view name comes from the URL hash, so it is escaped before it enters a selector.
+  const viewSelector = (name) => `[data-view="${CSS.escape(String(name))}"]`;
+
   function setView(name, updateHash = true) {
-    const view = $(`[data-view="${name}"]`);
+    const view = $(viewSelector(name));
     if (!view) return false;
     $$(".view").forEach((item) => { item.hidden = item !== view; item.classList.toggle("is-active", item === view); });
     $$('[data-nav]').forEach((button) => { const active = button.dataset.nav === name; button.classList.toggle("is-active", active); active ? button.setAttribute("aria-current", "page") : button.removeAttribute("aria-current"); });
@@ -2037,13 +2370,21 @@
     $("#position-search").addEventListener("input", (event) => { positionSearch = event.target.value.trim(); positionPage = 0; renderPositionTable(); });
     $("#position-page-previous").addEventListener("click", () => { positionPage = Math.max(0, positionPage - 1); renderPositionTable(); });
     $("#position-page-next").addEventListener("click", () => { positionPage += 1; renderPositionTable(); });
+    $("#leverage-page-previous").addEventListener("click", () => { leveragePage = Math.max(0, leveragePage - 1); renderLeverageDisclosures(); });
+    $("#leverage-page-next").addEventListener("click", () => { leveragePage += 1; renderLeverageDisclosures(); });
     $("#context-account").addEventListener("change", (event) => { selectedContextAccount = event.target.value; applyContext(); });
     $("#context-strategy").addEventListener("change", (event) => { selectedContextStrategy = event.target.value; applyContext(); });
     $("#context-reset").addEventListener("click", () => { selectedContextAccount = "ALL"; selectedContextStrategy = "ALL"; applyContext(); });
     $("#snapshot-button").addEventListener("click", () => showToast(`Portfolio facts ${formatDate(data.meta.portfolio_as_of)} · freshness assessed ${formatDate(data.meta.freshness_evaluated_on)} (not a current-day claim) · Report ${data.meta.report_generation_id.slice(0, 12)}… · read-only local artifact.`));
     $$('.segmented, .strategy-selector').forEach((group) => group.setAttribute("role", "group"));
     $$('.segment').forEach((button) => button.setAttribute("aria-pressed", String(button.classList.contains("is-active"))));
-    window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
+    window.addEventListener("hashchange", () => {
+      try {
+        setView(location.hash.slice(1) || "command", false);
+      } catch (error) {
+        showAppError(error);
+      }
+    });
   }
 
   function prepareScrollableTableRegions() {
@@ -2072,6 +2413,7 @@
           || link.getAttribute("href") !== `downloads/${filename}`
           || link.getAttribute("download") !== filename) {
         console.error("Embedded download metadata is invalid.");
+        showToast("The download could not start: its embedded metadata is invalid.");
         return;
       }
       try {
@@ -2110,6 +2452,7 @@
         }
       } catch (error) {
         console.error("Embedded download payload could not be decoded.", error);
+        showToast("The download failed: the embedded report data could not be decoded in this browser.");
       }
     }));
   }
@@ -2124,11 +2467,11 @@
       $("#freshness-as-of").textContent = freshnessAtCutoff
         ? `freshness assessed at cutoff ${formatDate(data.meta.freshness_evaluated_on)}; not a current-day freshness claim`
         : `freshness assessed ${formatDate(data.meta.freshness_evaluated_on)} (cutoff ${formatDate(data.meta.portfolio_as_of)}); not a current-day freshness claim`;
-      $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
+      $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`; // header label: HWM-perimeter NAV coverage
       populateContextControls();
       bindEvents(); bindEmbeddedDownloads();
       const requested = location.hash.slice(1);
-      if (!setView($(`[data-view="${requested}"]`) ? requested : "command", false)) return;
+      if (!setView($(viewSelector(requested)) ? requested : "command", false)) return;
       prepareScrollableTableRegions();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";

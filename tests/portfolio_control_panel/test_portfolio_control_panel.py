@@ -7701,7 +7701,7 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'id="remediation-table"' in template
     assert "TTL / reconciled" in renderer
     assert "Escalation required" in renderer
-    assert 'item.category === "DATA_FRESHNESS"' in renderer
+    assert 'detail.category === "DATA_FRESHNESS"' in renderer
 
 
 def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> None:

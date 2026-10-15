@@ -387,8 +387,8 @@ _EPOCH_HEADERS = [
     "RONC",
     "Ann. RONC",
     "Observed return",
-    "Observed HWM",
-    "Observed Max DD",
+    "Observed HWM (index, base 100)",
+    "Observed Max DD (signed)",
 ]
 
 
@@ -448,7 +448,8 @@ def _manifest_payload(*bases: str) -> dict[str, Any]:
 
 def _epoch_table(dom: dict[str, Any]) -> tuple[list[str], list[str]]:
     html = dom["#account-manifest-table"]["innerHTML"]
-    headers = re.findall(r"<th\s[^>]*>(.*?)</th>", html, flags=re.S)
+    head = re.search(r"<thead>.*?</thead>", html, flags=re.S)
+    headers = re.findall(r"<th\s[^>]*>(.*?)</th>", head[0] if head else "", flags=re.S)
     rows = re.findall(r"<tr data-account-id=.*?</tr>", html, flags=re.S)
     return headers, rows
 

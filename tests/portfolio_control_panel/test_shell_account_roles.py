@@ -54,7 +54,15 @@ def _render(tmp_path: Path) -> dict[str, str]:
     payload = {
         "meta": {"performance_lineage": {"status": "PASS"}},
         "strategies": [],
-        "account_summary": [],
+        # F03: an account is named by the producer's own label, never by its opaque id.
+        "account_summary": [
+            {
+                "account_id": row["account_id"],
+                "provider": "synthetic",
+                "account_label": f"Label {row['account_id']}",
+            }
+            for row in rows
+        ],
         "leverage_disclosures": rows,
         "fact_coverage_matrix": [
             {**row, "fact_type": "nav", "status": "OBSERVED_NOT_COMPLETENESS_PROOF"}
@@ -87,7 +95,10 @@ def _render(tmp_path: Path) -> dict[str, str]:
 
 
 def _row_html(table: str, account_id: str) -> str:
-    rows = [part for part in table.split("<tr") if account_id in part]
+    rows = [part for part in table.split("<tr") if f"Label {account_id}" in part]
+    assert not any(
+        account_id in part.replace(f"Label {account_id}", "") for part in rows
+    )
     assert len(rows) == 1, (account_id, len(rows))
     return rows[0]
 
