@@ -4,13 +4,34 @@ Disposition is computed from the committed release, never recalled.
 
 ```
 python ops/retention/retention.py keep-set --portfolio <dir> [--depth 2]
-python ops/retention/retention.py sweep    --portfolio <dir> [--depth 2] [--apply]
+python ops/retention/retention.py sweep    --portfolio <dir> [--depth 2] [--plan-out <plan.json>]
+python ops/retention/retention.py sweep    --portfolio <dir> [--depth 2] --apply --reviewed-plan <plan.json>
 python ops/retention/retention.py demo
 ```
 
-`sweep` reports by default; `--apply` deletes. It refuses to run at all when the
-release authority or journal is not `COMMITTED`, because a sweep during a
-prepare→commit window can delete the predecessor the in-flight release needs.
+`sweep` reports by default; `--apply` deletes and fails closed (#541). It
+refuses to run at all when the release authority or journal is not `COMMITTED`,
+because a sweep during a prepare→commit window can delete the predecessor the
+in-flight release needs. Before any deletion it also:
+
+* authenticates `release.json` against the pointer's `release_manifest_sha256`
+  and the journal against the release id;
+* aborts on any directory-walk error, unreadable path or dangling link (an
+  incomplete census cannot authorize a delete);
+* refuses to run while any release journal is unsettled (`PREPARED`,
+  `COMMITTING`, `ROLLING_BACK`, `RECOVERY_FAILED`): a prepared release's
+  proposed generations are in no keep-set and it holds no lock until commit;
+* requires `--reviewed-plan`, the file a dry run wrote with `--plan-out`, and
+  deletes only when the whole reviewed document equals the freshly computed
+  plan, which binds every dead generation's file inventory (path, size, mtime):
+  anything added or changed after review aborts the apply, and the inventory is
+  re-checked again immediately before each removal;
+* holds `release.lock` (the coordination mutex a release uses) and re-reads the
+  committed state before each removal, so a release that moves to `PREPARED`
+  mid-sweep stops it.
+
+`--apply` still needs the owner's authorization and verified durable copies of
+anything it would delete; the gate above does not replace that.
 
 ## Why the keep-set comes from the release manifest
 
