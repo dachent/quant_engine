@@ -532,3 +532,51 @@ def test_a_recovery_release_keeps_every_found_pointer_and_refuses_a_missing_copy
     dangling = next(item for item in manifest.targets if item.root_id == "dangling")
     with pytest.raises(ReleaseConflictError, match="bytes are missing"):
         _recovered_pointer_bytes(world.coordination, manifest, dangling)
+
+
+def test_a_recovery_successor_still_refuses_a_hand_moved_pointer_elsewhere(
+    tmp_path,
+) -> None:
+    """One unusable root must not let a moved pointer on a healthy root through."""
+
+    import shutil
+
+    world = _World(tmp_path)
+    first = world.prepare()
+    commit_release(
+        coordination_root=world.coordination,
+        release_id=first.release_id,
+        roots=world.roots,
+        skip_release_validation=True,
+    )
+    shutil.rmtree(world.dangling / "generations" / world.generations["dangling"])
+    # hand-move the healthy root's pointer to another published generation
+    other = _manifest("healthy-other")
+    stage_generation(world.healthy, other)
+    publish_generation(world.healthy, other.generation_id)
+    replacement = _manifest("dangling-replacement-2")
+    stage_generation(world.dangling, replacement)
+    generations = {**world.generations, "dangling": replacement.generation_id}
+    with pytest.raises(ReleaseConflictError, match="committed pointer graph differs"):
+        prepare_release(
+            coordination_root=world.coordination,
+            roots=world.roots,
+            proposed_generations=generations,
+            code_commit="d" * 40,
+            created_at=datetime(2026, 10, 16, 16, tzinfo=UTC),
+            gates=_gates(True),
+            allow_unusable_predecessor_pointers=True,
+        )
+
+
+def test_recovery_refuses_a_damaged_pointer_the_gate_never_admitted(tmp_path) -> None:
+    world = _World(tmp_path)
+    publish_generation(world.healthy, world.proposed["healthy"].generation_id)
+    (
+        world.healthy
+        / "generations"
+        / world.proposed["healthy"].generation_id
+        / "x.json"
+    ).write_bytes(b"edited after publication\n")
+    with pytest.raises(PointerIntegrityError, match="inventory"):
+        world.prepare()

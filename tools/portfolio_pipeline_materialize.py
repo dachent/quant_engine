@@ -5605,15 +5605,19 @@ def build_production_spec(
     # under `predecessor-pointer-recovery` after re-deriving the failure from
     # disk; the evidence is derived here, never supplied.
     pointer_recovery_gates: list[dict[str, Any]] = []
-    recovery_payload = _pointer_recovery_gate_payload(
-        {
-            **{
-                root_id: portfolio_root / relative
-                for root_id, relative in PRODUCTION_ROOTS.items()
+    recovery_payload = (
+        None
+        if provider_generations_path is None
+        else _pointer_recovery_gate_payload(
+            {
+                **{
+                    root_id: portfolio_root / relative
+                    for root_id, relative in PRODUCTION_ROOTS.items()
+                },
+                **provider_root_paths,
             },
-            **provider_root_paths,
-        },
-        generation_ids,
+            generation_ids,
+        )
     )
     if recovery_payload is not None:
         recovery_path = spec_path.with_name("predecessor-pointer-recovery.json")
