@@ -6384,15 +6384,14 @@ def _broker_strategy_returns(
                 continue
             day = link.end_date.isoformat()
             providers = sorted({member.provider_id for member in components})
+            # A provider that reported no flow has none to time, so it adds no
+            # convention; labelling its returns date-only would invent one.
+            # The no-flow label applies only when no component has a flow.
             timing_modes = {
                 mode
                 for provider in providers
-                # A provider that reported no flow has none to time; labelling
-                # its returns date-only would invent a timing convention.
-                for mode in flow_timing_by_provider.get(
-                    provider, {"NO_EXTERNAL_OR_INTERNAL_FLOW"}
-                )
-            }
+                for mode in flow_timing_by_provider.get(provider, ())
+            } or {"NO_EXTERNAL_OR_INTERNAL_FLOW"}
             account_ids = sorted({member.account_id for member in components})
             source_record_ids = sorted(
                 member.record_ids[link.end_date] for member in components

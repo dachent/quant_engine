@@ -10215,3 +10215,28 @@ def test_providers_without_flows_are_not_labelled_date_only() -> None:
 
     assert rows
     assert {row["flow_timing"] for row in rows} == {"NO_EXTERNAL_OR_INTERNAL_FLOW"}
+
+
+def test_no_flow_provider_does_not_make_a_mixed_timing_label() -> None:
+    """A date-only flow plus a component that has no flow stays DATE_ONLY (#535 review)."""
+
+    nav = [
+        _nav("a", "2026-01-01", "100", "a-1"),
+        _nav("a", "2026-01-02", "120", "a-2"),
+        {**_nav("m", "2026-01-01", "300", "m-1"), "provider_id": "matrixport"},
+        {**_nav("m", "2026-01-02", "330", "m-2"), "provider_id": "matrixport"},
+    ]
+    flows = [
+        {
+            "account_id": "a",
+            "amount": "10",
+            "event_date": "2026-01-02",
+            "mapping_status": "MAPPED",
+            "provider_id": "schwab",
+        }
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab", "matrixport"})
+
+    assert rows
+    assert {row["flow_timing"] for row in rows} == {"DATE_ONLY_END_OF_DAY"}
