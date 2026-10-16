@@ -27,6 +27,12 @@ Checks, each a ``Finding``:
 ``release.target_unbound``     (BLOCKER_AUTHORITY) the target's root is not in the
                                 binding table at all; fails closed for any root
                                 added later.
+``release.provider_binding``   (BLOCKER_AUTHORITY) a provider or epoch-manifest
+                                root (REL-PROVIDER-ROOTS-001): the target's
+                                generation id, manifest hash and catalog bytes
+                                equal what the release's own provider ledger
+                                (or, for the epoch manifest, the panel's
+                                account manifest) records.
 ``release.target_unconsumed``  (BLOCKER_AUTHORITY) only for ``hybrid-dynamic-style``,
                                 whose binding-table entry is ``INTEGRITY_ONLY_UNCONSUMED``:
                                 its generation id must not appear anywhere in the
@@ -118,6 +124,27 @@ KNOWN_ROOTS: frozenset[str] = frozenset(
         *(f"{_HYBRID_PREFIX}{key}" for key in _LENS_SOURCE_KEYS),
         UNCONSUMED_ROOT_ID,
     }
+)
+
+# REL-PROVIDER-ROOTS-001: governed roots that sit beside dataPortfolio. Provider
+# roots are judged against the provider ledger the same release publishes; the
+# epoch-manifest root against the account manifest the panel carries. Mirrors
+# portfolio_pipeline_materialize.PROVIDER_ROOTS (pinned by the seam test); this
+# module imports no production builder.
+PROVIDER_LEDGER_ROOT_ID = "provider-ledger"
+EPOCH_MANIFEST_ROOT_ID = "epoch-manifest"
+_EPOCH_AUTHORITY_PREFIX = "authority/"
+PROVIDER_ROOT_PROVIDERS: dict[str, str] = {
+    "provider-alpaca": "alpaca",
+    "provider-fidelity": "fidelity",
+    "provider-ibkr": "ibkr",
+    "provider-matrixport": "matrixport",
+    "provider-portfolio123": "portfolio123",
+    "provider-quantbase": "quantbase",
+    "provider-schwab": "schwab",
+}
+PROVIDER_BOUND_ROOTS: frozenset[str] = frozenset(
+    {*PROVIDER_ROOT_PROVIDERS, EPOCH_MANIFEST_ROOT_ID}
 )
 
 # The artifact a lens generation carries whose bytes the panel's source_sha256 pins.
@@ -396,6 +423,206 @@ def target_integrity(target: Mapping[str, Any], root_dir: Path) -> Iterator[Find
         )
 
 
+def _file_sha256s(directory: Path) -> set[str]:
+    """The sha256 of every regular file in a generation directory, from its bytes."""
+
+    digests: set[str] = set()
+    for path in sorted(directory.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            digests.add(hashlib.sha256(path.read_bytes()).hexdigest())
+    return digests
+
+
+def _catalog_hash_bound(generation_dir: Path, catalog_sha256: object) -> bool:
+    """Whether the ledger's catalog hash is this generation's own catalog.
+
+    The catalog must be an artifact the generation's manifest declares (a hash that
+    only matches some file binds nothing); a declared artifact whose file is present
+    at its declared location must carry exactly the declared bytes.
+    """
+
+    if not isinstance(catalog_sha256, str):
+        return False
+    try:
+        artifacts = json.loads((generation_dir / GENERATION_MANIFEST).read_bytes())[
+            "artifacts"
+        ]
+        declaring = [item for item in artifacts if item["sha256"] == catalog_sha256]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        declaring = []
+    for item in declaring:
+        artifact_id = str(item["artifact_id"])
+        for candidate in (
+            generation_dir / artifact_id,
+            generation_dir / Path(artifact_id).name,
+        ):
+            if candidate.is_file() and (
+                hashlib.sha256(candidate.read_bytes()).hexdigest() != catalog_sha256
+            ):
+                return False
+    return bool(declaring)
+
+
+def _panel_account_manifest_artifacts(panel: Mapping[str, Any]) -> dict[str, str]:
+    """Every ``artifact_id`` -> ``sha256`` the panel's account manifest declares."""
+
+    found: dict[str, str] = {}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, Mapping):
+            artifact_id, sha256 = value.get("artifact_id"), value.get("sha256")
+            if isinstance(artifact_id, str) and isinstance(sha256, str):
+                found[artifact_id] = sha256
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(panel.get("account_manifest"))
+    return found
+
+
+def provider_binding(
+    target: Mapping[str, Any],
+    root_dir: Path,
+    panel: Mapping[str, Any],
+    ledger_catalog: Mapping[str, Any] | None,
+) -> Iterator[Finding]:
+    """BLOCKER_AUTHORITY: a provider or epoch-manifest target is what the release cites.
+
+    A provider generation is bound by identity AND bytes: the provider ledger of
+    the same release must record this exact generation id and manifest hash, and
+    the catalog hash it records must be the hash of a file actually present in the
+    generation directory. The epoch-manifest generation is bound through the
+    account manifest the panel carries: every artifact the panel pins that the
+    generation also declares must equal the generation's declared hash and its
+    on-disk bytes, and at least one must exist (fail closed).
+    """
+
+    root_id = str(target.get("root_id"))
+    if root_id not in PROVIDER_BOUND_ROOTS:
+        return
+    generation_id = str(target.get("proposed_generation_id"))
+    generation_dir = root_dir / "generations" / generation_id
+    manifest_file = str(generation_dir / GENERATION_MANIFEST)
+
+    def finding(observed: Any, expected: Any, path: str, message: str) -> Finding:
+        return _finding(
+            "release.provider_binding",
+            BLOCKER_AUTHORITY,
+            root_id,
+            observed,
+            expected,
+            manifest_file,
+            path,
+            (),
+            message,
+        )
+
+    if root_id == EPOCH_MANIFEST_ROOT_ID:
+        pinned = _panel_account_manifest_artifacts(panel)
+        try:
+            declared = {
+                item["artifact_id"]: item["sha256"]
+                for item in json.loads(
+                    (generation_dir / GENERATION_MANIFEST).read_bytes()
+                )["artifacts"]
+            }
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            yield finding(None, "a readable generation manifest", "$", "unreadable")
+            return
+        shared = sorted(set(pinned) & set(declared))
+        # Every authority artifact the panel pins belongs to the epoch manifest;
+        # a generation that omits one is a different epoch manifest.
+        for artifact_id in sorted(
+            item
+            for item in pinned
+            if item.startswith(_EPOCH_AUTHORITY_PREFIX) and item not in declared
+        ):
+            yield finding(
+                None,
+                pinned[artifact_id],
+                f"$.artifacts[{artifact_id}]",
+                f"the panel pins {artifact_id} but the epoch-manifest generation "
+                "does not declare it",
+            )
+        if not shared:
+            yield finding(
+                None,
+                "at least one panel account-manifest artifact",
+                "$.account_manifest",
+                "the panel's account manifest pins no artifact this epoch-manifest "
+                "generation declares",
+            )
+        for artifact_id in shared:
+            file_path = generation_dir / artifact_id
+            actual = (
+                hashlib.sha256(file_path.read_bytes()).hexdigest()
+                if file_path.is_file()
+                else None
+            )
+            if not (pinned[artifact_id] == declared[artifact_id] == actual):
+                yield finding(
+                    {"declared": declared[artifact_id], "bytes": actual},
+                    pinned[artifact_id],
+                    f"$.artifacts[{artifact_id}].sha256",
+                    f"panel pins a different {artifact_id} than the epoch-manifest "
+                    "generation holds",
+                )
+        return
+
+    rows = (
+        ledger_catalog.get("provider_generations")
+        if isinstance(ledger_catalog, Mapping)
+        else None
+    )
+    if not isinstance(rows, list):
+        yield finding(
+            None,
+            "the release's provider ledger catalog",
+            "$.provider_generations",
+            "no provider ledger catalog is available to bind this provider root",
+        )
+        return
+    provider = PROVIDER_ROOT_PROVIDERS[root_id]
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("provider_id") == provider
+    ]
+    if len(matches) != 1:
+        yield finding(
+            len(matches), 1, "$.provider_generations", "provider is not bound once"
+        )
+        return
+    row = matches[0]
+    if row.get("generation_id") != generation_id:
+        yield finding(
+            row.get("generation_id"),
+            generation_id,
+            "$.provider_generations.generation_id",
+            "the provider ledger binds a different generation for this provider",
+        )
+    if row.get("manifest_sha256") != target.get("proposed_manifest_sha256"):
+        yield finding(
+            row.get("manifest_sha256"),
+            target.get("proposed_manifest_sha256"),
+            "$.provider_generations.manifest_sha256",
+            "the provider ledger binds a different manifest hash",
+        )
+    if not _catalog_hash_bound(generation_dir, row.get("catalog_sha256")):
+        yield finding(
+            row.get("catalog_sha256"),
+            "the sha256 of a file present in the generation or of an artifact its "
+            "manifest declares (and whose present bytes agree)",
+            "$.provider_generations.catalog_sha256",
+            "no file in the target generation and no declared artifact has the "
+            "catalog hash the ledger recorded, or the bytes at a declared location "
+            "contradict it",
+        )
+
+
 def target_binding(
     target: Mapping[str, Any], panel: Mapping[str, Any], root_dir: Path
 ) -> Iterator[Finding]:
@@ -403,7 +630,7 @@ def target_binding(
 
     root_id = str(target.get("root_id"))
     generation_id = str(target.get("proposed_generation_id"))
-    if root_id == UNCONSUMED_ROOT_ID:
+    if root_id == UNCONSUMED_ROOT_ID or root_id in PROVIDER_BOUND_ROOTS:
         return
     pointers = _declared_pointers(root_id, panel)
     if pointers is None:
@@ -707,12 +934,14 @@ def run_target_checks(
     root_dir: Path,
     panel: Mapping[str, Any],
     report: Mapping[str, Any],
+    ledger_catalog: Mapping[str, Any] | None = None,
 ) -> list[Finding]:
     """Every finding for one non-panel release target, sorted."""
 
     findings = [
         *target_integrity(target, root_dir),
         *target_binding(target, panel, root_dir),
+        *provider_binding(target, root_dir, panel, ledger_catalog),
         *target_unconsumed(target, panel, report),
     ]
     return sorted(findings, key=Finding.sort_key)

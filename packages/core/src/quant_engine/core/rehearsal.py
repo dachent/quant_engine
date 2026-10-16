@@ -19,6 +19,7 @@ from quant_engine.core.contracts import (
 )
 from quant_engine.core.pipeline import PipelineSpec
 from quant_engine.core.publication import (
+    CurrentPointer,
     publish_generation,
     read_current,
     stage_generation,
@@ -39,6 +40,26 @@ from quant_engine.core.release import (
 
 
 _SCHEMA_VERSION: Final = 3
+_POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
+
+
+def _recovery_release(manifest: ReleaseManifest) -> bool:
+    """Whether the release admitted roots whose own pointer was unusable."""
+
+    return any(item.gate_id == _POINTER_RECOVERY_GATE_ID for item in manifest.gates)
+
+
+def _observed_pointer(root: Path, *, recorded: bool) -> CurrentPointer | None:
+    """The root's pointer, or None; ``recorded`` reads the bytes without validating."""
+
+    path = root / "CURRENT.json"
+    if not path.exists():
+        return None
+    if recorded:
+        return CurrentPointer.from_json_bytes(path.read_bytes())
+    return read_current(root)
+
+
 _HARNESS_IDENTITY_KEYS: Final = frozenset(
     {
         "code_commit",
@@ -104,6 +125,9 @@ def _source_state(
             "generations": {
                 generation_id: _tree_hash(root / "generations" / generation_id)
                 for generation_id in sorted(generations)
+                if generation_id == target.proposed_generation_id
+                or (root / "generations" / generation_id).is_dir()
+                or not _recovery_release(manifest)
             },
         }
     companions = {}
@@ -244,6 +268,7 @@ def rehearse_release_boundaries(
     source_before, manifest = _source_state(spec, release_id)
     if manifest.release_id != release_id:
         raise RehearsalError("release identity differs")
+    recovery = _recovery_release(manifest)
     if source_before["journal_state"] != ReleaseState.COMMITTED.value:
         raise RehearsalError("source release must be committed")
     for target in manifest.targets:
@@ -288,7 +313,37 @@ def rehearse_release_boundaries(
             rehearsal_root = scenario / "r" / target.root_id
             roots[target.root_id] = rehearsal_root
             _copy_manifest(source_root, target.proposed_generation_id, rehearsal_root)
-            if target.previous_pointer is not None:
+            if target.previous_pointer is not None and recovery:
+                # An unusable predecessor is reproduced as the exact bytes the
+                # release recorded, never re-published.
+                previous_dir = (
+                    source_root / "generations" / target.previous_pointer.generation_id
+                )
+                if previous_dir.is_dir():
+                    _copy_manifest(
+                        source_root,
+                        target.previous_pointer.generation_id,
+                        rehearsal_root,
+                    )
+                recorded_bytes = spec.coordination_root / "releases" / release_id
+                recorded_bytes = recorded_bytes / "pointers" / f"{target.root_id}.bin"
+                rehearsal_root.mkdir(parents=True, exist_ok=True)
+                if not recorded_bytes.is_file():
+                    raise RehearsalError(
+                        "recorded predecessor pointer bytes are missing: "
+                        f"{target.root_id}"
+                    )
+                (rehearsal_root / "CURRENT.json").write_bytes(
+                    recorded_bytes.read_bytes()
+                )
+                if (
+                    _observed_pointer(rehearsal_root, recorded=True)
+                    != target.previous_pointer
+                ):
+                    raise RehearsalError(
+                        "recovered rehearsal predecessor could not be reproduced"
+                    )
+            elif target.previous_pointer is not None:
                 _copy_manifest(
                     source_root,
                     target.previous_pointer.generation_id,
@@ -329,7 +384,15 @@ def rehearse_release_boundaries(
             },
             code_commit=manifest.code_commit,
             created_at=manifest.created_at,
-            gates=(GateEvidence("recovery-rehearsal", "f" * 64),),
+            gates=(
+                GateEvidence("recovery-rehearsal", "f" * 64),
+                *(
+                    (GateEvidence(_POINTER_RECOVERY_GATE_ID, "e" * 64),)
+                    if recovery
+                    else ()
+                ),
+            ),
+            allow_unusable_predecessor_pointers=recovery,
             companions=tuple(
                 CompanionInput(
                     item.companion_id,
@@ -433,7 +496,10 @@ def rehearse_release_boundaries(
             if target.previous_pointer is None:
                 if pointer_path.exists():
                     raise RehearsalError("absent predecessor pointer was not restored")
-            elif read_current(roots[target.root_id]) != target.previous_pointer:
+            elif (
+                _observed_pointer(roots[target.root_id], recorded=recovery)
+                != target.previous_pointer
+            ):
                 raise RehearsalError("predecessor pointer graph was not restored")
         for companion in manifest.companions:
             path = roots[companion.root_id] / PurePosixPath(companion.relative_path)
@@ -497,7 +563,7 @@ def rehearse_release_boundaries(
     ) -> None:
         for target in release.targets:
             root = scenario_roots[target.root_id]
-            actual = read_current(root) if (root / "CURRENT.json").exists() else None
+            actual = _observed_pointer(root, recorded=recovery)
             if actual != target.previous_pointer:
                 raise RehearsalError("resumed rollback pointer graph differs")
         for companion in release.companions:
@@ -550,14 +616,8 @@ def rehearse_release_boundaries(
             second_target,
         ),
     )
-    second_pointer_path = roots[second_target] / "CURRENT.json"
-    second_actual = (
-        read_current(roots[second_target]) if second_pointer_path.exists() else None
-    )
-    first_pointer_path = roots[first_target] / "CURRENT.json"
-    first_actual = (
-        read_current(roots[first_target]) if first_pointer_path.exists() else None
-    )
+    second_actual = _observed_pointer(roots[second_target], recorded=recovery)
+    first_actual = _observed_pointer(roots[first_target], recorded=recovery)
     if (
         second_actual
         != next(

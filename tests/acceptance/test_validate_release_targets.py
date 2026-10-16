@@ -801,3 +801,236 @@ def test_a_non_flat_root_resolves_its_declared_artifact_id_only(
     # Control: the same panel binds clean once the declared id is staged.
     (generation / "weekly-returns.json").write_bytes(WEEKLY_ARTIFACT_BYTES)
     assert list(rt.target_binding(target, panel, tmp_path)) == []
+
+
+# ------------------------------------------- provider and epoch roots (REL-PROVIDER-ROOTS-001)
+
+
+def test_provider_bound_roots_equal_the_materializer_provider_roots() -> None:
+    """Seam test: the roots judged by provider_binding are exactly the roots the
+    production spec adds beside dataPortfolio, and none is in the panel table."""
+    import portfolio_pipeline_materialize as materializer
+
+    assert rt.PROVIDER_BOUND_ROOTS == frozenset(materializer.PROVIDER_ROOTS)
+    assert rt.PROVIDER_BOUND_ROOTS.isdisjoint(rt.KNOWN_ROOTS)
+    assert rt.PROVIDER_LEDGER_ROOT_ID in rt.KNOWN_ROOTS
+    assert rt.PROVIDER_ROOT_PROVIDERS == {
+        root_id: provider
+        for provider, root_id in materializer.LEDGER_PROVIDER_ROOTS.items()
+    }
+
+
+PROVIDER_CATALOG_BYTES = b'{"catalog": "provider bytes"}\n'
+
+
+def _provider_target(
+    tmp_path: Path, root_id: str = "provider-schwab"
+) -> dict[str, Any]:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/schwab-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
+    (tmp_path / "generations" / GOOD_GEN / "schwab-generation.json").write_bytes(
+        PROVIDER_CATALOG_BYTES
+    )
+    return make_target(root_id, tmp_path, GOOD_GEN)
+
+
+def _ledger(target: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    row = {
+        "provider_id": "schwab",
+        "generation_id": GOOD_GEN,
+        "manifest_sha256": target["proposed_manifest_sha256"],
+        "catalog_sha256": _sha(PROVIDER_CATALOG_BYTES),
+        "qualification": "STAGED_COMPLETE",
+    }
+    row.update(changes)
+    return {"provider_generations": [row]}
+
+
+def test_a_provider_target_bound_by_the_ledger_has_no_findings(tmp_path: Path) -> None:
+    target = _provider_target(tmp_path)
+    ledger = _ledger(target)
+    assert list(rt.provider_binding(target, tmp_path, base_panel(), ledger)) == []
+    assert rt.run_target_checks(target, tmp_path, base_panel(), {}, ledger) == []
+
+
+def test_a_provider_target_the_ledger_does_not_bind_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    target = _provider_target(tmp_path)
+    for changes, fragment in (
+        ({"generation_id": PREVIOUS_GEN}, "different generation"),
+        ({"manifest_sha256": "0" * 64}, "different manifest hash"),
+        ({"catalog_sha256": "1" * 64}, "no file in the target generation"),
+    ):
+        findings = list(
+            rt.provider_binding(
+                target, tmp_path, base_panel(), _ledger(target, **changes)
+            )
+        )
+        assert [f.check_id for f in findings] == ["release.provider_binding"]
+        assert findings[0].klass == BLOCKER_AUTHORITY
+        assert fragment in findings[0].message
+
+
+def test_a_provider_target_without_a_ledger_catalog_fails_closed(
+    tmp_path: Path,
+) -> None:
+    target = _provider_target(tmp_path)
+    findings = list(rt.provider_binding(target, tmp_path, base_panel(), None))
+    assert [f.klass for f in findings] == [BLOCKER_AUTHORITY]
+    twice = {"provider_generations": [*_ledger(target)["provider_generations"]] * 2}
+    assert (
+        "not bound once"
+        in list(rt.provider_binding(target, tmp_path, base_panel(), twice))[0].message
+    )
+
+
+def test_a_provider_root_is_not_judged_against_the_panel_table(tmp_path: Path) -> None:
+    target = _provider_target(tmp_path)
+    assert list(rt.target_binding(target, base_panel(), tmp_path)) == []
+
+
+EPOCH_ARTIFACT_BYTES = b'{"authority": "epoch bytes"}\n'
+
+
+def _epoch_target(
+    tmp_path: Path, *, on_disk: bytes = EPOCH_ARTIFACT_BYTES
+) -> dict[str, Any]:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "authority/calculation-inputs.json",
+                "sha256": _sha(EPOCH_ARTIFACT_BYTES),
+            }
+        ],
+    )
+    artifact = (
+        tmp_path / "generations" / GOOD_GEN / "authority" / "calculation-inputs.json"
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(on_disk)
+    return make_target("epoch-manifest", tmp_path, GOOD_GEN)
+
+
+def _panel_pinning(sha: str) -> dict[str, Any]:
+    panel = base_panel()
+    panel["account_manifest"]["calculation_inputs"] = {
+        "artifact_id": "authority/calculation-inputs.json",
+        "sha256": sha,
+    }
+    return panel
+
+
+def test_an_epoch_manifest_target_matching_the_panel_pins_has_no_findings(
+    tmp_path: Path,
+) -> None:
+    target = _epoch_target(tmp_path)
+    panel = _panel_pinning(_sha(EPOCH_ARTIFACT_BYTES))
+    assert list(rt.provider_binding(target, tmp_path, panel, None)) == []
+
+
+def test_an_epoch_manifest_target_the_panel_does_not_pin_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    target = _epoch_target(tmp_path)
+    different = list(
+        rt.provider_binding(target, tmp_path, _panel_pinning("2" * 64), None)
+    )
+    assert [f.check_id for f in different] == ["release.provider_binding"]
+    unpinned = list(rt.provider_binding(target, tmp_path, base_panel(), None))
+    assert "pins no artifact" in unpinned[0].message
+    other = tmp_path / "other"
+    tampered = _epoch_target(other, on_disk=b"tampered\n")
+    findings = list(
+        rt.provider_binding(
+            tampered, other, _panel_pinning(_sha(EPOCH_ARTIFACT_BYTES)), None
+        )
+    )
+    assert findings and findings[0].observed["bytes"] == _sha(b"tampered\n")
+
+
+def test_an_epoch_manifest_target_missing_a_panel_pinned_authority_artifact_blocks(
+    tmp_path: Path,
+) -> None:
+    target = _epoch_target(tmp_path)
+    panel = _panel_pinning(_sha(EPOCH_ARTIFACT_BYTES))
+    panel["account_manifest"]["classified_flows"] = {
+        "artifact_id": "authority/classified-flows.json",
+        "sha256": "3" * 64,
+    }
+    findings = list(rt.provider_binding(target, tmp_path, panel, None))
+    assert [f.check_id for f in findings] == ["release.provider_binding"]
+    assert "does not declare it" in findings[0].message
+    assert "authority/classified-flows.json" in findings[0].json_path
+
+
+def test_a_provider_catalog_the_manifest_declares_binds_without_the_file(
+    tmp_path: Path,
+) -> None:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/portfolio123-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
+    target = make_target("provider-portfolio123", tmp_path, GOOD_GEN)
+    ledger = {
+        "provider_generations": [
+            {
+                "provider_id": "portfolio123",
+                "generation_id": GOOD_GEN,
+                "manifest_sha256": target["proposed_manifest_sha256"],
+                "catalog_sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ]
+    }
+    assert list(rt.provider_binding(target, tmp_path, base_panel(), ledger)) == []
+
+
+def test_a_declared_catalog_whose_present_bytes_differ_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/schwab-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
+    (tmp_path / "generations" / GOOD_GEN / "schwab-generation.json").write_bytes(
+        b"swapped catalog\n"
+    )
+    target = make_target("provider-schwab", tmp_path, GOOD_GEN)
+    findings = list(
+        rt.provider_binding(target, tmp_path, base_panel(), _ledger(target))
+    )
+    assert [f.check_id for f in findings] == ["release.provider_binding"]
+    assert "contradict" in findings[0].message
+
+
+def test_a_ledger_hash_matching_only_an_unrelated_file_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    target = _provider_target(tmp_path)
+    unrelated = b"original catalog bytes kept under another name\n"
+    (tmp_path / "generations" / GOOD_GEN / "unrelated.txt").write_bytes(unrelated)
+    ledger = _ledger(target, catalog_sha256=_sha(unrelated))
+    findings = list(rt.provider_binding(target, tmp_path, base_panel(), ledger))
+    assert [f.check_id for f in findings] == ["release.provider_binding"]
