@@ -111,15 +111,49 @@ def _owner(path: str) -> str:
     return parts[0]
 
 
-def _imports(tree: ast.AST) -> Iterable[tuple[int, str, tuple[str, ...]]]:
-    """Yield (line, absolute module, imported names); relative imports are skipped."""
+def _package_parts(path: str) -> list[str]:
+    """Dotted package of a packages/*/src file, as parts (empty elsewhere)."""
 
+    if not path.startswith("packages/") or "/src/" not in path:
+        return []
+    parts = path.split("/src/", 1)[1].removesuffix(".py").split("/")
+    return parts[:-1]
+
+
+def _imports(
+    tree: ast.AST, path: str = ""
+) -> Iterable[tuple[int, str, tuple[str, ...]]]:
+    """Yield (line, absolute module, imported names).
+
+    Relative imports inside a package are resolved against the importing
+    package, so `from ..schwab import api` is seen as `quant_engine.schwab`.
+    """
+
+    package = _package_parts(path)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name, ()
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            yield node.lineno, node.module, tuple(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names = tuple(a.name for a in node.names)
+            if node.level == 0:
+                module = node.module or ""
+            elif package and node.level <= len(package):
+                base = package[: len(package) - (node.level - 1)]
+                module = ".".join(
+                    [*base, *(node.module.split(".") if node.module else [])]
+                )
+            else:
+                continue
+            if not module:
+                continue
+            if module == "quant_engine":
+                # `from quant_engine import core` / `from .. import core`: each
+                # name is itself a package of the namespace.
+                for name in names:
+                    yield node.lineno, f"quant_engine.{name}", ()
+            else:
+                yield node.lineno, module, names
 
 
 def _declared(root: Path, project_dir: str) -> set[str] | None:
@@ -157,7 +191,7 @@ def census(files: Mapping[str, str], root: Path = ROOT) -> list[Violation]:
         except SyntaxError:
             continue
         owner = owners[path]
-        imports = list(_imports(tree))
+        imports = list(_imports(tree, path))
         bound: dict[str, str] = {}
 
         def first_party(module: str) -> str | None:
@@ -300,31 +334,48 @@ def census(files: Mapping[str, str], root: Path = ROOT) -> list[Violation]:
     return found
 
 
-def counts(violations: Iterable[Violation]) -> dict[str, dict[str, int]]:
-    table: dict[str, Counter[str]] = {rule: Counter() for rule in RULES}
-    for rule, path, _, _ in violations:
-        table[rule][path] += 1
-    return {rule: dict(sorted(table[rule].items())) for rule in RULES}
+Census = dict[str, dict[str, dict[str, int]]]  # rule -> file -> detail -> count
 
 
-def compare(
-    actual: Mapping[str, Mapping[str, int]], allowed: Mapping[str, Mapping[str, int]]
-) -> tuple[list[str], list[str]]:
+def counts(violations: Iterable[Violation]) -> Census:
+    """Per (rule, file), the multiset of violation identities (`detail`).
+
+    Identities, not totals: swapping one violation for another in an allowlisted
+    file changes the census and fails the gate.
+    """
+
+    table: dict[str, dict[str, Counter[str]]] = {rule: {} for rule in RULES}
+    for rule, path, _, detail in violations:
+        table[rule].setdefault(path, Counter())[detail] += 1
+    return {
+        rule: {
+            path: dict(sorted(table[rule][path].items()))
+            for path in sorted(table[rule])
+        }
+        for rule in RULES
+    }
+
+
+def compare(actual: Census, allowed: Census) -> tuple[list[str], list[str]]:
     """Return (new violations, stale allowlist entries)."""
 
     new: list[str] = []
     stale: list[str] = []
     for rule in RULES:
-        have, may = actual.get(rule, {}), allowed.get(rule, {})
-        for path in sorted(set(have) | set(may)):
-            if have.get(path, 0) > may.get(path, 0):
-                new.append(
-                    f"{rule} {path}: {have.get(path, 0)} > allowed {may.get(path, 0)}"
-                )
-            elif have.get(path, 0) < may.get(path, 0):
-                stale.append(
-                    f"{rule} {path}: {have.get(path, 0)} < allowed {may[path]}"
-                )
+        have_files, may_files = actual.get(rule, {}), allowed.get(rule, {})
+        for path in sorted(set(have_files) | set(may_files)):
+            have, may = have_files.get(path, {}), may_files.get(path, {})
+            for detail in sorted(set(have) | set(may)):
+                if have.get(detail, 0) > may.get(detail, 0):
+                    new.append(
+                        f"{rule} {path} [{detail}]: "
+                        f"{have.get(detail, 0)} > allowed {may.get(detail, 0)}"
+                    )
+                elif have.get(detail, 0) < may.get(detail, 0):
+                    stale.append(
+                        f"{rule} {path} [{detail}]: "
+                        f"{have.get(detail, 0)} < allowed {may[detail]}"
+                    )
     return new, stale
 
 
@@ -356,7 +407,7 @@ def import_graph(files: Mapping[str, str]) -> dict[str, Any]:
             tree = ast.parse(source)
         except SyntaxError:
             continue
-        for _, module, _ in _imports(tree):
+        for _, module, _ in _imports(tree, path):
             parts = module.split(".")
             if (
                 owner.startswith("pkg:")
@@ -421,6 +472,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if json.loads(EDGES.read_text(encoding="utf-8")) != edges_contract():
         print("allowed-edges.json is stale; run --write-docs", file=sys.stderr)
         return 1
+    if json.loads(GRAPH.read_text(encoding="utf-8")) != import_graph(files):
+        print("import-graph.json is stale; run --write-docs", file=sys.stderr)
+        return 1
     if new or stale:
         if new:
             print(
@@ -437,7 +491,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for msg in stale:
                 print("  " + msg, file=sys.stderr)
         return 1
-    total = sum(sum(v.values()) for v in actual.values())
+    total = sum(
+        n for files in actual.values() for d in files.values() for n in d.values()
+    )
     print(f"architecture: PASS ({total} allowlisted violations)")
     return 0
 
