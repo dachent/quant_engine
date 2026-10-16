@@ -1989,7 +1989,7 @@ def test_verified_epoch_details_feed_the_summed_value_reconcile_with_the_r3_memb
     is off by 1e-9.  The merge base's details carry none of it.
     """
 
-    r3 = "account-702c489650e59956"
+    r3 = "account-c63d2a487e019790"
     epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
         _verified_schema9_epoch_bundle(
             tmp_path, all_numeric_candidates=True, r3_account_id=r3

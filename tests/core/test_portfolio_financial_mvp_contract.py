@@ -1475,7 +1475,9 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
         "p123-eu": 1,
         "qsi": 2,
         "robuxio-crypto": 1,
-        "tt-portfolio": 4,
+        # The fourth TT account (4054) was liquidated and transferred out on
+        # 2026-06-22 (#539): its sleeve is a closed funded epoch, not current.
+        "tt-portfolio": 3,
         "volatis-strategy": 1,
     }
     assert len(transition_rows) == 4
@@ -1494,7 +1496,18 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
         and assignment["status"] == "FUNDED_MEMBERSHIP"
     ]
     assert tt_funded
-    assert all(row["effective_end"] is None for row in tt_funded)
+    # Open memberships, plus the closed funded epochs the owner ruled on (#539):
+    # the two accounts later assigned to QSI (to 2026-01-04) and the liquidated
+    # and transferred account (to 2026-06-21, never a July exit).
+    assert sorted(str(row["effective_end"]) for row in tt_funded) == sorted(
+        ["None"] * 3 + ["2026-01-04", "2026-01-04", "2026-06-21"]
+    )
+    assert {
+        row["authority"] for row in tt_funded if row["effective_end"] is not None
+    } == {
+        "OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED",
+        "OWNER_539_LIQUIDATED_AND_TRANSFERRED",
+    }
 
 
 def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes() -> (

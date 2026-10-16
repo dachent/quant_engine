@@ -3441,24 +3441,42 @@ def _real_context() -> checks.Context:
 def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     """Guard: contract bytes == the baseline's authority pointer, and the qsi tuple."""
 
+    # #539: the owner funded the two TT predecessor epochs and ended the 4054
+    # epoch on 2026-06-21, so the census no longer is the one the expected
+    # baseline pins.  The validator must say so (it refuses a run against a
+    # baseline derived from other authority); the baseline is re-derived from
+    # the retained data at the governed release step.
     state = checks.census_state(_real_context())
-    assert state.problem is None, state.problem
-    assert state.census is not None
-    assert state.census.sha256 == (
-        "49a19ebfa1e7dded94fa21241e5011d60c9b1bb6e41dd587c9943dbe14017d7b"
-    )
-    tuples = [
-        (a.strategy_id, a.status, a.effective_start, a.effective_end)
-        for a in state.census.assignments
-        if a.strategy_id == "tt-portfolio"
-    ]
-    # schwab-qsi-01 and schwab-qsi-02 hold the assignment-only tt interval; no
-    # sleeve holds a funded membership with that tuple
+    assert state.census is None
+    assert state.problem is not None
     assert (
-        tuples.count(("tt-portfolio", "ASSIGNMENT_ONLY", "2025-11-25", "2026-01-04"))
+        "49a19ebfa1e7dded94fa21241e5011d60c9b1bb6e41dd587c9943dbe14017d7b"
+        in state.problem
+    )
+    assert (
+        "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da"
+        in state.problem
+    )
+    census = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )["current_census"]
+    tuples = [
+        ("tt-portfolio", row["status"], row["effective_start"], row["effective_end"])
+        for sleeve in census["account_sleeves"]
+        for row in sleeve["assignments"]
+        if row["strategy_id"] == "tt-portfolio"
+    ]
+    # schwab-qsi-01 and schwab-qsi-02 hold the funded tt predecessor interval
+    assert (
+        tuples.count(("tt-portfolio", "FUNDED_MEMBERSHIP", "2025-11-25", "2026-01-04"))
         == 2
     )
-    assert not [t for t in tuples if t[1] == "FUNDED_MEMBERSHIP" and t[3] is not None]
+    assert not [t for t in tuples if t[1] == "ASSIGNMENT_ONLY"]
+    assert ("tt-portfolio", "FUNDED_MEMBERSHIP", "2025-11-25", "2026-06-21") in tuples
 
 
 def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None:

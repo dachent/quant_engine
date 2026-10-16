@@ -281,6 +281,7 @@ def link_epoch(
     legs: Sequence[FlowLeg],
     opening: OpeningPoint,
     funded_end: date | None = None,
+    close_on_zero_capital: bool = True,
 ) -> EpochLink:
     """Chain-link every observation after ``opening`` into one epoch TWR.
 
@@ -288,7 +289,9 @@ def link_epoch(
     observations beyond it (the tail after a liquidation): sub-periods ending
     after it are post-liquidation credits, not linked.  Without it the epoch
     closes by itself at the first sub-period that starts at zero capital and
-    ends with value (see the module docstring).
+    ends with value (see the module docstring); ``close_on_zero_capital=False``
+    keeps the older rule where that sub-period makes the epoch unavailable
+    (summed strategy series, whose callers re-open the path).
 
     Each leg belongs to the sub-period ending at the first observation on or
     after its NAV recognition date.  Legs recognized on or before the opening
@@ -344,7 +347,10 @@ def link_epoch(
     prior_value = opening.value
     closed_on: date | None = None
     credits: list[PostLiquidationCredit] = []
-    if funded_end is not None and _require_date(funded_end, "funded_end") < opening.as_of:
+    if (
+        funded_end is not None
+        and _require_date(funded_end, "funded_end") < opening.as_of
+    ):
         raise ReturnsError("funded_end precedes the opening point")
     for day in days:
         if closed_on is None and funded_end is not None and day > funded_end:
@@ -364,7 +370,7 @@ def link_epoch(
         base = prior_value + beginning_flow if beginning_legs else prior_value
         numerator = ending_value - ending_flow
         neutral = base == 0
-        if closed_on is None and neutral and numerator != 0:
+        if closed_on is None and close_on_zero_capital and neutral and numerator != 0:
             closed_on = prior_day
         if closed_on is not None:
             if any(leg.amount > 0 for leg in period_legs):

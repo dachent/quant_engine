@@ -217,7 +217,9 @@ def test_exact_timestamp_fill_starts_its_subperiod_date_only_ends_it() -> None:
 # --- R3 zero capital ---------------------------------------------------------
 
 
-def test_liquidate_and_transfer_closes_the_epoch_and_deferred_credit_is_recorded() -> None:
+def test_liquidate_and_transfer_closes_the_epoch_and_deferred_credit_is_recorded() -> (
+    None
+):
     observations = series(
         d2026_07_13="100", d2026_07_14="0", d2026_07_15="0", d2026_07_16="3.81"
     )

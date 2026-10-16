@@ -22169,9 +22169,10 @@ def test_zero_nav_liquidation_run_closes_the_epoch_and_credits_the_residual(
     assert verifier_row["withdrawn"] == Decimal("32.15")
     assert verifier_row["performance_status"] == "AVAILABLE"
     assert verifier_row["performance_closed_on"] == "2026-01-03"
-    assert verifier_row["post_liquidation_credits"] == producer_row[
-        "post_liquidation_credits"
-    ]
+    assert (
+        verifier_row["post_liquidation_credits"]
+        == producer_row["post_liquidation_credits"]
+    )
     assert verifier_row["post_liquidation_income"] == Decimal("3.81")
     assert verifier_row["gain"] == Decimal("3.81")
 

@@ -7092,7 +7092,12 @@ def test_t2_r2_funded_admission_of_a_census_assignment_only_interval_raises(
 def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
     manifest_module: Any,
 ) -> None:
-    """The governed census marks the two tt->qsi transitions ASSIGNMENT_ONLY."""
+    """The governed census funds the two tt->qsi predecessor epochs (#539).
+
+    The owner ruled these epochs were traded, then re-assigned: they carry an
+    epoch return and count in the TT return.  ASSIGNMENT_ONLY remains a valid
+    census status, so the refusal is exercised on a census that still has it.
+    """
 
     contract = json.loads(
         (
@@ -7103,7 +7108,11 @@ def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
     )
     census = manifest_module.load_membership_census(contract)
     key = ("SCHWAB", "tt-portfolio", "2025-11-25", "2026-01-04")
-    assert census[key] == ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
+    assert census[key] == ["FUNDED_MEMBERSHIP", "FUNDED_MEMBERSHIP"]
+    manifest_module._validate_admissions_against_census(
+        {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
+    )
+    census[key] = ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
     with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
         manifest_module._validate_admissions_against_census(
             {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}

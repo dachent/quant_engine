@@ -5065,8 +5065,10 @@ def _validate_manifest_semantics(
         closed_on = row.get("performance_closed_on")
         if closed_on is not None:
             closed_on = _iso_date(closed_on, f"row[{index}].performance_closed_on")
-            if closed_on < start or closed_on > end or (
-                effective_end is not None and closed_on > effective_end
+            if (
+                closed_on < start
+                or closed_on > end
+                or (effective_end is not None and closed_on > effective_end)
             ):
                 raise ManifestError(f"row {index} performance closing is invalid")
         # A closed epoch carries the account's later observations (the tail

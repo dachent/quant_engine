@@ -168,7 +168,12 @@ def _governed_case(tmp_path):
                 {
                     "epoch_id": epoch["epoch_id"],
                     "start_date": epoch["effective_start"],
-                    "end_date": epoch["effective_end"] or inputs["complete_through"],
+                    # An epoch that closes after the evaluation date (the 4054 sleeve, #539)
+                    # is covered only up to what the source has completed.
+                    "end_date": min(
+                        epoch["effective_end"] or inputs["complete_through"],
+                        inputs["complete_through"],
+                    ),
                     "evidence_sha256": capital._digest(coverage),
                 }
             )
