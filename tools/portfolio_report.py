@@ -3316,7 +3316,7 @@ def _verify_custody_current_capital(
     authority = block.get("custody_authority")
     if authority is None:
         if any(
-            row.get("derived_cash")
+            row.get("derived_cash") or row.get("account_cash_lines")
             for row in _objects(block.get("strategies"), "strategies")
         ):
             raise ReportValidationError("custody cash lacks selected source authority")
@@ -3341,7 +3341,10 @@ def _verify_custody_current_capital(
     ):
         raise ReportValidationError("custody selected source authority differs")
     from provider_ledger import _financial_mvp_module
-    from portfolio_baseline import _derived_custody_cash
+    from portfolio_baseline import (
+        _derived_custody_cash,
+        _fund_scoped_account_cash_lines,
+    )
 
     module = _financial_mvp_module()
     contract = _load_json(
@@ -3392,6 +3395,23 @@ def _verify_custody_current_capital(
     ):
         raise ReportValidationError(
             "custody cash differs from independent raw recompute"
+        )
+    try:
+        cash_lines = _fund_scoped_account_cash_lines(
+            raw,
+            _date(block["valuation_date"], "custody cutoff"),
+            invested_policy.get("provider_custody_perimeter", {}).get(
+                "fund_scoped_providers", ()
+            ),
+        )
+    except (RuntimeError, ValueError, KeyError) as exc:
+        raise ReportValidationError(f"account cash recompute failed: {exc}") from exc
+    if set(cash_lines) - {str(row["strategy_id"]) for row in rows} or any(
+        row.get("account_cash_lines", []) != cash_lines.get(str(row["strategy_id"]), [])
+        for row in rows
+    ):
+        raise ReportValidationError(
+            "account cash lines differ from independent raw recompute"
         )
 
 

@@ -724,6 +724,26 @@
     const state = capitalState("reserve");
     return { status: state.status, value: state.value, ready: state.ready };
   };
+  // #536: a strategy funded from an account that funds several funds shows its dividends and
+  // fees beside the fund NAV, labelled, so the result reads NAV plus dividends minus cash-paid fees.
+  const accountCashNote = (strategyId) => {
+    const row = strategyId ? data.custody_current_capital?.strategies?.find((item) => item.strategy_id === strategyId) : null;
+    const lines = Array.isArray(row?.account_cash_lines) ? row.account_cash_lines : [];
+    if (!lines.length) return "";
+    const amount = (label) => number(lines.find((line) => line.label === label)?.current_value?.value);
+    const nav = number(row.current_value?.value);
+    const dividends = amount("DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV");
+    const cashFees = amount("FEES_PAID_FROM_ACCOUNT_CASH");
+    const fundSells = amount("IN_FUND_FEE_FUNDED_SELLS_COST");
+    const parts = [
+      `Fund NAV ${currency(nav)}`,
+      dividends == null ? null : `dividends paid to account cash ${currency(dividends)} (not in NAV)`,
+      cashFees == null ? null : `fees paid from account cash ${currency(cashFees)}`,
+      fundSells == null ? null : `in-fund fee sells ${currency(fundSells)} (cost, already in NAV)`,
+    ].filter(Boolean);
+    const economic = nav == null ? null : nav + (dividends ?? 0) + (cashFees ?? 0);
+    return `<span class="cell-secondary">${safe(parts.join("; "))}${economic == null ? "" : `; NAV plus dividends minus cash-paid fees ${safe(currency(economic))}`}</span>`;
+  };
   const allocationCurrent = (row) => {
     if (row.scope === "RESERVE") {
       const reserve = reserveCurrentState();
@@ -745,7 +765,7 @@
       const current = currents[index];
       const currentValue = current.value != null ? currency(current.value) : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
     });
     // F20: a total only for the additive columns, from the rows shown.  A current value that is
     // not ready is left out of its total and the footer says how many.

@@ -4251,7 +4251,8 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
-    "CAPITAL_ANCHOR"
+    "CAPITAL_ANCHOR",
+    "TRANSACTION"
    ],
    "authority": "QUANTBASE_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "quantbase-generation.json in an exact governed generation",
@@ -4292,7 +4293,8 @@
     "facts": [
      "NAV_OBSERVATION",
      "EXTERNAL_FLOW",
-     "CAPITAL_ANCHOR"
+     "CAPITAL_ANCHOR",
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -4302,8 +4304,8 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
-     "product_data_class_count": 3,
-     "product_data_class_set_sha256": "ecd774f302b55db00ccdba59aded6bb8025d44f4a9c8e28aeb04f65254215e69",
+     "product_data_class_count": 4,
+     "product_data_class_set_sha256": "f5eec6a60b6cdb6afae4b237382658345a51bb26631e0fc9aecc565fcf2874ca",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [

@@ -2953,6 +2953,97 @@ def _derived_custody_cash(
     return dict(components)
 
 
+_ACCOUNT_CASH_LINE_KINDS: Final = (
+    (
+        "DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV",
+        "DIVIDEND",
+        None,
+    ),
+    (
+        "FEES_PAID_FROM_ACCOUNT_CASH",
+        "FEE_JOURNAL:PARTNER_SUB_FEE",
+        "ACCOUNT_CASH",
+    ),
+    (
+        "IN_FUND_FEE_FUNDED_SELLS_COST",
+        "FEE_FUNDING_SELL",
+        None,
+    ),
+)
+
+
+def _fund_scoped_account_cash_lines(
+    provider_catalog: Mapping[str, Any],
+    valuation_date: date,
+    fund_scoped_providers: Sequence[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Labelled lines beside a fund-scoped strategy's fund NAV (owner decision, #536).
+
+    Dividends paid to account cash are not in the fund NAV; fees paid from
+    account cash and in-fund fee-funded sells are costs.  None of these is part
+    of the strategy's current value or capital: they are disclosed so the
+    economic result reads NAV plus dividends minus cash-paid fees.  Every line
+    is an exact sum of admitted, mapped ledger transactions through the cutoff.
+    """
+
+    scoped = {str(item).upper() for item in fund_scoped_providers}
+    if not scoped:
+        return {}
+    rows = [
+        row
+        for row in _objects(provider_catalog.get("transactions", []), "transactions")
+        if str(row.get("provider_id") or "").upper() in scoped
+        and row.get("mapping_status") == "MAPPED"
+        and row.get("strategy_id") is not None
+        and _date(row.get("event_date"), "account cash line date") <= valuation_date
+    ]
+    identities = [_text(row.get("record_id"), "account cash record_id") for row in rows]
+    if len(set(identities)) != len(identities):
+        raise BaselineValidationError("account cash duplicate source record ID")
+    by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_strategy[str(row["strategy_id"])].append(row)
+    result: dict[str, list[dict[str, Any]]] = {}
+    for strategy_id, members in sorted(by_strategy.items()):
+        lines: list[dict[str, Any]] = []
+        for label, kind, funding in _ACCOUNT_CASH_LINE_KINDS:
+            selected = [
+                row
+                for row in members
+                if row.get("kind") == kind
+                and (funding is None or row.get("funding") == funding)
+            ]
+            if not selected:
+                continue
+            amounts = []
+            for row in selected:
+                amount = _object(row.get("amount"), "account cash amount")
+                if (
+                    amount.get("status") != "AVAILABLE"
+                    or amount.get("currency") != "USD"
+                ):
+                    raise BaselineValidationError("account cash amount is not USD")
+                amounts.append(_decimal(amount.get("value"), "account cash amount"))
+            ids = sorted(str(row["record_id"]) for row in selected)
+            lines.append(
+                {
+                    "label": label,
+                    "as_of_date": max(
+                        _date(row["event_date"], "account cash date")
+                        for row in selected
+                    ).isoformat(),
+                    "current_value": _capital_amount(_exact_sum(amounts)),
+                    "event_count": len(selected),
+                    "events_sha256": hashlib.sha256(
+                        canonical_json_bytes(ids)
+                    ).hexdigest(),
+                }
+            )
+        if lines:
+            result[strategy_id] = lines
+    return result
+
+
 def _build_current_capital(
     *,
     valuation_date: date,
@@ -3006,6 +3097,17 @@ def _build_current_capital(
             raise BaselineValidationError(
                 "custody cash references an unregistered strategy"
             )
+        cash_lines = _fund_scoped_account_cash_lines(
+            provider_catalog,
+            valuation_date,
+            custody_authority.get("fund_scoped_providers", ()),
+        )
+        if set(cash_lines) - set(strategy_ids):
+            raise BaselineValidationError(
+                "account cash lines reference an unregistered strategy"
+            )
+    else:
+        cash_lines = {}
     rows: list[dict[str, Any]] = []
     claimed: dict[str, str] = {}
     for strategy_id in strategy_ids:
@@ -3097,6 +3199,8 @@ def _build_current_capital(
         )
         if strategy_id in cash:
             rows[-1]["derived_cash"] = cash[strategy_id]
+        if strategy_id in cash_lines:
+            rows[-1]["account_cash_lines"] = cash_lines[strategy_id]
 
     def component(scope: str) -> list[dict[str, Any]]:
         return [row for row in rows if row["scope"] == scope]
@@ -3526,12 +3630,21 @@ def _reconcile_current_capital(
                 "fund_scoped_providers", ()
             ),
         )
+        cash_lines = _fund_scoped_account_cash_lines(
+            provider_catalog,
+            valuation_date,
+            current_capital["custody_authority"].get("fund_scoped_providers", ()),
+        )
         for row in rows:
             strategy_id = str(row["strategy_id"])
             expected = cash.get(strategy_id, [])
             if row.get("derived_cash", []) != expected:
                 raise BaselineValidationError(
                     "custody cash differs from raw event recompute"
+                )
+            if row.get("account_cash_lines", []) != cash_lines.get(strategy_id, []):
+                raise BaselineValidationError(
+                    "account cash lines differ from raw event recompute"
                 )
             value, day, accounts = recomputed[strategy_id]
             if value is not None:
@@ -3560,7 +3673,7 @@ def _reconcile_current_capital(
                     ]
                 )
                 recomputed[strategy_id] = (value, day, accounts)
-    elif any(row.get("derived_cash") for row in rows):
+    elif any(row.get("derived_cash") or row.get("account_cash_lines") for row in rows):
         raise BaselineValidationError("custody cash lacks selected authority")
     capital_check = _strategy_capital_check(rows, scopes, recomputed, valuation_date)
     identity_check = _capital_identity_check(

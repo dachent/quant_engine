@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "eef3bf35c88212c7c0676e9d9851be0096afd4a12ba497f5d831a2ca555dbad0"
+        "ea6f5ca757e11c249cca9661e117bb73f4c61175b6347441f4f5e225cb809b47"
     )
 
 
@@ -1078,10 +1078,13 @@ def test_quantbase_generation_is_account_live_from_accepted_membership() -> None
     assert admission["transform"] == "provider-ledger"
     assert admission["version"] == "1"
     # The three leverage facts left MVP-2's scope under the issue #396 deferral.
+    # TRANSACTION (#536): the account-cash dividends and fee journals the fund
+    # NAV does not carry.
     assert admission["facts"] == [
         "NAV_OBSERVATION",
         "EXTERNAL_FLOW",
         "CAPITAL_ANCHOR",
+        "TRANSACTION",
     ]
     assert admission["dataset_disposition_policy"]["policy_id"] == (
         "PROVIDER_ADMIT_OR_DECLARE_V1"
@@ -4240,7 +4243,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "aed5894066b53c79e191e7a4f32d4dd9206763224989e38393d7793ced63da40"
+        "ca5cf18cc47a67266e756ea8be6a94d52bcd4e4bf1bb8325730cbcebeeb7f2c2"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4277,7 +4280,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "aed5894066b53c79e191e7a4f32d4dd9206763224989e38393d7793ced63da40"
+        "ca5cf18cc47a67266e756ea8be6a94d52bcd4e4bf1bb8325730cbcebeeb7f2c2"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
