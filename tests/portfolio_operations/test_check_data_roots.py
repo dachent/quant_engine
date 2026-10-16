@@ -116,3 +116,15 @@ def test_every_published_data_root_is_a_boundary_forbidden_root() -> None:
     assert missing == [], f"add to forbidden_root_names: {missing}"
     example = (REPOSITORY_ROOT / "config.example.toml").read_text("utf-8")
     assert "../dataRobuxio" in example and "../dataEpochManifest" in example
+
+
+def test_explicitly_requested_absent_root_fails(tmp_path: Path) -> None:
+    assert gate.main(["--workspace", str(tmp_path), "--root", "dataSchwab"]) == 1
+    assert gate.main(["--workspace", str(tmp_path)]) == 0  # default sweep tolerates
+
+
+def test_boundary_policy_floor_requires_the_new_roots() -> None:
+    import check_repository_boundary as boundary
+
+    for name in gate.DATA_ROOTS:
+        assert name.lower() in boundary._REQUIRED_PROVIDER_ROOTS, name

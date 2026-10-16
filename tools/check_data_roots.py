@@ -68,7 +68,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name in names:
         root = args.workspace / name
         if not root.is_dir():
-            print(f"{name}: absent")
+            # An explicitly requested root is required; a default sweep tolerates
+            # roots this workspace does not have.
+            if args.root:
+                print(f"{name}: FAIL requested root is absent")
+                failed += 1
+            else:
+                print(f"{name}: absent")
             continue
         ok, message = check_root(root)
         failed += not ok
