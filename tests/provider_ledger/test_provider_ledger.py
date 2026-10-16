@@ -10115,3 +10115,128 @@ def test_matrixport_anchors_keep_their_own_window_without_a_captured_boundary() 
     by_fact = {item.fact_type: item for item in admissions}
     assert by_fact["flows"].effective_end == date(2026, 9, 18)
     assert by_fact["capital_anchors"].effective_end == date(2025, 12, 5)
+
+
+def test_execution_costs_and_time_granularity_are_admitted_to_ledger_rows() -> None:
+    """#535: a catalog commission, fee or time of day is never dropped at admission."""
+
+    ibkr_catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
+    ibkr_catalog["transactions"] = [
+        {
+            "account_id": _IBKR_ACCOUNT,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
+            "commission": {"currency": "USD", "status": "AVAILABLE", "value": "-1.05"},
+            "event_date": "2026-01-05",
+            "executed_time": "09:30:15",
+            "kind": "TRADE:ExchTrade:BUY",
+            "record_id": "ibkr-trade-1",
+            "timing_granularity": "DATETIME",
+        },
+        {
+            "account_id": _IBKR_ACCOUNT,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-5"},
+            "event_date": "2026-01-05",
+            "kind": "TRADE:ExchTrade:BUY",
+            "record_id": "ibkr-trade-2",
+            "timing_granularity": "DATE_ONLY",
+        },
+    ]
+    projected, _findings = ledger._project_account_facts(
+        "ibkr",
+        "generation-ibkr",
+        ibkr_catalog,
+        {_IBKR_ACCOUNT},
+        {"p123-eu"},
+        _IBKR_ASSIGNMENTS,
+    )
+    ibkr_by_id = {row["source_record_id"]: row for row in projected["transactions"]}
+    timed, date_only = ibkr_by_id["ibkr-trade-1"], ibkr_by_id["ibkr-trade-2"]
+    assert timed["commission"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "-1.05",
+    }
+    assert timed["executed_time"] == "09:30:15"
+    assert timed["timing_granularity"] == "DATETIME"
+    assert "commission" not in date_only and "executed_time" not in date_only
+    assert date_only["timing_granularity"] == "DATE_ONLY"
+
+    account_id = "account-schwab-fees"
+    schwab_catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    schwab_catalog["transactions"] = [
+        {
+            "account_id": account_id,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-100"},
+            "effective_date": "2026-01-15",
+            "event_date": "2026-01-14",
+            "fees_and_commission": "0.04",
+            "kind": "Sell",
+            "record_id": "schwab-sell-1",
+            "source_artifact_id": "wch/transactions/account-schwab-fees.json",
+        },
+        {
+            "account_id": account_id,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-50"},
+            "effective_date": "2026-01-15",
+            "event_date": "2026-01-14",
+            "fees_and_commission": None,
+            "kind": "Buy",
+            "record_id": "schwab-buy-1",
+            "source_artifact_id": "wch/transactions/account-schwab-fees.json",
+        },
+    ]
+    projected, _findings = ledger._project_account_facts(
+        "schwab",
+        "generation-schwab-fees",
+        schwab_catalog,
+        {account_id},
+        {"strategy-schwab-fees"},
+        {
+            account_id: [
+                {"effective_start": "2026-01-01", "strategy_id": "strategy-schwab-fees"}
+            ]
+        },
+    )
+    by_id = {row["source_record_id"]: row for row in projected["transactions"]}
+    sell, buy = by_id["schwab-sell-1"], by_id["schwab-buy-1"]
+    assert sell["fees_and_commission"] == "0.04"
+    assert "fees_and_commission" not in buy
+
+
+def test_providers_without_flows_are_not_labelled_date_only() -> None:
+    """#535: no flow to time means no timing convention, not DATE_ONLY_END_OF_DAY."""
+
+    nav = [
+        _nav("m", "2026-01-01", "100", "m-1"),
+        _nav("m", "2026-01-02", "110", "m-2"),
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+    assert rows
+    assert {row["flow_timing"] for row in rows} == {"NO_EXTERNAL_OR_INTERNAL_FLOW"}
+
+
+def test_no_flow_provider_does_not_make_a_mixed_timing_label() -> None:
+    """A date-only flow plus a component that has no flow stays DATE_ONLY (#535 review)."""
+
+    nav = [
+        _nav("a", "2026-01-01", "100", "a-1"),
+        _nav("a", "2026-01-02", "120", "a-2"),
+        {**_nav("m", "2026-01-01", "300", "m-1"), "provider_id": "matrixport"},
+        {**_nav("m", "2026-01-02", "330", "m-2"), "provider_id": "matrixport"},
+    ]
+    flows = [
+        {
+            "account_id": "a",
+            "amount": "10",
+            "event_date": "2026-01-02",
+            "mapping_status": "MAPPED",
+            "provider_id": "schwab",
+        }
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab", "matrixport"})
+
+    assert rows
+    assert {row["flow_timing"] for row in rows} == {"DATE_ONLY_END_OF_DAY"}

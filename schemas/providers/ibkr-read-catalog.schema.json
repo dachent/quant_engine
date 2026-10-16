@@ -24,7 +24,7 @@
     "tws_current_state"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 4},
+    "catalog_schema_version": {"enum": [4, 5]},
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
