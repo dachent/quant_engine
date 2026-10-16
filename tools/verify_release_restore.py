@@ -29,12 +29,12 @@ import sys
 from quant_engine.core import (
     GenerationNode,
     PipelineSpec,
+    ReleaseAuthorityPointer,
     generation_inventory_sha256,
     publish_generation,
     read_current,
     read_release,
 )
-from quant_engine.core.release import ReleaseAuthorityPointer
 
 
 class RestoreError(Exception):
