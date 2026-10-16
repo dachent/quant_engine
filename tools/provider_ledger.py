@@ -83,7 +83,7 @@ REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
-    "ibkr": ("ibkr-catalog.json", frozenset({3, 4})),
+    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5})),
     "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
@@ -4460,6 +4460,18 @@ def _project_account_facts(
                 ):
                     if field in row:
                         record[field] = row[field]
+                # Execution costs and source time granularity (#535): admitted
+                # when the source states them, so a catalog fact is never
+                # dropped here.  A ``None`` is no fact and adds no key.
+                for field in (
+                    "commission",
+                    "event_time",
+                    "executed_time",
+                    "fees_and_commission",
+                    "timing_granularity",
+                ):
+                    if row.get(field) is not None:
+                        record[field] = row[field]
             if source_fact == "positions" and position_observation is not None:
                 record.update(
                     observed_at=row["observed_at"],
@@ -6375,8 +6387,10 @@ def _broker_strategy_returns(
             timing_modes = {
                 mode
                 for provider in providers
+                # A provider that reported no flow has none to time; labelling
+                # its returns date-only would invent a timing convention.
                 for mode in flow_timing_by_provider.get(
-                    provider, {"DATE_ONLY_END_OF_DAY"}
+                    provider, {"NO_EXTERNAL_OR_INTERNAL_FLOW"}
                 )
             }
             account_ids = sorted({member.account_id for member in components})
