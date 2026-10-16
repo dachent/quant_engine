@@ -11195,7 +11195,12 @@ def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
         name: _sha(panel.DEFAULT_TEMPLATE_ROOT / name)
         for name in ("index.html", "analytics.css", "app.js")
     }
-    expected_styles = (inputs["legacy"] / "styles.css").read_bytes()
+    # A styles.css committed beside the templates wins over the legacy input (F25).
+    in_repo_styles = panel.DEFAULT_TEMPLATE_ROOT / "styles.css"
+    styles_source = (
+        in_repo_styles if in_repo_styles.is_file() else inputs["legacy"] / "styles.css"
+    )
+    expected_styles = styles_source.read_bytes()
     expected_freshness = inputs["freshness"].read_bytes()
     counts: dict[Path, int] = {}
     original_open = Path.open
@@ -11220,11 +11225,15 @@ def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
     expected_raw = {
         "freshness": inputs["freshness"],
         "legacy": inputs["legacy"] / "data" / "dashboard_data.json",
-        "legacy_styles": inputs["legacy"] / "styles.css",
+        "legacy_styles": styles_source,
         "decomposition": decomposition_path,
         "correlation": correlation_path,
     }
     for name, path in expected_raw.items():
+        if name == "legacy_styles" and path == in_repo_styles:
+            # The in-repo stylesheet is a template: bound by its raw digest.
+            assert bound_inputs[name][1] == _sha(in_repo_styles)
+            continue
         assert counts[path.resolve()] == 1
         assert bound_inputs[name][1] == expected_hashes[name]
     for name in ("index.html", "analytics.css", "app.js"):
