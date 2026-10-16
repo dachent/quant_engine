@@ -1,141 +1,572 @@
 {
   "DYNAMIC": {
-    "acceptance/derive_a/__main__.py": 1,
-    "ops/mvp2-release/scripts/build_base_source_root.py": 1,
-    "ops/mvp2-release/scripts/build_capital_input.py": 1,
-    "ops/mvp2-release/scripts/build_financial_artifacts.py": 1,
-    "ops/mvp2-release/scripts/build_hwm_calendar.py": 1,
-    "ops/mvp2-release/scripts/build_hwm_inputs.py": 1,
-    "ops/mvp2-release/scripts/build_hwm_result.py": 2,
-    "ops/mvp2-release/scripts/draft_correction_registries.py": 1,
-    "ops/mvp2-release/scripts/emit_repair_gate.py": 1,
-    "ops/mvp2-release/scripts/repin_crosswalk.py": 1,
-    "ops/mvp2-release/scripts/repin_dependence_policy.py": 1,
-    "ops/mvp2-release/scripts/sync_contract_pins.py": 1,
-    "packages/core/src/quant_engine/core/pipeline.py": 14,
-    "tools/build_account_manifest_generation.py": 2,
-    "tools/p123_security_quarantine.py": 2,
-    "tools/portfolio_attended_preparation.py": 2,
-    "tools/portfolio_current_decomposition_plan.py": 2,
-    "tools/portfolio_current_dependence.py": 4,
-    "tools/portfolio_pipeline_materialize.py": 6,
-    "tools/portfolio_provenance.py": 2,
-    "tools/portfolio_release_builder.py": 39,
-    "tools/portfolio_report.py": 2,
-    "tools/portfolio_target_series.py": 8,
-    "tools/provider_ledger.py": 2,
-    "tools/rebind_provider_ledger_strategy_inputs.py": 2,
-    "tools/stage_current_epoch_manifest.py": 1,
-    "tools/validate_generation.py": 1,
-    "tools/validate_release_targets.py": 1
+    "acceptance/derive_a/__main__.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_base_source_root.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_capital_input.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_financial_artifacts.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_hwm_calendar.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_hwm_inputs.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/build_hwm_result.py": {
+      "sys.path": 2
+    },
+    "ops/mvp2-release/scripts/draft_correction_registries.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/emit_repair_gate.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/repin_crosswalk.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/repin_dependence_policy.py": {
+      "sys.path": 1
+    },
+    "ops/mvp2-release/scripts/sync_contract_pins.py": {
+      "sys.path": 1
+    },
+    "packages/core/src/quant_engine/core/pipeline.py": {
+      "exec_module": 4,
+      "spec_from_file_location": 4,
+      "sys.path": 6
+    },
+    "tools/build_account_manifest_generation.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/p123_security_quarantine.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/portfolio_attended_preparation.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/portfolio_current_decomposition_plan.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/portfolio_current_dependence.py": {
+      "exec_module": 2,
+      "spec_from_file_location": 2
+    },
+    "tools/portfolio_pipeline_materialize.py": {
+      "exec_module": 3,
+      "spec_from_file_location": 3
+    },
+    "tools/portfolio_provenance.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/portfolio_release_builder.py": {
+      "_tool": 31,
+      "exec_module": 4,
+      "spec_from_file_location": 4
+    },
+    "tools/portfolio_report.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/portfolio_target_series.py": {
+      "exec_module": 4,
+      "spec_from_file_location": 4
+    },
+    "tools/provider_ledger.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/rebind_provider_ledger_strategy_inputs.py": {
+      "exec_module": 1,
+      "spec_from_file_location": 1
+    },
+    "tools/stage_current_epoch_manifest.py": {
+      "sys.path": 1
+    },
+    "tools/validate_generation.py": {
+      "sys.path": 1
+    },
+    "tools/validate_release_targets.py": {
+      "sys.path": 1
+    }
   },
   "LAYER": {
-    "packages/core/src/quant_engine/core/pipeline.py": 2,
-    "tools/validate_generation.py": 2,
-    "tools/validate_release_targets.py": 2
+    "packages/core/src/quant_engine/core/pipeline.py": {
+      "core->portfolio_ledger": 1,
+      "core->tools:portfolio_financial_outcomes": 1
+    },
+    "tools/validate_generation.py": {
+      "tools:validate_generation->acceptance": 2
+    },
+    "tools/validate_release_targets.py": {
+      "tools:validate_release_targets->acceptance": 2
+    }
   },
   "PRIVATE": {
-    "ops/mvp2-release/scripts/build_capital_input.py": 29,
-    "ops/mvp2-release/scripts/sync_contract_pins.py": 15,
-    "tools/portfolio_attended_preparation.py": 10,
-    "tools/portfolio_attribution.py": 2,
-    "tools/portfolio_baseline.py": 3,
-    "tools/portfolio_control_panel.py": 4,
-    "tools/portfolio_driver_map.py": 2,
-    "tools/portfolio_financial_outcomes.py": 23,
-    "tools/portfolio_implementation_reconciliation.py": 3,
-    "tools/portfolio_implementation_return_attribution.py": 22,
-    "tools/portfolio_invested_capital.py": 7,
-    "tools/portfolio_pipeline_materialize.py": 15,
-    "tools/portfolio_qc.py": 1,
-    "tools/portfolio_release_builder.py": 1,
-    "tools/portfolio_report.py": 4,
-    "tools/portfolio_strategy_history.py": 1,
-    "tools/schwab_generation.py": 1
+    "ops/mvp2-release/scripts/build_capital_input.py": {
+      "portfolio_hwm_selected_inputs._source_generation_from_path": 1,
+      "provider_ledger._provenance": 1,
+      "tools:portfolio_invested_capital._ACCOUNT_LEDGER_BASIS_SCOPE": 2,
+      "tools:portfolio_invested_capital._RAW_ACCOUNT_LEDGER_DATE": 1,
+      "tools:portfolio_invested_capital._account_flow_dispositions": 1,
+      "tools:portfolio_invested_capital._canonical": 2,
+      "tools:portfolio_invested_capital._capital_precision": 1,
+      "tools:portfolio_invested_capital._digest": 3,
+      "tools:portfolio_invested_capital._file_binding": 4,
+      "tools:portfolio_invested_capital._is_owner_capital_source": 2,
+      "tools:portfolio_invested_capital._is_provider_custody_external_flow": 2,
+      "tools:portfolio_invested_capital._load_flow_classification_rules": 1,
+      "tools:portfolio_invested_capital._local_binding": 4,
+      "tools:portfolio_invested_capital._number": 2,
+      "tools:portfolio_invested_capital._source_effect_usd": 1,
+      "tools:portfolio_invested_capital._verify_provider_custody_perimeter": 1
+    },
+    "ops/mvp2-release/scripts/sync_contract_pins.py": {
+      "tools:provider_ledger._admitted_item_set_digest": 3,
+      "tools:provider_ledger._dataset_disposition_policy": 3,
+      "tools:provider_ledger._inventory_digest": 3,
+      "tools:provider_ledger._product_data_class_set_digest": 3,
+      "tools:provider_ledger._provider_inventory": 3
+    },
+    "tools/portfolio_attended_preparation.py": {
+      "quant_engine.portfolio_ledger.hwm._json_safe": 1,
+      "tools:portfolio_pipeline_materialize._attended_finish_preparation_attempt": 2,
+      "tools:portfolio_pipeline_materialize._attended_start_preparation_attempt": 1,
+      "tools:portfolio_release_builder._record_stage": 3,
+      "tools:portfolio_release_builder._validate_strategy_attribution_baseline_binding": 1,
+      "tools:portfolio_release_builder._validate_strategy_attribution_expected_baseline_binding": 1,
+      "tools:provider_ledger._PROVIDER_CATALOGS": 1
+    },
+    "tools/portfolio_attribution.py": {
+      "portfolio_report._account_live_return_series": 1,
+      "portfolio_report._epoch_hpr_receipts": 1
+    },
+    "tools/portfolio_baseline.py": {
+      "portfolio_invested_capital._source_effect_usd": 1,
+      "portfolio_pipeline_materialize._provider_admission_authority": 1,
+      "provider_ledger._financial_mvp_authority": 1
+    },
+    "tools/portfolio_control_panel.py": {
+      "portfolio_report._current_capital": 1,
+      "tools:portfolio_report._validate_policy_unavailable_comparison": 3
+    },
+    "tools/portfolio_driver_map.py": {
+      "portfolio_diligence_rubric._leave_one_out": 1,
+      "portfolio_diligence_rubric._with_cluster_budget": 1
+    },
+    "tools/portfolio_financial_outcomes.py": {
+      "portfolio_hwm_selected_inputs._source_generation_from_path": 1,
+      "portfolio_hwm_selected_inputs._verify_account_manifest_replay": 1,
+      "tools:portfolio_control_panel._canonical_json": 1,
+      "tools:portfolio_control_panel._current_product_correlation_projection": 1,
+      "tools:portfolio_control_panel._dependence_analysis": 1,
+      "tools:portfolio_control_panel._factor_analysis": 1,
+      "tools:portfolio_control_panel._factor_decomposition_perimeter": 1,
+      "tools:portfolio_control_panel._source_path": 1,
+      "tools:portfolio_control_panel._validate_plan_authority": 1,
+      "tools:portfolio_correlation._load_spec": 1,
+      "tools:portfolio_decomposition._consumed_producer_identity": 1,
+      "tools:portfolio_decomposition._dynamic_fit": 3,
+      "tools:portfolio_decomposition._fit": 3,
+      "tools:portfolio_decomposition._load_spec": 1,
+      "tools:portfolio_report._dependence_report": 1,
+      "tools:portfolio_report._report_governed_hwm_proof": 1,
+      "tools:portfolio_report._report_product_controls": 1,
+      "tools:portfolio_report._validate_current_epoch_crosswalk": 1,
+      "tools:portfolio_report._validate_report_account_manifest": 1
+    },
+    "tools/portfolio_implementation_reconciliation.py": {
+      "portfolio_strategy_history._cell": 1,
+      "portfolio_strategy_history._excel_date": 1,
+      "portfolio_strategy_history._xlsx_rows": 1
+    },
+    "tools/portfolio_implementation_return_attribution.py": {
+      "tools:portfolio_implementation_reconciliation._decimal": 2,
+      "tools:portfolio_implementation_reconciliation._grizzly_actual": 1,
+      "tools:portfolio_implementation_reconciliation._grizzly_model_states": 1,
+      "tools:portfolio_implementation_reconciliation._ibkr_actual_trades": 1,
+      "tools:portfolio_implementation_reconciliation._mapped_transaction_rows": 1,
+      "tools:portfolio_implementation_reconciliation._p123_book_ids": 1,
+      "tools:portfolio_implementation_reconciliation._p123_managed_rows": 1,
+      "tools:portfolio_implementation_reconciliation._p123_trade_events": 1,
+      "tools:portfolio_implementation_reconciliation._pair_events_one_to_one": 3,
+      "tools:portfolio_implementation_reconciliation._read_tt_source_manifest": 1,
+      "tools:portfolio_implementation_reconciliation._returns": 5,
+      "tools:portfolio_implementation_reconciliation._tt_actual_events": 1,
+      "tools:portfolio_implementation_reconciliation._tt_component_weights": 1,
+      "tools:portfolio_implementation_reconciliation._tt_manifest_model_returns": 1,
+      "tools:provider_ledger._broker_strategy_returns": 1
+    },
+    "tools/portfolio_invested_capital.py": {
+      "account_strategy_manifest._expected_flow_dispositions": 1,
+      "portfolio_financial_mvp_contract._validate_owner_decision_receipts": 1,
+      "portfolio_pipeline_materialize._provider_admission_authority": 2,
+      "provider_ledger._financial_mvp_authority": 1,
+      "provider_ledger._provenance": 2
+    },
+    "tools/portfolio_pipeline_materialize.py": {
+      "tools:portfolio_control_panel._current_analytics": 1,
+      "tools:portfolio_control_panel._current_panel_qa": 1,
+      "tools:portfolio_control_panel._current_report": 1,
+      "tools:portfolio_qc._read_committed_release": 1,
+      "tools:portfolio_qc._verify_committed_manifest": 1,
+      "tools:portfolio_release_builder._financial_epoch_inputs": 1,
+      "tools:portfolio_release_builder._governed_hwm_arguments": 1,
+      "tools:portfolio_release_builder._history_contract_path": 1,
+      "tools:portfolio_release_builder._invested_capital_arguments": 1,
+      "tools:portfolio_release_builder._published_generation": 1,
+      "tools:portfolio_release_builder._recipe": 1,
+      "tools:portfolio_release_builder._validate_stage_financial_arguments": 1,
+      "tools:portfolio_release_builder._validated_reusable_provider_ledger": 1,
+      "tools:portfolio_report._baseline": 1,
+      "tools:portfolio_report._validated_source_clock": 1
+    },
+    "tools/portfolio_qc.py": {
+      "tools:portfolio_report._workbook_parity_receipt": 1
+    },
+    "tools/portfolio_release_builder.py": {
+      "tools:portfolio_attribution._baseline": 1
+    },
+    "tools/portfolio_report.py": {
+      "portfolio_attended_preparation._source_clock": 1,
+      "portfolio_baseline._derived_custody_cash": 1,
+      "portfolio_control_panel._decomposition_lenses": 1,
+      "provider_ledger._financial_mvp_module": 1
+    },
+    "tools/portfolio_strategy_history.py": {
+      "tools:portfolio_strategy_backtests._build_from_contents": 1
+    },
+    "tools/schwab_generation.py": {
+      "quant_engine.schwab.generation._crosswalk": 1
+    }
   },
   "PROVIDER_NAME": {
-    "tools/account_strategy_manifest.py": 1,
-    "tools/check_repository_boundary.py": 2,
-    "tools/portfolio_attended_preparation.py": 1,
-    "tools/portfolio_attribution.py": 2,
-    "tools/portfolio_baseline.py": 27,
-    "tools/portfolio_control_panel.py": 3,
-    "tools/portfolio_financial_mvp_contract.py": 24,
-    "tools/portfolio_freshness.py": 4,
-    "tools/portfolio_implementation_reconciliation.py": 4,
-    "tools/portfolio_pipeline_materialize.py": 3,
-    "tools/portfolio_report.py": 2,
-    "tools/portfolio_rollforward_cycle.py": 1,
-    "tools/portfolio_target_series.py": 67,
-    "tools/provider_ledger.py": 138,
-    "tools/provider_security_quarantine.py": 16
+    "tools/account_strategy_manifest.py": {
+      "quantbase": 1
+    },
+    "tools/check_repository_boundary.py": {
+      "matrixport": 1,
+      "p123": 1
+    },
+    "tools/portfolio_attended_preparation.py": {
+      "schwab": 1
+    },
+    "tools/portfolio_attribution.py": {
+      "matrixport": 2
+    },
+    "tools/portfolio_baseline.py": {
+      "ALPACA": 4,
+      "Alpaca": 2,
+      "IBKR": 5,
+      "SCHWAB": 6,
+      "alpaca": 1,
+      "fidelity": 1,
+      "ibkr": 1,
+      "matrixport": 1,
+      "portfolio123": 1,
+      "quantbase": 1,
+      "schwab": 4
+    },
+    "tools/portfolio_control_panel.py": {
+      "ibkr": 1,
+      "matrixport": 1,
+      "quantbase": 1
+    },
+    "tools/portfolio_financial_mvp_contract.py": {
+      "ALPACA": 2,
+      "FIDELITY": 2,
+      "IBKR": 2,
+      "MATRIXPORT": 4,
+      "Matrixport ": 4,
+      "PORTFOLIO123": 4,
+      "QUANTBASE": 4,
+      "SCHWAB": 2
+    },
+    "tools/portfolio_freshness.py": {
+      "alpaca": 1,
+      "fidelity": 1,
+      "matrixport": 1,
+      "portfolio123": 1
+    },
+    "tools/portfolio_implementation_reconciliation.py": {
+      "portfolio123": 4
+    },
+    "tools/portfolio_pipeline_materialize.py": {
+      "ibkr": 1,
+      "schwab": 2
+    },
+    "tools/portfolio_report.py": {
+      "portfolio123": 2
+    },
+    "tools/portfolio_rollforward_cycle.py": {
+      "portfolio123": 1
+    },
+    "tools/portfolio_target_series.py": {
+      "Matrixport": 4,
+      "PORTFOLIO123": 1,
+      "Portfolio123": 4,
+      "Quantbase": 4,
+      "matrixport": 20,
+      "portfolio123": 22,
+      "quantbase": 12
+    },
+    "tools/provider_ledger.py": {
+      "alpaca": 4,
+      "fidelity": 8,
+      "ibkr": 18,
+      "matrixport": 39,
+      "matrixport ": 2,
+      "portfolio123": 12,
+      "quantbase": 34,
+      "schwab": 21
+    },
+    "tools/provider_security_quarantine.py": {
+      "alpaca": 3,
+      "matrixport": 3,
+      "portfolio123": 4,
+      "quantbase": 3,
+      "schwab": 3
+    }
   },
   "SUBMODULE": {
-    "ops/mvp2-release/scripts/build_capital_input.py": 1,
-    "ops/mvp2-release/scripts/build_hwm_calendar.py": 1,
-    "ops/mvp2-release/scripts/build_hwm_result.py": 1,
-    "ops/mvp2-release/scripts/draft_correction_registries.py": 1,
-    "ops/mvp2-release/scripts/emit_repair_gate.py": 2,
-    "ops/mvp2-release/scripts/repin_crosswalk.py": 1,
-    "ops/mvp2-release/scripts/repin_dependence_policy.py": 1,
-    "packages/alpaca/src/quant_engine/alpaca/generation.py": 1,
-    "packages/core/src/quant_engine/core/pipeline.py": 1,
-    "packages/fidelity/src/quant_engine/fidelity/generation.py": 1,
-    "packages/ibkr/src/quant_engine/ibkr/generation.py": 1,
-    "packages/matrixport/src/quant_engine/matrixport/generation.py": 1,
-    "packages/portfolio123/src/quant_engine/portfolio123/generation.py": 1,
-    "packages/schwab/src/quant_engine/schwab/api.py": 1,
-    "packages/schwab/src/quant_engine/schwab/generation.py": 1,
-    "packages/web-contracts/src/quant_engine/web_contracts/extract.py": 1,
-    "tools/account_strategy_manifest.py": 2,
-    "tools/build_account_manifest_generation.py": 1,
-    "tools/check_release_validation_findings.py": 1,
-    "tools/data_recovery_rehearsal.py": 2,
-    "tools/portfolio_attended_preparation.py": 6,
-    "tools/portfolio_attribution.py": 2,
-    "tools/portfolio_baseline.py": 1,
-    "tools/portfolio_control_panel.py": 2,
-    "tools/portfolio_control_recompute.py": 3,
-    "tools/portfolio_correlation.py": 1,
-    "tools/portfolio_current_dependence.py": 1,
-    "tools/portfolio_decomposition.py": 1,
-    "tools/portfolio_decomposition_evidence_modes.py": 1,
-    "tools/portfolio_designer_model_curve.py": 1,
-    "tools/portfolio_diligence_rubric.py": 1,
-    "tools/portfolio_driver_map.py": 1,
-    "tools/portfolio_financial_mvp_contract.py": 1,
-    "tools/portfolio_financial_outcomes.py": 5,
-    "tools/portfolio_freshness.py": 1,
-    "tools/portfolio_fx_rates.py": 1,
-    "tools/portfolio_hwm_selected_inputs.py": 7,
-    "tools/portfolio_implementation_reconciliation.py": 1,
-    "tools/portfolio_implementation_return_attribution.py": 1,
-    "tools/portfolio_invested_capital.py": 1,
-    "tools/portfolio_pipeline_materialize.py": 6,
-    "tools/portfolio_provenance.py": 1,
-    "tools/portfolio_provider_track_record.py": 1,
-    "tools/portfolio_qc.py": 2,
-    "tools/portfolio_release_builder.py": 1,
-    "tools/portfolio_replication.py": 1,
-    "tools/portfolio_report.py": 4,
-    "tools/portfolio_rollforward_cycle.py": 3,
-    "tools/portfolio_strategy_backtests.py": 1,
-    "tools/portfolio_strategy_history.py": 1,
-    "tools/portfolio_target_series.py": 1,
-    "tools/portfolio_weekly_returns.py": 1,
-    "tools/provider_ledger.py": 4,
-    "tools/quantbase_account_interval_receipt.py": 2,
-    "tools/quantbase_generation.py": 1,
-    "tools/rebind_current_epoch_crosswalk.py": 1,
-    "tools/rebind_provider_ledger_strategy_inputs.py": 1,
-    "tools/schwab_generation.py": 1,
-    "tools/schwab_transaction_capture.py": 1,
-    "tools/stage_current_epoch_manifest.py": 1,
-    "tools/validate_release_targets.py": 1,
-    "tools/verify_account_manifest_generation.py": 2
+    "ops/mvp2-release/scripts/build_capital_input.py": {
+      "quant_engine.core.publication": 1
+    },
+    "ops/mvp2-release/scripts/build_hwm_calendar.py": {
+      "quant_engine.portfolio_ledger.hwm_calendar_authority": 1
+    },
+    "ops/mvp2-release/scripts/build_hwm_result.py": {
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1
+    },
+    "ops/mvp2-release/scripts/draft_correction_registries.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "ops/mvp2-release/scripts/emit_repair_gate.py": {
+      "quant_engine.core.publication": 1,
+      "quant_engine.core.release": 1
+    },
+    "ops/mvp2-release/scripts/repin_crosswalk.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "ops/mvp2-release/scripts/repin_dependence_policy.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/alpaca/src/quant_engine/alpaca/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/core/src/quant_engine/core/pipeline.py": {
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1
+    },
+    "packages/fidelity/src/quant_engine/fidelity/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/ibkr/src/quant_engine/ibkr/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/matrixport/src/quant_engine/matrixport/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/portfolio123/src/quant_engine/portfolio123/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/schwab/src/quant_engine/schwab/api.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/schwab/src/quant_engine/schwab/generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "packages/web-contracts/src/quant_engine/web_contracts/extract.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/account_strategy_manifest.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.portfolio_ledger.returns": 1
+    },
+    "tools/build_account_manifest_generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/check_release_validation_findings.py": {
+      "quant_engine.core.publication": 1
+    },
+    "tools/data_recovery_rehearsal.py": {
+      "quant_engine.core.rehearsal": 2
+    },
+    "tools/portfolio_attended_preparation.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.run_storage": 1,
+      "quant_engine.portfolio_ledger.hwm": 1,
+      "quant_engine.portfolio_ledger.hwm_governed": 1,
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1,
+      "quant_engine.portfolio_ledger.value_basis_bounds": 1
+    },
+    "tools/portfolio_attribution.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.portfolio_ledger.value_basis_bounds": 1
+    },
+    "tools/portfolio_baseline.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_control_panel.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1
+    },
+    "tools/portfolio_control_recompute.py": {
+      "quant_engine.core.authority": 1,
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.pipeline": 1
+    },
+    "tools/portfolio_correlation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_current_dependence.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_decomposition.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_decomposition_evidence_modes.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_designer_model_curve.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_diligence_rubric.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_driver_map.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_financial_mvp_contract.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_financial_outcomes.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.pipeline": 1,
+      "quant_engine.core.publication": 1,
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1,
+      "quant_engine.portfolio_ledger.value_basis_bounds": 1
+    },
+    "tools/portfolio_freshness.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_fx_rates.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_hwm_selected_inputs.py": {
+      "quant_engine.core.publication": 1,
+      "quant_engine.core.strict_json": 1,
+      "quant_engine.portfolio_ledger.hwm": 1,
+      "quant_engine.portfolio_ledger.hwm_calendar_authority": 1,
+      "quant_engine.portfolio_ledger.hwm_governed": 1,
+      "quant_engine.portfolio_ledger.hwm_input_builder": 1,
+      "quant_engine.portfolio_ledger.returns": 1
+    },
+    "tools/portfolio_implementation_reconciliation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_implementation_return_attribution.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_invested_capital.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_pipeline_materialize.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.pipeline": 3,
+      "quant_engine.core.run_storage": 1,
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1
+    },
+    "tools/portfolio_provenance.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_provider_track_record.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_qc.py": {
+      "quant_engine.core.pipeline": 2
+    },
+    "tools/portfolio_release_builder.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_replication.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_report.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.portfolio_ledger.hwm_governed_execution": 1,
+      "quant_engine.portfolio_ledger.returns": 1,
+      "quant_engine.portfolio_ledger.value_basis_bounds": 1
+    },
+    "tools/portfolio_rollforward_cycle.py": {
+      "quant_engine.core.authority": 1,
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.pipeline": 1
+    },
+    "tools/portfolio_strategy_backtests.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_strategy_history.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_target_series.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/portfolio_weekly_returns.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/provider_ledger.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.publication": 1,
+      "quant_engine.ibkr.flex": 1,
+      "quant_engine.portfolio_ledger.returns": 1
+    },
+    "tools/quantbase_account_interval_receipt.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.strict_json": 1
+    },
+    "tools/quantbase_generation.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/rebind_current_epoch_crosswalk.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/rebind_provider_ledger_strategy_inputs.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/schwab_generation.py": {
+      "quant_engine.schwab.generation": 1
+    },
+    "tools/schwab_transaction_capture.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/stage_current_epoch_manifest.py": {
+      "quant_engine.core.contracts": 1
+    },
+    "tools/validate_release_targets.py": {
+      "quant_engine.core.publication": 1
+    },
+    "tools/verify_account_manifest_generation.py": {
+      "quant_engine.core.contracts": 1,
+      "quant_engine.core.strict_json": 1
+    }
   },
   "UNDECLARED": {
-    "apps/schwab-trading/schwab_client.py": 2,
-    "packages/matrixport/src/quant_engine/matrixport/credentials.py": 1
+    "apps/schwab-trading/schwab_client.py": {
+      "flask": 1,
+      "werkzeug": 1
+    },
+    "packages/matrixport/src/quant_engine/matrixport/credentials.py": {
+      "win32cred": 1
+    }
   }
 }
