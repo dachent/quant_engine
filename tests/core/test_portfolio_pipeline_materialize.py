@@ -4046,15 +4046,17 @@ def test_production_spec_binds_stable_twenty_root_authority(
             materializer.PROVIDER_ROOTS
         )
         # the seven providers less the PARTIAL IBKR evidence, plus the epoch manifest
-        assert (
-            set(provider_spec.release_generations)
-            - set(spec.release_generations)
-            == set(materializer.PROVIDER_ROOTS) - {"provider-ibkr"}
-        )
+        assert set(provider_spec.release_generations) - set(
+            spec.release_generations
+        ) == set(materializer.PROVIDER_ROOTS) - {"provider-ibkr"}
         assert "provider-ibkr" not in provider_spec.release_generations
-        assert provider_spec.roots["provider-ibkr"] == production_root.parent / "dataIBKR"
+        assert (
+            provider_spec.roots["provider-ibkr"] == production_root.parent / "dataIBKR"
+        )
         retained = next(
-            node for node in provider_spec.nodes if node.node_id == "retain-provider-ibkr"
+            node
+            for node in provider_spec.nodes
+            if node.node_id == "retain-provider-ibkr"
         )
         assert retained.release_target is False
         recovery = [

@@ -1284,7 +1284,10 @@ def prepare_release(
         raise ReleaseValidationError(
             "a pointer recovery gate must be bound with its governed permission"
         )
-    if allow_unusable_predecessor_pointers and allow_invalid_previous_artifact_inventory:
+    if (
+        allow_unusable_predecessor_pointers
+        and allow_invalid_previous_artifact_inventory
+    ):
         raise ReleaseValidationError(
             "pointer recovery and inventory repair are separate dispositions"
         )

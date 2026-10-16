@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 import sys
 
-from quant_engine.core import read_current
+from quant_engine.core import read_current, read_generation
 
 # Single-pointer data roots. dataPortfolio is excluded: its stores sit one level
 # down and are bound by the coordinated release instead.
@@ -37,9 +37,36 @@ DATA_ROOTS = (
 )
 
 
+# A root whose only bound generation is an accepted PARTIAL one. The provider ledger
+# qualifies it ACCEPTED_PARTIAL, and a PARTIAL generation is immutable evidence, never
+# current consumer authority (docs/architecture/system-boundaries.md): ``read_current``
+# refuses it, correctly. Such a root passes when every retained generation is
+# hash-verified; it carries no pointer a consumer may follow.
+EVIDENCE_ONLY_ROOTS = {"dataIBKR": "ledger qualification ACCEPTED_PARTIAL"}
+
+
+def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
+    generations = root / "generations"
+    names = (
+        sorted(item.name for item in generations.iterdir())
+        if generations.is_dir()
+        else []
+    )
+    if not names:
+        return False, "evidence-only root retains no generation"
+    for name in names:
+        try:
+            read_generation(root, name)
+        except Exception as error:  # noqa: BLE001 - every verifier refusal is a finding
+            return False, f"{name[:12]} {type(error).__name__}: {error}"
+    return True, f"evidence-only ({reason}); {len(names)} generation(s) hash-verified"
+
+
 def check_root(root: Path) -> tuple[bool, str]:
     """Return (ok, message) for one data root."""
 
+    if root.name in EVIDENCE_ONLY_ROOTS and (root / "generations").is_dir():
+        return check_evidence_root(root, EVIDENCE_ONLY_ROOTS[root.name])
     if not (root / "generations").is_dir() and not (root / "CURRENT.json").exists():
         return True, "no generations (nothing to resolve)"
     if not (root / "CURRENT.json").exists():

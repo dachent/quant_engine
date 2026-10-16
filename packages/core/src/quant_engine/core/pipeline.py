@@ -4436,7 +4436,9 @@ def _verify_pointer_recovery_gate(spec: PipelineSpec, path: Path) -> None:
     if payload["schema_version"] != 1 or payload["disposition"] != (
         "PROMOTE_BOUND_GENERATIONS"
     ):
-        raise PipelineValidationError("predecessor pointer recovery disposition differs")
+        raise PipelineValidationError(
+            "predecessor pointer recovery disposition differs"
+        )
     rows = _objects(payload["unusable_pointers"], "unusable predecessor pointers")
     listed: set[str] = set()
     for row in rows:
@@ -4451,9 +4453,13 @@ def _verify_pointer_recovery_gate(spec: PipelineSpec, path: Path) -> None:
                 f"unusable predecessor root is not a unique release target: {root_id}"
             )
         listed.add(root_id)
-        if _hash(
-            row["proposed_generation_id"], "unusable predecessor proposed generation"
-        ) != spec.release_generations[root_id]:
+        if (
+            _hash(
+                row["proposed_generation_id"],
+                "unusable predecessor proposed generation",
+            )
+            != spec.release_generations[root_id]
+        ):
             raise PipelineValidationError(
                 f"unusable predecessor proposal differs: {root_id}"
             )

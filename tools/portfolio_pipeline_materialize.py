@@ -5108,7 +5108,10 @@ def _provider_root_nodes(
         if not isinstance(files, list):
             raise MaterializationError(f"{root_id} generation inventory differs")
         if root_id == "epoch-manifest":
-            if not isinstance(epoch, dict) or epoch.get("generation_id") != generation_id:
+            if (
+                not isinstance(epoch, dict)
+                or epoch.get("generation_id") != generation_id
+            ):
                 raise MaterializationError(
                     "epoch-manifest generation differs from the recipe binding"
                 )
@@ -5140,7 +5143,9 @@ def _provider_root_nodes(
                 "generation_id": generation_id,
                 "kind": "GENERATION",
                 "manifest_sha256": inventory["manifest_sha256"],
-                "node_id": f"publish-{root_id}" if release_target else f"retain-{root_id}",
+                "node_id": f"publish-{root_id}"
+                if release_target
+                else f"retain-{root_id}",
                 "release_target": release_target,
                 "root_id": root_id,
                 "source_dir": str(source),

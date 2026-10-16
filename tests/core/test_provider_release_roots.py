@@ -209,7 +209,9 @@ def test_the_ledger_must_bind_exactly_the_seven_providers(tmp_path) -> None:
 def test_the_recovery_gate_names_only_roots_whose_pointer_is_unreadable(
     tmp_path,
 ) -> None:
-    roots = {name: tmp_path / name for name in ("dangling", "legacy", "healthy", "bare")}
+    roots = {
+        name: tmp_path / name for name in ("dangling", "legacy", "healthy", "bare")
+    }
     generations: dict[str, str] = {}
     for name, root in roots.items():
         manifest = _manifest(f"gate-{name}")
@@ -238,11 +240,15 @@ def test_the_recovery_gate_names_only_roots_whose_pointer_is_unreadable(
         rows["legacy"]["failure"]
         == "legacy pointer schema is not accepted as current authority"
     )
-    assert rows["dangling"]["pointer_sha256"] == hashlib.sha256(
-        dangling.to_json_bytes()
-    ).hexdigest()
+    assert (
+        rows["dangling"]["pointer_sha256"]
+        == hashlib.sha256(dangling.to_json_bytes()).hexdigest()
+    )
     assert rows["legacy"]["proposed_generation_id"] == generations["legacy"]
-    assert materializer._pointer_recovery_gate_payload(
-        {"healthy": roots["healthy"], "bare": roots["bare"]},
-        {"healthy": generations["healthy"], "bare": generations["bare"]},
-    ) is None
+    assert (
+        materializer._pointer_recovery_gate_payload(
+            {"healthy": roots["healthy"], "bare": roots["bare"]},
+            {"healthy": generations["healthy"], "bare": generations["bare"]},
+        )
+        is None
+    )

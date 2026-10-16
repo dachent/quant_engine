@@ -128,3 +128,29 @@ def test_boundary_policy_floor_requires_the_new_roots() -> None:
 
     for name in gate.DATA_ROOTS:
         assert name.lower() in boundary._REQUIRED_PROVIDER_ROOTS, name
+
+
+def test_evidence_only_root_passes_on_hash_verified_generations(tmp_path: Path) -> None:
+    root = tmp_path / "dataIBKR"
+    generation = _publish(root)
+    # a dangling pointer is the audited defect; for an evidence-only root the
+    # retained generation is what matters and the pointer is not authority
+    pointer = json.loads((root / "CURRENT.json").read_text(encoding="utf-8"))
+    pointer["generation_id"] = "0" * 64
+    (root / "CURRENT.json").write_text(json.dumps(pointer), encoding="utf-8")
+    ok, message = gate.check_root(root)
+    assert ok and "evidence-only" in message and "1 generation" in message
+    assert generation
+
+
+def test_evidence_only_root_fails_on_a_corrupt_or_empty_generation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataIBKR"
+    generation = _publish(root)
+    (root / "generations" / generation / "generation.json").write_bytes(b"{}")
+    ok, message = gate.check_root(root)
+    assert not ok
+    shutil.rmtree(root / "generations" / generation)
+    ok, message = gate.check_root(root)
+    assert not ok and "retains no generation" in message

@@ -82,3 +82,37 @@ are available on every platform.
 `prepare_release` stages immutable evidence and does not authorize publication.
 `publish_generation` remains a separate single-root primitive and does not
 carry the coordinated hostile-writer guarantee.
+
+## Provider roots and unusable predecessor pointers
+
+`REL-PROVIDER-ROOTS-001`: a release is restorable only if the provider inputs it
+depends on are in the graph it records. The provider roots (`dataAlpaca`,
+`dataFidelity`, `dataIBKR`, `dataMatrixport`, `dataPortfolio123`, `dataQuantbase`,
+`dataSchwab`) and `dataEpochManifest` sit beside `dataPortfolio`, and
+`portfolio_pipeline_materialize.py production-spec --provider-generations` makes them
+release targets under the root ids `provider-<name>` and `epoch-manifest`.
+
+- Every provider generation must equal, by id, manifest hash and catalog hash, what
+  the selected provider ledger recorded in `provider_generations`. The ledger's own
+  qualification decides publication: `PUBLISHED_COMPLETE`, `STAGED_COMPLETE` and
+  `FINITE_STATIC` generations become `CURRENT`; an `ACCEPTED_PARTIAL` generation is
+  immutable evidence, is retained in its root through a non-target generation node,
+  and is never published (`read_current` refuses a PARTIAL generation by design).
+- The epoch-manifest generation must be the one the recipe binds.
+- `tools/validate_release_targets.py` writes the findings every target needs:
+  provider roots are judged against the same release's provider ledger, the epoch
+  manifest against the account-manifest digests the panel pins
+  (`release.provider_binding`).
+
+A provider root whose own `CURRENT.json` dangles at a generation directory that no
+longer exists, or is schema v1, cannot be recorded as a predecessor pointer graph. The
+governed `predecessor-pointer-recovery` gate admits exactly those roots. The production
+spec derives it from disk; the pipeline re-derives it before preparing the release and
+refuses a gate that names a healthy root, omits an unusable one, or carries different
+pointer bytes or refusal text. The prepared release records the pointer bytes it found
+and a rollback restores them verbatim. A successor release may add roots: the
+predecessor graph is judged over the roots it bound.
+
+`tools/check_data_roots.py` is the read-only gate: every data root resolves through
+`read_current`, except an evidence-only root (today `dataIBKR`), which must retain
+hash-verified generations and carries no pointer a consumer may follow.
