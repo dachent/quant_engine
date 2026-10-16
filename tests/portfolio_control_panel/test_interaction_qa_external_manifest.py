@@ -398,3 +398,13 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
         item["field"] == "nav_observation_trace.date"
         for item in trace_check["evidence"]["violations"]
     )
+
+
+def test_interaction_qa_hashes_the_download_without_retaining_a_copy() -> None:
+    """#540: the 330 MB report copy under qa/downloads is deleted once hashed."""
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    hashed = source.index('createHash("sha256").update(downloaded)')
+    removed = source.index("await rm(destination, { force: true })")
+    assert hashed < removed, "the copy must be hashed before it is removed"
+    assert 'waitForEvent("download", { timeout: 300_000 })' in source

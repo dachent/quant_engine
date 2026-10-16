@@ -1,5 +1,52 @@
-(() => {
+(function bootPanel(late) {
   "use strict";
+
+  // #540: the generated data script carries the payload as gzip parts (byte-exact
+  // slices of data/dashboard_data.json) instead of one 364 MB object literal. The
+  // head and tail are inflated here, once, before the panel starts; the
+  // LIVE_PLUS_BACKTEST lens array (~73% of the payload) stays compressed until the
+  // viewer opens that mode. A page that already has window.PORTFOLIO_DATA (older
+  // generations, test fixtures) starts synchronously exactly as before.
+  const dataParts = window.PORTFOLIO_DATA_PARTS;
+  if (!window.PORTFOLIO_DATA && dataParts && Array.isArray(dataParts.parts)) {
+    const inflateText = async (gzipBase64) => {
+      if (typeof DecompressionStream !== "function") throw new Error("This browser cannot decompress the embedded panel data.");
+      const binary = window.atob(gzipBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+      return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    };
+    const lazyPart = dataParts.parts.find((part) => part.lazy === true);
+    (async () => {
+      const eager = dataParts.parts.filter((part) => part.lazy !== true);
+      const texts = [];
+      for (const part of eager) {
+        texts.push(await inflateText(part.gzip_base64));
+        part.gzip_base64 = null;
+      }
+      // head + [] + tail: the lazy array is a truthy placeholder until it is loaded.
+      const text = lazyPart ? `${texts[0]}[]${texts[1]}` : texts.join("");
+      const decoded = JSON.parse(text);
+      window.PORTFOLIO_LAZY_LENS = lazyPart ? {
+        pointer: dataParts.lazy_pointer,
+        load: async () => {
+          const rows = JSON.parse(await inflateText(lazyPart.gzip_base64));
+          lazyPart.gzip_base64 = null;
+          return rows;
+        },
+      } : null;
+      window.PORTFOLIO_DATA = decoded;
+    })().then(() => bootPanel(true), (error) => {
+      console.error("Embedded dashboard data could not be decoded.", error);
+      const loading = document.getElementById("loading-state");
+      const failure = document.getElementById("error-state");
+      if (loading) loading.hidden = true;
+      if (failure) failure.hidden = false;
+      const shell = document.getElementById("app");
+      if (shell) shell.dataset.appState = "error";
+    });
+    return;
+  }
 
   const data = window.PORTFOLIO_DATA;
   // F48: the comparison and heat-map scales are named, and the labels below read them.
@@ -141,8 +188,8 @@
     VERIFIED_GENERATION_BUNDLE_EXACT_BYTES: "Report-attested static publication — verified generation bundle exact bytes",
   });
   const EMBEDDED_DOWNLOAD_TYPES = Object.freeze({
-    "portfolio-report-data.json": Object.freeze({ mimeType: "application/json", payloadPrefix: "download-payload-report-json" }),
-    "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx" }),
+    "portfolio-report-data.json": Object.freeze({ mimeType: "application/json", payloadPrefix: "download-payload-report-json", encoding: "gzip" }),
+    "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx", encoding: "identity" }),
   });
   const EMBEDDED_DOWNLOAD_CHUNK_SIZE = 65536;
   // The report data is embedded rather than linked to the sibling file because
@@ -151,11 +198,11 @@
   // Every browser and interaction QA capture loads the panel over file://, so
   // the sibling route cannot satisfy the gate.
   //
-  // 8191 is the mechanism's ceiling, not a policy choice. `chunks.join("")`
-  // below builds one string and V8's MAX_STRING_LENGTH is 536870888, so 8192
-  // chunks of 65536 raise RangeError whatever this constant says.
-  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must
-  // equal this, and a test pins the two together.
+  // The report JSON is embedded gzip-compressed and inflated with
+  // DecompressionStream on click; the chunks are decoded one at a time and never
+  // joined into a single string. 8191 is a sanity bound on the chunk count, and
+  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must equal
+  // this; a test pins the two together.
   const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 8191;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   // F3: gate notes arrive from the producer already respelled as plain words (`note`; the
@@ -1690,9 +1737,26 @@
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
       button.title = available ? "" : "No accepted version-compatible backtest decomposition is published for this mode.";
-      button.onclick = () => {
+      button.onclick = async () => {
         if (!available) return;
-        selectedFactorEvidenceMode = button.dataset.factorEvidenceMode;
+        const requestedMode = button.dataset.factorEvidenceMode;
+        // #540: the LIVE_PLUS_BACKTEST lenses are inflated and parsed on first use.
+        const lazy = window.PORTFOLIO_LAZY_LENS;
+        const lazyPointer = lazy?.pointer || [];
+        if (lazy && requestedMode === lazyPointer[lazyPointer.length - 1] && !lazy.loaded) {
+          document.documentElement.dataset.lazyData = "loading";
+          try {
+            data.decomposition_lenses.modes[requestedMode] = await lazy.load();
+            lazy.loaded = true;
+          } catch (error) {
+            console.error("Lazy lens data could not be decoded.", error);
+            showToast("The backtest-compatible lens data could not be decoded in this browser.");
+            return;
+          } finally {
+            document.documentElement.dataset.lazyData = "ready";
+          }
+        }
+        selectedFactorEvidenceMode = requestedMode;
         selectedFactorSeries = null;
         if (!activeFactorLenses().some((item) => item.lens_id === selectedFactorLens)) selectedFactorLens = activeFactorLenses()[0]?.lens_id;
         selectedFactorSurface = currentFactorLens()?.default_surface || "STATIC";
@@ -2404,19 +2468,23 @@
   }
 
   function bindEmbeddedDownloads() {
-    $$('a[data-download-payload-prefix]').forEach((link) => link.addEventListener("click", (event) => {
+    $$('a[data-download-payload-prefix]').forEach((link) => link.addEventListener("click", async (event) => {
       event.preventDefault();
       const filename = String(link.getAttribute("data-download-filename") || "");
       const metadata = EMBEDDED_DOWNLOAD_TYPES[filename];
       const mimeType = metadata?.mimeType;
       const payloadPrefix = String(link.getAttribute("data-download-payload-prefix") || "");
       const chunkCount = Number(link.getAttribute("data-download-chunk-count"));
+      const rawBytes = Number(link.getAttribute("data-download-raw-bytes"));
       if (!mimeType
           || payloadPrefix !== metadata.payloadPrefix
           || !Number.isInteger(chunkCount)
           || chunkCount < 1
           || chunkCount > EMBEDDED_DOWNLOAD_MAX_CHUNKS
           || link.getAttribute("data-download-mime") !== mimeType
+          || link.getAttribute("data-download-encoding") !== metadata.encoding
+          || !Number.isInteger(rawBytes)
+          || rawBytes < 1
           || link.getAttribute("href") !== `downloads/${filename}`
           || link.getAttribute("download") !== filename) {
         console.error("Embedded download metadata is invalid.");
@@ -2424,7 +2492,7 @@
         return;
       }
       try {
-        const chunks = [];
+        const parts = [];
         for (let index = 0; index < chunkCount; index += 1) {
           const payloadElement = document.getElementById(`${payloadPrefix}-${String(index).padStart(5, "0")}`);
           const chunk = String(payloadElement?.textContent || "");
@@ -2432,6 +2500,7 @@
           if (!(payloadElement instanceof HTMLScriptElement)
               || payloadElement.type !== "application/octet-stream"
               || payloadElement.getAttribute("data-download-filename") !== filename
+              || payloadElement.getAttribute("data-download-encoding") !== metadata.encoding
               || payloadElement.getAttribute("data-download-chunk-index") !== String(index)
               || !chunk
               || chunk.length > EMBEDDED_DOWNLOAD_CHUNK_SIZE
@@ -2439,13 +2508,21 @@
               || !validChunk) {
             throw new Error("Embedded download chunk is invalid.");
           }
-          chunks.push(chunk);
+          // Each chunk is a multiple of 4 base64 characters, so it decodes on
+          // its own; only one chunk's binary string is alive at a time.
+          const binary = window.atob(chunk);
+          const bytes = new Uint8Array(binary.length);
+          for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+          parts.push(bytes);
         }
-        const payload = chunks.join("");
-        const binary = window.atob(payload);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-        const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+        let blob = new Blob(parts, { type: mimeType });
+        if (metadata.encoding === "gzip") {
+          if (typeof DecompressionStream !== "function") throw new Error("This browser cannot decompress the embedded download.");
+          blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
+          blob = blob.slice(0, blob.size, mimeType);
+        }
+        if (blob.size !== rawBytes) throw new Error("Embedded download length differs from its declared size.");
+        const objectUrl = URL.createObjectURL(blob);
         const trigger = document.createElement("a");
         trigger.href = objectUrl;
         trigger.download = filename;
@@ -2487,5 +2564,10 @@
     }
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  // A late start (data inflated after the page parsed) may run after DOMContentLoaded.
+  const startNow = late === true && document.readyState !== "loading";
+  if (startNow) init();
+  if (!startNow) {
+    document.addEventListener("DOMContentLoaded", init);
+  }
 })();
