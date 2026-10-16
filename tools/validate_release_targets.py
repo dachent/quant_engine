@@ -38,6 +38,8 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from acceptance.validate.generation import PANEL  # noqa: E402
 from acceptance.validate.release_targets import (  # noqa: E402
     PANEL_ROOT_ID,
+    PROVIDER_BOUND_ROOTS,
+    PROVIDER_LEDGER_ROOT_ID,
     release_findings_document,
     run_target_checks,
 )
@@ -251,6 +253,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_ERROR
 
+    # REL-PROVIDER-ROOTS-001: provider roots are judged against the provider
+    # ledger this same release publishes, so its catalog is a required input
+    # whenever such a target is present.
+    ledger_catalog: dict[str, Any] | None = None
+    if any(t["root_id"] in PROVIDER_BOUND_ROOTS for t in targets):
+        ledger_targets = [t for t in targets if t["root_id"] == PROVIDER_LEDGER_ROOT_ID]
+        if len(ledger_targets) != 1 or PROVIDER_LEDGER_ROOT_ID not in roots:
+            print(
+                _ascii(
+                    "validate_release_targets: REFUSED: the prepared release binds "
+                    "provider roots but not exactly one provider-ledger target"
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        ledger_dir = (
+            roots[PROVIDER_LEDGER_ROOT_ID]
+            / "generations"
+            / ledger_targets[0]["proposed_generation_id"]
+        )
+        ledger_file = ledger_dir / "provider-ledger.json"
+        if not ledger_file.is_file():
+            ledger_file = ledger_dir / "normalized" / "provider-ledger.json"
+        try:
+            loaded_ledger = _read_json(ledger_file, "provider ledger catalog")
+        except ContractError as exc:
+            print(_ascii(f"validate_release_targets: ERROR: {exc}"), file=sys.stderr)
+            return EXIT_ERROR
+        if isinstance(loaded_ledger, dict):
+            ledger_catalog = loaded_ledger
+
     any_blockers = False
     commit = validator_commit()
     panel_expected_baseline_sha256 = json.loads(panel_findings_bytes)[
@@ -271,7 +304,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return EXIT_ERROR
         root_dir = roots[root_id]
-        findings = run_target_checks(target, root_dir, panel_payload, report)
+        findings = run_target_checks(
+            target, root_dir, panel_payload, report, ledger_catalog
+        )
         document = release_findings_document(
             generation_id=generation_id,
             generation_dir=str(root_dir / "generations" / generation_id),

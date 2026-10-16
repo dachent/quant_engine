@@ -7092,7 +7092,12 @@ def test_t2_r2_funded_admission_of_a_census_assignment_only_interval_raises(
 def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
     manifest_module: Any,
 ) -> None:
-    """The governed census marks the two tt->qsi transitions ASSIGNMENT_ONLY."""
+    """The governed census funds the two tt->qsi predecessor epochs (#539).
+
+    The owner ruled these epochs were traded, then re-assigned: they carry an
+    epoch return and count in the TT return.  ASSIGNMENT_ONLY remains a valid
+    census status, so the refusal is exercised on a census that still has it.
+    """
 
     contract = json.loads(
         (
@@ -7103,7 +7108,11 @@ def test_t2_r2_repository_census_rejects_the_retained_tt_admissions(
     )
     census = manifest_module.load_membership_census(contract)
     key = ("SCHWAB", "tt-portfolio", "2025-11-25", "2026-01-04")
-    assert census[key] == ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
+    assert census[key] == ["FUNDED_MEMBERSHIP", "FUNDED_MEMBERSHIP"]
+    manifest_module._validate_admissions_against_census(
+        {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
+    )
+    census[key] = ["ASSIGNMENT_ONLY", "ASSIGNMENT_ONLY"]
     with pytest.raises(manifest_module.ManifestError, match="ASSIGNMENT_ONLY"):
         manifest_module._validate_admissions_against_census(
             {("x", *key[1:]): {"status": "FUNDED"}}, census, {"x": "SCHWAB"}
@@ -7216,14 +7225,21 @@ def test_cli_table_renders_unavailable_performance_on_ok_rows(
     )
     first, second = manifest["rows"]
     assert first["status"] == "OK"
-    assert first["performance_status"] == "UNAVAILABLE"
-    assert first["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
-    assert first["observed_hwm_index"] is None
-    assert first["observed_max_drawdown"] is None
+    # Liquidated and transferred, then a deferred credit: the epoch closes at
+    # the last funded day, the credit is dated non-TWR income inside ``gain``.
+    assert first["performance_status"] == "AVAILABLE"
+    assert first["observation_linked_return"] == "0"
+    assert first["performance_closed_on"] == "2026-01-02"
+    assert [
+        (c["start_date"], c["end_date"], c["amount"])
+        for c in first["post_liquidation_credits"]
+    ] == [("2026-01-02", "2026-01-03", "3.81")]
+    assert first["post_liquidation_income"] == "3.81"
+    assert first["gain"] == "3.81"
     assert second["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
 
     displayed = manifest_module.format_table(manifest).splitlines()[-2].split("|")
-    assert sum("unavailable" in cell for cell in displayed) == 2
+    assert sum("unavailable" in cell for cell in displayed) == 0
 
     argv = _producer_argv(inputs)
     argv.extend(["--receipt-authority-json", str(authority_path)])
@@ -7231,4 +7247,3 @@ def test_cli_table_renders_unavailable_performance_on_ok_rows(
     assert manifest_module.main(argv) == 0
     table = capsys.readouterr().out
     assert table == manifest_module.format_table(manifest) + "\n"
-    assert sum("unavailable" in cell for cell in table.splitlines()[-2].split("|")) == 2

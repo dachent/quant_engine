@@ -1656,6 +1656,25 @@ _SMOKE9_MANIFEST_ROWS = [
 ]
 
 
+def _assignment_only_contract():
+    """The real contract with the TT predecessor epochs back to ASSIGNMENT_ONLY.
+
+    The shipped census funds them (owner ruling, #539), so the exemption
+    mechanism is exercised on this variant; the shipped state is pinned by
+    ``test_shipped_census_refuses_the_blocked_tt_predecessor_rows``.
+    """
+
+    contract = _contract()
+    for sleeve in contract["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            if (
+                assignment["strategy_id"] == "tt-portfolio"
+                and assignment["effective_end"] == _TT_END
+            ):
+                assignment["status"] = "ASSIGNMENT_ONLY"
+    return contract
+
+
 def _smoke9_rows():
     return copy.deepcopy(_SMOKE9_MANIFEST_ROWS)
 
@@ -1664,7 +1683,7 @@ def test_good_a1_the_real_smoke9_rows_are_exempt_exactly_on_the_two_blocked_tt_r
     """GOOD-A1 (real shape): the 13 verbatim smoke9 rows against the real contract."""
 
     exempt = outcomes._census_assignment_only_epochs(
-        _smoke9_rows(), _contract(), _T0A_CUTOFF
+        _smoke9_rows(), _assignment_only_contract(), _T0A_CUTOFF
     )
     assert exempt == [
         {
@@ -1689,7 +1708,7 @@ def test_good_a2_an_assignment_only_row_closed_exactly_on_the_cutoff_passes():
     for row in rows:
         if row["account_id"] in (_TT_ACCOUNT_1, _TT_ACCOUNT_2):
             row["effective_end"] = _T0A_CUTOFF.isoformat()
-    contract = _contract()
+    contract = _assignment_only_contract()
     for sleeve in contract["current_census"]["account_sleeves"]:
         for assignment in sleeve["assignments"]:
             if (
@@ -1934,7 +1953,9 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
     from acceptance.validate.generation import CensusAssignment, ContractCensus
 
     rows = _smoke9_rows()
-    exempt = outcomes._census_assignment_only_epochs(rows, _contract(), _T0A_CUTOFF)
+    exempt = outcomes._census_assignment_only_epochs(
+        rows, _assignment_only_contract(), _T0A_CUTOFF
+    )
     gate_identities = {
         (
             row["account_id"],
@@ -1945,7 +1966,7 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
         for row in exempt
     }
 
-    contract = _contract()
+    contract = _assignment_only_contract()
     assignments = tuple(
         CensusAssignment(
             strategy_id=assignment["strategy_id"],
@@ -2042,7 +2063,7 @@ def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignm
     monkeypatch.setattr(
         outcomes, "_epoch_manifest_profile", lambda _spec: {"selected_bytes": {}}
     )
-    proof = outcomes._verify_epochs(spec, _contract())
+    proof = outcomes._verify_epochs(spec, _assignment_only_contract())
     assert proof["epoch_count"] == 13
     assert proof["assignment_only_epochs"] == [
         {
@@ -2058,3 +2079,12 @@ def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignm
             "effective_end": _TT_END,
         },
     ]
+
+
+def test_shipped_census_refuses_the_blocked_tt_predecessor_rows():
+    """#539: the TT predecessor epochs are funded, so a blocked row cannot pass."""
+
+    with pytest.raises(outcomes.FinancialOutcomeError):
+        outcomes._census_assignment_only_epochs(
+            _smoke9_rows(), _contract(), _T0A_CUTOFF
+        )

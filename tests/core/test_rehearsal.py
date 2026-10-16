@@ -300,3 +300,88 @@ def test_recovery_rehearsal_supports_release_without_predecessors(
     assert result["harness_identity"] == _HARNESS_IDENTITY
     assert result["boundary_rehearsal"]["source_unchanged"] is True
     assert result["boundary_rehearsal"]["rollback_interruption"]["status"] == "PASS"
+
+
+def test_recovery_rehearsal_supports_a_release_that_recovered_unusable_pointers(
+    tmp_path: Path,
+) -> None:
+    """REL-PROVIDER-ROOTS-001: dangling and schema-v1 predecessors are rehearsed verbatim."""
+
+    roots = {"excel": tmp_path / "excel", "panel": tmp_path / "panel"}
+    proposed = {
+        root_id: _manifest(f"{root_id}-proposed", date(2026, 7, 31))
+        for root_id in roots
+    }
+    for root_id in roots:
+        stage_generation(roots[root_id], proposed[root_id])
+    # excel: a pointer at a generation that does not exist here (dangling)
+    gone = _manifest("excel-gone", date(2026, 7, 30))
+    stage_generation(tmp_path / "elsewhere", gone)
+    dangling = publish_generation(tmp_path / "elsewhere", gone.generation_id)
+    (roots["excel"] / "CURRENT.json").write_bytes(dangling.to_json_bytes())
+    # panel: a schema-v1 pointer at a generation that is present
+    old = _manifest("panel-old", date(2026, 7, 30))
+    stage_generation(roots["panel"], old)
+    (roots["panel"] / "CURRENT.json").write_bytes(
+        CurrentPointer(
+            generation_id=old.generation_id,
+            manifest_sha256=hashlib.sha256(old.to_json_bytes()).hexdigest(),
+        ).to_json_bytes()
+    )
+    launcher = tmp_path / "proposed-launcher.html"
+    launcher.write_bytes(b"proposed launcher\n")
+    coordination = tmp_path / "coordination"
+    release = prepare_release(
+        coordination_root=coordination,
+        roots=roots,
+        proposed_generations={r: m.generation_id for r, m in proposed.items()},
+        code_commit="a" * 40,
+        created_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        gates=(
+            GateEvidence("test", "b" * 64),
+            GateEvidence("predecessor-pointer-recovery", "c" * 64),
+        ),
+        companions=(
+            CompanionInput(
+                "panel-launcher", "panel", "index.html", launcher.read_bytes()
+            ),
+        ),
+        allow_unusable_predecessor_pointers=True,
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=release.release_id,
+        roots=roots,
+        companion_contents={"panel-launcher": launcher.read_bytes()},
+        skip_release_validation=True,
+    )
+    spec = PipelineSpec(
+        pipeline_id="recovered-test-release",
+        as_of_date=date(2026, 7, 31),
+        code_commit="a" * 40,
+        created_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        coordination_root=coordination,
+        state_root=tmp_path / "state",
+        roots=roots,
+        nodes=(),
+        gates=(),
+        companions=(
+            PipelineCompanion(
+                "panel-launcher",
+                "panel",
+                "index.html",
+                launcher,
+                hashlib.sha256(launcher.read_bytes()).hexdigest(),
+            ),
+        ),
+    )
+
+    result = run_recovery_rehearsal(
+        spec=spec,
+        release_id=release.release_id,
+        output_root=tmp_path / "recovered-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["boundary_rehearsal"]["source_unchanged"] is True

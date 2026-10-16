@@ -341,6 +341,23 @@
         }
       }
     },
+    "post_liquidation_credits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start_date", "end_date", "beginning_value", "ending_value", "net_flow", "amount", "inferred_timing"],
+        "properties": {
+          "start_date": {"$ref": "#/$defs/date"},
+          "end_date": {"$ref": "#/$defs/date"},
+          "beginning_value": {"$ref": "#/$defs/decimal"},
+          "ending_value": {"$ref": "#/$defs/decimal"},
+          "net_flow": {"$ref": "#/$defs/decimal"},
+          "amount": {"$ref": "#/$defs/decimal"},
+          "inferred_timing": {"type": "boolean"}
+        }
+      }
+    },
     "capital_flow_trace": {
       "type": "array",
       "items": {
@@ -502,6 +519,9 @@
         "performance_flags": {"type": "array", "uniqueItems": true, "items": {"enum": ["INFERRED_TIMING"]}},
         "performance_flow_legs": {"$ref": "#/$defs/performance_flow_legs"},
         "flow_count": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "performance_closed_on": {"$ref": "#/$defs/date"},
+        "post_liquidation_credits": {"$ref": "#/$defs/post_liquidation_credits"},
+        "post_liquidation_income": {"$ref": "#/$defs/decimal"},
         "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"]},
         "observation_trace": {"$ref": "#/$defs/observation_trace"},
         "capital_flow_trace": {"type": "array"},

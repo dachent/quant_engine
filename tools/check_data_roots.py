@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import hashlib
 from pathlib import Path
 import sys
 
-from quant_engine.core import read_current
+from quant_engine.core import read_current, read_generation
 
 # Single-pointer data roots. dataPortfolio is excluded: its stores sit one level
 # down and are bound by the coordinated release instead.
@@ -37,9 +38,69 @@ DATA_ROOTS = (
 )
 
 
+# A root whose only bound generation is an accepted PARTIAL one. The provider ledger
+# qualifies it ACCEPTED_PARTIAL, and a PARTIAL generation is immutable evidence, never
+# current consumer authority (docs/architecture/system-boundaries.md): ``read_current``
+# refuses it, correctly. Such a root passes when every retained generation is
+# hash-verified; it carries no pointer a consumer may follow.
+EVIDENCE_ONLY_ROOTS = {"dataIBKR": "ledger qualification ACCEPTED_PARTIAL"}
+
+
+def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
+    """An evidence-only root retains verified generations and exposes no pointer.
+
+    ``read_generation`` proves the manifest and the generation identity. A retained
+    generation need not carry every file its manifest declares (source captures live
+    in the provider's source-runs), so the payload check is on the bytes that ARE
+    present: any declared artifact found at its id or flat basename must equal its
+    declared sha256, and at least one declared artifact must be present at all.
+    """
+
+    generations = root / "generations"
+    names = (
+        sorted(item.name for item in generations.iterdir())
+        if generations.is_dir()
+        else []
+    )
+    if not names:
+        return False, "evidence-only root retains no generation"
+    for name in names:
+        try:
+            manifest = read_generation(root, name)
+        except Exception as error:  # noqa: BLE001 - every verifier refusal is a finding
+            return False, f"{name[:12]} {type(error).__name__}: {error}"
+        present = 0
+        for artifact in manifest.artifacts:
+            base = generations / name
+            for candidate in {
+                base / artifact.artifact_id,
+                base / Path(artifact.artifact_id).name,
+            }:
+                if candidate.is_file():
+                    present += 1
+                    actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                    if actual != artifact.sha256:
+                        return (
+                            False,
+                            f"{name[:12]} {artifact.artifact_id} bytes differ",
+                        )
+        if not present:
+            return False, f"{name[:12]} retains none of its declared artifact bytes"
+    if (root / "CURRENT.json").exists():
+        try:
+            read_current(root)
+        except Exception:  # noqa: BLE001 - an unreadable pointer is fail-closed
+            pass
+        else:
+            return False, "evidence-only root exposes a followable CURRENT pointer"
+    return True, f"evidence-only ({reason}); {len(names)} generation(s) hash-verified"
+
+
 def check_root(root: Path) -> tuple[bool, str]:
     """Return (ok, message) for one data root."""
 
+    if root.name in EVIDENCE_ONLY_ROOTS and (root / "generations").is_dir():
+        return check_evidence_root(root, EVIDENCE_ONLY_ROOTS[root.name])
     if not (root / "generations").is_dir() and not (root / "CURRENT.json").exists():
         return True, "no generations (nothing to resolve)"
     if not (root / "CURRENT.json").exists():

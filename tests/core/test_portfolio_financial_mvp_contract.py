@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "c205de36b4aebc0a479cb8d3d46299c0624a312bf20f9602728daaf4d283b267"
+        "71692a8540f8a77ffa75bf6b83c9a9ad947520f878c22c3c8f20cf73d7414dfe"
     )
 
 
@@ -1494,7 +1494,14 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
         and assignment["status"] == "FUNDED_MEMBERSHIP"
     ]
     assert tt_funded
-    assert all(row["effective_end"] is None for row in tt_funded)
+    # Open memberships, plus the closed funded epochs the owner ruled on (#539):
+    # the two accounts later assigned to QSI (to 2026-01-04).
+    assert sorted(str(row["effective_end"]) for row in tt_funded) == sorted(
+        ["None"] * 4 + ["2026-01-04", "2026-01-04"]
+    )
+    assert {
+        row["authority"] for row in tt_funded if row["effective_end"] is not None
+    } == {"OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED"}
 
 
 def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes() -> (
