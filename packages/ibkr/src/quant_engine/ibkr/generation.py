@@ -48,7 +48,7 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 4
+CATALOG_SCHEMA_VERSION = 5
 ADAPTER_VERSION = "0.4.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1153,7 +1153,21 @@ def _normalize(
                 "security_id": security_id,
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
+                # Source granularity of this execution: the time of day when
+                # Flex reports one, otherwise the date only.
+                "timing_granularity": (
+                    "DATETIME" if trade.executed_time is not None else "DATE_ONLY"
+                ),
             }
+            if trade.executed_time is not None:
+                payload["executed_time"] = trade.executed_time
+            if trade.commission is not None:
+                # ibCommission, exactly as Flex signs it (a cost is negative).
+                payload["commission"] = {
+                    "currency": trade.commission_currency or trade.currency,
+                    "status": "AVAILABLE",
+                    "value": decimal_text(trade.commission),
+                }
             transactions.append(
                 {"record_id": _record_id("transaction", payload), **payload}
             )
@@ -1189,7 +1203,12 @@ def _normalize(
                 ),
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
+                "timing_granularity": (
+                    "DATETIME" if cash.event_time is not None else "DATE_ONLY"
+                ),
             }
+            if cash.event_time is not None:
+                common["event_time"] = cash.event_time
             cash_fields: dict[str, object] = {
                 "level_of_detail": cash.level_of_detail,
                 "activity_type": cash.activity_type,
@@ -1301,7 +1320,12 @@ def _normalize(
                 ),
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
+                "timing_granularity": (
+                    "DATETIME" if transfer.event_time is not None else "DATE_ONLY"
+                ),
             }
+            if transfer.event_time is not None:
+                transfer_payload["event_time"] = transfer.event_time
             if (
                 transfer.cash_amount in (None, Decimal("0"))
                 and transfer.position_amount_in_base is not None

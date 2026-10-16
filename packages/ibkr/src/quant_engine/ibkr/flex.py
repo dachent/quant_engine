@@ -23,6 +23,7 @@ GET_STATEMENT_URL = (
 _POLL_INITIAL_DELAY_SECONDS = 20.0
 _POLL_MAX_DELAY_SECONDS = 120.0
 _DATE = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})")
+_TIME_OF_DAY = re.compile(r"^\d{4}-?\d{2}-?\d{2}[;,T ]+\s*(\d{2}):?(\d{2}):?(\d{2})")
 _REQUIRED_SECTIONS = {
     "AccountInformation",
     "CashTransactions",
@@ -79,6 +80,23 @@ def _day(value: str | None, name: str) -> date:
         return date(*(int(part) for part in match.groups()))
     except ValueError as exc:
         raise FlexValidationError(f"{name} contains an invalid date") from exc
+
+
+def _time_of_day(value: str | None) -> str | None:
+    """The time of day a Flex ``dateTime`` carries, exactly as reported.
+
+    Flex reports the time in the statement's own time zone and does not name
+    it, so the value is kept as ``HH:MM:SS`` and never converted.  A date-only
+    value has no time of day.
+    """
+
+    match = _TIME_OF_DAY.match((value or "").strip())
+    if match is None:
+        return None
+    hours, minutes, seconds = (int(part) for part in match.groups())
+    if hours > 23 or minutes > 59 or seconds > 59:
+        raise FlexValidationError("dateTime carries an invalid time of day")
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _optional_day(value: str | None, name: str) -> date | None:
@@ -176,6 +194,8 @@ class FlexTrade:
     commission: Decimal | None
     taxes: Decimal | None
     reported_account_matches_statement: bool
+    commission_currency: str | None = None
+    executed_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +214,7 @@ class FlexCashTransaction:
     description: str | None = None
     settlement_date: date | None = None
     fx_rate_to_base: Decimal | None = None
+    event_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +293,7 @@ class FlexTransfer:
     conid: str | None
     quantity: Decimal | None
     reported_account_matches_statement: bool
+    event_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -391,6 +413,8 @@ def _trade(element: ET.Element, raw_account_id: str) -> FlexTrade:
         ),
         taxes=_optional_decimal(element.attrib.get("taxes"), "trade.taxes"),
         reported_account_matches_statement=_account_matches(element, raw_account_id),
+        commission_currency=_optional(element.attrib.get("ibCommissionCurrency")),
+        executed_time=_time_of_day(element.attrib.get("dateTime")),
     )
 
 
@@ -424,6 +448,7 @@ def _cash_transaction(element: ET.Element, raw_account_id: str) -> FlexCashTrans
         fx_rate_to_base=_optional_decimal(
             element.attrib.get("fxRateToBase"), "cash_transaction.fxRateToBase"
         ),
+        event_time=_time_of_day(element.attrib.get("dateTime")),
     )
 
 
@@ -586,6 +611,7 @@ def _transfer(element: ET.Element, raw_account_id: str) -> FlexTransfer:
         conid=_optional(element.attrib.get("conid")),
         quantity=_optional_decimal(element.attrib.get("quantity"), "transfer.quantity"),
         reported_account_matches_statement=_account_matches(element, raw_account_id),
+        event_time=_time_of_day(element.attrib.get("dateTime")),
     )
 
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import provider_ledger as ledger
@@ -1204,7 +1205,7 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     second, second_manifest, second_bytes = build_generation(spec_path)
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
-    assert first["catalog_schema_version"] == 4
+    assert first["catalog_schema_version"] == 5
     assert {row["value_basis"] for row in first["nav_observations"]} == {
         "ACCOUNT_TOTAL"
     }
@@ -2638,3 +2639,63 @@ def test_tws_coverage_partial_after_abuse(tmp_path: Path) -> None:
     assert tws_section["status"] == "PARTIAL"
     assert any("declared_zero_activity_abuse" in g for g in tws_section["known_gaps"])
     assert manifest.coverage.status is CoverageStatus.PARTIAL
+
+
+def test_trade_commission_and_time_of_day_reach_the_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#535: ``ibCommission`` and the Flex time of day are admitted, not dropped."""
+
+    import sys
+
+    original = _xml
+
+    def with_costs(*args: Any, **kwargs: Any) -> str:
+        return original(*args, **kwargs).replace(
+            'netCash="-10" ',
+            'netCash="-10" ibCommission="-1.05" ibCommissionCurrency="EUR" '
+            'dateTime="20260105;093015" ',
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", with_costs)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    timed = [row for row in catalog["transactions"] if "commission" in row]
+    assert timed
+    for row in timed:
+        assert row["commission"] == {
+            "currency": "EUR",
+            "status": "AVAILABLE",
+            "value": "-1.05",
+        }
+        assert row["executed_time"] == "09:30:15"
+        assert row["timing_granularity"] == "DATETIME"
+    assert all(
+        row["timing_granularity"] == "DATETIME"
+        for row in catalog["flows"]
+        if "event_time" in row
+    )
+
+
+def test_trade_without_commission_or_time_stays_date_only(tmp_path: Path) -> None:
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    trades = [
+        row for row in catalog["transactions"] if str(row["kind"]).startswith("TRADE:")
+    ]
+    assert trades
+    for row in trades:
+        assert "commission" not in row and "executed_time" not in row
+        assert row["timing_granularity"] == "DATE_ONLY"
+
+
+def test_flex_time_of_day_is_kept_as_reported() -> None:
+    from quant_engine.ibkr.flex import _time_of_day
+
+    assert _time_of_day("20260105;093015") == "09:30:15"
+    assert _time_of_day("2026-01-05, 09:30:15") == "09:30:15"
+    assert _time_of_day("2026-01-05") is None
+    assert _time_of_day("20260105") is None
+    assert _time_of_day(None) is None
+    with pytest.raises(FlexValidationError):
+        _time_of_day("20260105;253015")
