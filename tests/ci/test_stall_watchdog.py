@@ -32,3 +32,11 @@ def test_leading_python_runs_the_current_interpreter(capsys: object) -> None:
         stall_watchdog.main(["--stall-seconds", "5", "--", "python", "-c", code]) == 0
     )
     assert sys.executable in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+def test_progress_without_a_newline_counts_as_output() -> None:
+    code = (
+        "import sys, time\nfor i in range(4):\n"
+        " sys.stdout.write('.'); sys.stdout.flush(); time.sleep(0.6)"
+    )
+    assert stall_watchdog.run([sys.executable, "-c", code], 2.0) == 0

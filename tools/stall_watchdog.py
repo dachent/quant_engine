@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from collections import deque
+from io import BufferedReader
 import os
 from pathlib import Path
 import queue
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import cast
 
 STALL_EXIT = 124
 TAIL_LINES = 25
@@ -57,8 +59,10 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
     lines: queue.Queue[bytes | None] = queue.Queue()
 
     def pump() -> None:
-        assert process.stdout is not None
-        for raw in iter(process.stdout.readline, b""):
+        # read1 returns whatever is available, so progress without a newline (pytest -q
+        # dots) still counts as output.
+        stream = cast(BufferedReader, process.stdout)
+        for raw in iter(lambda: stream.read1(4096), b""):
             lines.put(raw)
         lines.put(None)
 
@@ -89,7 +93,7 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
         longest = max(longest, now - last)
         last = now
         text = raw.decode("utf-8", errors="replace")
-        tail.append(text.rstrip("\n"))
+        tail.extend(text.splitlines())
         sys.stdout.write(text)
         sys.stdout.flush()
     code = process.wait()
