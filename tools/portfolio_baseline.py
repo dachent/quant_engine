@@ -2972,7 +2972,7 @@ _ACCOUNT_CASH_LINE_KINDS: Final = (
 )
 
 
-def _fund_scoped_account_cash_lines(
+def fund_scoped_account_cash_lines(
     provider_catalog: Mapping[str, Any],
     valuation_date: date,
     fund_scoped_providers: Sequence[str],
@@ -3097,7 +3097,7 @@ def _build_current_capital(
             raise BaselineValidationError(
                 "custody cash references an unregistered strategy"
             )
-        cash_lines = _fund_scoped_account_cash_lines(
+        cash_lines = fund_scoped_account_cash_lines(
             provider_catalog,
             valuation_date,
             custody_authority.get("fund_scoped_providers", ()),
@@ -3630,7 +3630,7 @@ def _reconcile_current_capital(
                 "fund_scoped_providers", ()
             ),
         )
-        cash_lines = _fund_scoped_account_cash_lines(
+        cash_lines = fund_scoped_account_cash_lines(
             provider_catalog,
             valuation_date,
             current_capital["custody_authority"].get("fund_scoped_providers", ()),

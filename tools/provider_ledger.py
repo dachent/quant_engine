@@ -2222,6 +2222,7 @@ _QUANTBASE_COST_JOURNAL_TYPES: Final = frozenset({"PARTNER_SUB_FEE", "AUM_FEE"})
 
 
 def _quantbase_cash_activity(
+    provider_id: str,
     generation_id: str,
     manifest: GenerationManifest,
     catalog: Mapping[str, Any],
@@ -2244,7 +2245,7 @@ def _quantbase_cash_activity(
     retained strategy costs.  An AUM fee is an account-level cost.
     """
 
-    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    account_id = _CSV_FACT_ACCOUNT[provider_id]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
             "run_id"
@@ -2295,7 +2296,7 @@ def _quantbase_cash_activity(
         if financial_cutoff is not None and day > financial_cutoff:
             _excluded_source_row(
                 cutoff_findings,
-                "quantbase",
+                provider_id,
                 "transactions",
                 artifact.artifact_id,
                 row,
@@ -2325,7 +2326,7 @@ def _quantbase_cash_activity(
             "generation_id": generation_id,
             "kind": kind,
             "mapping_status": mapping_status,
-            "provider_id": "quantbase",
+            "provider_id": provider_id,
             "record_id": f"quantbase-cash-activity:{kind}:{source_id}",
             "source_artifact_id": source_artifact_id,
             "source_record_id": source_id,
@@ -4532,6 +4533,7 @@ def _project_account_facts(
                 )
             elif source_fact == "transactions":
                 rows = _quantbase_cash_activity(
+                    provider_id,
                     generation_id,
                     manifest,
                     catalog,

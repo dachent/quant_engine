@@ -10288,6 +10288,7 @@ def _quantbase_cash_rows(tmp_path: Path, **kwargs):
     root, catalog, manifest = _quantbase_cash_activity_fixture(tmp_path, **kwargs)
     account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
     return ledger._quantbase_cash_activity(
+        "quantbase",
         "gen-1",
         manifest,
         catalog,

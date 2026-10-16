@@ -3343,7 +3343,7 @@ def _verify_custody_current_capital(
     from provider_ledger import _financial_mvp_module
     from portfolio_baseline import (
         _derived_custody_cash,
-        _fund_scoped_account_cash_lines,
+        fund_scoped_account_cash_lines,
     )
 
     module = _financial_mvp_module()
@@ -3397,7 +3397,7 @@ def _verify_custody_current_capital(
             "custody cash differs from independent raw recompute"
         )
     try:
-        cash_lines = _fund_scoped_account_cash_lines(
+        cash_lines = fund_scoped_account_cash_lines(
             raw,
             _date(block["valuation_date"], "custody cutoff"),
             invested_policy.get("provider_custody_perimeter", {}).get(
