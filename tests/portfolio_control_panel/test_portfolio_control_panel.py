@@ -3733,7 +3733,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
     data = json.loads(
         (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
     )
-    lenses = {row["lens_id"]: row for row in data["decomposition_lenses"]["lenses"]}
+    lenses = {row["lens_id"]: row for row in _live_lenses_with_series(data)}
     assert set(lenses) == {
         "DYNAMIC_STYLE",
         "ECONOMIC_FACTOR",
@@ -3758,6 +3758,21 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         "MPI_INFORMED_NON_EQUIVALENT"
     )
     assert lenses["DYNAMIC_STYLE"]["dynamic_available_count"] == 1
+
+
+def _live_lenses_with_series(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """LIVE_ONLY lens records with `series` resolved from the default surface (#540).
+
+    The published payload carries each surface's series once, so a lens record
+    that has surfaces no longer repeats it at lens level.
+    """
+
+    return [
+        {**row, "series": row["surfaces"][row["default_surface"]]["series"]}
+        if "series" not in row
+        else row
+        for row in data["decomposition_lenses"]["modes"]["LIVE_ONLY"]
+    ]
 
 
 def _rewrite_legacy_plan_strategy_ids(
@@ -4167,7 +4182,7 @@ def test_panel_consumes_current_surface_lens_generations(
     data = json.loads(
         (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
     )
-    lenses = {row["lens_id"]: row for row in data["decomposition_lenses"]["lenses"]}
+    lenses = {row["lens_id"]: row for row in _live_lenses_with_series(data)}
     assert set(lenses) >= {
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
@@ -4241,7 +4256,7 @@ def test_panel_consumes_distinct_plan_bound_current_surfaces(
     )
     economic = next(
         row
-        for row in data["decomposition_lenses"]["lenses"]
+        for row in _live_lenses_with_series(data)
         if row["lens_id"] == "ECONOMIC_FACTOR"
     )
 
@@ -15402,3 +15417,89 @@ try {
     assert after["loaded"] == len(hybrid)
     assert after["pressed"] == "true" and after["appState"] == "ready"
     assert after["partsKept"] == [], "the compressed lazy part is released once parsed"
+
+
+def _wire_lens(
+    lens_id: str, series: list[dict[str, Any]], *, surfaces: bool = True
+) -> dict[str, Any]:
+    lens: dict[str, Any] = {
+        "lens_id": lens_id,
+        "series": series,
+        "sources": [{"source_key": "k"}],
+    }
+    if surfaces:
+        lens["default_surface"] = "STATIC"
+        lens["surfaces"] = {
+            "STATIC": {"series": copy.deepcopy(series), "surface": "STATIC"},
+            "DYNAMIC_FLS": {"series": [{"series_id": "dyn"}], "surface": "DYNAMIC_FLS"},
+        }
+    return lens
+
+
+def _wire_source() -> dict[str, Any]:
+    live = [
+        _wire_lens("A", [{"series_id": "x", "n": 1}]),
+        _wire_lens("B", [{"series_id": "y"}]),
+        _wire_lens("DYNAMIC_STYLE", [{"series_id": "z"}], surfaces=False),
+    ]
+    return {
+        "panel_schema_version": 25,
+        "decomposition_lenses": {
+            "default_lens": "A",
+            "lenses": copy.deepcopy(live),
+            "modes": {"LIVE_ONLY": live, "LIVE_PLUS_BACKTEST": copy.deepcopy(live[:1])},
+        },
+    }
+
+
+def test_wire_form_carries_each_surface_series_once_and_loses_nothing() -> None:
+    """#540: lens.series and the `lenses` mirror are published only where they repeat."""
+
+    source = _wire_source()
+    original = copy.deepcopy(source)
+    wire = panel._panel_wire_form(source)
+
+    assert source == original, "the assembled payload must not be modified"
+    lenses = wire["decomposition_lenses"]
+    assert lenses["representation"] == "SURFACE_SERIES_ONCE_V1"
+    assert "lenses" not in lenses
+    for mode, rows in lenses["modes"].items():
+        for row in rows:
+            if row["lens_id"] == "DYNAMIC_STYLE":
+                assert row["series"] == [{"series_id": "z"}], (
+                    "no surfaces: series stays"
+                )
+            else:
+                assert "series" not in row, (mode, row["lens_id"])
+
+    rebuilt = copy.deepcopy(wire)
+    rebuilt_lenses = rebuilt["decomposition_lenses"]
+    del rebuilt_lenses["representation"]
+    for rows in rebuilt_lenses["modes"].values():
+        for row in rows:
+            row.setdefault(
+                "series", row.get("surfaces", {}).get("STATIC", {}).get("series")
+            )
+    rebuilt_lenses["lenses"] = copy.deepcopy(rebuilt_lenses["modes"]["LIVE_ONLY"])
+    assert canonical_json_bytes(rebuilt) == canonical_json_bytes(original)
+
+
+def test_wire_form_keeps_a_repeat_that_is_not_an_exact_copy() -> None:
+    source = _wire_source()
+    source["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["series"] = [
+        {"series_id": "x", "n": 2}
+    ]
+    source["decomposition_lenses"]["lenses"][1]["lens_label"] = "differs"
+    wire = panel._panel_wire_form(source)
+    lenses = wire["decomposition_lenses"]
+    assert lenses["modes"]["LIVE_ONLY"][0]["series"] == [{"series_id": "x", "n": 2}]
+    assert "series" not in lenses["modes"]["LIVE_ONLY"][1]
+    assert lenses["lenses"] == source["decomposition_lenses"]["lenses"], (
+        "mirror differs: kept"
+    )
+
+
+def test_wire_form_without_lens_modes_is_unchanged() -> None:
+    assert panel._panel_wire_form({"panel_schema_version": 25}) == {
+        "panel_schema_version": 25
+    }
