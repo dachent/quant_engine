@@ -81,8 +81,9 @@ class _Fixture:
             manifest = _manifest(root_id, partial=provider == "ibkr")
             scratch = tmp_path / "staged" / root_id
             directory = stage_generation(scratch, manifest).parent
-            catalog = f"catalog of {root_id}\n".encode()
-            (directory / "catalog.json").write_bytes(catalog)
+            # the manifest declares inputs/<label>.txt; that artifact is the catalog
+            catalog = f"{root_id}\n".encode()
+            (directory / f"{root_id}.txt").write_bytes(catalog)
             self.sources[root_id] = directory
             if root_id == "epoch-manifest":
                 self.epoch_id = manifest.generation_id
@@ -160,7 +161,9 @@ def test_a_provider_generation_that_is_not_the_ledgers_is_refused(tmp_path) -> N
 
 def test_a_catalog_the_ledger_did_not_hash_is_refused(tmp_path) -> None:
     fixture = _Fixture(tmp_path)
-    (fixture.sources["provider-quantbase"] / "catalog.json").write_bytes(b"swapped\n")
+    (fixture.sources["provider-quantbase"] / "provider-quantbase.txt").write_bytes(
+        b"swapped\n"
+    )
     with pytest.raises(materializer.MaterializationError, match="ledger binding"):
         fixture.nodes()
 
@@ -266,7 +269,7 @@ def test_a_catalog_retained_elsewhere_binds_through_the_manifest_declaration(
         )
     )
     declared = manifest["artifacts"][0]["sha256"]
-    (fixture.sources["provider-portfolio123"] / "catalog.json").unlink()
+    (fixture.sources["provider-portfolio123"] / "provider-portfolio123.txt").unlink()
     for row in fixture.bindings:
         if row["provider_id"] == "portfolio123":
             row["catalog_sha256"] = declared
@@ -323,3 +326,16 @@ def test_a_damaged_pointer_is_not_recoverable(tmp_path) -> None:
         materializer._pointer_recovery_gate_payload(
             {"damaged": root}, {"damaged": manifest.generation_id}
         )
+
+
+def test_a_hash_that_only_matches_an_unrelated_file_binds_nothing(tmp_path) -> None:
+    fixture = _Fixture(tmp_path)
+    schwab = fixture.sources["provider-schwab"]
+    unrelated = b"original catalog bytes kept under another name\n"
+    (schwab / "unrelated.txt").write_bytes(unrelated)
+    for row in fixture.bindings:
+        if row["provider_id"] == "schwab":
+            row["catalog_sha256"] = hashlib.sha256(unrelated).hexdigest()
+    fixture.write_ledger()
+    with pytest.raises(materializer.MaterializationError, match="ledger binding"):
+        fixture.nodes()

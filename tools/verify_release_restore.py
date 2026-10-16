@@ -85,7 +85,7 @@ def restore(
     shutil.copyfile(authority_path, clean_coordination / "CURRENT_RELEASE.json")
     restored_roots: dict[str, Path] = {}
     report: list[dict[str, str]] = []
-    restored_files: dict[str, str] = {}
+    restored_files: dict[str, set[tuple[str, str]]] = {}
     for target in manifest.targets:
         source = (
             spec.roots[target.root_id] / "generations" / target.proposed_generation_id
@@ -125,9 +125,9 @@ def restore(
             (root / "generations" / target.proposed_generation_id).rglob("*")
         ):
             if path.is_file():
-                restored_files[hashlib.sha256(path.read_bytes()).hexdigest()] = (
-                    f"{target.root_id}/{path.name}"
-                )
+                restored_files.setdefault(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), set()
+                ).add((target.root_id, path.name))
         report.append(
             {
                 "root_id": target.root_id,
@@ -171,18 +171,29 @@ def restore(
                 raise RestoreError(
                     f"{node.root_id}: retained file {expected.relative_path} differs"
                 )
-            restored_files[expected.sha256] = f"{node.root_id}/{path.name}"
+            restored_files.setdefault(expected.sha256, set()).add(
+                (node.root_id, path.name)
+            )
         retained.append(f"{node.root_id}/{node.generation_id}")
     matched: list[str] = []
     if expect_sums is not None:
         for label, digest, name in _sums(expect_sums):
             if expect_labels is not None and label not in expect_labels:
                 continue
-            if digest not in restored_files:
+            # A row is found only as the same file name inside the root of the provider
+            # its label names (``schwab_aa618f5b`` -> ``provider-schwab``), not merely
+            # as some file with that digest.
+            provider = label.split("_", 1)[0]
+            places = [
+                f"{root}/{file}"
+                for root, file in sorted(restored_files.get(digest, set()))
+                if file == name and root.endswith(provider)
+            ]
+            if not places:
                 raise RestoreError(
                     f"expected {label}/{name} ({digest[:12]}) not restored"
                 )
-            matched.append(f"{label}/{name} -> {restored_files[digest]}")
+            matched.append(f"{label}/{name} -> {places[0]}")
     return {
         "release_id": authority.release_id,
         "targets": report,

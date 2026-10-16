@@ -436,9 +436,9 @@ def _file_sha256s(directory: Path) -> set[str]:
 def _catalog_hash_bound(generation_dir: Path, catalog_sha256: object) -> bool:
     """Whether the ledger's catalog hash is this generation's own catalog.
 
-    A file the generation holds, or an artifact its manifest declares when the catalog
-    is retained elsewhere; a declared artifact whose file is present at its declared
-    location must carry exactly the declared bytes.
+    The catalog must be an artifact the generation's manifest declares (a hash that
+    only matches some file binds nothing); a declared artifact whose file is present
+    at its declared location must carry exactly the declared bytes.
     """
 
     if not isinstance(catalog_sha256, str):
@@ -460,7 +460,7 @@ def _catalog_hash_bound(generation_dir: Path, catalog_sha256: object) -> bool:
                 hashlib.sha256(candidate.read_bytes()).hexdigest() != catalog_sha256
             ):
                 return False
-    return bool(declaring) or catalog_sha256 in _file_sha256s(generation_dir)
+    return bool(declaring)
 
 
 def _panel_account_manifest_artifacts(panel: Mapping[str, Any]) -> dict[str, str]:

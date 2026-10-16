@@ -826,7 +826,16 @@ PROVIDER_CATALOG_BYTES = b'{"catalog": "provider bytes"}\n'
 def _provider_target(
     tmp_path: Path, root_id: str = "provider-schwab"
 ) -> dict[str, Any]:
-    write_manifest(tmp_path, GOOD_GEN)
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/schwab-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
     (tmp_path / "generations" / GOOD_GEN / "schwab-generation.json").write_bytes(
         PROVIDER_CATALOG_BYTES
     )
@@ -1014,3 +1023,14 @@ def test_a_declared_catalog_whose_present_bytes_differ_is_a_blocker(
     )
     assert [f.check_id for f in findings] == ["release.provider_binding"]
     assert "contradict" in findings[0].message
+
+
+def test_a_ledger_hash_matching_only_an_unrelated_file_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    target = _provider_target(tmp_path)
+    unrelated = b"original catalog bytes kept under another name\n"
+    (tmp_path / "generations" / GOOD_GEN / "unrelated.txt").write_bytes(unrelated)
+    ledger = _ledger(target, catalog_sha256=_sha(unrelated))
+    findings = list(rt.provider_binding(target, tmp_path, base_panel(), ledger))
+    assert [f.check_id for f in findings] == ["release.provider_binding"]

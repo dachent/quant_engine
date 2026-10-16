@@ -72,18 +72,18 @@ def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
         present = 0
         for artifact in manifest.artifacts:
             base = generations / name
-            for candidate in (
+            for candidate in {
                 base / artifact.artifact_id,
                 base / Path(artifact.artifact_id).name,
-            ):
+            }:
                 if candidate.is_file():
                     present += 1
-                    if (
-                        hashlib.sha256(candidate.read_bytes()).hexdigest()
-                        != artifact.sha256
-                    ):
-                        return False, f"{name[:12]} {artifact.artifact_id} bytes differ"
-                    break
+                    actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                    if actual != artifact.sha256:
+                        return (
+                            False,
+                            f"{name[:12]} {artifact.artifact_id} bytes differ",
+                        )
         if not present:
             return False, f"{name[:12]} retains none of its declared artifact bytes"
     if (root / "CURRENT.json").exists():

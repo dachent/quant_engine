@@ -178,3 +178,19 @@ def test_evidence_only_root_fails_on_corrupt_missing_or_empty_payload(
     shutil.rmtree(root / "generations" / generation)
     ok, message = gate.check_root(root)
     assert not ok and "retains no generation" in message
+
+
+def test_evidence_only_root_verifies_every_present_copy_of_a_declared_artifact(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataIBKR"
+    generation = _publish(root)
+    (root / "CURRENT.json").unlink()
+    directory = root / "generations" / generation
+    (directory / "inputs").mkdir()
+    (directory / "inputs" / "tracker.json").write_bytes(b"synthetic-content")
+    assert gate.check_root(root)[0]
+    # a corrupt flat alias beside a valid nested copy is still corruption
+    (directory / "tracker.json").write_bytes(b"corrupt")
+    ok, message = gate.check_root(root)
+    assert not ok and "bytes differ" in message

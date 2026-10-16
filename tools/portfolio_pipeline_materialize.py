@@ -5081,16 +5081,16 @@ def _ledger_provider_bindings(ledger_generation: Path) -> dict[str, dict[str, An
 def _catalog_hash_bound(
     generation: Path,
     declared: Sequence[Mapping[str, Any]],
-    files: Sequence[Mapping[str, Any]],
     catalog_sha256: object,
 ) -> bool:
     """Whether the ledger's catalog hash is this generation's own catalog.
 
-    The catalog is either a file the generation holds or, for a generation whose
-    catalog is retained elsewhere (Portfolio123 keeps only its manifest here), an
-    artifact its manifest declares. A declared artifact whose file IS present at its
-    declared location must match its declared hash: a swapped catalog is not bound by
-    a manifest line that its own bytes contradict.
+    The catalog must be an artifact the generation's own manifest declares: a hash
+    that merely matches some file in the directory binds nothing. A generation whose
+    catalog is retained elsewhere (Portfolio123 keeps only its manifest here) is bound
+    by that declaration alone; one whose file IS present at its declared location must
+    carry exactly the declared bytes, so a swapped catalog is not bound by a manifest
+    line its own bytes contradict.
     """
 
     if not isinstance(catalog_sha256, str):
@@ -5104,7 +5104,7 @@ def _catalog_hash_bound(
         ):
             if candidate.is_file() and _sha(candidate)[0] != catalog_sha256:
                 return False
-    return bool(declaring) or catalog_sha256 in {item.get("sha256") for item in files}
+    return bool(declaring)
 
 
 def _provider_root_nodes(
@@ -5167,7 +5167,7 @@ def _provider_root_nodes(
                 binding.get("generation_id") != generation_id
                 or binding.get("manifest_sha256") != inventory["manifest_sha256"]
                 or not _catalog_hash_bound(
-                    source, declared_rows, files, binding.get("catalog_sha256")
+                    source, declared_rows, binding.get("catalog_sha256")
                 )
             ):
                 raise MaterializationError(

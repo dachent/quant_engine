@@ -217,3 +217,23 @@ def test_a_clean_room_inside_a_governed_root_is_refused(tmp_path: Path) -> None:
             assert "outside every governed root" in str(error)
         else:
             raise AssertionError("a clean room inside a governed root was accepted")
+
+
+def test_a_sums_row_is_found_only_as_that_file_in_that_providers_root(
+    tmp_path: Path,
+) -> None:
+    spec, directories = _committed(tmp_path)
+    digest = hashlib.sha256(
+        (directories["alpha"] / "catalog.json").read_bytes()
+    ).hexdigest()
+    wrong_root = tmp_path / "SUMS-wrong-root.txt"
+    wrong_root.write_text(f"[beta] {digest} *catalog.json\n", encoding="utf-8")
+    wrong_name = tmp_path / "SUMS-wrong-name.txt"
+    wrong_name.write_text(f"[alpha] {digest} *other.json\n", encoding="utf-8")
+    for index, sums in enumerate((wrong_root, wrong_name)):
+        try:
+            tool.restore(spec, tmp_path / f"clean{index}", sums)
+        except tool.RestoreError as error:
+            assert "not restored" in str(error)
+        else:
+            raise AssertionError("a misplaced sums row passed")
