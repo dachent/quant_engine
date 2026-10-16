@@ -126,6 +126,7 @@ _PATH_STAGES = {
     # treated as harmless -- two of these tripped that gate during the #374
     # integration, one of them on a pure type-annotation change.
     "tools/check_architecture.py": [],
+    "tools/check_data_roots.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],

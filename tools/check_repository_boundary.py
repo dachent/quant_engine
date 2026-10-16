@@ -193,6 +193,10 @@ _REQUIRED_PROVIDER_ROOTS = frozenset(
         "datafidelity",
         "dataalpaca",
         "dataportfolio",
+        "datarobuxio",
+        "dataprovidertrackrecord",
+        "datastrategybacktests",
+        "dataepochmanifest",
     }
 )
 _REQUIRED_FORBIDDEN_SEGMENTS = frozenset(
