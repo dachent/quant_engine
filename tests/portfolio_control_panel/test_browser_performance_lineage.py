@@ -595,7 +595,7 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
         for mode in data["dependence_modes"].values()
     )
     assert all(
-        all(len(lens["series"]) == 7 for lens in lenses)
+        all(len(lens_series(lens)) == 7 for lens in lenses)
         for lenses in data["decomposition_lenses"]["modes"].values()
     )
     for dependence in [data["dependence_analysis"], *data["dependence_modes"].values()]:
