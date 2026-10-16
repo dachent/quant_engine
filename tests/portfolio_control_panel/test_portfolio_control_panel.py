@@ -3760,6 +3760,18 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
     assert lenses["DYNAMIC_STYLE"]["dynamic_available_count"] == 1
 
 
+def _selected_report_bytes(inputs: Mapping[str, Path]) -> bytes:
+    """The selected report generation's JSON, the bytes the page must carry (#540)."""
+
+    pointer = panel.read_current(inputs["report"])
+    return (
+        inputs["report"]
+        / "generations"
+        / pointer.generation_id
+        / "portfolio-report-data.json"
+    ).read_bytes()
+
+
 def _live_lenses_with_series(data: Mapping[str, Any]) -> list[dict[str, Any]]:
     """LIVE_ONLY lens records with `series` resolved from the default surface (#540).
 
@@ -11269,13 +11281,16 @@ def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
         assert (
             bound_inputs[f"template:{name}"][1] == expected_template_source_hashes[name]
         )
+    # #540: the report is carried only inside the page, so it is not among `files`.
+    assert panel.REPORT_DOWNLOAD not in files
+    expected_downloads = {panel.REPORT_DOWNLOAD: _selected_report_bytes(inputs)}
     expected_links = " ".join(
-        panel._report_download_link(relative, label, files[relative])
+        panel._report_download_link(relative, label, expected_downloads[relative])
         for relative, label in (
             (panel.REPORT_DOWNLOAD, "Download report data"),
             (panel.WORKBOOK_DOWNLOAD, "Download Excel workbook"),
         )
-        if relative in files
+        if relative in expected_downloads
     ).encode("utf-8")
     assert files["index.html"] == expected_template_bytes["index.html"].replace(
         panel._DOWNLOAD_PLACEHOLDER, expected_links
@@ -13520,11 +13535,7 @@ def test_built_panel_embeds_the_report_gzipped_and_enforces_the_size_budget(
         encoding="utf-8"
     )
     assert 'data-download-encoding="gzip"' in html
-    report = (
-        Path(str(candidate["candidate_dir"]))
-        / "downloads"
-        / "portfolio-report-data.json"
-    ).read_bytes()
+    report = _selected_report_bytes(inputs)
     assert panel.embedded_download_bytes(html, panel.REPORT_DOWNLOAD) == report
     assert f'data-download-raw-bytes="{len(report)}"' in html
 

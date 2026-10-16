@@ -1692,24 +1692,37 @@ def _verify_consumers(
         raise FinancialOutcomeError(
             "capital and account-manifest epoch identities differ"
         )
-    # The panel carries the report inside index.html (#540); an older generation
-    # may still have the file beside the page, and then the two must agree.
-    _index_path, index_bytes = _generation_file(
-        epochs["panel_generation"], "index.html"
-    )
-    downloadable_report = panel_producer.embedded_download_bytes(
-        index_bytes.decode("utf-8"), panel_producer.REPORT_DOWNLOAD
-    )
+    # The panel carries the report inside index.html (#540). A generation that
+    # predates the embed has only the file beside the page, and one that has both
+    # must agree.
+    try:
+        _index_path, index_bytes = _generation_file(
+            epochs["panel_generation"], "index.html"
+        )
+        embedded_report: bytes | None = panel_producer.embedded_download_bytes(
+            index_bytes.decode("utf-8"), panel_producer.REPORT_DOWNLOAD
+        )
+    except (FinancialOutcomeError, panel_producer.ControlPanelValidationError):
+        embedded_report = None
     try:
         _path, report_file = _generation_file(
             epochs["panel_generation"], panel_producer.REPORT_DOWNLOAD
         )
     except FinancialOutcomeError:
         report_file = None
-    if report_file is not None and report_file != downloadable_report:
+    if (
+        embedded_report is not None
+        and report_file is not None
+        and report_file != embedded_report
+    ):
         raise FinancialOutcomeError(
             "downloaded report differs from the embedded report"
         )
+    downloadable_report = (
+        embedded_report if embedded_report is not None else report_file
+    )
+    if downloadable_report is None:
+        raise FinancialOutcomeError("panel carries no downloadable report")
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
     report_panel_parity = {
