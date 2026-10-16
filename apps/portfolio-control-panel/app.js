@@ -1,5 +1,52 @@
-(() => {
+(function bootPanel(late) {
   "use strict";
+
+  // #540: the generated data script carries the payload as gzip parts (byte-exact
+  // slices of data/dashboard_data.json) instead of one 364 MB object literal. The
+  // head and tail are inflated here, once, before the panel starts; the
+  // LIVE_PLUS_BACKTEST lens array (~73% of the payload) stays compressed until the
+  // viewer opens that mode. A page that already has window.PORTFOLIO_DATA (older
+  // generations, test fixtures) starts synchronously exactly as before.
+  const dataParts = window.PORTFOLIO_DATA_PARTS;
+  if (!window.PORTFOLIO_DATA && dataParts && Array.isArray(dataParts.parts)) {
+    const inflateText = async (gzipBase64) => {
+      if (typeof DecompressionStream !== "function") throw new Error("This browser cannot decompress the embedded panel data.");
+      const binary = window.atob(gzipBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+      return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    };
+    const lazyPart = dataParts.parts.find((part) => part.lazy === true);
+    (async () => {
+      const eager = dataParts.parts.filter((part) => part.lazy !== true);
+      const texts = [];
+      for (const part of eager) {
+        texts.push(await inflateText(part.gzip_base64));
+        part.gzip_base64 = null;
+      }
+      // head + [] + tail: the lazy array is a truthy placeholder until it is loaded.
+      const text = lazyPart ? `${texts[0]}[]${texts[1]}` : texts.join("");
+      const decoded = JSON.parse(text);
+      window.PORTFOLIO_LAZY_LENS = lazyPart ? {
+        pointer: dataParts.lazy_pointer,
+        load: async () => {
+          const rows = JSON.parse(await inflateText(lazyPart.gzip_base64));
+          lazyPart.gzip_base64 = null;
+          return rows;
+        },
+      } : null;
+      window.PORTFOLIO_DATA = decoded;
+    })().then(() => bootPanel(true), (error) => {
+      console.error("Embedded dashboard data could not be decoded.", error);
+      const loading = document.getElementById("loading-state");
+      const failure = document.getElementById("error-state");
+      if (loading) loading.hidden = true;
+      if (failure) failure.hidden = false;
+      const shell = document.getElementById("app");
+      if (shell) shell.dataset.appState = "error";
+    });
+    return;
+  }
 
   const data = window.PORTFOLIO_DATA;
   // F48: the comparison and heat-map scales are named, and the labels below read them.
@@ -1690,9 +1737,26 @@
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
       button.title = available ? "" : "No accepted version-compatible backtest decomposition is published for this mode.";
-      button.onclick = () => {
+      button.onclick = async () => {
         if (!available) return;
-        selectedFactorEvidenceMode = button.dataset.factorEvidenceMode;
+        const requestedMode = button.dataset.factorEvidenceMode;
+        // #540: the LIVE_PLUS_BACKTEST lenses are inflated and parsed on first use.
+        const lazy = window.PORTFOLIO_LAZY_LENS;
+        const lazyPointer = lazy?.pointer || [];
+        if (lazy && requestedMode === lazyPointer[lazyPointer.length - 1] && !lazy.loaded) {
+          document.documentElement.dataset.lazyData = "loading";
+          try {
+            data.decomposition_lenses.modes[requestedMode] = await lazy.load();
+            lazy.loaded = true;
+          } catch (error) {
+            console.error("Lazy lens data could not be decoded.", error);
+            showToast("The backtest-compatible lens data could not be decoded in this browser.");
+            return;
+          } finally {
+            document.documentElement.dataset.lazyData = "ready";
+          }
+        }
+        selectedFactorEvidenceMode = requestedMode;
         selectedFactorSeries = null;
         if (!activeFactorLenses().some((item) => item.lens_id === selectedFactorLens)) selectedFactorLens = activeFactorLenses()[0]?.lens_id;
         selectedFactorSurface = currentFactorLens()?.default_surface || "STATIC";
@@ -2500,5 +2564,10 @@
     }
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  // A late start (data inflated after the page parsed) may run after DOMContentLoaded.
+  const startNow = late === true && document.readyState !== "loading";
+  if (startNow) init();
+  if (!startNow) {
+    document.addEventListener("DOMContentLoaded", init);
+  }
 })();

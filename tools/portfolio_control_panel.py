@@ -230,6 +230,15 @@ _DOWNLOAD_GZIP_LEVEL: Final = 6
 # Build-time size budget for the page that carries the downloads. index.html
 # was 444 MB with the uncompressed report embedded; compressed it is ~47 MB.
 _INDEX_HTML_MAX_BYTES: Final = 96 * 1024 * 1024
+# `data/dashboard_data.js` carries the panel payload as gzip parts that are
+# byte-exact slices of `data/dashboard_data.json` (head + lazy + tail in order).
+# The LIVE_PLUS_BACKTEST lens array is ~73% of the payload and is parsed only
+# when the viewer opens that mode. A part is inflated into one JS string, and
+# V8's MAX_STRING_LENGTH is 536870888, so a part may not exceed this raw size.
+_PANEL_LAZY_POINTER: Final = ("decomposition_lenses", "modes", "LIVE_PLUS_BACKTEST")
+_PANEL_PART_MAX_RAW_BYTES: Final = 400 * 1024 * 1024
+_PANEL_SCRIPT_MAX_BYTES: Final = 160 * 1024 * 1024
+_PANEL_SCRIPT_GLOBAL: Final = "PORTFOLIO_DATA_PARTS"
 _DOWNLOAD_PLACEHOLDER: Final = b"<!-- REPORT_DOWNLOADS -->"
 _ALLOWED_FRONTEND_REFERENCES: Final = (
     ("link", "href", "styles.css"),
@@ -1313,6 +1322,78 @@ def _gunzip_exact(content: bytes) -> bytes:
     if not inflater.eof or inflater.unused_data:
         raise zlib.error("gzip member is truncated or has trailing bytes")
     return raw
+
+
+def _panel_data_parts(
+    data: Mapping[str, Any], data_bytes: bytes
+) -> list[tuple[str, bool, bytes]]:
+    """Split the canonical panel JSON into ordered byte-exact (id, lazy, bytes) parts.
+
+    The lazy part is the LIVE_PLUS_BACKTEST lens array; head + lazy + tail is the
+    original byte string, which is asserted, so every reader of the parts sees the
+    bytes that `data/dashboard_data.json` carries.
+    """
+
+    node: Any = data
+    for key in _PANEL_LAZY_POINTER:
+        node = node.get(key) if isinstance(node, Mapping) else None
+    if not isinstance(node, list) or not node:
+        return [("all", False, data_bytes)]
+    # canonical_json_bytes ends with one newline, which is not part of the nested array.
+    lazy_bytes = canonical_json_bytes(node)[:-1]
+    start = data_bytes.find(lazy_bytes)
+    if start < 0 or data_bytes.find(lazy_bytes, start + 1) >= 0:
+        raise ControlPanelValidationError(
+            "lazy lens array is not exactly one slice of the panel payload"
+        )
+    head = data_bytes[:start]
+    tail = data_bytes[start + len(lazy_bytes) :]
+    if head + lazy_bytes + tail != data_bytes:
+        raise ControlPanelValidationError("panel payload parts differ from the payload")
+    return [("head", False, head), ("lazy", True, lazy_bytes), ("tail", False, tail)]
+
+
+def _panel_data_script(data: Mapping[str, Any], data_bytes: bytes) -> bytes:
+    """`data/dashboard_data.js`: the panel payload as gzip parts, not one 364 MB literal."""
+
+    parts = _panel_data_parts(data, data_bytes)
+    described = []
+    for part_id, lazy, raw in parts:
+        if len(raw) > _PANEL_PART_MAX_RAW_BYTES:
+            raise ControlPanelValidationError(
+                f"panel data part {part_id} exceeds the renderer string limit: "
+                f"{len(raw)} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
+            )
+        described.append(
+            {
+                "id": part_id,
+                "lazy": lazy,
+                "raw_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "gzip_base64": base64.b64encode(
+                    gzip.compress(raw, compresslevel=_DOWNLOAD_GZIP_LEVEL, mtime=0)
+                ).decode("ascii"),
+            }
+        )
+    descriptor = {
+        "encoding": "gzip",
+        "lazy_pointer": list(_PANEL_LAZY_POINTER),
+        "parts": described,
+        "total_bytes": len(data_bytes),
+        "total_sha256": hashlib.sha256(data_bytes).hexdigest(),
+        "version": 1,
+    }
+    script = (
+        f"window.{_PANEL_SCRIPT_GLOBAL} = ".encode("ascii")
+        + json.dumps(descriptor, separators=(",", ":"), sort_keys=True).encode("ascii")
+        + b";\n"
+    )
+    if len(script) > _PANEL_SCRIPT_MAX_BYTES:
+        raise ControlPanelValidationError(
+            "dashboard_data.js exceeds the panel size budget: "
+            f"{len(script)} bytes > {_PANEL_SCRIPT_MAX_BYTES}"
+        )
+    return script
 
 
 def _report_download_link(relative_path: str, label: str, content: bytes) -> str:
@@ -11530,7 +11611,7 @@ def _rendered_files(
         "analytics.css": template_files["analytics.css"],
         "app.js": template_files["app.js"],
         "data/dashboard_data.json": data_bytes,
-        "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
+        "data/dashboard_data.js": _panel_data_script(data, data_bytes),
         "data/freshness-health.json": freshness_content,
     }
     if candidate_driver_map_content is not None:

@@ -167,6 +167,14 @@ page.on("console", (message) => {
 await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
+// #540: the LIVE_PLUS_BACKTEST lens data is inflated on first use, so a click on that
+// mode renders after the click returns; wait for the page to report it settled.
+const settleLazyData = () => page.waitForFunction(
+  () => document.documentElement.dataset.lazyData !== "loading",
+  null,
+  { timeout: 300_000 },
+);
+
 const checks = [];
 const sourceClock = sourceClockEvidence(
   dashboardData.meta?.source_clock,
@@ -666,6 +674,7 @@ for (const mode of requiredFactorEvidenceModes) {
     continue;
   }
   await button.click();
+  await settleLazyData();
   const strategyRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
     (nodes, strategies) => strategies.map((strategy) => ({
       beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
@@ -739,6 +748,7 @@ for (const item of rejectedBucketCases) {
     if (!(await target.count())) return false;
     if (await target.first().isDisabled()) return false;
     await target.first().click();
+    await settleLazyData();
     return true;
   };
   const navigable = (await click(`[data-factor-evidence-mode="${item.mode}"]`))

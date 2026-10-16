@@ -7890,10 +7890,11 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
 
 def _payload_globals(ctx: Context) -> set[str]:
     name = ctx.gen.scan.panel_script_global
-    if name:
-        return {name}
     js = ctx.gen.app_js or ""
-    return set(re.findall(r"window\s*\.\s*([A-Z][A-Z0-9_]{2,})\b", js))
+    # The data script may publish encoded parts (PORTFOLIO_DATA_PARTS) that the app
+    # inflates into window.PORTFOLIO_DATA: both bindings are payload bindings.
+    found = set(re.findall(r"window\s*\.\s*([A-Z][A-Z0-9_]{2,})\b", js))
+    return {name, *found} if name else found
 
 
 def check_app_guard(ctx: Context) -> Iterator[Finding]:
