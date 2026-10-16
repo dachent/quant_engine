@@ -14,6 +14,7 @@ import copy
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, getcontext, localcontext, setcontext
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -30,6 +31,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 import validate_generation  # noqa: E402
 from acceptance.validate import checks  # noqa: E402
 from acceptance.validate.generation import (  # noqa: E402
+    GenerationError,
     absolute_locator_offsets,
     load_generation,
 )
@@ -56,6 +58,7 @@ class Spec:
     shell_text: str = "Two current strategies"
     extra_files: dict[str, bytes] = field(default_factory=dict)
     post_write: list[Callable[[Path], None]] = field(default_factory=list)
+    gzip_embed: bool = False
 
 
 def _twr_row(
@@ -976,15 +979,22 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     panel["meta"].setdefault("report_sha256", _sha(report_bytes))
     panel_bytes = _dump(panel)
     script_bytes = b"window.PORTFOLIO_DATA = " + panel_bytes + b"\n;"
-    encoded = base64.b64encode(report_bytes)
+    encoded = base64.b64encode(
+        gzip.compress(report_bytes, mtime=0) if spec.gzip_embed else report_bytes
+    )
     half = len(encoded) // 8 * 4
     chunks = [encoded[:half], encoded[half:]]
+    encoding_attribute = b'data-download-encoding="gzip" ' if spec.gzip_embed else b""
     shell = (
         f"<!doctype html><html><body><div>{spec.shell_text}</div>".encode()
         + b"".join(
             b'<script type="application/octet-stream" id="d%d" '
             b'data-download-filename="portfolio-report-data.json" '
-            b'data-download-chunk-index="%d">' % (index, index) + chunk + b"</script>"
+            % index
+            + encoding_attribute
+            + b'data-download-chunk-index="%d">' % index
+            + chunk
+            + b"</script>"
             for index, chunk in enumerate(chunks)
         )
         + b'<script src="data/dashboard_data.js"></script></body></html>\n'
@@ -1122,6 +1132,30 @@ def test_good_generation_has_no_findings(tmp_path: Path) -> None:
     findings = run(build(tmp_path))
     assert [f.check_id for f in findings] == ["expected.not_supplied"]
     assert findings[0].klass == checks.NOT_READY
+
+
+def test_gzip_embedded_report_download_matches_the_published_report(
+    tmp_path: Path,
+) -> None:
+    """The page carries the report gzip-compressed; the gate compares inflated bytes."""
+
+    gen_dir = build(tmp_path, Spec(gzip_embed=True))
+    assert [f.check_id for f in run(gen_dir)] == ["expected.not_supplied"]
+    payloads = load_generation(gen_dir).scan.embedded_payloads
+    report = (gen_dir / "downloads" / "portfolio-report-data.json").read_bytes()
+    payload = payloads["portfolio-report-data.json"]
+    assert payload.size_bytes == len(report)
+    assert payload.sha256 == hashlib.sha256(report).hexdigest()
+
+
+def test_corrupt_gzip_embedded_report_download_is_unreadable_not_silently_passed(
+    tmp_path: Path,
+) -> None:
+    gen_dir = build(
+        tmp_path, Spec(gzip_embed=True, post_write=[_corrupt_gzip_embedded_report])
+    )
+    with pytest.raises(GenerationError, match="not valid gzip|truncated"):
+        load_generation(gen_dir)
 
 
 def test_good_generation_with_matching_expected_has_no_findings(tmp_path: Path) -> None:
@@ -1454,6 +1488,37 @@ def _big_move(report: dict[str, Any]) -> None:
             "evidence_layer": "ACCOUNT_LIVE",
         }
     )
+
+
+def _replace_gzip_embedded_report(gen_dir: Path) -> None:
+    """Re-embed a well-formed gzip of different bytes: the digest must differ."""
+    path = gen_dir / "index.html"
+    shell = path.read_bytes()
+    report = (gen_dir / "downloads" / "portfolio-report-data.json").read_bytes()
+    forged = base64.b64encode(gzip.compress(report + b" ", mtime=0))
+    marker = b'data-download-chunk-index="0">'
+    start = shell.index(marker) + len(marker)
+    end = shell.index(b"</script>", start)
+    second = shell.index(b'data-download-chunk-index="1">') + len(
+        b'data-download-chunk-index="1">'
+    )
+    second_end = shell.index(b"</script>", second)
+    half = len(forged) // 8 * 4
+    path.write_bytes(
+        shell[:start]
+        + forged[:half]
+        + shell[end:second]
+        + forged[half:]
+        + shell[second_end:]
+    )
+
+
+def _corrupt_gzip_embedded_report(gen_dir: Path) -> None:
+    path = gen_dir / "index.html"
+    shell = path.read_bytes()
+    marker = b'data-download-chunk-index="1">'
+    start = shell.index(marker) + len(marker)
+    path.write_bytes(shell[:start] + b"QUJD" + shell[start + 4 :])
 
 
 def _tamper_embedded_report(gen_dir: Path) -> None:
@@ -2087,6 +2152,11 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         "identity.embedded_payload_copies",
         checks.BLOCKER_AUTHORITY,
         Spec(post_write=[_tamper_embedded_report]),
+    ),
+    "embedded_report_download_gzip_different_bytes": (
+        "identity.embedded_payload_copies",
+        checks.BLOCKER_AUTHORITY,
+        Spec(gzip_embed=True, post_write=[_replace_gzip_embedded_report]),
     ),
     "inactive_unknown_account": (
         "universe.inactive_accounts_in_current",
