@@ -48,7 +48,7 @@ CURRENT_ORACLE_MANIFEST_SHA256 = {
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da",
+    "49a19ebfa1e7dded94fa21241e5011d60c9b1bb6e41dd587c9943dbe14017d7b",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS = frozenset(
     {

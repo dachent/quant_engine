@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "c205de36b4aebc0a479cb8d3d46299c0624a312bf20f9602728daaf4d283b267"
+        "dfbbe750c8cf7c71d8911309726d63bacb4cbb11305ef73889dc5061313e2d0e"
     )
 
 

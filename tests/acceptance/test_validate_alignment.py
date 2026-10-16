@@ -3445,7 +3445,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.problem is None, state.problem
     assert state.census is not None
     assert state.census.sha256 == (
-        "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da"
+        "49a19ebfa1e7dded94fa21241e5011d60c9b1bb6e41dd587c9943dbe14017d7b"
     )
     tuples = [
         (a.strategy_id, a.status, a.effective_start, a.effective_end)
