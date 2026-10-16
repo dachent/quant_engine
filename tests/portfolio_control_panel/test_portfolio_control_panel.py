@@ -13599,6 +13599,16 @@ def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
     ):
         panel._panel_data_script(data, data_bytes)
     monkeypatch.undo()
+    # each eager part is under the limit, but head + tail are joined into one string
+    head_tail = sum(
+        len(raw)
+        for _id, lazy, raw in panel._panel_data_parts(data, data_bytes)
+        if not lazy
+    )
+    monkeypatch.setattr(panel, "_PANEL_PART_MAX_RAW_BYTES", head_tail - 1)
+    with pytest.raises(panel.ControlPanelValidationError, match="eager parts exceed"):
+        panel._panel_data_script(data, data_bytes)
+    monkeypatch.undo()
     monkeypatch.setattr(panel, "_PANEL_SCRIPT_MAX_BYTES", 64)
     with pytest.raises(panel.ControlPanelValidationError, match="size budget"):
         panel._panel_data_script(data, data_bytes)

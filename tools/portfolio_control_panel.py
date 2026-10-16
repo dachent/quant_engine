@@ -1357,6 +1357,14 @@ def _panel_data_script(data: Mapping[str, Any], data_bytes: bytes) -> bytes:
     """`data/dashboard_data.js`: the panel payload as gzip parts, not one 364 MB literal."""
 
     parts = _panel_data_parts(data, data_bytes)
+    # The renderer joins head + "[]" + tail into one string before JSON.parse, so
+    # the eager parts are bounded together, not only one by one.
+    eager_bytes = sum(len(raw) for _part_id, lazy, raw in parts if not lazy)
+    if eager_bytes > _PANEL_PART_MAX_RAW_BYTES:
+        raise ControlPanelValidationError(
+            "panel data eager parts exceed the renderer string limit: "
+            f"{eager_bytes} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
+        )
     described = []
     for part_id, lazy, raw in parts:
         if len(raw) > _PANEL_PART_MAX_RAW_BYTES:
