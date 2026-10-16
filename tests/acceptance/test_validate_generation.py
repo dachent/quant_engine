@@ -1581,6 +1581,8 @@ def _big_move(report: dict[str, Any]) -> None:
 
 def _parts_script(panel_bytes: bytes, kind: str) -> bytes:
     """dashboard_data.js as the builder writes it: gzip parts of the payload bytes."""
+    # The builder's canonical JSON ends with a newline, which the panel digest excludes.
+    panel_bytes = panel_bytes + b"\n"
     cut = len(panel_bytes) // 3
     slices = [panel_bytes[:cut], panel_bytes[cut : 2 * cut], panel_bytes[2 * cut :]]
     parts = []
