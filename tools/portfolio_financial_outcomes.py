@@ -1692,9 +1692,44 @@ def _verify_consumers(
         raise FinancialOutcomeError(
             "capital and account-manifest epoch identities differ"
         )
-    _path, downloadable_report = _generation_file(
-        epochs["panel_generation"], panel_producer.REPORT_DOWNLOAD
+    # The panel carries the report inside index.html (#540). A generation that
+    # predates the embed has only the file beside the page, and one that has both
+    # must agree.
+    panel_files = {file.relative_path for file in epochs["panel_generation"].files}
+    embedded_report: bytes | None = None
+    if "index.html" in panel_files:
+        # Only a page without the embed may fall back to the file: an index that
+        # fails its hash or a payload that cannot be read is a broken download.
+        _index_path, index_bytes = _generation_file(
+            epochs["panel_generation"], "index.html"
+        )
+        try:
+            embedded_report = panel_producer.embedded_download_bytes_if_present(
+                index_bytes.decode("utf-8"), panel_producer.REPORT_DOWNLOAD
+            )
+        except (UnicodeDecodeError, panel_producer.ControlPanelValidationError) as exc:
+            raise FinancialOutcomeError(
+                f"panel embedded report is unreadable: {exc}"
+            ) from exc
+    try:
+        _path, report_file = _generation_file(
+            epochs["panel_generation"], panel_producer.REPORT_DOWNLOAD
+        )
+    except FinancialOutcomeError:
+        report_file = None
+    if (
+        embedded_report is not None
+        and report_file is not None
+        and report_file != embedded_report
+    ):
+        raise FinancialOutcomeError(
+            "downloaded report differs from the embedded report"
+        )
+    downloadable_report = (
+        embedded_report if embedded_report is not None else report_file
     )
+    if downloadable_report is None:
+        raise FinancialOutcomeError("panel carries no downloadable report")
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
     report_panel_parity = {

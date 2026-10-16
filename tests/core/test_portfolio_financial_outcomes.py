@@ -8,6 +8,7 @@ import copy
 import importlib
 import importlib.util
 import json
+import re
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -1064,6 +1065,7 @@ def _consumer_world(
     with_ledger=True,
     cutoff=True,
     report_edit=None,
+    panel_carries="file",
 ):
     """One report, its correlation generation and the selected ledger, ending at ``end``.
 
@@ -1124,11 +1126,23 @@ def _consumer_world(
         tmp_path / "baseline",
         {"portfolio-baseline.json": canonical_json_bytes(baseline)},
     )
+    # How the panel carries the report (#540): "file" is the pre-embed layout.
+    panel_files = {}
+    if panel_carries in ("file", "both", "both_corrupt"):
+        panel_files["downloads/portfolio-report-data.json"] = report_bytes
+    if panel_carries != "file":
+        link = panel_producer._report_download_link(
+            panel_producer.REPORT_DOWNLOAD, "Download report data", report_bytes
+        )
+        if panel_carries == "both_corrupt":
+            link = re.sub(
+                r"(>)[A-Za-z0-9+/=]+(</script>)",
+                lambda m: m.group(1) + "bm90IGd6aXA=" + m.group(2),
+                link,
+            )
+        panel_files["index.html"] = f"<html><body>{link}</body></html>".encode()
     panel_generation = _node_with_files(
-        "panel-generation",
-        "control-panel",
-        tmp_path / "panel",
-        {"downloads/portfolio-report-data.json": report_bytes},
+        "panel-generation", "control-panel", tmp_path / "panel", panel_files
     )
     correlation_generation = pipeline.GenerationNode(
         "correlation-generation",
@@ -2088,3 +2102,39 @@ def test_shipped_census_refuses_the_blocked_tt_predecessor_rows():
         outcomes._census_assignment_only_epochs(
             _smoke9_rows(), _contract(), _T0A_CUTOFF
         )
+
+
+@pytest.mark.parametrize("carries", ["file", "embedded", "both"])
+def test_the_downloaded_report_may_be_carried_by_the_page_or_the_file(
+    tmp_path, monkeypatch, carries
+):
+    """#540: the panel's report is read from the page; a file beside it must agree."""
+
+    world = _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=CUTOFF,
+        with_ledger=False,
+        cutoff=False,
+        panel_carries=carries,
+    )
+    assert (
+        world.call()["report_sha256"] == hashlib.sha256(world.report_bytes).hexdigest()
+    )
+
+
+def test_an_unreadable_embedded_report_is_not_masked_by_a_valid_file(
+    tmp_path, monkeypatch
+):
+    world = _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=CUTOFF,
+        with_ledger=False,
+        cutoff=False,
+        panel_carries="both_corrupt",
+    )
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="embedded report is unreadable"
+    ):
+        world.call()
