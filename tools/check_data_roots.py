@@ -86,20 +86,27 @@ def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
                         )
         if not present:
             return False, f"{name[:12]} retains none of its declared artifact bytes"
+    pointer_note = "no CURRENT pointer"
     if (root / "CURRENT.json").exists():
         try:
             read_current(root)
-        except Exception:  # noqa: BLE001 - an unreadable pointer is fail-closed
-            pass
+        except Exception as error:  # noqa: BLE001 - an unreadable pointer is fail-closed
+            pointer_note = f"CURRENT pointer is not followable ({error})"
         else:
             return False, "evidence-only root exposes a followable CURRENT pointer"
-    return True, f"evidence-only ({reason}); {len(names)} generation(s) hash-verified"
+    return (
+        True,
+        f"evidence-only ({reason}); {len(names)} generation(s) hash-verified; "
+        f"{pointer_note}",
+    )
 
 
 def check_root(root: Path) -> tuple[bool, str]:
     """Return (ok, message) for one data root."""
 
-    if root.name in EVIDENCE_ONLY_ROOTS and (root / "generations").is_dir():
+    if root.name in EVIDENCE_ONLY_ROOTS:
+        # Taken whether or not generations/ exists: an evidence-only root that lost its
+        # retained evidence must fail, not pass as an empty root.
         return check_evidence_root(root, EVIDENCE_ONLY_ROOTS[root.name])
     if not (root / "generations").is_dir() and not (root / "CURRENT.json").exists():
         return True, "no generations (nothing to resolve)"

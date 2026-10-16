@@ -532,3 +532,94 @@ def test_a_recovery_release_keeps_every_found_pointer_and_refuses_a_missing_copy
     dangling = next(item for item in manifest.targets if item.root_id == "dangling")
     with pytest.raises(ReleaseConflictError, match="bytes are missing"):
         _recovered_pointer_bytes(world.coordination, manifest, dangling)
+
+
+def test_a_recovery_successor_still_refuses_a_hand_moved_pointer_elsewhere(
+    tmp_path,
+) -> None:
+    """One unusable root must not let a moved pointer on a healthy root through."""
+
+    import shutil
+
+    world = _World(tmp_path)
+    first = world.prepare()
+    commit_release(
+        coordination_root=world.coordination,
+        release_id=first.release_id,
+        roots=world.roots,
+        skip_release_validation=True,
+    )
+    shutil.rmtree(world.dangling / "generations" / world.generations["dangling"])
+    # hand-move the healthy root's pointer to another published generation
+    other = _manifest("healthy-other")
+    stage_generation(world.healthy, other)
+    publish_generation(world.healthy, other.generation_id)
+    replacement = _manifest("dangling-replacement-2")
+    stage_generation(world.dangling, replacement)
+    generations = {**world.generations, "dangling": replacement.generation_id}
+    with pytest.raises(ReleaseConflictError, match="committed pointer graph differs"):
+        prepare_release(
+            coordination_root=world.coordination,
+            roots=world.roots,
+            proposed_generations=generations,
+            code_commit="d" * 40,
+            created_at=datetime(2026, 10, 16, 16, tzinfo=UTC),
+            gates=_gates(True),
+            allow_unusable_predecessor_pointers=True,
+        )
+
+
+def test_recovery_refuses_a_damaged_pointer_the_gate_never_admitted(tmp_path) -> None:
+    world = _World(tmp_path)
+    publish_generation(world.healthy, world.proposed["healthy"].generation_id)
+    (
+        world.healthy
+        / "generations"
+        / world.proposed["healthy"].generation_id
+        / "x.json"
+    ).write_bytes(b"edited after publication\n")
+    with pytest.raises(PointerIntegrityError, match="inventory"):
+        world.prepare()
+
+
+def test_the_gate_file_must_still_match_the_hash_it_was_bound_with(tmp_path) -> None:
+    from quant_engine.core.pipeline import (
+        PipelineExecutionError,
+        _verify_recovered_pointer_evidence,
+    )
+
+    world = _World(tmp_path)
+    manifest = world.prepare()
+    path = _gate_file(tmp_path, world)
+    pinned = hashlib.sha256(path.read_bytes()).hexdigest()
+    spec = SimpleNamespace(
+        coordination_root=world.coordination,
+        gates=(PipelineGate("predecessor-pointer-recovery", path, pinned),),
+    )
+    _verify_recovered_pointer_evidence(spec, manifest.release_id)
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(PipelineExecutionError, match="changed after it was bound"):
+        _verify_recovered_pointer_evidence(spec, manifest.release_id)
+
+
+def test_a_healthy_pointer_that_changes_while_it_is_recorded_is_refused(
+    tmp_path, monkeypatch
+) -> None:
+    import quant_engine.core.release as release_module
+
+    world = _World(tmp_path)
+    real = release_module._read_recorded_bytes
+    healthy = world.healthy.resolve()
+    calls = {"count": 0}
+
+    def racing(root):
+        raw = real(root)
+        if root.resolve() == healthy:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                return (raw or b"") + b" "
+        return raw
+
+    monkeypatch.setattr(release_module, "_read_recorded_bytes", racing)
+    with pytest.raises(ReleaseConflictError, match="changed while it was recorded"):
+        world.prepare()

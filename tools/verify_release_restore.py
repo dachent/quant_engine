@@ -55,6 +55,13 @@ def _sums(path: Path) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _confirm_clean_room(clean_room: Path, expected: Path) -> None:
+    """The clean room is still the directory that was checked, not a swapped link."""
+
+    if clean_room.is_symlink() or clean_room.resolve() != expected:
+        raise RestoreError("the clean room was redirected during the restore")
+
+
 def restore(
     spec: PipelineSpec,
     clean_room: Path,
@@ -72,12 +79,15 @@ def restore(
             or resolved_clean_room in governed_resolved.parents
         ):
             raise RestoreError("the clean room must be outside every governed root")
+    clean_room.mkdir(parents=True, exist_ok=True)
+    _confirm_clean_room(clean_room, resolved_clean_room)
     authority_path = spec.coordination_root / "CURRENT_RELEASE.json"
     authority = ReleaseAuthorityPointer.from_json_bytes(authority_path.read_bytes())
     manifest, journal = read_release(spec.coordination_root, authority.release_id)
     if journal.state.value != "COMMITTED":
         raise RestoreError("the authoritative release is not COMMITTED")
     clean_coordination = clean_room / "coordination"
+    _confirm_clean_room(clean_room, resolved_clean_room)
     shutil.copytree(
         spec.coordination_root / "releases" / authority.release_id,
         clean_coordination / "releases" / authority.release_id,
@@ -95,6 +105,7 @@ def restore(
                 f"{target.root_id}: bound generation is absent from the durable store"
             )
         root = clean_room / "roots" / target.root_id
+        _confirm_clean_room(clean_room, resolved_clean_room)
         shutil.copytree(source, root / "generations" / target.proposed_generation_id)
         inventory = generation_inventory_sha256(root, target.proposed_generation_id)
         if inventory != target.proposed_inventory_sha256:
@@ -140,14 +151,13 @@ def restore(
         source_file = spec.roots[companion.root_id] / relative
         if not source_file.is_file():
             raise RestoreError(f"companion {companion.companion_id} is absent")
-        if (
-            hashlib.sha256(source_file.read_bytes()).hexdigest()
-            != companion.proposed_sha256
-        ):
+        companion_bytes = source_file.read_bytes()
+        if hashlib.sha256(companion_bytes).hexdigest() != companion.proposed_sha256:
             raise RestoreError(f"companion {companion.companion_id} hash differs")
         restored_companion = clean_room / "roots" / companion.root_id / relative
+        _confirm_clean_room(clean_room, resolved_clean_room)
         restored_companion.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_file, restored_companion)
+        restored_companion.write_bytes(companion_bytes)
     # Generations the release retains as evidence without publishing them (an
     # accepted PARTIAL provider generation) are not targets, so the release record
     # does not list them; the pipeline spec's non-target generation nodes do.
@@ -161,6 +171,7 @@ def restore(
                 f"{node.root_id}: retained generation is absent from the durable store"
             )
         destination = clean_room / "retained" / node.root_id / node.generation_id
+        _confirm_clean_room(clean_room, resolved_clean_room)
         shutil.copytree(source, destination)
         for expected in node.files:
             path = destination / expected.relative_path
@@ -199,6 +210,13 @@ def restore(
         "targets": report,
         "retained_evidence": retained,
         "sums_matched": matched,
+        "sums_labels_checked": (
+            "NOT_CHECKED"
+            if expect_sums is None
+            else sorted(expect_labels)
+            if expect_labels
+            else "ALL"
+        ),
         "read_current": "PASS",
     }
 

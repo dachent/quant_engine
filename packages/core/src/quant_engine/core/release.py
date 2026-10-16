@@ -45,6 +45,14 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PREDECESSOR_REPAIR_GATE_ID: Final = "predecessor-authority-repair"
 _POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
+# The only refusals a root's own pointer may carry and still be recovered; anything else
+# (a generation edited after publication, a manifest hash difference) is damage.
+_RECOVERABLE_POINTER_FAILURES: Final = frozenset(
+    {
+        "current generation manifest is missing",
+        "legacy pointer schema is not accepted as current authority",
+    }
+)
 _FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x400
 _FILE_READ_ATTRIBUTES: Final = 0x80
 _FILE_SHARE_READ: Final = 0x1
@@ -1355,19 +1363,37 @@ def prepare_release(
         ):
             raise PublicationRejectedError("release target coverage is not complete")
         previous_inventory_sha256: str | None
+        # The raw bytes bracket the validated read: the pointer that is recorded, the
+        # bytes kept for rollback and the pointer read_current accepted are one state.
+        bytes_before = (
+            _read_recorded_bytes(root) if allow_unusable_predecessor_pointers else None
+        )
         try:
             previous_pointer = _read_optional_current(root)
             if allow_unusable_predecessor_pointers and previous_pointer is not None:
-                recovered_pointer_bytes[root_id] = _read_recorded_bytes(root) or b""
+                healthy_raw = _read_recorded_bytes(root) or b""
+                if (
+                    healthy_raw != bytes_before
+                    or CurrentPointer.from_json_bytes(healthy_raw) != previous_pointer
+                ):
+                    raise ReleaseConflictError(
+                        f"current pointer changed while it was recorded: {root_id}"
+                    )
+                recovered_pointer_bytes[root_id] = healthy_raw
             previous_inventory_sha256 = (
                 previous_pointer.artifact_inventory_sha256
                 if previous_pointer is not None
                 else None
             )
-        except PointerIntegrityError:
+        except PointerIntegrityError as refusal:
             if not (
                 allow_invalid_previous_artifact_inventory
                 or allow_unusable_predecessor_pointers
+            ):
+                raise
+            if (
+                allow_unusable_predecessor_pointers
+                and str(refusal) not in _RECOVERABLE_POINTER_FAILURES
             ):
                 raise
             if allow_unusable_predecessor_pointers:
@@ -1448,6 +1474,9 @@ def prepare_release(
                     )
                 if _expected_authority(previous_manifest) != previous_authority:
                     raise ReleaseConflictError("coordinated release authority differs")
+                _validate_committed_graph_allowing_unusable(
+                    previous_manifest, previous_roots
+                )
             elif not allow_invalid_previous_artifact_inventory:
                 raise
             else:
@@ -1604,6 +1633,45 @@ def _validate_committed_state(
             )
         if _read_optional_authority(coordination_root) != _expected_authority(manifest):
             raise ReleaseConflictError("coordinated release authority differs")
+
+
+def _validate_committed_graph_allowing_unusable(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> None:
+    """The committed pointer graph, except that an unusable pointer is not judged here.
+
+    A recovery successor may supersede a root whose own pointer no longer passes
+    ``read_current`` (the pipeline re-derived that from disk against its gate); every
+    OTHER root of the predecessor graph must still equal what the release committed, so
+    one unusable root never lets a hand-moved pointer elsewhere through.
+    """
+
+    _validate_root_identities(manifest, roots)
+    for target in manifest.targets:
+        try:
+            pointer = read_current(roots[target.root_id].resolve())
+        except PointerIntegrityError:
+            continue
+        if (
+            pointer.generation_id != target.proposed_generation_id
+            or pointer.manifest_sha256 != target.proposed_manifest_sha256
+            or (
+                target.proposed_inventory_sha256 is not None
+                and pointer.artifact_inventory_sha256
+                != target.proposed_inventory_sha256
+            )
+        ):
+            raise ReleaseConflictError(
+                f"committed pointer graph differs: {target.root_id}"
+            )
+    for companion in manifest.companions:
+        path = _companion_path(
+            roots[companion.root_id].resolve(), companion.relative_path
+        )
+        if _companion_hash(path) != companion.proposed_sha256:
+            raise ReleaseConflictError(
+                f"committed companion differs: {companion.companion_id}"
+            )
 
 
 def _validate_rolled_back_state(

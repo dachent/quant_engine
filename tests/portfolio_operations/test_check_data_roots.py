@@ -194,3 +194,12 @@ def test_evidence_only_root_verifies_every_present_copy_of_a_declared_artifact(
     (directory / "tracker.json").write_bytes(b"corrupt")
     ok, message = gate.check_root(root)
     assert not ok and "bytes differ" in message
+
+
+def test_an_evidence_only_root_that_lost_its_generations_directory_fails(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataIBKR"
+    root.mkdir()
+    ok, message = gate.check_root(root)
+    assert not ok and "retains no generation" in message

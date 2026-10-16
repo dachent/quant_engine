@@ -4519,8 +4519,13 @@ def _verify_recovered_pointer_evidence(spec: PipelineSpec, release_id: str) -> N
     for gate in spec.gates:
         if gate.gate_id != _POINTER_RECOVERY_GATE:
             continue
+        gate_bytes = gate.path.read_bytes()
+        if hashlib.sha256(gate_bytes).hexdigest() != gate.sha256:
+            raise PipelineExecutionError(
+                "the pointer recovery gate changed after it was bound"
+            )
         payload = _object(
-            json.loads(gate.path.read_text(encoding="utf-8")),
+            json.loads(gate_bytes.decode("utf-8")),
             "predecessor pointer recovery gate",
         )
         for row in _objects(
