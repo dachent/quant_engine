@@ -188,7 +188,7 @@ def build_input_generation(
     )
     # A provider whose one account funds several funds (policy, #536) counts
     # the allocations to the strategy's fund as capital, not account deposits.
-    rules = capital._with_fund_scope(rules, capital_policy)
+    rules = capital.with_fund_scope(rules, capital_policy)
 
     # --- opening basis ------------------------------------------------------
     # One opening per ACCOUNT, not per epoch. An account's later epoch opens on

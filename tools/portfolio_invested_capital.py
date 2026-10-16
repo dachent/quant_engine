@@ -707,7 +707,7 @@ def _fund_scoped_providers(policy: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(item.upper() for item in providers)
 
 
-def _with_fund_scope(
+def with_fund_scope(
     classification_rules: Mapping[str, Any], policy: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     """Carry the policy's fund-scoped providers with the classification rules."""
@@ -1147,7 +1147,7 @@ def _verify_selected_facts(
     }
     classification_rules = _load_flow_classification_rules()
     if policy is not None:
-        classification_rules = _with_fund_scope(classification_rules, policy)
+        classification_rules = with_fund_scope(classification_rules, policy)
     required_account_ids = {
         row.get("account_id") for row in arguments["required_epochs"]
     }
