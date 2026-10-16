@@ -199,6 +199,7 @@ def restore(
         "targets": report,
         "retained_evidence": retained,
         "sums_matched": matched,
+        "sums_labels_checked": sorted(expect_labels) if expect_labels else "ALL",
         "read_current": "PASS",
     }
 
