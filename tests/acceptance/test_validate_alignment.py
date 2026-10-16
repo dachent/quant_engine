@@ -3450,7 +3450,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.census is None
     assert state.problem is not None
     assert (
-        "012d49141c9055f56965c21e440abf20c6b3ca8ca185233c913aedda3a086191"
+        "880ed60727be7e3ffc082bffd443f053a313772f580469c4d8b27d1fa5e0886a"
         in state.problem
     )
     assert (

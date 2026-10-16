@@ -5507,3 +5507,35 @@ def test_n59_a_systematic_member_is_not_redated(
         "2026-07-01",
         "alpaca-nav",
     )
+
+
+def test_fund_scoped_provider_account_builds_no_derived_cash_line():
+    """#536: one account funds several funds; the strategy's value is its fund NAV."""
+
+    case = _cr2_custody_cash_case()
+    for fact in ("flows", "capital_anchors"):
+        for row in case["provider_catalog"][fact]:
+            row["provider_id"] = "quantbase"
+    case["custody_authority"]["fund_scoped_providers"] = ["QUANTBASE"]
+
+    block = baseline._build_current_capital(**case)
+
+    row = block["strategies"][0]
+    assert "derived_cash" not in row
+    assert row["current_value"]["value"] == "105"
+    assert row["members"][0]["value"]["value"] == "105"
+    _cc_schema_validator("current_capital").validate(block)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+    assert all(
+        check["status"] != "FAIL"
+        for check in baseline._current_capital_checks(block, **arguments)
+    )
+    # A derived cash line for the fund-scoped account is a tamper, not a value.
+    block["strategies"][0]["derived_cash"] = [{"current_value": {"value": "4"}}]
+    assert any(
+        check["status"] == "FAIL"
+        for check in baseline._current_capital_checks(block, **arguments)
+    )

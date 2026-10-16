@@ -273,11 +273,20 @@
         "selected_treatment"
       ],
       "properties": {
+        "amends_approval_evidence": {"$ref": "#/$defs/nonempty_string"},
         "approval_evidence": {
           "type": ["string", "null"],
           "minLength": 1
         },
         "calculation_effect": {"$ref": "#/$defs/nonempty_string"},
+        "fund_scoped_effect": {"$ref": "#/$defs/nonempty_string"},
+        "fund_scoped_providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonempty_string"}
+        },
+        "fund_scoped_treatment": {"$ref": "#/$defs/nonempty_string"},
         "decision_authority": {
           "enum": [
             "FINANCIAL_MVP_DEFINITION",

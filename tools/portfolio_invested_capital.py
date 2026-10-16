@@ -684,9 +684,54 @@ def _load_flow_classification_rules() -> Mapping[str, Any]:
     return rules
 
 
+_FUND_ALLOCATION_CAPITAL_TYPES: Final = frozenset(
+    {"OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"}
+)
+
+
+def _fund_scoped_providers(policy: Mapping[str, Any]) -> frozenset[str]:
+    """Providers whose one account funds several funds (owner decision, #536).
+
+    The list is policy, never code: it is read from the approved
+    ``provider_custody_perimeter`` decision.
+    """
+
+    decision = policy.get("provider_custody_perimeter")
+    if not isinstance(decision, Mapping):
+        return frozenset()
+    providers = decision.get("fund_scoped_providers", [])
+    if not isinstance(providers, list) or not all(
+        isinstance(item, str) and item for item in providers
+    ):
+        raise CapitalValidationError("fund-scoped providers are invalid")
+    return frozenset(item.upper() for item in providers)
+
+
+def _with_fund_scope(
+    classification_rules: Mapping[str, Any], policy: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Carry the policy's fund-scoped providers with the classification rules."""
+
+    return {
+        **classification_rules,
+        "fund_scoped_providers": _fund_scoped_providers(policy),
+    }
+
+
+def _is_fund_scoped(
+    source: Mapping[str, Any], classification_rules: Mapping[str, Any]
+) -> bool:
+    scoped = classification_rules.get("fund_scoped_providers", frozenset())
+    return str(source.get("provider_id") or "").upper() in scoped
+
+
 def _is_owner_capital_source(
     source: Mapping[str, Any], classification_rules: Mapping[str, Any]
 ) -> bool:
+    if _is_fund_scoped(source, classification_rules):
+        # One account funds several funds: the allocations to the strategy's
+        # fund are its capital; account deposits and withdrawals are not.
+        return source.get("capital_type") in _FUND_ALLOCATION_CAPITAL_TYPES
     capital_type = source.get("capital_type")
     if capital_type == "OPENING_CONTRIBUTED_BASIS":
         return True
@@ -828,11 +873,13 @@ def _verify_provider_custody_perimeter(
     policy: Mapping[str, Any],
 ) -> set[str]:
     """Prove the selected account-only custody cash perimeter, if present."""
+    fund_scoped = _fund_scoped_providers(policy)
     anchors = [
         row
         for row in ledger.get("capital_anchors", [])
         if row.get("capital_type")
         in {"OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"}
+        and str(row.get("provider_id") or "").upper() not in fund_scoped
     ]
     if not anchors:
         return set()
@@ -943,6 +990,40 @@ def _verify_provider_custody_perimeter(
     return set(anchors_by_account)
 
 
+def _verify_fund_scoped_accounts(
+    ledger: Mapping[str, Any],
+    epochs: Sequence[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> set[str]:
+    """Prove each fund-scoped account's allocations belong to its one strategy."""
+
+    fund_scoped = _fund_scoped_providers(policy)
+    if not fund_scoped:
+        return set()
+    strategies_by_account: dict[str, set[str]] = {}
+    for epoch in epochs:
+        account_id = epoch.get("account_id")
+        strategy_id = epoch.get("strategy_id")
+        if isinstance(account_id, str) and isinstance(strategy_id, str):
+            strategies_by_account.setdefault(account_id, set()).add(strategy_id)
+    accounts: set[str] = set()
+    for anchor in ledger.get("capital_anchors", []):
+        if str(anchor.get("provider_id") or "").upper() not in fund_scoped:
+            continue
+        account_id = _text(anchor.get("account_id"), "fund-scoped anchor account")
+        if account_id not in strategies_by_account:
+            continue
+        if anchor.get("capital_type") not in _FUND_ALLOCATION_CAPITAL_TYPES:
+            raise CapitalValidationError("unsupported fund-scoped capital anchor")
+        strategy_id = _text(anchor.get("strategy_id"), "fund-scoped anchor strategy")
+        if strategy_id not in strategies_by_account[account_id]:
+            raise CapitalValidationError("fund-scoped allocation strategy differs")
+        if _source_effect_usd(anchor) <= 0:
+            raise CapitalValidationError("fund-scoped allocation must be positive")
+        accounts.add(account_id)
+    return accounts
+
+
 def _verify_account_ledger_opening(
     event: Mapping[str, Any],
     epoch: Mapping[str, Any],
@@ -1047,6 +1128,7 @@ def _verify_selected_facts(
     ledger = snapshots["provider_ledger"]
     if policy is not None:
         _verify_provider_custody_perimeter(ledger, arguments["required_epochs"], policy)
+        _verify_fund_scoped_accounts(ledger, arguments["required_epochs"], policy)
     source_rows = {
         _digest(row): row
         for name in ("capital_anchors", "flows")
@@ -1064,6 +1146,8 @@ def _verify_selected_facts(
         for row in [*arguments["opening_basis"], *arguments["events"]]
     }
     classification_rules = _load_flow_classification_rules()
+    if policy is not None:
+        classification_rules = _with_fund_scope(classification_rules, policy)
     required_account_ids = {
         row.get("account_id") for row in arguments["required_epochs"]
     }
@@ -1155,6 +1239,13 @@ def _verify_selected_facts(
             if not basis_proved:
                 raise CapitalValidationError(
                     "opening contributed basis is not proved by source"
+                )
+        elif _is_fund_scoped(source, classification_rules):
+            # A fund-scoped allocation is the strategy's own capital: it is
+            # admitted only as a positive contribution of its anchor.
+            if kind != "EXTERNAL_CONTRIBUTION" or native <= 0:
+                raise CapitalValidationError(
+                    "capital flow classification lacks selected evidence"
                 )
         elif source_kind != kind:
             internal = source_kind == "ACCOUNT_TRANSFER" or str(source_kind).startswith(

@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "71692a8540f8a77ffa75bf6b83c9a9ad947520f878c22c3c8f20cf73d7414dfe"
+        "eef3bf35c88212c7c0676e9d9851be0096afd4a12ba497f5d831a2ca555dbad0"
     )
 
 
@@ -4650,3 +4650,43 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         ]
         == "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
     )
+
+
+def test_fund_scoped_custody_decision_is_complete_paired_and_policy_driven() -> None:
+    """#536: the Quantbase amendment is policy, with its own owner evidence."""
+
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    decision = policy["provider_custody_perimeter"]
+    receipt = policy["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"]
+
+    assert decision["fund_scoped_providers"] == ["QUANTBASE"]
+    assert decision["approval_evidence"] == receipt["evidence_url"]
+    assert decision["amends_approval_evidence"].endswith("5957619019")
+    assert receipt["approved_on"] == "2026-10-16"
+    assert "NO_DERIVED_CASH_LINE" in decision["fund_scoped_treatment"]
+    assert (
+        contract_tool.owner_decision_receipt_digests(
+            contract_tool.load_contract(CONTRACT_PATH)
+        )["PROVIDER_CUSTODY_PERIMETER"]
+        == receipt["payload_sha256"]
+    )
+
+    incomplete = copy.deepcopy(decision)
+    del incomplete["fund_scoped_effect"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="keys must be complete"
+    ):
+        contract_tool._validate_policy_decision(
+            incomplete, "provider_custody_perimeter"
+        )
+    duplicated = copy.deepcopy(decision)
+    duplicated["fund_scoped_providers"] = ["QUANTBASE", "QUANTBASE"]
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="unique"):
+        contract_tool._validate_policy_decision(
+            duplicated, "provider_custody_perimeter"
+        )

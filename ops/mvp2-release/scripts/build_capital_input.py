@@ -178,15 +178,17 @@ def build_input_generation(
     print("epochs", len(epochs))
 
     required_account_ids = {row["account_id"] for row in epochs}
-    custody_accounts = capital._verify_provider_custody_perimeter(
-        ledger,
-        epochs,
-        next(
-            row["calculation_contract"]
-            for row in contract["financial_outcomes"]
-            if row["outcome_id"] == "INVESTED_CAPITAL"
-        ),
+    capital_policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
     )
+    custody_accounts = capital._verify_provider_custody_perimeter(
+        ledger, epochs, capital_policy
+    )
+    # A provider whose one account funds several funds (policy, #536) counts
+    # the allocations to the strategy's fund as capital, not account deposits.
+    rules = capital._with_fund_scope(rules, capital_policy)
 
     # --- opening basis ------------------------------------------------------
     # One opening per ACCOUNT, not per epoch. An account's later epoch opens on
