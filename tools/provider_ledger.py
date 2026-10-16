@@ -5915,7 +5915,7 @@ def _strategy_path_links(
             day: value for day, value in series.items() if day >= opening.as_of
         }
         period_legs = [leg for leg in legs if leg.nav_recognition_date > opening.as_of]
-        epoch = link_epoch(remaining, period_legs, opening)
+        epoch = link_epoch(remaining, period_legs, opening, close_on_zero_capital=False)
         if epoch.rejected_legs:
             # A member flow recognized after the strategy's last valued date
             # would leave the money identity incomplete.

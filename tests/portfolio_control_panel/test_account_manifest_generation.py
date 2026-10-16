@@ -22095,16 +22095,17 @@ def test_first_available_nav_absorbs_preopening_flow_and_counts_later_recognitio
     )
 
 
-def test_zero_nav_liquidation_run_is_linked_under_r3_not_bridged(
+def test_zero_nav_liquidation_run_closes_the_epoch_and_credits_the_residual(
     verifier_module: Any,
 ) -> None:
-    """R3 (N4): earnings on zero capital make the epoch TWR undefined.
+    """R3 (N4, #539): earnings on zero capital are post-liquidation income.
 
-    Pre-change a reconciled zero run was skipped and 01-01 was linked straight
-    to 01-04, so the 3.81 dividend on zero capital became a +11.85 % return
-    (factor 1.1185...).  The zeros are now linked: the liquidation sub-period
-    is flat, zero-to-zero is neutral, and re-opening without an inflow leaves
-    performance unavailable while the capital accounting stays intact.
+    A reconciled zero run is linked, not bridged: the liquidation sub-period
+    is flat and zero-to-zero is neutral.  The first money earned on zero capital
+    (the 3.81 deferred credit) closes the epoch at its last funded day; it is a
+    dated, labelled non-TWR credit inside ``gain`` and never a +11.85 % return
+    or a failure.  A liquidated epoch with no later credit is also admitted,
+    and a contribution after the closing starts a new epoch.
     """
 
     from tools import account_strategy_manifest as producer_module
@@ -22126,10 +22127,19 @@ def test_zero_nav_liquidation_run_is_linked_under_r3_not_bridged(
     assert producer_row["end"] == "2026-01-05"
     assert producer_row["nav_observations"] == 5
     assert producer_row["withdrawn"] == Decimal("32.15")
-    assert producer_row["performance_status"] == "UNAVAILABLE"
-    assert producer_row["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
-    assert producer_row["observation_linked_return"] is None
-    assert producer_row["observation_trace"] == {"links": []}
+    assert producer_row["performance_status"] == "AVAILABLE"
+    assert producer_row["observation_linked_return"] == Decimal("0")
+    assert [
+        (link["end_date"], link["factor"])
+        for link in producer_row["observation_trace"]["links"]
+    ] == [("2026-01-02", Decimal("1")), ("2026-01-03", Decimal("1"))]
+    assert producer_row["performance_closed_on"] == "2026-01-03"
+    assert [
+        (credit["start_date"], credit["end_date"], credit["amount"])
+        for credit in producer_row["post_liquidation_credits"]
+    ] == [("2026-01-03", "2026-01-04", Decimal("3.81"))]
+    assert producer_row["post_liquidation_income"] == Decimal("3.81")
+    assert producer_row["gain"] == Decimal("3.81")
     assert producer_row["flow_count"] == 1
 
     facts = verifier_module._IndependentEpochFacts(
@@ -22157,13 +22167,19 @@ def test_zero_nav_liquidation_run_is_linked_under_r3_not_bridged(
     verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
     assert verifier_row["nav_observations"] == 5
     assert verifier_row["withdrawn"] == Decimal("32.15")
-    assert verifier_row["performance_status"] == "UNAVAILABLE"
-    assert verifier_row["performance_reason"] == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    assert verifier_row["performance_status"] == "AVAILABLE"
+    assert verifier_row["performance_closed_on"] == "2026-01-03"
+    assert (
+        verifier_row["post_liquidation_credits"]
+        == producer_row["post_liquidation_credits"]
+    )
+    assert verifier_row["post_liquidation_income"] == Decimal("3.81")
+    assert verifier_row["gain"] == Decimal("3.81")
 
-    # Re-opening with a same-day inflow is defined: zero-to-zero links are
-    # neutral and the recapitalised sub-period links from the inflow.
+    # Re-funding with a gain on zero capital starts a new epoch: this one cannot
+    # carry it (a flat same-day re-funding stays linked, per the R3 vectors).
     reopened = producer_module.analyze_epoch(
-        {**navs, "2026-01-04": Decimal("40"), "2026-01-05": Decimal("41")},
+        {**navs, "2026-01-04": Decimal("41"), "2026-01-05": Decimal("42")},
         {("2026-01-04", "2026-01-04"): Decimal("40")},
         withdrawal,
         {},
@@ -22172,26 +22188,65 @@ def test_zero_nav_liquidation_run_is_linked_under_r3_not_bridged(
         "2026-01-01",
         None,
     )
-    assert reopened is not None and reopened["performance_status"] == "AVAILABLE"
-    links = reopened["observation_trace"]["links"]
-    assert [link["factor"] for link in links] == [
-        Decimal("1"),
-        Decimal("1"),
-        Decimal("1"),
-        Decimal("1.025"),
-    ]
-    assert reopened["observation_linked_return"] == Decimal("0.025")
+    assert reopened is not None
+    assert reopened["performance_status"] == "UNAVAILABLE"
+    assert reopened["performance_reason"] == "REFUNDING_AFTER_LIQUIDATION"
+
+    # A liquidated account whose NAV stays at zero is admitted: sold and
+    # transferred out is a regular outcome, there is simply nothing to credit.
+    liquidated = producer_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("32.15"),
+            "2026-01-02": Decimal("0"),
+            "2026-01-03": Decimal("0"),
+        },
+        {},
+        withdrawal,
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+    )
+    assert liquidated is not None
+    assert liquidated["performance_status"] == "AVAILABLE"
+    assert liquidated["observation_linked_return"] == Decimal("0")
+    assert "post_liquidation_credits" not in liquidated
+    assert liquidated["gain"] == Decimal("0")
+
+    # An epoch whose last funded day is stated carries the account's tail: the
+    # return closes at that day, dollars run on and the tail is dated income
+    # (the 4054 case: sold and transferred out, then a few small credits).
+    tailed = producer_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-01-02": Decimal("110"),
+            "2026-01-03": Decimal("3.03"),
+            "2026-01-04": Decimal("40.75"),
+            "2026-01-05": Decimal("40.75"),
+        },
+        {},
+        {("2026-01-03", "2026-01-03"): Decimal("120")},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+        funded_end="2026-01-02",
+    )
+    assert tailed is not None
+    assert tailed["observation_linked_return"] == Decimal("0.1")
+    assert tailed["performance_closed_on"] == "2026-01-02"
+    assert [
+        (credit["end_date"], credit["amount"])
+        for credit in tailed["post_liquidation_credits"]
+    ] == [("2026-01-03", Decimal("13.03")), ("2026-01-04", Decimal("37.72"))]
+    assert tailed["post_liquidation_income"] == Decimal("50.75")
+    assert tailed["end"] == "2026-01-05"
+    assert tailed["gain"] == Decimal("40.75") - (Decimal("100") - Decimal("120"))
 
     invalid_cases = (
         ({("2026-01-02", "2026-01-02"): Decimal("32.14")}, navs),
-        (
-            {("2026-01-02", "2026-01-02"): Decimal("32.15")},
-            {
-                "2026-01-01": Decimal("32.15"),
-                "2026-01-02": Decimal("0"),
-                "2026-01-03": Decimal("0"),
-            },
-        ),
         (
             {
                 ("2026-01-02", "2026-01-02"): Decimal("32.15"),
@@ -29286,3 +29341,167 @@ def test_t2_fact_projections_carry_each_funded_epoch_pre_start_observation(
     expected = ["acct-t2-2026-01-04", "acct-t2-2026-01-05", "acct-t2-2026-01-06"]
     assert [nav["record_id"] for nav in builder_navs] == expected
     assert [nav["record_id"] for nav in verifier_navs] == expected
+
+
+def test_independent_verifier_matches_the_producer_on_a_funded_end_tail(
+    verifier_module: Any,
+) -> None:
+    """#539: the independent derivation reproduces the producer's tail credits."""
+
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2026-01-01": Decimal("100"),
+        "2026-01-02": Decimal("110"),
+        "2026-01-03": Decimal("3.03"),
+        "2026-01-04": Decimal("40.75"),
+        "2026-01-05": Decimal("40.75"),
+    }
+    producer_row = producer_module.analyze_epoch(
+        navs,
+        {},
+        {("2026-01-03", "2026-01-03"): Decimal("120")},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+        funded_end="2026-01-02",
+    )
+    facts = verifier_module._IndependentEpochFacts(
+        "liquidated-account",
+        date(2026, 1, 1),
+        date(2026, 1, 5),
+        tuple(
+            verifier_module._IndependentNavFact(
+                date.fromisoformat(as_of_date), "USD", value
+            )
+            for as_of_date, value in navs.items()
+        ),
+        (
+            verifier_module._IndependentFlowFact(
+                date(2026, 1, 3),
+                "EXTERNAL_OUT",
+                "USD",
+                Decimal("120"),
+                date(2026, 1, 3),
+            ),
+        ),
+        None,
+        True,
+        None,
+        date(2026, 1, 2),
+    )
+    verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
+    for field in (
+        "observation_linked_return",
+        "performance_closed_on",
+        "post_liquidation_credits",
+        "post_liquidation_income",
+        "gain",
+        "end",
+        "performance_flags",
+    ):
+        assert verifier_row[field] == producer_row[field], field
+    assert [
+        link["end_date"] for link in verifier_row["observation_trace"]["links"]
+    ] == ["2026-01-02"]
+
+
+def test_policy_funded_end_closes_the_epoch_end_to_end_and_the_verifier_agrees(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """#539: a policy ``funded_end`` flows producer -> payloads -> independent verifier."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    policy = json.loads(selected.admission_policy.contents)
+    funded = [row for row in policy["admissions"] if row["status"] == "FUNDED"]
+    assert len(funded) == 1
+    funded[0]["funded_end"] = "2026-01-31"
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "mixed admission with funded end", canonical_json_bytes(policy)
+            ),
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    closed_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_account_manifest_payloads(closed_selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert row["performance_closed_on"] == "2026-01-31"
+    assert [
+        (credit["start_date"], credit["end_date"], credit["amount"])
+        for credit in row["post_liquidation_credits"]
+    ] == [("2026-01-31", "2026-02-01", "10")]
+    assert row["post_liquidation_income"] == "10"
+    assert [link["end_date"] for link in row["observation_trace"]["links"]] == [
+        "2026-01-31"
+    ]
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, closed_selected), payloads
+    )
+
+    # A verifier that is told a different funded end refuses the manifest.
+    other = json.loads(closed_selected.admission_policy.contents)
+    next(row for row in other["admissions"] if row["status"] == "FUNDED")[
+        "funded_end"
+    ] = "2026-01-30"
+    values["admission_policy"] = InputSnapshot.from_bytes(
+        "mixed admission, other funded end", canonical_json_bytes(other)
+    )
+    other_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(Exception):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, other_selected), payloads
+        )
+
+
+def test_closed_epoch_with_a_flat_tail_has_no_credits_and_still_verifies(
+    verifier_module: Any,
+) -> None:
+    """A funded end followed by unchanged NAV closes the epoch with an empty credit list."""
+
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2026-01-01": Decimal("100"),
+        "2026-01-02": Decimal("110"),
+        "2026-01-03": Decimal("110"),
+        "2026-01-04": Decimal("110"),
+    }
+    row = producer_module.analyze_epoch(
+        navs, {}, {}, {}, {}, None, "2026-01-01", None, funded_end="2026-01-02"
+    )
+    assert row is not None
+    assert row["performance_closed_on"] == "2026-01-02"
+    assert row["post_liquidation_credits"] == []
+    assert row["post_liquidation_income"] == Decimal("0")
+    facts = verifier_module._IndependentEpochFacts(
+        "flat-account",
+        date(2026, 1, 1),
+        date(2026, 1, 4),
+        tuple(
+            verifier_module._IndependentNavFact(
+                date.fromisoformat(as_of_date), "USD", value
+            )
+            for as_of_date, value in navs.items()
+        ),
+        (),
+        None,
+        True,
+        None,
+        date(2026, 1, 2),
+    )
+    expected = verifier_module._derive_first_available_nav_epoch(facts)
+    assert expected["post_liquidation_credits"] == []
+    projection = {
+        key: json.loads(json.dumps(value, default=str))
+        for key, value in expected.items()
+    }
+    assert projection["performance_closed_on"] == "2026-01-02"

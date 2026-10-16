@@ -2789,8 +2789,22 @@ def load_admission_policy(
                 "continuity_to_successor": admission["continuity_to_successor"],
             }
             continue
-        if set(admission) != common | {"authority_kind", "funded_nav_record_ids"}:
+        if not (
+            common | {"authority_kind", "funded_nav_record_ids"}
+            <= set(admission)
+            <= common | {"authority_kind", "funded_nav_record_ids", "funded_end"}
+        ):
             raise ManifestError(f"admission {index} FUNDED keys are invalid")
+        # The epoch's last funded day when the account was later liquidated and
+        # transferred out: the return closes there and what follows is dated
+        # post-liquidation income (#539).  The evidence window is unchanged.
+        funded_end = admission.get("funded_end")
+        if funded_end is not None:
+            funded_end = _iso_date(funded_end, f"admission {index}.funded_end")
+            if not _in_window(funded_end, key[2], key[3]):
+                raise ManifestError(
+                    f"admission {index}.funded_end is outside the assignment"
+                )
         authority_kind = _require_nonempty_text(
             admission.get("authority_kind"), f"admission {index}.authority_kind"
         )
@@ -2837,6 +2851,7 @@ def load_admission_policy(
             "funded_nav_record_ids": list(record_ids),
             "funded_nav_dates": evidence_dates,
             "continuity_to_successor": admission["continuity_to_successor"],
+            "funded_end": funded_end,
         }
     if set(admissions) != assignment_keys:
         raise ManifestError(
@@ -3351,8 +3366,14 @@ def analyze_epoch(
     opening_anchor: Mapping[str, object] | None = None,
     capital_allocation_legs: Mapping[object, Decimal] | None = None,
     pre_start_observation: tuple[str, Decimal | None] | None = None,
+    funded_end: str | None = None,
 ) -> dict[str, Any] | None:
     """Account for one funded epoch: capital basis plus R1-R4 performance.
+
+    ``funded_end`` (admission policy) is the epoch's last funded day when the
+    account was later liquidated and transferred out: the time-weighted return
+    closes there and every later sub-period of the window is a post-liquidation
+    credit inside ``gain``.
 
     Capital (opening basis, invested, withdrawn, gain, RONC and the XIRR
     diagnostic) keeps its owner-approved meaning.  Performance -- the
@@ -3365,9 +3386,11 @@ def analyze_epoch(
       opens a continuity successor.  An anchor amount is never a return value.
     * Flow timing: exact-timestamp fund allocations enter at the beginning of
       the sub-period ending at their NAV recognition; date-only flows at its end.
-    * R3: zero-capital sub-periods are neutral only when nothing is earned on
-      them; otherwise the epoch's performance is unavailable while its capital
-      accounting stays intact.
+    * R3: zero-capital sub-periods are neutral while nothing is earned on them;
+      the first money earned on zero capital closes the epoch there, and it and
+      every later sub-period are dated, signed post-liquidation credits
+      (non-TWR income inside ``gain``).  A contribution after the closing makes
+      the epoch's performance unavailable: a re-funding starts a new epoch.
     """
 
     legs = sorted(
@@ -3432,8 +3455,8 @@ def analyze_epoch(
         ):
             zero_end += 1
         if (
-            zero_end + 1 >= len(funded_days)
-            or window_navs[funded_days[zero_end + 1]] <= 0
+            zero_end + 1 < len(funded_days)
+            and window_navs[funded_days[zero_end + 1]] < 0
         ):
             return {
                 "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
@@ -3456,6 +3479,8 @@ def analyze_epoch(
                 "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
                 "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
             }
+        # A zero run that ends the window is a liquidation: the account was
+        # sold and transferred out.
         day_index = zero_end + 1
     days = funded_days
     if len(days) < 3:
@@ -3577,6 +3602,7 @@ def analyze_epoch(
         pre_start_observation=pre_start_observation,
         anchor_recognition_date=anchor_recognition_date,
         anchor_opening_nav=anchor_opening_nav,
+        funded_end=funded_end,
     )
     return {
         "start": first_funded,
@@ -3602,6 +3628,37 @@ def analyze_epoch(
     }
 
 
+def _post_liquidation_fields(linked_epoch: Any) -> dict[str, Any]:
+    """Closing date and dated credits of an epoch closed before its last NAV.
+
+    Present only for a closed epoch, so a manifest without one keeps its bytes.
+    The credits are already inside the epoch's dollar ``gain``; they are not
+    part of its time-weighted return.
+    """
+
+    if linked_epoch.closed_on is None:
+        return {}
+    credits = linked_epoch.post_liquidation_credits
+    return {
+        "performance_closed_on": linked_epoch.closed_on.isoformat(),
+        "post_liquidation_credits": [
+            {
+                "start_date": credit.start_date.isoformat(),
+                "end_date": credit.end_date.isoformat(),
+                "beginning_value": credit.beginning_value,
+                "ending_value": credit.ending_value,
+                "net_flow": credit.net_flow,
+                "amount": credit.amount,
+                "inferred_timing": credit.inferred_timing,
+            }
+            for credit in credits
+        ],
+        "post_liquidation_income": sum(
+            (credit.amount for credit in credits), Decimal(0)
+        ),
+    }
+
+
 def _epoch_performance(
     window_navs: Mapping[str, Decimal],
     days: Sequence[str],
@@ -3614,6 +3671,7 @@ def _epoch_performance(
     pre_start_observation: tuple[str, Decimal | None] | None,
     anchor_recognition_date: str | None,
     anchor_opening_nav: Decimal | None,
+    funded_end: str | None = None,
 ) -> dict[str, Any]:
     """R1-R4 epoch performance through the single return engine."""
 
@@ -3681,6 +3739,7 @@ def _epoch_performance(
             "performance_status": PERFORMANCE_AVAILABLE,
             "performance_reason": None,
             "performance_flags": list(linked_epoch.flags),
+            **_post_liquidation_fields(linked_epoch),
             **common,
         }
 
@@ -3764,6 +3823,7 @@ def _epoch_performance(
             {date.fromisoformat(day): value for day, value in observations.items()},
             [leg.flow_leg() for leg in legs],
             opening,
+            None if funded_end is None else date.fromisoformat(funded_end),
         )
     except ReturnsError as exc:
         raise ManifestError(f"epoch performance inputs are invalid: {exc}") from None
@@ -3955,6 +4015,7 @@ def _assemble_manifest_impl(
                 opening_anchor=opening_anchors[0] if opening_anchors else None,
                 capital_allocation_legs=allocation_legs,
                 pre_start_observation=pre_start_observation,
+                funded_end=admission.get("funded_end"),
             )
             if stats is not None and stats.get("unavailable_status"):
                 unavailable_row = {
@@ -4459,6 +4520,18 @@ def _validate_row_performance(
     status = row.get("performance_status")
     if status not in {PERFORMANCE_AVAILABLE, PERFORMANCE_UNAVAILABLE}:
         raise ManifestError(f"row {index} performance status is invalid")
+    closed_raw = row.get("performance_closed_on")
+    closed_on: str | None = (
+        None
+        if closed_raw is None
+        else _iso_date(closed_raw, f"row[{index}].performance_closed_on")
+    )
+    if closed_on is not None and status != PERFORMANCE_AVAILABLE:
+        raise ManifestError(f"row {index} closed epoch performance is unavailable")
+    if (closed_on is None) != ("post_liquidation_credits" not in row) or (
+        closed_on is None
+    ) != ("post_liquidation_income" not in row):
+        raise ManifestError(f"row {index} post-liquidation evidence is incomplete")
     reason = row.get("performance_reason")
     raw_opening_date = row.get("performance_opening_date")
     raw_opening_value = row.get("performance_opening_value")
@@ -4607,6 +4680,12 @@ def _validate_row_performance(
     assert opening_date is not None
     if reason is not None:
         raise ManifestError(f"row {index} available performance has a reason")
+    if closed_on is not None:
+        has_date_only = any(
+            leg.get("timing") == DATE_ONLY
+            and str(leg.get("nav_recognition_date")) <= closed_on
+            for leg in raw_legs
+        )
     if flags != (["INFERRED_TIMING"] if has_date_only else []):
         raise ManifestError(f"row {index} performance flags are invalid")
     linked_return = _manifest_decimal(
@@ -4622,7 +4701,11 @@ def _validate_row_performance(
     if type(nav_observations) is not int:
         raise ManifestError(f"row {index} NAV observation count is invalid")
     expected_link_count = nav_observations - int(opening_date == start)
-    if len(links) != expected_link_count or not links:
+    if closed_on is None and len(links) != expected_link_count:
+        raise ManifestError(f"row {index} observation trace link count is invalid")
+    if closed_on is not None and len(links) > expected_link_count:
+        raise ManifestError(f"row {index} observation trace link count is invalid")
+    if not links and closed_on != opening_date:
         raise ManifestError(f"row {index} observation trace link count is invalid")
     hundred = Decimal(100)
     cumulative_index = Decimal(1)
@@ -4715,9 +4798,19 @@ def _validate_row_performance(
             raise ManifestError(f"row {index} observation trace index is invalid")
         prior_end = end_date
         prior_ending_nav = values["ending_nav"]
-    if prior_end != end or prior_ending_nav != current_value:
-        raise ManifestError(f"row {index} observation trace current value is invalid")
-    if linked_recognitions != {*beginning_by_recognition, *ending_by_recognition}:
+    if closed_on is None:
+        if prior_end != end or prior_ending_nav != current_value:
+            raise ManifestError(
+                f"row {index} observation trace current value is invalid"
+            )
+    elif prior_end != closed_on:
+        raise ManifestError(f"row {index} observation trace closing is invalid")
+    linkable = {
+        day
+        for day in (*beginning_by_recognition, *ending_by_recognition)
+        if closed_on is None or day <= closed_on
+    }
+    if linked_recognitions != linkable:
         raise ManifestError(f"row {index} capital flow trace does not map to a link")
     if (
         linked_return != cumulative_index - Decimal(1)
@@ -4725,6 +4818,95 @@ def _validate_row_performance(
         or observed_drawdown != max_drawdown
     ):
         raise ManifestError(f"row {index} observation trace summary is invalid")
+    if closed_on is not None:
+        _validate_post_liquidation_credits(
+            row,
+            index,
+            closed_on=closed_on,
+            beginning_by_recognition=beginning_by_recognition,
+            ending_by_recognition=ending_by_recognition,
+            closing_nav=prior_ending_nav,
+        )
+
+
+_POST_LIQUIDATION_CREDIT_KEYS = frozenset(
+    {
+        "start_date",
+        "end_date",
+        "beginning_value",
+        "ending_value",
+        "net_flow",
+        "amount",
+        "inferred_timing",
+    }
+)
+
+
+def _validate_post_liquidation_credits(
+    row: Mapping[str, Any],
+    index: int,
+    *,
+    closed_on: str,
+    beginning_by_recognition: Mapping[str, Decimal],
+    ending_by_recognition: Mapping[str, Decimal],
+    closing_nav: Decimal,
+) -> None:
+    """Re-derive each post-liquidation credit from the row's own legs."""
+
+    credits = row.get("post_liquidation_credits")
+    if not isinstance(credits, list):
+        raise ManifestError(f"row {index} post-liquidation credits are invalid")
+    prior_end = closed_on
+    total = Decimal(0)
+    for credit_index, credit in enumerate(credits):
+        field = f"row[{index}].post_liquidation_credits[{credit_index}]"
+        if not isinstance(credit, Mapping) or set(credit) != (
+            _POST_LIQUIDATION_CREDIT_KEYS
+        ):
+            raise ManifestError(f"{field} is invalid")
+        start_date = _iso_date(credit.get("start_date"), f"{field}.start_date")
+        end_date = _iso_date(credit.get("end_date"), f"{field}.end_date")
+        if start_date < prior_end or end_date <= start_date:
+            raise ManifestError(f"{field} dates are invalid")
+        values = {
+            name: _manifest_decimal(credit.get(name), f"{field}.{name}", money=True)
+            for name in ("beginning_value", "ending_value", "net_flow", "amount")
+        }
+        if credit_index == 0 and start_date == closed_on:
+            if values["beginning_value"] != closing_nav:
+                raise ManifestError(f"{field} opening value is invalid")
+        interval = [
+            day
+            for day in sorted({*beginning_by_recognition, *ending_by_recognition})
+            if start_date < day <= end_date
+        ]
+        beginning_flow = sum(
+            (beginning_by_recognition.get(day, Decimal(0)) for day in interval),
+            Decimal(0),
+        )
+        ending_flow = sum(
+            (ending_by_recognition.get(day, Decimal(0)) for day in interval),
+            Decimal(0),
+        )
+        base = values["beginning_value"] + beginning_flow
+        expected = values["ending_value"] - ending_flow - base
+        if (
+            values["net_flow"] != beginning_flow + ending_flow
+            or values["amount"] != expected
+            or values["amount"] == 0
+            or credit.get("inferred_timing")
+            is not any(day in ending_by_recognition for day in interval)
+        ):
+            raise ManifestError(f"{field} arithmetic is invalid")
+        total += values["amount"]
+        prior_end = end_date
+    income = _manifest_decimal(
+        row.get("post_liquidation_income"),
+        f"row[{index}].post_liquidation_income",
+        money=True,
+    )
+    if income != total:
+        raise ManifestError(f"row {index} post-liquidation income is invalid")
 
 
 def _performance_flow_leg_sort_key(
@@ -4890,6 +5072,15 @@ def _validate_manifest_semantics(
 
         start = _iso_date(row.get("start"), f"row[{index}].start")
         end = _iso_date(row.get("end"), f"row[{index}].end")
+        closed_on = row.get("performance_closed_on")
+        if closed_on is not None:
+            closed_on = _iso_date(closed_on, f"row[{index}].performance_closed_on")
+            if (
+                closed_on < start
+                or closed_on > end
+                or (effective_end is not None and closed_on > effective_end)
+            ):
+                raise ManifestError(f"row {index} performance closing is invalid")
         if (
             start > end
             or start < effective_start

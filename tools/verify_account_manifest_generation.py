@@ -72,9 +72,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "7b6fb1d9c181f40e518780eca00bcdb63b4f9699c1b8777c314b79df60539455"
+    "2a022a459d3e83dbdc2497b7c24b5a9d7b5074449912bf26cae4b22d82ae3159"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 29130
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30007
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -1161,6 +1161,9 @@ class _IndependentEpochFacts:
     # The account's last observation before ``start`` (R1); ``None`` value
     # means the observation exists but carries no available valuation.
     pre_start_nav: tuple[date, Decimal | None] | None = None
+    # The epoch's last funded day when ``end`` carries the account's later
+    # observations (the tail of a liquidated account); ``None`` otherwise.
+    funded_end: date | None = None
 
 
 @dataclass(frozen=True)
@@ -1480,7 +1483,15 @@ def _independent_performance(
     max_drawdown = Decimal(0)
     hundred = Decimal(100)
     links: list[dict[str, object]] = []
+    closed_on: date | None = None
+    credits: list[dict[str, object]] = []
     for (prior_day, prior_value), (day, value) in zip(observations, observations[1:]):
+        if (
+            closed_on is None
+            and facts.funded_end is not None
+            and day > facts.funded_end
+        ):
+            closed_on = prior_day
         period = [flow for flow in linked if prior_day < flow.recognition <= day]
         beginning = [flow for flow in period if flow.timing == _EXACT_TIMESTAMP]
         beginning_flow = sum((flow.signed_amount for flow in beginning), Decimal(0))
@@ -1490,6 +1501,28 @@ def _independent_performance(
         )
         base = prior_value + beginning_flow if beginning else prior_value
         numerator = value - ending_flow
+        if closed_on is None and base == 0 and numerator != 0:
+            closed_on = prior_day
+        if closed_on is not None:
+            # Closed at the last funded day: the rest is dated non-TWR income,
+            # and a contribution starts a new epoch.
+            if any(flow.signed_amount > 0 for flow in period):
+                return unavailable("REFUNDING_AFTER_LIQUIDATION", opening, basis)
+            if numerator != base:
+                credits.append(
+                    {
+                        "start_date": prior_day.isoformat(),
+                        "end_date": day.isoformat(),
+                        "beginning_value": prior_value,
+                        "ending_value": value,
+                        "net_flow": beginning_flow + ending_flow,
+                        "amount": numerator - base,
+                        "inferred_timing": any(
+                            flow.timing == _DATE_ONLY for flow in period
+                        ),
+                    }
+                )
+            continue
         if base < 0:
             return unavailable("NEGATIVE_CAPITAL_BASE", opening, basis)
         if base == 0:
@@ -1519,7 +1552,7 @@ def _independent_performance(
                 "drawdown": drawdown,
             }
         )
-    return {
+    result: dict[str, object] = {
         "observation_linked_return": index - Decimal(1),
         "observed_hwm_index": hwm * hundred,
         "observed_max_drawdown": max_drawdown,
@@ -1531,12 +1564,27 @@ def _independent_performance(
         "performance_opening_basis": basis,
         "performance_flags": (
             ["INFERRED_TIMING"]
-            if any(flow.timing == _DATE_ONLY for flow in linked)
+            if any(
+                flow.timing == _DATE_ONLY
+                and (closed_on is None or flow.recognition <= closed_on)
+                for flow in linked
+            )
             else []
         ),
         "performance_flow_legs": [_independent_leg_row(flow) for flow in linked],
         "flow_count": len(linked),
     }
+    if closed_on is not None:
+        result.update(
+            {
+                "performance_closed_on": closed_on.isoformat(),
+                "post_liquidation_credits": credits,
+                "post_liquidation_income": sum(
+                    (credit["amount"] for credit in credits), Decimal(0)
+                ),
+            }
+        )
+    return result
 
 
 def _independent_leg_row(flow: _IndependentFlowFact) -> dict[str, object]:
@@ -1602,9 +1650,13 @@ def _derive_independent_epoch(
                 zero_end + 1 < len(funded_navs) and funded_navs[zero_end + 1].value == 0
             ):
                 zero_end += 1
+            # A zero run that ends the window is a liquidation (sold and
+            # transferred out); a negative value after it is still refused.
             if (
-                zero_end + 1 >= len(funded_navs)
-                or funded_navs[zero_end + 1].value <= 0
+                (
+                    zero_end + 1 < len(funded_navs)
+                    and funded_navs[zero_end + 1].value < 0
+                )
                 or prior_positive.value
                 + signed_flow(prior_positive.as_of_date, first_zero.as_of_date)
                 != 0
@@ -1924,6 +1976,21 @@ _NUMERIC_PROJECTION_FIELDS: Final[frozenset[str]] = frozenset(
         "flow_count",
     }
 )
+# Present only for an epoch closed before its last observation.
+_POST_LIQUIDATION_FIELDS: Final[frozenset[str]] = frozenset(
+    {"performance_closed_on", "post_liquidation_credits", "post_liquidation_income"}
+)
+_POST_LIQUIDATION_CREDIT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "start_date",
+        "end_date",
+        "beginning_value",
+        "ending_value",
+        "net_flow",
+        "amount",
+        "inferred_timing",
+    }
+)
 _NUMERIC_MONEY_FIELDS: Final[tuple[str, ...]] = (
     "opening_capital",
     "deposits",
@@ -2029,7 +2096,10 @@ def _parse_numeric_projection(
 ) -> tuple[object, ...]:
     if type(_retained_money) is not bool:
         _fail()
-    if not isinstance(row, Mapping) or set(row) != _NUMERIC_PROJECTION_FIELDS:
+    if not isinstance(row, Mapping) or set(row) not in (
+        _NUMERIC_PROJECTION_FIELDS,
+        _NUMERIC_PROJECTION_FIELDS | _POST_LIQUIDATION_FIELDS,
+    ):
         _fail()
 
     def decimal_value(value: object, *, money: bool) -> Decimal:
@@ -2173,6 +2243,41 @@ def _parse_numeric_projection(
     ):
         _fail()
 
+    post_liquidation: tuple[object, ...] | None = None
+    if _POST_LIQUIDATION_FIELDS <= set(row):
+        raw_credits = row["post_liquidation_credits"]
+        if type(raw_credits) is not list or status != "AVAILABLE":
+            _fail()
+        parsed_credits: list[tuple[object, ...]] = []
+        for credit in raw_credits:
+            if (
+                not isinstance(credit, Mapping)
+                or set(credit) != _POST_LIQUIDATION_CREDIT_FIELDS
+                or type(credit["inferred_timing"]) is not bool
+            ):
+                _fail()
+            parsed_credits.append(
+                (
+                    _parse_canonical_date(credit["start_date"]),
+                    _parse_canonical_date(credit["end_date"]),
+                    *(
+                        decimal_value(credit[field], money=True)
+                        for field in (
+                            "beginning_value",
+                            "ending_value",
+                            "net_flow",
+                            "amount",
+                        )
+                    ),
+                    credit["inferred_timing"],
+                )
+            )
+        post_liquidation = (
+            _parse_canonical_date(row["performance_closed_on"]),
+            tuple(parsed_credits),
+            decimal_value(row["post_liquidation_income"], money=True),
+        )
+
     return (
         *dates,
         *money,
@@ -2189,6 +2294,7 @@ def _parse_numeric_projection(
         tuple(flags),
         tuple(parsed_legs),
         flow_count,
+        post_liquidation,
     )
 
 
@@ -5775,21 +5881,31 @@ def _verify_mixed_admission(
         if type(continuity) is not bool:
             _fail()
         if status == "FUNDED":
+            funded_keys = {
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+                "status",
+                "continuity_to_successor",
+                "authority_kind",
+                "funded_nav_record_ids",
+            }
             if (
-                set(raw)
-                != {
-                    "account_id",
-                    "strategy_id",
-                    "effective_start",
-                    "effective_end",
-                    "status",
-                    "continuity_to_successor",
-                    "authority_kind",
-                    "funded_nav_record_ids",
-                }
+                not funded_keys <= set(raw) <= funded_keys | {"funded_end"}
                 or raw.get("authority_kind") != "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
             ):
                 _fail()
+            if "funded_end" in raw:
+                # The last funded day of a liquidated and transferred account.
+                funded_end_day = _parse_canonical_date(raw["funded_end"])
+                assignment_start = _date_value(mapped_by_key[key]["effective_start"])
+                assignment_stop = mapped_by_key[key]["effective_end"]
+                if funded_end_day < assignment_start or (
+                    assignment_stop is not None
+                    and funded_end_day > _date_value(assignment_stop)
+                ):
+                    _fail()
             ids = raw.get("funded_nav_record_ids")
             if (
                 not isinstance(ids, list)
@@ -5989,6 +6105,8 @@ def _mixed_numeric_facts(
     selected: IndependentVerifierInputs,
     assignment: Mapping[str, object],
     bridge: Mapping[str, object],
+    *,
+    funded_end: date | None = None,
 ) -> _IndependentEpochFacts:
     ledger = bridge["ledger"]
     events = bridge["events"]
@@ -6156,6 +6274,9 @@ def _mixed_numeric_facts(
         if assignment["effective_end"] is None
         else min(cutoff, _date_value(assignment["effective_end"]))
     )
+    if funded_end is not None:
+        # The return closes at the policy's last funded day (#539).
+        funded_end = min(cutoff, funded_end)
     facts = _parse_epoch_facts(
         nav_facts,
         flow_facts,
@@ -6182,6 +6303,7 @@ def _mixed_numeric_facts(
         facts.opening_anchor,
         facts.dual_date_trace,
         facts.pre_start_nav,
+        funded_end,
     )
 
 
@@ -6351,7 +6473,17 @@ def _verify_mixed_output_and_state(
                     }
                 )
                 continue
-            facts = _mixed_numeric_facts(selected, assignment, bridge)
+            policy_funded_end = policy_row.get("funded_end")
+            facts = _mixed_numeric_facts(
+                selected,
+                assignment,
+                bridge,
+                funded_end=(
+                    None
+                    if policy_funded_end is None
+                    else _date_value(policy_funded_end)
+                ),
+            )
             predecessor_assignment = admission["predecessor_by_key"].get(key)
             predecessor_fact: _IndependentPredecessorFact | None = None
             fact_form: object = facts
@@ -6426,12 +6558,16 @@ def _verify_mixed_output_and_state(
             expected_mwr = _derive_independent_mwr_projection(
                 assignment, fact_form, bridge
             )
-            if set(candidate) != (
+            if set(candidate) - _POST_LIQUIDATION_FIELDS != (
                 set(expected_base) | _NUMERIC_PROJECTION_FIELDS | _MWR_FIELDS
             ):
                 _fail()
             projection = {
-                field: candidate[field] for field in _NUMERIC_PROJECTION_FIELDS
+                field: candidate[field]
+                for field in (
+                    _NUMERIC_PROJECTION_FIELDS
+                    | (set(candidate) & _POST_LIQUIDATION_FIELDS)
+                )
             }
             row_comparison = _compare_mixed_retained_numeric_epoch(
                 fact_form, projection
