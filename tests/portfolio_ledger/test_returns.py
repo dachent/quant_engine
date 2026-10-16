@@ -217,33 +217,96 @@ def test_exact_timestamp_fill_starts_its_subperiod_date_only_ends_it() -> None:
 # --- R3 zero capital ---------------------------------------------------------
 
 
-def test_zero_run_is_neutral_and_reopen_without_inflow_is_undefined() -> None:
+def test_liquidate_and_transfer_closes_the_epoch_and_deferred_credit_is_recorded() -> None:
     observations = series(
         d2026_07_13="100", d2026_07_14="0", d2026_07_15="0", d2026_07_16="3.81"
     )
     liquidation = leg("-100", "2026-07-14")
     opening = OpeningPoint(day("2026-07-13"), D("100"), FIRST)
 
-    bad = link_epoch(observations, [liquidation], opening)
-    good = link_epoch(
+    credited = link_epoch(observations, [liquidation], opening)
+    closed = link_epoch(
         {k: v for k, v in observations.items() if k < day("2026-07-16")},
         [liquidation],
         opening,
     )
 
-    assert bad.status == "UNAVAILABLE"
-    assert bad.reason == "ZERO_CAPITAL_RETURN_UNDEFINED"
-    assert bad.failed_subperiod == (day("2026-07-15"), day("2026-07-16"))
-    assert bad.twr is None and bad.hwm_index is None and bad.max_drawdown is None
-    # The sub-periods linked before the failure survive as the trace.
-    assert [link.end_date for link in bad.links] == [
+    # The epoch return chains the funded days only; the deferred interest is a
+    # dated, labelled non-TWR credit and never a failure.
+    assert credited.status == "AVAILABLE"
+    assert credited.twr == D(0)
+    assert credited.closed_on == day("2026-07-15")
+    assert [link.end_date for link in credited.links] == [
         day("2026-07-14"),
         day("2026-07-15"),
     ]
-    assert bad.linked_legs == (liquidation,)
-    assert good.status == "AVAILABLE"
-    assert good.twr == D(0)
-    assert [link.zero_capital_neutral for link in good.links] == [False, True]
+    assert [
+        (c.start_date, c.end_date, c.amount, c.net_flow)
+        for c in credited.post_liquidation_credits
+    ] == [(day("2026-07-15"), day("2026-07-16"), D("3.81"), D(0))]
+    assert closed.status == "AVAILABLE"
+    assert closed.closed_on is None
+    assert closed.post_liquidation_credits == ()
+    assert [link.zero_capital_neutral for link in closed.links] == [False, True]
+
+
+def test_funded_end_closes_at_the_last_funded_day_and_credits_the_tail() -> None:
+    observations = series(
+        d2026_06_21="17164.4",
+        d2026_06_22="3.03",
+        d2026_06_24="40.75",
+        d2026_06_29="32.15",
+        d2026_07_14="0",
+        d2026_07_31="3.81",
+    )
+    legs = [leg("-17188", "2026-06-22"), leg("-32.15", "2026-07-14")]
+    opening = OpeningPoint(day("2026-06-21"), D("17164.4"), FIRST)
+
+    epoch = link_epoch(observations, legs, opening, funded_end=day("2026-06-21"))
+
+    assert epoch.status == "AVAILABLE"
+    assert epoch.twr == D(0)
+    assert epoch.closed_on == day("2026-06-21")
+    assert [(c.end_date, c.amount) for c in epoch.post_liquidation_credits] == [
+        (day("2026-06-22"), D("26.63")),
+        (day("2026-06-24"), D("37.72")),
+        (day("2026-06-29"), D("-8.60")),
+        (day("2026-07-31"), D("3.81")),
+    ]
+    assert sum(c.amount for c in epoch.post_liquidation_credits) == D("59.56")
+    assert epoch.post_liquidation_credits[0].inferred_timing
+
+
+def test_funded_days_chain_before_the_closing_and_stay_out_of_the_credits() -> None:
+    observations = series(
+        d2026_01_01="100", d2026_01_02="110", d2026_01_03="121", d2026_01_04="5"
+    )
+    opening = OpeningPoint(day("2026-01-01"), D("100"), FIRST)
+
+    epoch = link_epoch(observations, [], opening, funded_end=day("2026-01-03"))
+
+    assert epoch.twr == D("0.21")
+    assert [(c.end_date, c.amount) for c in epoch.post_liquidation_credits] == [
+        (day("2026-01-04"), D("-116"))
+    ]
+
+
+def test_refunding_after_the_closing_requires_a_new_epoch() -> None:
+    observations = series(
+        d2026_07_13="100",
+        d2026_07_14="0",
+        d2026_07_15="3.81",
+        d2026_07_16="5003.81",
+    )
+    legs = [leg("-100", "2026-07-14"), leg("5000", "2026-07-16")]
+    opening = OpeningPoint(day("2026-07-13"), D("100"), FIRST)
+
+    epoch = link_epoch(observations, legs, opening)
+
+    assert epoch.status == "UNAVAILABLE"
+    assert epoch.reason == "REFUNDING_AFTER_LIQUIDATION"
+    assert epoch.failed_subperiod == (day("2026-07-15"), day("2026-07-16"))
+    assert epoch.twr is None
 
 
 def test_zero_capital_reopen_with_same_day_inflow_is_defined() -> None:
@@ -271,7 +334,9 @@ def test_zero_capital_reopen_with_same_day_inflow_is_defined() -> None:
     assert date_only_flat.status == "AVAILABLE"
     assert date_only_flat.twr == D(0)
     assert date_only_flat.links[-1].zero_capital_neutral
-    assert date_only_gain.reason == "ZERO_CAPITAL_RETURN_UNDEFINED"
+    # Value on zero capital with a same-day contribution is a re-funding with a
+    # gain: it starts a new epoch, so this one cannot carry it.
+    assert date_only_gain.reason == "REFUNDING_AFTER_LIQUIDATION"
 
 
 def test_negative_base_and_total_loss_fail_closed() -> None:
@@ -778,11 +843,8 @@ def test_value_periods_do_not_fail_on_zero_capital() -> None:
     liquidation = leg("-100", "2026-07-14")
     opening = OpeningPoint(day("2026-07-13"), D("100"), FIRST)
 
-    # The return engine declares the epoch unavailable (R3) ...
-    assert (
-        link_epoch(observations, [liquidation], opening).reason
-        == "ZERO_CAPITAL_RETURN_UNDEFINED"
-    )
+    # The return engine closes the epoch and records the credit ...
+    assert link_epoch(observations, [liquidation], opening).closed_on is not None
     # ... while the member's values are still there to be summed.
     periods = engine.value_periods("r3", observations, [liquidation], day("2026-07-13"))
 
