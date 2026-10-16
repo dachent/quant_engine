@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+import gzip
 import hashlib
 from html import escape as html_escape
 from html.parser import HTMLParser
@@ -216,10 +217,28 @@ _DOWNLOAD_METADATA: Final = {
 }
 _DOWNLOAD_BASE64_CHUNK_SIZE: Final = 65_536
 # Must equal `EMBEDDED_DOWNLOAD_MAX_CHUNKS` in apps/portfolio-control-panel/app.js.
-# The renderer joins every chunk into one string and V8's MAX_STRING_LENGTH is
-# 536870888, so 8192 chunks of 65536 raise RangeError there no matter what
-# either constant says. A test pins the two together.
+# A test pins the two together. The renderer decodes chunk by chunk and never
+# joins them into one string, so this is a sanity bound on the embedded payload
+# (about 512 MiB of base64), not a V8 string limit.
 _DOWNLOAD_MAX_BASE64_CHUNKS: Final = 8191
+# The report JSON is embedded gzip-compressed: it is ~10x smaller (332 MB ->
+# 34 MB) and the page inflates it with `DecompressionStream` on click, so the
+# direct `file://` route needs no sibling file and no network. The workbook is
+# an .xlsx, already a zip container, and stays byte-identical.
+_DOWNLOAD_ENCODINGS: Final = {REPORT_DOWNLOAD: "gzip", WORKBOOK_DOWNLOAD: "identity"}
+_DOWNLOAD_GZIP_LEVEL: Final = 6
+# Build-time size budget for the page that carries the downloads. index.html
+# was 444 MB with the uncompressed report embedded; compressed it is ~47 MB.
+_INDEX_HTML_MAX_BYTES: Final = 96 * 1024 * 1024
+# `data/dashboard_data.js` carries the panel payload as gzip parts that are
+# byte-exact slices of `data/dashboard_data.json` (head + lazy + tail in order).
+# The LIVE_PLUS_BACKTEST lens array is ~73% of the payload and is parsed only
+# when the viewer opens that mode. A part is inflated into one JS string, and
+# V8's MAX_STRING_LENGTH is 536870888, so a part may not exceed this raw size.
+_PANEL_LAZY_POINTER: Final = ("decomposition_lenses", "modes", "LIVE_PLUS_BACKTEST")
+_PANEL_PART_MAX_RAW_BYTES: Final = 400 * 1024 * 1024
+_PANEL_SCRIPT_MAX_BYTES: Final = 160 * 1024 * 1024
+_PANEL_SCRIPT_GLOBAL: Final = "PORTFOLIO_DATA_PARTS"
 _DOWNLOAD_PLACEHOLDER: Final = b"<!-- REPORT_DOWNLOADS -->"
 _ALLOWED_FRONTEND_REFERENCES: Final = (
     ("link", "href", "styles.css"),
@@ -1258,22 +1277,131 @@ def embedded_download_bytes(html: str, relative_path: str) -> bytes:
     pattern = re.compile(
         r'<script type="application/octet-stream" id="'
         + re.escape(prefix)
-        + r'-(\d{5})"[^>]*>([^<]*)</script>'
+        + r'-(\d{5})"([^>]*)>([^<]*)</script>'
     )
+    found = pattern.findall(html)
     chunks = sorted(
-        ((int(index), payload) for index, payload in pattern.findall(html)),
+        ((int(index), payload) for index, _attributes, payload in found),
         key=lambda item: item[0],
     )
     if not chunks or [index for index, _ in chunks] != list(range(len(chunks))):
         raise ControlPanelValidationError("embedded download payload is incomplete")
+    encodings = {
+        match.group(1)
+        if (match := _ENCODING_ATTRIBUTE.search(attributes))
+        else "identity"
+        for _index, attributes, _payload in found
+    }
+    if encodings != {_DOWNLOAD_ENCODINGS[relative_path]}:
+        raise ControlPanelValidationError("embedded download encoding differs")
     try:
-        return base64.b64decode(
+        encoded = base64.b64decode(
             "".join(payload for _, payload in chunks), validate=True
         )
     except (ValueError, binascii.Error) as exc:
         raise ControlPanelValidationError(
             "embedded download payload is not valid base64"
         ) from exc
+    if encodings == {"gzip"}:
+        try:
+            return _gunzip_exact(encoded)
+        except zlib.error as exc:
+            raise ControlPanelValidationError(
+                "embedded download payload is not valid gzip"
+            ) from exc
+    return encoded
+
+
+_ENCODING_ATTRIBUTE: Final = re.compile(r'data-download-encoding="([a-z]+)"')
+
+
+def _gunzip_exact(content: bytes) -> bytes:
+    """Inflate one complete gzip member; trailing bytes are an error."""
+    inflater = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+    raw = inflater.decompress(content) + inflater.flush()
+    if not inflater.eof or inflater.unused_data:
+        raise zlib.error("gzip member is truncated or has trailing bytes")
+    return raw
+
+
+def _panel_data_parts(
+    data: Mapping[str, Any], data_bytes: bytes
+) -> list[tuple[str, bool, bytes]]:
+    """Split the canonical panel JSON into ordered byte-exact (id, lazy, bytes) parts.
+
+    The lazy part is the LIVE_PLUS_BACKTEST lens array; head + lazy + tail is the
+    original byte string, which is asserted, so every reader of the parts sees the
+    bytes that `data/dashboard_data.json` carries.
+    """
+
+    node: Any = data
+    for key in _PANEL_LAZY_POINTER:
+        node = node.get(key) if isinstance(node, Mapping) else None
+    if not isinstance(node, list) or not node:
+        return [("all", False, data_bytes)]
+    # canonical_json_bytes ends with one newline, which is not part of the nested array.
+    lazy_bytes = canonical_json_bytes(node)[:-1]
+    start = data_bytes.find(lazy_bytes)
+    if start < 0 or data_bytes.find(lazy_bytes, start + 1) >= 0:
+        raise ControlPanelValidationError(
+            "lazy lens array is not exactly one slice of the panel payload"
+        )
+    head = data_bytes[:start]
+    tail = data_bytes[start + len(lazy_bytes) :]
+    if head + lazy_bytes + tail != data_bytes:
+        raise ControlPanelValidationError("panel payload parts differ from the payload")
+    return [("head", False, head), ("lazy", True, lazy_bytes), ("tail", False, tail)]
+
+
+def _panel_data_script(data: Mapping[str, Any], data_bytes: bytes) -> bytes:
+    """`data/dashboard_data.js`: the panel payload as gzip parts, not one 364 MB literal."""
+
+    parts = _panel_data_parts(data, data_bytes)
+    # The renderer joins head + "[]" + tail into one string before JSON.parse, so
+    # the eager parts are bounded together, not only one by one.
+    eager_bytes = sum(len(raw) for _part_id, lazy, raw in parts if not lazy)
+    if eager_bytes > _PANEL_PART_MAX_RAW_BYTES:
+        raise ControlPanelValidationError(
+            "panel data eager parts exceed the renderer string limit: "
+            f"{eager_bytes} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
+        )
+    described = []
+    for part_id, lazy, raw in parts:
+        if len(raw) > _PANEL_PART_MAX_RAW_BYTES:
+            raise ControlPanelValidationError(
+                f"panel data part {part_id} exceeds the renderer string limit: "
+                f"{len(raw)} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
+            )
+        described.append(
+            {
+                "id": part_id,
+                "lazy": lazy,
+                "raw_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "gzip_base64": base64.b64encode(
+                    gzip.compress(raw, compresslevel=_DOWNLOAD_GZIP_LEVEL, mtime=0)
+                ).decode("ascii"),
+            }
+        )
+    descriptor = {
+        "encoding": "gzip",
+        "lazy_pointer": list(_PANEL_LAZY_POINTER),
+        "parts": described,
+        "total_bytes": len(data_bytes),
+        "total_sha256": hashlib.sha256(data_bytes).hexdigest(),
+        "version": 1,
+    }
+    script = (
+        f"window.{_PANEL_SCRIPT_GLOBAL} = ".encode("ascii")
+        + json.dumps(descriptor, separators=(",", ":"), sort_keys=True).encode("ascii")
+        + b";\n"
+    )
+    if len(script) > _PANEL_SCRIPT_MAX_BYTES:
+        raise ControlPanelValidationError(
+            "dashboard_data.js exceeds the panel size budget: "
+            f"{len(script)} bytes > {_PANEL_SCRIPT_MAX_BYTES}"
+        )
+    return script
 
 
 def _report_download_link(relative_path: str, label: str, content: bytes) -> str:
@@ -1282,7 +1410,13 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
     if metadata is None or not isinstance(content, bytes) or not content:
         raise ControlPanelValidationError("report download link input differs")
     filename, mime_type, payload_prefix = metadata
-    payload = base64.b64encode(content).decode("ascii")
+    encoding = _DOWNLOAD_ENCODINGS[relative_path]
+    carried = (
+        gzip.compress(content, compresslevel=_DOWNLOAD_GZIP_LEVEL, mtime=0)
+        if encoding == "gzip"
+        else content
+    )
+    payload = base64.b64encode(carried).decode("ascii")
     chunks = [
         payload[index : index + _DOWNLOAD_BASE64_CHUNK_SIZE]
         for index in range(0, len(payload), _DOWNLOAD_BASE64_CHUNK_SIZE)
@@ -1301,11 +1435,14 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
         f'<a class="ghost-button" href="{relative_path}" download="{filename}" '
         f'data-download-filename="{filename}" data-download-mime="{mime_type}" '
         f'data-download-payload-prefix="{payload_prefix}" '
+        f'data-download-encoding="{encoding}" '
+        f'data-download-raw-bytes="{len(content)}" '
         f'data-download-chunk-count="{len(chunks)}">{html_escape(label)}</a>'
     )
     payload_elements = "".join(
         f'<script type="application/octet-stream" '
         f'id="{payload_prefix}-{index:05d}" data-download-filename="{filename}" '
+        f'data-download-encoding="{encoding}" '
         f'data-download-chunk-index="{index}">{chunk}</script>'
         for index, chunk in enumerate(chunks)
     )
@@ -11482,7 +11619,7 @@ def _rendered_files(
         "analytics.css": template_files["analytics.css"],
         "app.js": template_files["app.js"],
         "data/dashboard_data.json": data_bytes,
-        "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
+        "data/dashboard_data.js": _panel_data_script(data, data_bytes),
         "data/freshness-health.json": freshness_content,
     }
     if candidate_driver_map_content is not None:
@@ -11506,6 +11643,11 @@ def _rendered_files(
     files["index.html"] = files["index.html"].replace(
         _DOWNLOAD_PLACEHOLDER, " ".join(links).encode("utf-8")
     )
+    if len(files["index.html"]) > _INDEX_HTML_MAX_BYTES:
+        raise ControlPanelValidationError(
+            "index.html exceeds the panel size budget: "
+            f"{len(files['index.html'])} bytes > {_INDEX_HTML_MAX_BYTES}"
+        )
     # The workbook is served from the base64 payload inlined above, never from a
     # file beside the page: `app.js` intercepts the click and rebuilds it from
     # those chunks, and only reads the href as an identifier. Keeping an .xlsx in
