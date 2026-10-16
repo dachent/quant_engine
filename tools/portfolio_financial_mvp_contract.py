@@ -2502,9 +2502,39 @@ _POLICY_DECISION_KEYS: Final = {
 }
 
 
+# A provider-custody decision may also scope a different treatment to providers
+# whose one account funds several funds (#536); all four keys or none.
+_FUND_SCOPED_DECISION_KEYS: Final = {
+    "amends_approval_evidence",
+    "fund_scoped_effect",
+    "fund_scoped_providers",
+    "fund_scoped_treatment",
+}
+
+
 def _validate_policy_decision(value: object, name: str) -> dict[str, Any]:
     decision = _object(value, name)
-    _strict_keys(decision, _POLICY_DECISION_KEYS, name)
+    fund_scoped = _FUND_SCOPED_DECISION_KEYS & set(decision)
+    if fund_scoped and fund_scoped != _FUND_SCOPED_DECISION_KEYS:
+        raise FinancialMvpContractError(
+            f"{name} fund-scoped decision keys must be complete"
+        )
+    _strict_keys(
+        decision,
+        _POLICY_DECISION_KEYS | fund_scoped,
+        name,
+    )
+    if fund_scoped:
+        _text(decision["amends_approval_evidence"], f"{name}.amends_approval_evidence")
+        _text(decision["fund_scoped_effect"], f"{name}.fund_scoped_effect")
+        _text(decision["fund_scoped_treatment"], f"{name}.fund_scoped_treatment")
+        providers = _strings(
+            decision["fund_scoped_providers"], f"{name}.fund_scoped_providers"
+        )
+        if not providers or len(set(providers)) != len(providers):
+            raise FinancialMvpContractError(
+                f"{name}.fund_scoped_providers must be unique and non-empty"
+            )
     _text(decision["plain_language"], f"{name}.plain_language")
     _text(decision["calculation_effect"], f"{name}.calculation_effect")
     _strings(decision["examples"], f"{name}.examples")
