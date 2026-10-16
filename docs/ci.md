@@ -30,7 +30,7 @@ to prove that each member's published metadata is complete.
 
 | Workflow | Purpose | Token authority |
 |---|---|---|
-| `quality.yml` | Single delivery cell (windows-2025 / CPython 3.11): frozen install, Ruff, mypy, pinned Gitleaks-suppression provenance, bounded offline pytest, and all-package build | `contents: read` |
+| `quality.yml` | Single delivery cell (windows-2025 / CPython 3.11): frozen install, Ruff, mypy, pinned Gitleaks-suppression provenance, bounded offline pytest (per-test timeout 900 s via pytest-timeout, and `tools/stall_watchdog.py` kills the step after 20 minutes without output; the job-level `timeout-minutes` is a 90-minute backstop only), and all-package build | `contents: read` |
 | `security.yml` | Local Git-history secret scan, locked dependency audit, and workflow policy validation | `contents: read` |
 | `data-boundary.yml` | Standard-library scan of the authoritative Git index and staged blobs | `contents: read` |
 | `issue-guard.yml` | Validate the issue graph; outside pull requests, reconcile native dependencies and reopen illegal closures | Pull requests: `contents: read`; reconcile only: `contents: read`, `issues: write` |
