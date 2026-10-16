@@ -249,3 +249,10 @@ def test_a_clean_room_redirected_during_the_restore_is_refused(tmp_path: Path) -
         assert "redirected" in str(error)
     else:
         raise AssertionError("a redirected clean room was accepted")
+
+
+def test_the_report_says_when_no_sums_were_checked(tmp_path: Path) -> None:
+    spec, _ = _committed(tmp_path)
+    assert (
+        tool.restore(spec, tmp_path / "clean")["sums_labels_checked"] == "NOT_CHECKED"
+    )
