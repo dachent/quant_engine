@@ -1046,3 +1046,92 @@ section[data-view="capital"] .callout-neutral {
 .binding-card {
   overflow-wrap: anywhere;
 }
+
+/* Audit 543 (F16, F18, F42): table scrolling, nested-table widths and the classes the shell
+   emits that no stylesheet defined.  A table wider than its panel scrolls inside its
+   .table-wrap region instead of stacking its columns into a few narrow pixels. */
+.table-wrap.wide table {
+  min-width: 640px;
+}
+
+#portfolio-implementation-table,
+#leverage-table,
+#allocation-table,
+#strategy-table,
+#lifecycle-table,
+#position-table,
+#implementation-table,
+#economic-cluster-table,
+#candidate-table,
+#factor-proxy-table,
+#orthogonal-coefficient-table {
+  min-width: 760px;
+}
+
+#account-manifest-table {
+  min-width: 1320px;
+}
+
+#invested-capital-current-table,
+#invested-capital-daily-table,
+#leverage-coverage-table,
+#correlation-one-table,
+#reconciliation-table,
+#candidate-driver-table,
+#candidate-leave-one-out-table,
+#factor-diagnostic-beta-table,
+#factor-diagnostic-contribution-table,
+#factor-contribution-table,
+#orthogonal-risk-table {
+  min-width: 480px;
+}
+
+.callout-warning {
+  background: #2b2517;
+  color: #fff1d6;
+}
+
+.status-banner.status-danger,
+.status-danger {
+  border-color: var(--danger);
+}
+
+.metric-list {
+  display: grid;
+  gap: 8px;
+}
+
+.metric-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.symbol-not-ready {
+  color: var(--warning);
+  font-style: italic;
+}
+
+.is-hatched {
+  background-image: repeating-linear-gradient(135deg, var(--border-strong) 0 4px, transparent 4px 9px);
+}
+
+.glossary-panel .glossary-list {
+  margin-top: 12px;
+}
+
+.stale-tag {
+  color: var(--warning);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.policy-text {
+  font-style: italic;
+}
+
+tfoot th,
+tfoot td {
+  border-top: 2px solid var(--border-strong);
+  font-weight: 600;
+}

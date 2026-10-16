@@ -337,7 +337,7 @@ const epochLegend = await page.locator("#account-manifest-legend").textContent()
 const epochDisclosure = await page.locator("#account-manifest-disclosure-list").textContent();
 const epochHeaders = [
   "Account", "Strategy", "Observed interval", "Capital in", "Withdrawn", "Net capital",
-  "Current", "Gain", "RONC", "Ann. RONC", "Observed return", "Observed HWM", "Observed Max DD",
+  "Current", "Gain", "RONC", "Ann. RONC", "Observed return", "Observed HWM (index, base 100)", "Observed Max DD (signed)",
 ];
 const authorityProfile = dashboardData.meta.account_manifest_authority_profile;
 const authorityProfileKnown = Object.prototype.hasOwnProperty.call(EXPECTED_AUTHORITY_LABELS, authorityProfile);
@@ -889,7 +889,7 @@ for (const regime of requiredDrawdownRegimes) {
 checks.push(check(
   "All observed windows and both true drawdown regimes are exercised",
   horizonEvidence.length === requiredCorrelationWindows.length
-    && horizonEvidence.every((item) => item.active === "true" && item.title?.includes(`${item.window} sessions`) && item.detail_has_selected_period)
+    && horizonEvidence.every((item) => item.active === "true" && item.title?.includes(`${item.window} weekday observations`) && item.detail_has_selected_period)
     && drawdownEvidence.length === requiredDrawdownRegimes.length
     && drawdownEvidence.every((item) => item.active === "true"
       && item.title?.includes(item.regime === "either_drawdown" ? "either strategy in drawdown" : "both strategies in drawdown")

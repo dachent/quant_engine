@@ -7701,7 +7701,7 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'id="remediation-table"' in template
     assert "TTL / reconciled" in renderer
     assert "Escalation required" in renderer
-    assert 'item.category === "DATA_FRESHNESS"' in renderer
+    assert 'detail.category === "DATA_FRESHNESS"' in renderer
 
 
 def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> None:
@@ -13870,7 +13870,7 @@ try {
     errorHidden: document.querySelector("#error-state")?.hidden ?? null,
     errorText: document.querySelector("#error-state")?.textContent?.trim() ?? "",
     portfolioAsOf: document.querySelector("#portfolio-as-of")?.textContent?.trim() ?? "",
-    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[7]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[7]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
+    allocationRows: Array.from(document.querySelectorAll("#allocation-table tbody tr"), row => ({ dateText: row.cells[9]?.firstChild?.textContent?.trim() ?? "", weightBasis: row.cells[9]?.querySelector(".cell-secondary")?.textContent?.trim() ?? "" })),
     positionDateTexts: Array.from(document.querySelectorAll("#position-table tbody tr"), row => row.cells[5]?.firstChild?.textContent?.trim() ?? ""),
     injectedPositionNodes: document.querySelectorAll("#position-table [data-f2-f7-position-probe]").length,
     injectedDateScripts: document.querySelectorAll("#allocation-table script[data-f2-f7-probe]").length,
