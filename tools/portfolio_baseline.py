@@ -767,6 +767,21 @@ def _provider_ledger(
                     "invested_capital_policy_sha256": hashlib.sha256(
                         canonical_json_bytes(policy)
                     ).hexdigest(),
+                    # Providers whose one account funds several funds carry no
+                    # derived cash line (owner decision, #536); the list is the
+                    # approved policy's, bound by the policy digest above.
+                    **(
+                        {
+                            "fund_scoped_providers": sorted(
+                                policy["provider_custody_perimeter"][
+                                    "fund_scoped_providers"
+                                ]
+                            )
+                        }
+                        if "fund_scoped_providers"
+                        in policy["provider_custody_perimeter"]
+                        else {}
+                    ),
                 }
             )
     links = [
@@ -2729,6 +2744,7 @@ def _derived_custody_cash(
     valuation_date: date,
     *,
     legacy: bool = False,
+    fund_scoped_providers: Sequence[str] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """Derive separate cash components from the selected raw admitted events.
 
@@ -2751,11 +2767,15 @@ def _derived_custody_cash(
     if len(set(identities)) != len(identities):
         raise BaselineValidationError("custody duplicate source record ID")
     admissions = _validated_provider_admissions(provider_catalog)
+    fund_scoped = {str(item).upper() for item in fund_scoped_providers}
     owner_flows = [
         row
         for row in flows
         if row.get("provider_account_scope") == "ACCOUNT_ONLY"
         and row.get("capital_disposition") == "EXTERNAL_CAPITAL"
+        # One account funds several funds: its deposits are not the strategy's
+        # capital and no derived cash line is built for it.
+        and str(row.get("provider_id") or "").upper() not in fund_scoped
     ]
     if any(row.get("flow_type") != "DEPOSIT_OR_WITHDRAWAL" for row in owner_flows):
         raise BaselineValidationError(
@@ -2977,7 +2997,11 @@ def _build_current_capital(
     if custody_authority:
         if provider_catalog is None:
             raise BaselineValidationError("custody raw provider catalog is missing")
-        cash = _derived_custody_cash(provider_catalog, valuation_date)
+        cash = _derived_custody_cash(
+            provider_catalog,
+            valuation_date,
+            fund_scoped_providers=custody_authority.get("fund_scoped_providers", ()),
+        )
         if set(cash) - set(strategy_ids):
             raise BaselineValidationError(
                 "custody cash references an unregistered strategy"
@@ -3495,7 +3519,12 @@ def _reconcile_current_capital(
             for line in _objects(row.get("derived_cash", []), "derived cash")
         )
         cash = _derived_custody_cash(
-            provider_catalog, valuation_date, legacy=legacy_cash
+            provider_catalog,
+            valuation_date,
+            legacy=legacy_cash,
+            fund_scoped_providers=current_capital["custody_authority"].get(
+                "fund_scoped_providers", ()
+            ),
         )
         for row in rows:
             strategy_id = str(row["strategy_id"])

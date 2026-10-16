@@ -3,8 +3,8 @@
  "policy_id": "PORT-HWM-4",
  "product_authority": {
   "path": "contracts/portfolio-financial-mvp-source-v1.json",
-  "raw_sha256": "012d49141c9055f56965c21e440abf20c6b3ca8ca185233c913aedda3a086191",
-  "semantic_digest": "71692a8540f8a77ffa75bf6b83c9a9ad947520f878c22c3c8f20cf73d7414dfe"
+  "raw_sha256": "880ed60727be7e3ffc082bffd443f053a313772f580469c4d8b27d1fa5e0886a",
+  "semantic_digest": "eef3bf35c88212c7c0676e9d9851be0096afd4a12ba497f5d831a2ca555dbad0"
  },
  "performance_authority": {
   "path": "contracts/portfolio-performance-policy-v1.json",
@@ -17,7 +17,7 @@
   "MARGIN_AND_LEVERAGE": "b94d2809b9f9c3d49d4aaa04f3656c7c67aafd82b1069a1e53cd39399f45cc13",
   "NEGATIVE_NET_CONTRIBUTIONS": "c6d763f09be23919a588a56501e920ff530e4bba0d6af0cda6cde35b05b45551",
   "PREDECESSOR_TRANSITION": "27a023b850c67bee593b6779d14e7c58bb7a156141588542ffe28c8053af2976",
-  "PROVIDER_CUSTODY_PERIMETER": "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
+  "PROVIDER_CUSTODY_PERIMETER": "544d6d74fadab26714758b37857cec1ece40aa5e6aa88d34a8d468c03e17d960"
  },
  "material_perimeter_authority": {
   "source": "PRODUCT_AUTHORITY_HWM_REQUIREMENT_AND_ACCEPTED_HWM_EXCLUSIONS",

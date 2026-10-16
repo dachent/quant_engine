@@ -2342,3 +2342,151 @@ def test_equal_and_opposite_wide_transfer_legs_are_internal():
     )
 
     assert dispositions == {"out": "INTERNAL", "in": "INTERNAL"}
+
+
+def test_fund_scoped_account_capital_is_the_gross_fund_allocations_not_deposits():
+    """#536: one account funds several funds, so deposits are not the strategy's capital."""
+
+    case = _case()
+    case["required_epochs"] = [
+        {
+            "epoch_id": "fund-1",
+            "account_id": "fund-account",
+            "strategy_id": "A",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+    case["opening_basis"] = []
+    coverage = {
+        "account_id": "fund-account",
+        "fact_type": "flows",
+        "disposition": "AUTHORITATIVE",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-01-03",
+    }
+    case["flow_coverage"] = [
+        {
+            "epoch_id": "fund-1",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-03",
+            "evidence_sha256": capital._digest(coverage),
+        }
+    ]
+    # 100 deposited; 60 + 25 allocated to this strategy's fund, 15 to another fund.
+    deposit = {
+        "record_id": "fund-deposit",
+        "provider_id": "quantbase",
+        "account_id": "fund-account",
+        "strategy_id": None,
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "capital_disposition": "EXTERNAL_CAPITAL",
+        "event_date": "2026-01-01",
+        "amount": {"value": "100", "currency": "USD", "status": "AVAILABLE"},
+    }
+    first = {
+        "record_id": "fund-allocation-1",
+        "provider_id": "quantbase",
+        "account_id": "fund-account",
+        "strategy_id": "A",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2026-01-01",
+        "amount": {"value": "60", "currency": "USD", "status": "AVAILABLE"},
+    }
+    second = {
+        "record_id": "fund-allocation-2",
+        "provider_id": "quantbase",
+        "account_id": "fund-account",
+        "strategy_id": "A",
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "event_date": "2026-01-02",
+        "amount": {"value": "25", "currency": "USD", "status": "AVAILABLE"},
+    }
+
+    def event_for(row, name):
+        evidence = capital._digest(row)
+        return _event(
+            name,
+            "fund-1",
+            row["event_date"],
+            "EXTERNAL_CONTRIBUTION",
+            row["amount"]["value"],
+            source_evidence_sha256=evidence,
+            fx_evidence_sha256=evidence,
+        )
+
+    case["events"] = [event_for(first, "a-1"), event_for(second, "a-2")]
+    ledger = {
+        "capital_anchors": [first, second],
+        "flows": [deposit],
+        "admissions": [coverage],
+    }
+    capital._verify_selected_facts(case, {"provider_ledger": ledger}, case["policy"])
+    calculation_case = deepcopy(case)
+    calculation_case["opening_basis"] = [
+        _event("fund-open", "fund-1", "2026-01-01", "OPENING_CONTRIBUTED_BASIS", "0")
+    ]
+    assert (
+        capital.calculate_invested_capital(**calculation_case)["current_aggregate_usd"]
+        == "85"
+    )
+
+    # The deposit is not this strategy's capital: citing it is refused.
+    deposit_case = deepcopy(case)
+    deposit_case["events"] = [event_for(deposit, "d-1")]
+    with pytest.raises(
+        capital.CapitalValidationError, match="not an owner-capital fact"
+    ):
+        capital._verify_selected_facts(
+            deposit_case, {"provider_ledger": ledger}, case["policy"]
+        )
+
+    # An allocation left out of the capital input is an omitted capital fact.
+    omitted_case = deepcopy(case)
+    omitted_case["events"] = [event_for(first, "a-1")]
+    with pytest.raises(capital.CapitalValidationError, match="is omitted"):
+        capital._verify_selected_facts(
+            omitted_case, {"provider_ledger": ledger}, case["policy"]
+        )
+
+    # Cash lines reassigned to another strategy or account never fund this one.
+    for field, value, message in (
+        ("strategy_id", "B", "fund-scoped allocation strategy differs"),
+        ("account_id", "other-account", "capital source account/epoch differs"),
+    ):
+        moved = deepcopy(second)
+        moved[field] = value
+        moved_case = deepcopy(case)
+        moved_case["events"] = [event_for(first, "a-1"), event_for(moved, "a-2")]
+        with pytest.raises(capital.CapitalValidationError, match=message):
+            capital._verify_selected_facts(
+                moved_case,
+                {
+                    "provider_ledger": {
+                        "capital_anchors": [first, moved],
+                        "flows": [deposit],
+                        "admissions": [coverage],
+                    }
+                },
+                case["policy"],
+            )
+
+    # A provider the policy does not list keeps the account-deposit treatment.
+    other_provider = deepcopy(deposit)
+    other_provider["provider_id"] = "matrixport"
+    other_anchor = deepcopy(first)
+    other_anchor["provider_id"] = "matrixport"
+    other_case = deepcopy(case)
+    other_case["events"] = [event_for(other_provider, "d-1")]
+    capital._verify_selected_facts(
+        other_case,
+        {
+            "provider_ledger": {
+                "capital_anchors": [other_anchor],
+                "flows": [other_provider],
+                "admissions": [coverage],
+            }
+        },
+        case["policy"],
+    )

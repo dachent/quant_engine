@@ -1125,6 +1125,11 @@
         "census_id": {
           "type": "string",
           "minLength": 1
+        },
+        "fund_scoped_providers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
         }
       }
     },

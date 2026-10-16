@@ -3366,11 +3366,22 @@ def _verify_custody_current_capital(
         "ledger_generation_id"
     ) or catalog_sha256 != identity.get("ledger_catalog_sha256"):
         raise ReportValidationError("custody raw selected ledger differs")
+    invested_policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
     try:
         cash = _derived_custody_cash(
             raw,
             _date(block["valuation_date"], "custody cutoff"),
             legacy=catalog.get("baseline_schema_version") == 1,
+            # Read from the approved policy itself, not from the block under
+            # check: providers whose one account funds several funds have no
+            # derived cash line (#536).
+            fund_scoped_providers=invested_policy.get(
+                "provider_custody_perimeter", {}
+            ).get("fund_scoped_providers", ()),
         )
     except (RuntimeError, ValueError, KeyError) as exc:
         raise ReportValidationError(f"custody raw recompute failed: {exc}") from exc

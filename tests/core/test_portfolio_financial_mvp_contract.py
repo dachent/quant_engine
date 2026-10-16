@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "71692a8540f8a77ffa75bf6b83c9a9ad947520f878c22c3c8f20cf73d7414dfe"
+        "eef3bf35c88212c7c0676e9d9851be0096afd4a12ba497f5d831a2ca555dbad0"
     )
 
 
@@ -4596,6 +4596,9 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "decision_status": "APPROVED",
         "decision_authority": "OWNER_318",
         "approval_evidence": (
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225081900"
+        ),
+        "amends_approval_evidence": (
             "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957619019"
         ),
         "selected_treatment": (
@@ -4622,6 +4625,9 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
             "the sleeve NAV and allocation path. A cash line below zero at any event "
             "date fails closed."
         ),
+        "fund_scoped_providers": ["QUANTBASE"],
+        "fund_scoped_treatment": "FUND_SCOPED_PROVIDER_ACCOUNT_INVESTED_CAPITAL_IS_THE_GROSS_FUND_ALLOCATIONS_TO_THE_STRATEGY_FUND_AT_FILL_DATES; MONEY_SENT_TO_OTHER_FUNDS_OF_THE_ACCOUNT_IS_NEVER_THE_STRATEGY_CAPITAL; ACCOUNT_DEPOSITS_AND_WITHDRAWALS_ARE_NOT_THE_STRATEGY_CAPITAL; IN_FUND_FEE_FUNDED_SELLS_ARE_A_COST_NOT_NETTED_FROM_CAPITAL; DIVIDENDS_PAID_TO_ACCOUNT_CASH_AND_FEES_PAID_FROM_ACCOUNT_CASH_ARE_LABELLED_LINES_BESIDE_NAV; NO_DERIVED_CASH_LINE_FOR_THE_STRATEGY",
+        "fund_scoped_effect": "For a provider listed in fund_scoped_providers, one account funds more than one fund. A strategy's invested capital is the gross sum of the allocations to that strategy's fund (OPENING_CAPITAL_ANCHOR and STRATEGY_CAPITAL_ALLOCATION facts), each at its fill date and counted once. Account deposits and withdrawals are not that strategy's capital and money sent to the account's other funds is never its capital. In-fund sells that pay fees are a cost of the strategy and are not subtracted from capital. Dividends paid to account cash and fees paid from account cash are reported as labelled lines beside the fund NAV so the result reads NAV plus dividends minus cash-paid fees. No derived cash line is built for such a strategy. TWR, MWR, HWM and drawdown keep the fund NAV and allocation path.",
         "examples": [
             "An owner deposits 100 into the provider cash account and the provider "
             "buys 96 of the strategy fund from it: invested capital is 100, the "
@@ -4634,19 +4640,59 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "authority_issue": 330,
         "policy_owner_issue": 318,
         "evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957619019"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225081900"
         ),
-        "comment_id": 5957619019,
+        "comment_id": 6225081900,
         "digest_evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957763417"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225157557"
         ),
-        "digest_comment_id": 5957763417,
-        "approved_on": "2026-10-02",
-        "payload_sha256": "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2",
+        "digest_comment_id": 6225157557,
+        "approved_on": "2026-10-16",
+        "payload_sha256": "544d6d74fadab26714758b37857cec1ece40aa5e6aa88d34a8d468c03e17d960",
     }
     assert (
         contract_tool.owner_decision_receipt_digests(contract)[
             "PROVIDER_CUSTODY_PERIMETER"
         ]
-        == "7f1428af89a974d1219c1803dab8993f38a0f4b79601dae751cf2e5432903df2"
+        == "544d6d74fadab26714758b37857cec1ece40aa5e6aa88d34a8d468c03e17d960"
     )
+
+
+def test_fund_scoped_custody_decision_is_complete_paired_and_policy_driven() -> None:
+    """#536: the Quantbase amendment is policy, with its own owner evidence."""
+
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    decision = policy["provider_custody_perimeter"]
+    receipt = policy["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"]
+
+    assert decision["fund_scoped_providers"] == ["QUANTBASE"]
+    assert decision["approval_evidence"] == receipt["evidence_url"]
+    assert decision["amends_approval_evidence"].endswith("5957619019")
+    assert receipt["approved_on"] == "2026-10-16"
+    assert "NO_DERIVED_CASH_LINE" in decision["fund_scoped_treatment"]
+    assert (
+        contract_tool.owner_decision_receipt_digests(
+            contract_tool.load_contract(CONTRACT_PATH)
+        )["PROVIDER_CUSTODY_PERIMETER"]
+        == receipt["payload_sha256"]
+    )
+
+    incomplete = copy.deepcopy(decision)
+    del incomplete["fund_scoped_effect"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="keys must be complete"
+    ):
+        contract_tool._validate_policy_decision(
+            incomplete, "provider_custody_perimeter"
+        )
+    duplicated = copy.deepcopy(decision)
+    duplicated["fund_scoped_providers"] = ["QUANTBASE", "QUANTBASE"]
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="unique"):
+        contract_tool._validate_policy_decision(
+            duplicated, "provider_custody_perimeter"
+        )
