@@ -1,13 +1,1 @@
-* text=auto
-*.json text eol=lf
-/contracts/portfolio-financial-mvp-source-v1.json text eol=crlf
-*.lock text eol=lf
-*.md text eol=lf
-*.py text eol=lf
-*.ps1 text eol=crlf
-*.toml text eol=lf
-*.yaml text eol=lf
-*.yml text eol=lf
-/.gitleaksignore text eol=lf
-/.github/gitleaks-suppressions.json text eol=lf
-/.githooks/* text eol=lf
+/apps/portfolio-control-panel/styles.css text eol=lf
