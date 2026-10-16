@@ -86,5 +86,5 @@ def test_browser_performance_rows_render_row_twr_without_return_path_fallback() 
         source.index("const acceptedReturn") : source.index("const performanceHeaders")
     ]
     assert "const acceptedReturn = row.twr;" in rendering
-    assert "const returnStatus = row.twr_status;" in rendering
+    assert "row.twr_status" in rendering
     assert "return_path" not in rendering

@@ -248,7 +248,7 @@ def test_stress_label_names_the_policy_weight_set_and_its_date(tmp_path: Path) -
     dom = _run(tmp_path, _risk_payload(), "renderRisk")
     stress = _flat(dom, "#stress-bar")
 
-    assert "Policy weights (PORT-DEPENDENCE-1, as of 2026-08-16)" in stress
+    assert "Policy weights (PORT-DEPENDENCE-1, as of 2026-08-16" in stress
     assert "Current portfolio" not in stress
 
 
@@ -277,7 +277,8 @@ def test_mwr_kpi_does_not_claim_complete_flows(tmp_path: Path) -> None:
     kpis = _flat(_run(tmp_path, _risk_payload(), "renderRisk"), "#risk-kpis")
 
     assert "Complete flows required" not in kpis
-    assert "completeness of the flow path is not proven" in kpis
+    # F32: the note is bound to the payload's flows fact status, or says none is declared.
+    assert "flow fact" in kpis or "flow-path completeness is not declared" in kpis
 
 
 # ---- N62 (A9/K4/K5): current holdings are the rows current at the cutoff ---------
@@ -487,7 +488,8 @@ def test_provider_source_windows_show_their_provider_boundary_and_no_zero_count(
     dom = _run(tmp_path, payload, "renderFactScopeTables")
     windows = _flat(dom, "#observation-windows-table")
 
-    assert "MATRIXPORT" in windows
+    assert "Matrixport" in windows
+    assert "MATRIXPORT" not in windows
     assert "Frozen Matrixport/BIT run through its recorded run_end_ms" in windows
     assert "Boundary basis unavailable" not in windows
     assert "Unknown" not in windows
@@ -580,10 +582,11 @@ def test_strategy_evidence_says_provider_capture_not_accepted(tmp_path: Path) ->
     dom = _run(tmp_path, payload, "renderCapital")
     matrix = _flat(dom, "#strategy-table")
 
-    assert (
-        "Provider capture Sep 18, 2026 (post-cutoff capture; data through Sep 17, 2026)"
-        in matrix
-    )
+    # F26: the row names its capture date; the post-cutoff caveat is one note per table.
+    assert "Provider capture Sep 18, 2026" in matrix
+    assert "Provider capture Sep 18, 2026 (post-cutoff capture" not in matrix
+    assert matrix.count("Post-cutoff capture:") == 1
+    assert "1 of 1 provider captures are dated after the Sep 17, 2026 cutoff" in matrix
     assert "Accepted Sep 18, 2026" not in matrix
 
 

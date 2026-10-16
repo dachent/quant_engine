@@ -1,6 +1,11 @@
 // Test harness: run apps/portfolio-control-panel/app.js against a stub DOM.
 //
-//   node shell_harness.mjs <app.js> <payload.json> <function,function,...>
+//   node shell_harness.mjs <app.js> <payload.json> <function,function,...> [calls.json]
+//
+// The optional calls file is a JSON list run after the named functions, in order.  Each
+// item is {"fn": name, "args": [...]} (a named function, with arguments) or
+// {"eval": "<js>"} (evaluated inside the panel closure, so it can read and assign the
+// panel's own `let` state).  Return values are reported as `returns`, in order.
 //
 // The shell is one closed IIFE that renders every view from `window.PORTFOLIO_DATA`
 // when the document loads.  To test one view without a browser the harness
@@ -15,8 +20,13 @@
 import fs from "node:fs";
 import vm from "node:vm";
 
-const [appPath, payloadPath, calls = ""] = process.argv.slice(2);
+const [appPath, payloadPath, calls = "", callsPath = ""] = process.argv.slice(2);
 const names = calls.split(",").map((name) => name.trim()).filter(Boolean);
+const extraCalls = callsPath ? JSON.parse(fs.readFileSync(callsPath, "utf8")) : [];
+const exposed = [...names];
+for (const item of extraCalls) {
+  if (item.fn && !exposed.includes(item.fn)) exposed.push(item.fn);
+}
 const source = fs.readFileSync(appPath, "utf8");
 const marker = 'document.addEventListener("DOMContentLoaded", init);';
 if (source.split(marker).length !== 2) {
@@ -24,7 +34,7 @@ if (source.split(marker).length !== 2) {
 }
 const instrumented = source.replace(
   marker,
-  `globalThis.__panel = { ${names.join(", ")} };\n  ${marker}`,
+  `globalThis.__panel = { ${[...exposed, "__eval: (code) => eval(code)"].join(", ")} };\n  ${marker}`,
 );
 
 const permissive = () => new Proxy(function permissiveStub() {}, {
@@ -45,6 +55,7 @@ const data = new Proxy(payload, {
 });
 
 const elements = new Map();
+const queries = [];
 const makeElement = () => {
   const state = {
     innerHTML: "",
@@ -79,7 +90,7 @@ const document = {
     if (!elements.has(selector)) elements.set(selector, makeElement());
     return elements.get(selector);
   },
-  querySelectorAll: () => [],
+  querySelectorAll: (selector) => { queries.push(String(selector)); return []; },
   getElementById: (id) => document.querySelector(`#${id}`),
   createElement: () => makeElement(),
   addEventListener: () => {},
@@ -89,7 +100,7 @@ const sandbox = {
   document,
   location: { hash: "" },
   console,
-  CSS: { escape: (value) => String(value) },
+  CSS: { escape: (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, (character) => "\\" + character) },
 };
 sandbox.window = {
   PORTFOLIO_DATA: data,
@@ -109,6 +120,17 @@ for (const name of names) {
     errors.push({ name, error: String((error && error.stack) || error) });
   }
 }
+const returns = [];
+for (const item of extraCalls) {
+  try {
+    const value = item.eval !== undefined
+      ? sandbox.__panel.__eval(item.eval)
+      : sandbox.__panel[item.fn](...(item.args || []));
+    returns.push({ value: value === undefined ? null : JSON.parse(JSON.stringify(value)) });
+  } catch (error) {
+    returns.push({ error: String((error && error.stack) || error) });
+  }
+}
 const dom = {};
 for (const [selector, element] of elements) {
   const state = element.__state;
@@ -120,4 +142,4 @@ for (const [selector, element] of elements) {
     };
   }
 }
-process.stdout.write(JSON.stringify({ errors, dom }));
+process.stdout.write(JSON.stringify({ errors, dom, returns, queries }));

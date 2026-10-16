@@ -229,8 +229,8 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
                 "RONC",
                 "Ann. RONC",
                 "Observed return",
-                "Observed HWM",
-                "Observed Max DD",
+                "Observed HWM (index, base 100)",
+                "Observed Max DD (signed)",
             ]
         )
         + "</tr></thead><tbody>"
