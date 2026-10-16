@@ -578,11 +578,16 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     assert len(data["dependence_modes"]["LIVE_ONLY"]["cells"]) == 21
     assert len(data["factor_analysis"]["series"]) == 7
     assert len(data["replication_analysis"]["series"]) == 7
+
+    def lens_series(lens):  # #540: surfaces carry the series once
+        return (
+            lens["series"]
+            if "series" in lens
+            else lens["surfaces"][lens["default_surface"]]["series"]
+        )
+
     assert all(
-        len(lens["series"]) == 7 for lens in data["decomposition_lenses"]["lenses"]
-    )
-    assert all(
-        len(lens["series"]) == 7
+        len(lens_series(lens)) == 7
         for lens in data["decomposition_lenses"]["modes"]["LIVE_ONLY"]
     )
     assert all(
@@ -590,7 +595,7 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
         for mode in data["dependence_modes"].values()
     )
     assert all(
-        all(len(lens["series"]) == 7 for lens in lenses)
+        all(len(lens_series(lens)) == 7 for lens in lenses)
         for lenses in data["decomposition_lenses"]["modes"].values()
     )
     for dependence in [data["dependence_analysis"], *data["dependence_modes"].values()]:
