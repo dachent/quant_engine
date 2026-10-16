@@ -5118,11 +5118,20 @@ def _provider_root_nodes(
             release_target = True
         else:
             binding = bound[root_id.removeprefix("provider-")]
+            # The catalog the ledger hashed is either a file the generation holds
+            # or, for a generation whose catalog is retained elsewhere (Portfolio123
+            # keeps only its manifest here), an artifact its manifest declares.
+            declared = {
+                item.get("sha256")
+                for item in _load(source / "generation.json", f"{root_id} manifest")[
+                    "artifacts"
+                ]
+            }
             if (
                 binding.get("generation_id") != generation_id
                 or binding.get("manifest_sha256") != inventory["manifest_sha256"]
                 or binding.get("catalog_sha256")
-                not in {item.get("sha256") for item in files}
+                not in {item.get("sha256") for item in files} | declared
             ):
                 raise MaterializationError(
                     f"{root_id} generation differs from the provider ledger binding"

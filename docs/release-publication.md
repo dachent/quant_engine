@@ -116,3 +116,13 @@ predecessor graph is judged over the roots it bound.
 `tools/check_data_roots.py` is the read-only gate: every data root resolves through
 `read_current`, except an evidence-only root (today `dataIBKR`), which must retain
 hash-verified generations and carries no pointer a consumer may follow.
+
+`tools/verify_release_restore.py` proves a committed release is reproducible from the
+durable stores: it copies only the bound generations (and any generation the spec
+retains as non-target evidence) into an empty clean-room directory, re-derives every
+pointer with `publish_generation`, and requires `read_current` to resolve each restored
+root to exactly the generation, manifest hash and inventory hash the release bound;
+`--expect-sums` additionally requires every row of a `SHA256SUMS` file (for example the
+preserved bound-generation zips) to be found by hash among the restored files. A release
+also binds each root's directory identity, so `read_current_release` cannot pass in a
+different location by design: adopting restored roots needs a new release over them.

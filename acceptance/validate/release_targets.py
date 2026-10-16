@@ -433,6 +433,18 @@ def _file_sha256s(directory: Path) -> set[str]:
     return digests
 
 
+def _declared_artifact_sha256s(generation_dir: Path) -> set[str]:
+    """The sha256 of every artifact the generation manifest declares."""
+
+    try:
+        artifacts = json.loads((generation_dir / GENERATION_MANIFEST).read_bytes())[
+            "artifacts"
+        ]
+        return {item["sha256"] for item in artifacts}
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return set()
+
+
 def _panel_account_manifest_artifacts(panel: Mapping[str, Any]) -> dict[str, str]:
     """Every ``artifact_id`` -> ``sha256`` the panel's account manifest declares."""
 
@@ -581,12 +593,16 @@ def provider_binding(
             "$.provider_generations.manifest_sha256",
             "the provider ledger binds a different manifest hash",
         )
-    if row.get("catalog_sha256") not in _file_sha256s(generation_dir):
+    if row.get("catalog_sha256") not in (
+        _file_sha256s(generation_dir) | _declared_artifact_sha256s(generation_dir)
+    ):
         yield finding(
             row.get("catalog_sha256"),
-            "the sha256 of a file present in the generation",
+            "the sha256 of a file present in the generation or an artifact its "
+            "manifest declares",
             "$.provider_generations.catalog_sha256",
-            "no file in the target generation has the catalog hash the ledger recorded",
+            "no file in the target generation and no declared artifact has the "
+            "catalog hash the ledger recorded",
         )
 
 

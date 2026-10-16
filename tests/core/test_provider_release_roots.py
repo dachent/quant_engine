@@ -252,3 +252,31 @@ def test_the_recovery_gate_names_only_roots_whose_pointer_is_unreadable(
         )
         is None
     )
+
+
+def test_a_catalog_retained_elsewhere_binds_through_the_manifest_declaration(
+    tmp_path,
+) -> None:
+    """Portfolio123 keeps only generation.json; its ledger catalog hash is a declared artifact."""
+
+    fixture = _Fixture(tmp_path)
+    manifest = json.loads(
+        (fixture.sources["provider-portfolio123"] / "generation.json").read_text(
+            "utf-8"
+        )
+    )
+    declared = manifest["artifacts"][0]["sha256"]
+    (fixture.sources["provider-portfolio123"] / "catalog.json").unlink()
+    for row in fixture.bindings:
+        if row["provider_id"] == "portfolio123":
+            row["catalog_sha256"] = declared
+    fixture.write_ledger()
+    assert {node["root_id"] for node in fixture.nodes()} == set(
+        materializer.PROVIDER_ROOTS
+    )
+    for row in fixture.bindings:
+        if row["provider_id"] == "portfolio123":
+            row["catalog_sha256"] = "9" * 64
+    fixture.write_ledger()
+    with pytest.raises(materializer.MaterializationError, match="ledger binding"):
+        fixture.nodes()

@@ -963,3 +963,30 @@ def test_an_epoch_manifest_target_missing_a_panel_pinned_authority_artifact_bloc
     assert [f.check_id for f in findings] == ["release.provider_binding"]
     assert "does not declare it" in findings[0].message
     assert "authority/classified-flows.json" in findings[0].json_path
+
+
+def test_a_provider_catalog_the_manifest_declares_binds_without_the_file(
+    tmp_path: Path,
+) -> None:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/portfolio123-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
+    target = make_target("provider-portfolio123", tmp_path, GOOD_GEN)
+    ledger = {
+        "provider_generations": [
+            {
+                "provider_id": "portfolio123",
+                "generation_id": GOOD_GEN,
+                "manifest_sha256": target["proposed_manifest_sha256"],
+                "catalog_sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ]
+    }
+    assert list(rt.provider_binding(target, tmp_path, base_panel(), ledger)) == []
