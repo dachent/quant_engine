@@ -1912,6 +1912,30 @@ def check_embedded_payload_copies(ctx: Context) -> Iterator[Finding]:
         )
     report_sha = scan.stripped_sha256.get(REPORT)
     embedded = scan.embedded_payloads.get("portfolio-report-data.json")
+    # A candidate record without `embedded_artifacts` predates #540 and declares no digest.
+    if (
+        scan.report_embedded_only
+        and embedded is not None
+        and ctx.gen.candidate.get("embedded_artifacts") is not None
+    ):
+        # No file beside the page: the embedded bytes are the only copy. They must be
+        # the digest the candidate record declares for them (the panel's own
+        # meta.report_sha256 binding is checked in identity.embedded_ids).
+        record = node(ctx.gen.candidate, "embedded_artifacts", REPORT)
+        declared = node(record, "sha256")
+        declared_size = node(record, "size_bytes")
+        if declared != embedded.sha256 or declared_size != embedded.size_bytes:
+            yield _finding(
+                "identity.embedded_payload_copies",
+                BLOCKER_AUTHORITY,
+                "index.html:portfolio-report-data.json",
+                {"sha256": embedded.sha256, "size_bytes": embedded.size_bytes},
+                {"sha256": declared, "size_bytes": declared_size},
+                CANDIDATE,
+                f"$.embedded_artifacts['{REPORT}']",
+                (),
+                "the embedded report differs from the candidate record",
+            )
     if INDEX in scan.files and embedded is not None:
         contiguous = embedded.chunk_indexes == tuple(range(len(embedded.chunk_indexes)))
         full = scan.files.get(REPORT, (0, ""))[1]
@@ -8357,7 +8381,13 @@ def check_lint_display_tokens(ctx: Context) -> Iterator[Finding]:
 def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     """F4/F5: payload size and duplicate copies (never a G1 prerequisite)."""
 
-    files = ctx.gen.scan.files
+    scan = ctx.gen.scan
+    # An embedded-only report is read as a virtual file; it is not a file to size.
+    files = {
+        rel: value
+        for rel, value in scan.files.items()
+        if not (scan.report_embedded_only and rel == REPORT)
+    }
     large = {rel: size for rel, (size, _) in sorted(files.items()) if size > 50_000_000}
     by_sha: dict[str, list[str]] = {}
     for rel, (size, digest) in files.items():

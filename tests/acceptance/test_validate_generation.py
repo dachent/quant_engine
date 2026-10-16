@@ -60,6 +60,9 @@ class Spec:
     post_write: list[Callable[[Path], None]] = field(default_factory=list)
     gzip_embed: bool = False
     parts_script: str | None = None  # "good" | "other-bytes" | "bad-gzip"
+    # The report is carried only inside index.html (#540): no downloads/ file.
+    report_embedded_only: bool = False
+    embedded_record: bool = True
 
 
 def _twr_row(
@@ -1011,6 +1014,16 @@ def build(root: Path, spec: Spec | None = None) -> Path:
         "index.html": shell,
     }
     files.update(spec.extra_files)
+    embedded_artifacts: dict[str, Any] | None = None
+    if spec.report_embedded_only:
+        carried = files.pop("downloads/portfolio-report-data.json")
+        embedded_artifacts = {
+            "downloads/portfolio-report-data.json": {
+                "encoding": "gzip" if spec.gzip_embed else "identity",
+                "sha256": _sha(carried),
+                "size_bytes": len(carried),
+            }
+        }
     for rel, data in files.items():
         path = gen_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1025,6 +1038,8 @@ def build(root: Path, spec: Spec | None = None) -> Path:
         "account_manifest_authority_profile": "VERIFIED",
         "artifact_sha256": {rel: _sha(data) for rel, data in sorted(files.items())},
     }
+    if embedded_artifacts is not None and spec.embedded_record:
+        candidate["embedded_artifacts"] = embedded_artifacts
     for mutate in spec.candidate:
         mutate(candidate)
     candidate_bytes = _dump(candidate)
@@ -1164,6 +1179,56 @@ def test_gzip_parts_data_script_carries_the_published_panel_payload(
         scan.panel_script_payload_sha256
         == scan.stripped_sha256["data/dashboard_data.json"]
     )
+
+
+@pytest.mark.parametrize("gzip_embed", [False, True], ids=["identity", "gzip"])
+def test_report_carried_only_inside_index_html_validates_like_the_file_copy(
+    tmp_path: Path, gzip_embed: bool
+) -> None:
+    """#540: no downloads/ file; the page's bytes are read as the report."""
+
+    with_file = build(tmp_path / "file", Spec(gzip_embed=gzip_embed))
+    embedded_only = build(
+        tmp_path / "embedded", Spec(gzip_embed=gzip_embed, report_embedded_only=True)
+    )
+    assert not (embedded_only / "downloads").exists()
+    expected = {f.check_id for f in run(with_file)}
+    assert {f.check_id for f in run(embedded_only)} == expected
+    assert load_generation(embedded_only).scan.report_embedded_only is True
+    assert load_generation(embedded_only).report == load_generation(with_file).report
+
+
+def test_embedded_only_report_must_match_the_candidate_record(tmp_path: Path) -> None:
+    def forge(candidate: dict[str, Any]) -> None:
+        candidate["embedded_artifacts"]["downloads/portfolio-report-data.json"][
+            "sha256"
+        ] = "0" * 64
+
+    gen_dir = build(tmp_path, Spec(report_embedded_only=True, candidate=[forge]))
+    assert "identity.embedded_payload_copies" in {f.check_id for f in run(gen_dir)}
+
+
+def test_embedded_only_report_without_a_record_is_a_pre_540_generation(
+    tmp_path: Path,
+) -> None:
+    gen_dir = build(tmp_path, Spec(report_embedded_only=True, embedded_record=False))
+    assert [f.check_id for f in run(gen_dir)] == ["expected.not_supplied"]
+
+
+def test_report_neither_beside_nor_inside_the_page_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    gen_dir = build(tmp_path, Spec(report_embedded_only=True))
+    shell = (gen_dir / "index.html").read_bytes()
+    start = shell.index(b'<script type="application/octet-stream"')
+    end = shell.rindex(
+        b"</script>", 0, shell.index(b'<script src="data/dashboard_data.js">')
+    )
+    (gen_dir / "index.html").write_bytes(
+        shell[:start] + shell[end + len(b"</script>") :]
+    )
+    with pytest.raises(GenerationError, match="neither beside the page nor embedded"):
+        load_generation(gen_dir)
 
 
 def test_corrupt_gzip_part_in_the_data_script_is_unreadable(tmp_path: Path) -> None:

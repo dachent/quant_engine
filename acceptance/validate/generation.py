@@ -37,7 +37,9 @@ FRESHNESS = "data/freshness-health.json"
 APP = "app.js"
 INDEX = "index.html"
 
-REQUIRED_FILES = (GENERATION_MANIFEST, CANDIDATE, PANEL, REPORT)
+# The report download may be carried only inside index.html (#540); a generation that
+# still has the file beside the page (older generations) is read from the file.
+REQUIRED_FILES = (GENERATION_MANIFEST, CANDIDATE, PANEL)
 JSON_FILES = (GENERATION_MANIFEST, CANDIDATE, PANEL, REPORT, FRESHNESS)
 TEXT_SUFFIXES = frozenset(
     {".json", ".js", ".html", ".htm", ".css", ".txt", ".md", ".svg", ".csv"}
@@ -86,6 +88,7 @@ class ScanResult:
     embedded_payloads: dict[str, EmbeddedPayload] = field(default_factory=dict)
     panel_script_payload_sha256: str | None = None
     panel_script_global: str | None = None
+    report_embedded_only: bool = False
 
 
 @dataclass
@@ -356,6 +359,59 @@ def _embedded_payloads(data: bytes) -> dict[str, EmbeddedPayload]:
     return payloads
 
 
+def _embedded_bytes(data: bytes, filename: str) -> bytes | None:
+    """The exact bytes of one embedded download (gzip inflated), or None if absent."""
+
+    found: list[tuple[int, bytes]] = []
+    gzip_flags: set[bool] = set()
+    position = 0
+    while True:
+        start = data.find(_EMBED_OPEN, position)
+        if start < 0:
+            break
+        tag_end = data.find(b">", start)
+        end = data.find(_EMBED_CLOSE, tag_end)
+        if tag_end < 0 or end < 0:
+            raise GenerationError("index.html embedded payload script is unterminated")
+        tag = data[start : tag_end + 1].decode("utf-8", "replace")
+        name = re.search(r'data-download-filename="([^"]+)"', tag)
+        index = re.search(r'data-download-chunk-index="(\d+)"', tag)
+        position = end + len(_EMBED_CLOSE)
+        if name is None or index is None or name.group(1) != filename:
+            continue
+        encoding = re.search(r'data-download-encoding="([^"]+)"', tag)
+        gzip_flags.add(encoding is not None and encoding.group(1) == "gzip")
+        found.append(
+            (
+                int(index.group(1)),
+                bytes(data[tag_end + 1 : end]).translate(None, b" \t\r\n"),
+            )
+        )
+    if not found:
+        return None
+    found.sort()
+    if [index for index, _ in found] != list(range(len(found))) or len(gzip_flags) != 1:
+        raise GenerationError(f"index.html embedded payload {filename} is incomplete")
+    try:
+        carried = binascii.a2b_base64(
+            b"".join(body for _, body in found), strict_mode=True
+        )
+        if gzip_flags == {True}:
+            inflater = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+            raw = inflater.decompress(carried) + inflater.flush()
+            if not inflater.eof or inflater.unused_data:
+                raise GenerationError(
+                    f"index.html embedded payload {filename} gzip member is "
+                    "truncated or has trailing bytes"
+                )
+            return raw
+        return carried
+    except (binascii.Error, zlib.error) as exc:
+        raise GenerationError(
+            f"index.html embedded payload {filename} is not readable: {exc}"
+        ) from exc
+
+
 def _script_payload_sha256(data: bytes) -> str | None:
     """sha256 of the JSON literal inside ``window.X = {...};``.
 
@@ -434,11 +490,10 @@ def scan_generation(
     app_js: str | None = None
     index_shell: str | None = None
     release_needle = release_id.encode("ascii") if release_id else None
-    for path in _iter_files(gen_dir):
-        rel = path.relative_to(gen_dir).as_posix()
-        data = _read_resident(path)
+
+    def scan_one(rel: str, suffix: str, data: bytes) -> None:
+        nonlocal app_js, index_shell
         scan.files[rel] = (len(data), hashlib.sha256(data).hexdigest())
-        suffix = path.suffix.lower()
         if suffix in TEXT_SUFFIXES:
             offsets = absolute_locator_offsets(data)
             if offsets:
@@ -484,7 +539,20 @@ def scan_generation(
             parsed[rel] = _load_json_bytes(data, rel)
         if rel == APP:
             app_js = data.decode("utf-8", "replace")
+
+    index_bytes: bytes | None = None
+    for path in _iter_files(gen_dir):
+        rel = path.relative_to(gen_dir).as_posix()
+        data = _read_resident(path)
+        scan_one(rel, path.suffix.lower(), data)
+        if rel == INDEX:
+            index_bytes = data
         del data
+    if REPORT not in scan.files and index_bytes is not None:
+        embedded_report = _embedded_bytes(index_bytes, REPORT.rsplit("/", 1)[-1])
+        if embedded_report is not None:
+            scan_one(REPORT, ".json", embedded_report)
+            scan.report_embedded_only = True
     return scan, parsed, app_js, index_shell
 
 
@@ -580,6 +648,10 @@ def load_generation(
     scan, parsed, app_js, index_shell = scan_generation(
         gen_dir, release_id if isinstance(release_id, str) else None
     )
+    if REPORT not in scan.files:
+        raise GenerationError(
+            "required report is neither beside the page nor embedded in index.html"
+        )
     documents: dict[str, dict[str, Any]] = {}
     for name in (GENERATION_MANIFEST, CANDIDATE, PANEL, REPORT):
         value = parsed.get(name)
