@@ -44,6 +44,7 @@ _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PREDECESSOR_REPAIR_GATE_ID: Final = "predecessor-authority-repair"
+_POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
 _FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x400
 _FILE_READ_ATTRIBUTES: Final = 0x80
 _FILE_SHARE_READ: Final = 0x1
@@ -1155,7 +1156,51 @@ def _validate_invalid_previous_artifact_inventory(
 
 
 def _repairs_invalid_previous_inventory(manifest: ReleaseManifest) -> bool:
-    return any(item.gate_id == _PREDECESSOR_REPAIR_GATE_ID for item in manifest.gates)
+    """Whether predecessor pointers are compared as recorded, not as validated.
+
+    Both governed predecessor gates admit a root whose own ``CURRENT.json`` no
+    longer passes ``read_current``; the pipeline re-derives that failure from
+    disk before it will bind either gate.
+    """
+
+    return any(
+        item.gate_id in {_PREDECESSOR_REPAIR_GATE_ID, _POINTER_RECOVERY_GATE_ID}
+        for item in manifest.gates
+    )
+
+
+def _recorded_inventory_claim(root: Path, pointer: CurrentPointer | None) -> str | None:
+    """The inventory hash a recorded predecessor pointer binds.
+
+    A pointer to a generation that no longer exists cannot be re-inventoried; the
+    only authority left is the pointer's own claim. That claim is carried into
+    the release so a rollback restores exactly the pointer that was found.
+    """
+
+    if pointer is None:
+        return None
+    if not (root / "generations" / pointer.generation_id).exists():
+        if pointer.artifact_inventory_sha256 is None:
+            raise ReleaseConflictError(
+                "dangling predecessor pointer carries no inventory claim"
+            )
+        return pointer.artifact_inventory_sha256
+    return generation_inventory_sha256(root, pointer.generation_id)
+
+
+def _roots_of_manifest(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> dict[str, Path]:
+    """The runtime roots a recorded release was committed over.
+
+    A successor may add roots; the predecessor graph is still judged over exactly
+    the roots it bound.
+    """
+
+    wanted = {item.root_id for item in manifest.targets}
+    if not wanted <= set(roots):
+        raise ReleaseValidationError("a successor release dropped a predecessor root")
+    return {root_id: roots[root_id] for root_id in wanted}
 
 
 def _validate_root_identities(
@@ -1199,7 +1244,7 @@ def _validate_previous_inventory(root: Path, target: ReleaseTarget) -> None:
             f"previous generation inventory is unbound: {target.root_id}"
         )
     if (
-        generation_inventory_sha256(root, target.previous_pointer.generation_id)
+        _recorded_inventory_claim(root, target.previous_pointer)
         != target.previous_inventory_sha256
     ):
         raise ReleaseConflictError(
@@ -1217,6 +1262,7 @@ def prepare_release(
     gates: tuple[GateEvidence, ...],
     companions: tuple[CompanionInput, ...] = (),
     allow_invalid_previous_artifact_inventory: bool = False,
+    allow_unusable_predecessor_pointers: bool = False,
 ) -> ReleaseManifest:
     """Create a hash-bound release and recovery state without changing pointers."""
 
@@ -1225,6 +1271,22 @@ def prepare_release(
     ):
         raise ReleaseValidationError(
             "predecessor inventory repair requires its governed gate"
+        )
+    if allow_unusable_predecessor_pointers and not any(
+        item.gate_id == _POINTER_RECOVERY_GATE_ID for item in gates
+    ):
+        raise ReleaseValidationError(
+            "unusable predecessor pointers require their governed gate"
+        )
+    if any(item.gate_id == _POINTER_RECOVERY_GATE_ID for item in gates) and not (
+        allow_unusable_predecessor_pointers
+    ):
+        raise ReleaseValidationError(
+            "a pointer recovery gate must be bound with its governed permission"
+        )
+    if allow_unusable_predecessor_pointers and allow_invalid_previous_artifact_inventory:
+        raise ReleaseValidationError(
+            "pointer recovery and inventory repair are separate dispositions"
         )
     normalized_roots = _normalize_roots(roots)
     coordination_root = coordination_root.resolve()
@@ -1260,13 +1322,14 @@ def prepare_release(
                 else None
             )
         except PointerIntegrityError:
-            if not allow_invalid_previous_artifact_inventory:
+            if not (
+                allow_invalid_previous_artifact_inventory
+                or allow_unusable_predecessor_pointers
+            ):
                 raise
             previous_pointer = _read_recorded_current(root)
-            previous_inventory_sha256 = (
-                generation_inventory_sha256(root, previous_pointer.generation_id)
-                if previous_pointer is not None
-                else None
+            previous_inventory_sha256 = _recorded_inventory_claim(
+                root, previous_pointer
             )
         targets.append(
             ReleaseTarget(
@@ -1313,21 +1376,22 @@ def prepare_release(
             "predecessor inventory repair requires coordinated authority"
         )
     if previous_authority is not None:
+        previous_manifest, previous_journal = read_release(
+            coordination_root, previous_authority.release_id
+        )
+        previous_roots = _roots_of_manifest(previous_manifest, normalized_roots)
         try:
-            read_current_release(coordination_root, normalized_roots)
+            read_current_release(coordination_root, previous_roots)
         except PointerIntegrityError:
             if not allow_invalid_previous_artifact_inventory:
                 raise
-            previous_manifest, previous_journal = read_release(
-                coordination_root, previous_authority.release_id
-            )
             if previous_journal.state is not ReleaseState.COMMITTED:
                 raise ReleaseConflictError(
                     "authoritative release journal is not COMMITTED"
                 )
             _validate_invalid_previous_artifact_inventory(
                 previous_manifest,
-                normalized_roots,
+                previous_roots,
                 coordination_root=coordination_root,
             )
     release_manifest = ReleaseManifest.build(
