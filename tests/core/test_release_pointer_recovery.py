@@ -375,3 +375,85 @@ def test_the_pipeline_refuses_a_gate_that_misdescribes_the_disk(
         _verify_pointer_recovery_gate(
             _spec(world), _gate_file(tmp_path, world, rows=rows)
         )
+
+
+def test_rollback_restores_a_non_canonical_pointer_byte_for_byte(tmp_path) -> None:
+    world = _World(tmp_path)
+    pointer = json.loads(world.found["dangling"])
+    messy = (
+        json.dumps(dict(reversed(list(pointer.items()))), indent=3).encode() + b"\n\n"
+    )
+    assert messy != CurrentPointer.from_json_bytes(messy).to_json_bytes()
+    (world.dangling / "CURRENT.json").write_bytes(messy)
+    world.found["dangling"] = messy
+    manifest = world.prepare()
+    assert (
+        world.coordination
+        / "releases"
+        / manifest.release_id
+        / "pointers"
+        / "dangling.bin"
+    ).read_bytes() == messy
+
+    def fail(step: str, _item: str) -> None:
+        if step == "after-authority":
+            raise OSError("synthetic mid-commit failure")
+
+    with pytest.raises(ReleaseCommitError):
+        commit_release(
+            coordination_root=world.coordination,
+            release_id=manifest.release_id,
+            roots=world.roots,
+            skip_release_validation=True,
+            fault_hook=fail,
+        )
+    assert (world.dangling / "CURRENT.json").read_bytes() == messy
+
+
+def test_a_successor_can_recover_a_root_that_a_committed_release_bound(
+    tmp_path,
+) -> None:
+    import shutil
+
+    world = _World(tmp_path)
+    first = world.prepare()
+    commit_release(
+        coordination_root=world.coordination,
+        release_id=first.release_id,
+        roots=world.roots,
+        skip_release_validation=True,
+    )
+    # a committed release's own root later loses its generation directory
+    shutil.rmtree(world.dangling / "generations" / world.generations["dangling"])
+    with pytest.raises(PointerIntegrityError):
+        read_current(world.dangling)
+    replacement = _manifest("dangling-replacement")
+    stage_generation(world.dangling, replacement)
+    generations = {**world.generations, "dangling": replacement.generation_id}
+
+    with pytest.raises(PointerIntegrityError):
+        prepare_release(
+            coordination_root=world.coordination,
+            roots=world.roots,
+            proposed_generations=generations,
+            code_commit="d" * 40,
+            created_at=datetime(2026, 10, 16, 15, tzinfo=UTC),
+            gates=_gates(False),
+        )
+    second = prepare_release(
+        coordination_root=world.coordination,
+        roots=world.roots,
+        proposed_generations=generations,
+        code_commit="d" * 40,
+        created_at=datetime(2026, 10, 16, 15, tzinfo=UTC),
+        gates=_gates(True),
+        allow_unusable_predecessor_pointers=True,
+    )
+    commit_release(
+        coordination_root=world.coordination,
+        release_id=second.release_id,
+        roots=world.roots,
+        skip_release_validation=True,
+    )
+    assert read_current(world.dangling).generation_id == replacement.generation_id
+    read_current_release(world.coordination, world.roots)

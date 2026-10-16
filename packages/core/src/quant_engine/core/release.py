@@ -1188,6 +1188,27 @@ def _recorded_inventory_claim(root: Path, pointer: CurrentPointer | None) -> str
     return generation_inventory_sha256(root, pointer.generation_id)
 
 
+def _recovered_pointer_bytes(
+    coordination_root: Path, manifest: ReleaseManifest, target: ReleaseTarget
+) -> bytes:
+    """The exact predecessor pointer bytes: recorded verbatim for a recovered root."""
+
+    assert target.previous_pointer is not None
+    recorded = (
+        _release_dir(coordination_root, manifest.release_id)
+        / "pointers"
+        / f"{target.root_id}.bin"
+    )
+    if not recorded.is_file():
+        return target.previous_pointer.to_json_bytes()
+    raw = recorded.read_bytes()
+    if CurrentPointer.from_json_bytes(raw) != target.previous_pointer:
+        raise ReleaseConflictError(
+            f"recovered pointer bytes differ from the release: {target.root_id}"
+        )
+    return raw
+
+
 def _roots_of_manifest(
     manifest: ReleaseManifest, roots: Mapping[str, Path]
 ) -> dict[str, Path]:
@@ -1305,6 +1326,7 @@ def prepare_release(
     if set(normalized_roots) != set(normalized_proposed):
         raise ReleaseValidationError("roots and proposed generation IDs must match")
     targets: list[ReleaseTarget] = []
+    recovered_pointer_bytes: dict[str, bytes] = {}
     for root_id in sorted(normalized_roots):
         root = normalized_roots[root_id]
         root_identity = _root_identity(root)
@@ -1334,6 +1356,10 @@ def prepare_release(
             previous_inventory_sha256 = _recorded_inventory_claim(
                 root, previous_pointer
             )
+            if allow_unusable_predecessor_pointers and previous_pointer is not None:
+                recovered_pointer_bytes[root_id] = (
+                    root.resolve() / "CURRENT.json"
+                ).read_bytes()
         targets.append(
             ReleaseTarget(
                 root_id=root_id,
@@ -1386,17 +1412,28 @@ def prepare_release(
         try:
             read_current_release(coordination_root, previous_roots)
         except PointerIntegrityError:
-            if not allow_invalid_previous_artifact_inventory:
+            if allow_unusable_predecessor_pointers:
+                # The committed authority itself must still be intact; the
+                # unusable pointers are bound by the recovery gate the pipeline
+                # re-derived from disk, not by read_current.
+                if previous_journal.state is not ReleaseState.COMMITTED:
+                    raise ReleaseConflictError(
+                        "authoritative release journal is not COMMITTED"
+                    )
+                if _expected_authority(previous_manifest) != previous_authority:
+                    raise ReleaseConflictError("coordinated release authority differs")
+            elif not allow_invalid_previous_artifact_inventory:
                 raise
-            if previous_journal.state is not ReleaseState.COMMITTED:
-                raise ReleaseConflictError(
-                    "authoritative release journal is not COMMITTED"
+            else:
+                if previous_journal.state is not ReleaseState.COMMITTED:
+                    raise ReleaseConflictError(
+                        "authoritative release journal is not COMMITTED"
+                    )
+                _validate_invalid_previous_artifact_inventory(
+                    previous_manifest,
+                    previous_roots,
+                    coordination_root=coordination_root,
                 )
-            _validate_invalid_previous_artifact_inventory(
-                previous_manifest,
-                previous_roots,
-                coordination_root=coordination_root,
-            )
     release_manifest = ReleaseManifest.build(
         code_commit=code_commit,
         created_at=created_at,
@@ -1416,6 +1453,8 @@ def prepare_release(
                 directory / "recovery" / f"{plan.companion_id}.bin",
                 companion_path.read_bytes(),
             )
+    for root_id, raw in sorted(recovered_pointer_bytes.items()):
+        _create_exact(directory / "pointers" / f"{root_id}.bin", raw)
     _create_exact(
         directory / "journal.json",
         ReleaseJournal(
@@ -1708,7 +1747,9 @@ def rollback_release(
                 else:
                     _atomic_write(
                         root / "CURRENT.json",
-                        release_target.previous_pointer.to_json_bytes(),
+                        _recovered_pointer_bytes(
+                            coordination_root, manifest, release_target
+                        ),
                     )
                     restored = (
                         _read_recorded_current(root)

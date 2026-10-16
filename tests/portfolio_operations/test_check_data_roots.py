@@ -130,9 +130,16 @@ def test_boundary_policy_floor_requires_the_new_roots() -> None:
         assert name.lower() in boundary._REQUIRED_PROVIDER_ROOTS, name
 
 
+def _retain_payload(root: Path, generation: str) -> Path:
+    payload = root / "generations" / generation / "tracker.json"
+    payload.write_bytes(b"synthetic-content")
+    return payload
+
+
 def test_evidence_only_root_passes_on_hash_verified_generations(tmp_path: Path) -> None:
     root = tmp_path / "dataIBKR"
     generation = _publish(root)
+    _retain_payload(root, generation)
     # a dangling pointer is the audited defect; for an evidence-only root the
     # retained generation is what matters and the pointer is not authority
     pointer = json.loads((root / "CURRENT.json").read_text(encoding="utf-8"))
@@ -140,17 +147,34 @@ def test_evidence_only_root_passes_on_hash_verified_generations(tmp_path: Path) 
     (root / "CURRENT.json").write_text(json.dumps(pointer), encoding="utf-8")
     ok, message = gate.check_root(root)
     assert ok and "evidence-only" in message and "1 generation" in message
-    assert generation
 
 
-def test_evidence_only_root_fails_on_a_corrupt_or_empty_generation(
+def test_evidence_only_root_refuses_a_followable_pointer(tmp_path: Path) -> None:
+    root = tmp_path / "dataIBKR"
+    generation = _publish(root)
+    _retain_payload(root, generation)
+    publish_generation(root, generation)  # re-bind the pointer to the inventory
+    ok, message = gate.check_root(root)
+    assert not ok and "followable CURRENT pointer" in message
+    (root / "CURRENT.json").unlink()
+    assert gate.check_root(root)[0]
+
+
+def test_evidence_only_root_fails_on_corrupt_missing_or_empty_payload(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "dataIBKR"
     generation = _publish(root)
-    (root / "generations" / generation / "generation.json").write_bytes(b"{}")
+    (root / "CURRENT.json").unlink()
     ok, message = gate.check_root(root)
-    assert not ok
+    assert not ok and "none of its declared artifact bytes" in message
+    payload = _retain_payload(root, generation)
+    assert gate.check_root(root)[0]
+    payload.write_bytes(b"tampered")
+    ok, message = gate.check_root(root)
+    assert not ok and "bytes differ" in message
+    (root / "generations" / generation / "generation.json").write_bytes(b"{}")
+    assert not gate.check_root(root)[0]
     shutil.rmtree(root / "generations" / generation)
     ok, message = gate.check_root(root)
     assert not ok and "retains no generation" in message

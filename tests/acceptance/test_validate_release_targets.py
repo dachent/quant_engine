@@ -948,3 +948,18 @@ def test_an_epoch_manifest_target_the_panel_does_not_pin_is_a_blocker(
         )
     )
     assert findings and findings[0].observed["bytes"] == _sha(b"tampered\n")
+
+
+def test_an_epoch_manifest_target_missing_a_panel_pinned_authority_artifact_blocks(
+    tmp_path: Path,
+) -> None:
+    target = _epoch_target(tmp_path)
+    panel = _panel_pinning(_sha(EPOCH_ARTIFACT_BYTES))
+    panel["account_manifest"]["classified_flows"] = {
+        "artifact_id": "authority/classified-flows.json",
+        "sha256": "3" * 64,
+    }
+    findings = list(rt.provider_binding(target, tmp_path, panel, None))
+    assert [f.check_id for f in findings] == ["release.provider_binding"]
+    assert "does not declare it" in findings[0].message
+    assert "authority/classified-flows.json" in findings[0].json_path

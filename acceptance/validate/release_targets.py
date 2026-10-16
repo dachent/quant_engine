@@ -133,6 +133,7 @@ KNOWN_ROOTS: frozenset[str] = frozenset(
 # module imports no production builder.
 PROVIDER_LEDGER_ROOT_ID = "provider-ledger"
 EPOCH_MANIFEST_ROOT_ID = "epoch-manifest"
+_EPOCH_AUTHORITY_PREFIX = "authority/"
 PROVIDER_ROOT_PROVIDERS: dict[str, str] = {
     "provider-alpaca": "alpaca",
     "provider-fidelity": "fidelity",
@@ -502,6 +503,20 @@ def provider_binding(
             yield finding(None, "a readable generation manifest", "$", "unreadable")
             return
         shared = sorted(set(pinned) & set(declared))
+        # Every authority artifact the panel pins belongs to the epoch manifest;
+        # a generation that omits one is a different epoch manifest.
+        for artifact_id in sorted(
+            item
+            for item in pinned
+            if item.startswith(_EPOCH_AUTHORITY_PREFIX) and item not in declared
+        ):
+            yield finding(
+                None,
+                pinned[artifact_id],
+                f"$.artifacts[{artifact_id}]",
+                f"the panel pins {artifact_id} but the epoch-manifest generation "
+                "does not declare it",
+            )
         if not shared:
             yield finding(
                 None,

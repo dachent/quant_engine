@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import hashlib
 from pathlib import Path
 import sys
 
@@ -46,6 +47,15 @@ EVIDENCE_ONLY_ROOTS = {"dataIBKR": "ledger qualification ACCEPTED_PARTIAL"}
 
 
 def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
+    """An evidence-only root retains verified generations and exposes no pointer.
+
+    ``read_generation`` proves the manifest and the generation identity. A retained
+    generation need not carry every file its manifest declares (source captures live
+    in the provider's source-runs), so the payload check is on the bytes that ARE
+    present: any declared artifact found at its id or flat basename must equal its
+    declared sha256, and at least one declared artifact must be present at all.
+    """
+
     generations = root / "generations"
     names = (
         sorted(item.name for item in generations.iterdir())
@@ -56,9 +66,33 @@ def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
         return False, "evidence-only root retains no generation"
     for name in names:
         try:
-            read_generation(root, name)
+            manifest = read_generation(root, name)
         except Exception as error:  # noqa: BLE001 - every verifier refusal is a finding
             return False, f"{name[:12]} {type(error).__name__}: {error}"
+        present = 0
+        for artifact in manifest.artifacts:
+            base = generations / name
+            for candidate in (
+                base / artifact.artifact_id,
+                base / Path(artifact.artifact_id).name,
+            ):
+                if candidate.is_file():
+                    present += 1
+                    if (
+                        hashlib.sha256(candidate.read_bytes()).hexdigest()
+                        != artifact.sha256
+                    ):
+                        return False, f"{name[:12]} {artifact.artifact_id} bytes differ"
+                    break
+        if not present:
+            return False, f"{name[:12]} retains none of its declared artifact bytes"
+    if (root / "CURRENT.json").exists():
+        try:
+            read_current(root)
+        except Exception:  # noqa: BLE001 - an unreadable pointer is fail-closed
+            pass
+        else:
+            return False, "evidence-only root exposes a followable CURRENT pointer"
     return True, f"evidence-only ({reason}); {len(names)} generation(s) hash-verified"
 
 
