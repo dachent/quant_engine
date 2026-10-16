@@ -1695,15 +1695,27 @@ def _verify_consumers(
     # The panel carries the report inside index.html (#540). A generation that
     # predates the embed has only the file beside the page, and one that has both
     # must agree.
-    try:
+    panel_files = {file.relative_path for file in epochs["panel_generation"].files}
+    embedded_report: bytes | None = None
+    if "index.html" in panel_files:
+        # Only a page without the embed may fall back to the file: an index that
+        # fails its hash or a payload that cannot be read is a broken download.
         _index_path, index_bytes = _generation_file(
             epochs["panel_generation"], "index.html"
         )
-        embedded_report: bytes | None = panel_producer.embedded_download_bytes(
-            index_bytes.decode("utf-8"), panel_producer.REPORT_DOWNLOAD
-        )
-    except (FinancialOutcomeError, panel_producer.ControlPanelValidationError):
-        embedded_report = None
+        try:
+            page = index_bytes.decode("utf-8")
+            prefix = panel_producer._DOWNLOAD_METADATA[panel_producer.REPORT_DOWNLOAD][
+                2
+            ]
+            if f'data-download-payload-prefix="{prefix}"' in page:
+                embedded_report = panel_producer.embedded_download_bytes(
+                    page, panel_producer.REPORT_DOWNLOAD
+                )
+        except (UnicodeDecodeError, panel_producer.ControlPanelValidationError) as exc:
+            raise FinancialOutcomeError(
+                f"panel embedded report is unreadable: {exc}"
+            ) from exc
     try:
         _path, report_file = _generation_file(
             epochs["panel_generation"], panel_producer.REPORT_DOWNLOAD
