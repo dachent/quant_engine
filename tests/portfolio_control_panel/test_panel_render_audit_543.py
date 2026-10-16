@@ -1463,6 +1463,35 @@ def test_F26_the_post_cutoff_caveat_is_one_note_not_one_per_row(tmp_path: Path) 
     )
 
 
+def test_F26_the_through_date_comes_from_observed_end_not_the_capture_date(
+    tmp_path: Path,
+) -> None:
+    def late_row(observed_end: str) -> dict[str, Any]:
+        return {
+            "provider_evidence": {
+                "account": {"observed_end": observed_end, "provider_id": "schwab"},
+                "generation_as_of_date": "2026-09-18",
+                "provider_id": "schwab",
+            }
+        }
+
+    full = base(strategies=[strategy("A", **late_row(CUTOFF))])
+    assert "run through the cutoff" in call(tmp_path, full, "postCutoffCaptureNote")
+    short = base(strategies=[strategy("A", **late_row("2026-09-01"))])
+    note = call(tmp_path, short, "postCutoffCaptureNote")
+    assert "run through the cutoff" not in note
+    assert "end on their own dates" in note
+    mixed = base(
+        strategies=[
+            strategy("A", **late_row(CUTOFF)),
+            strategy("B", **late_row("2026-09-01")),
+        ]
+    )
+    assert "run through the cutoff" not in call(
+        tmp_path, mixed, "postCutoffCaptureNote"
+    )
+
+
 # ---- F27 / F39: the orthogonal tables ----------------------------------------------------
 
 

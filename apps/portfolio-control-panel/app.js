@@ -217,9 +217,16 @@
     const cutoffDate = String(data.meta?.portfolio_as_of || "").slice(0, 10);
     const strategies = Array.isArray(data.strategies) ? data.strategies : [];
     const late = strategies.filter((row) => cutoffDate !== "" && String(row.provider_evidence?.generation_as_of_date || "").slice(0, 10) > cutoffDate);
-    return late.length
-      ? `Post-cutoff capture: ${integer.format(late.length)} of ${integer.format(strategies.length)} provider captures are dated after the ${formatDate(cutoffDate)} cutoff; the data they carry runs through the cutoff.`
-      : "";
+    if (!late.length) return "";
+    // The through-date is the observed_end of each accepted evidence path, never the capture date.
+    const ends = late.flatMap((row) => [row.provider_evidence?.account, row.provider_evidence?.provider]
+      .filter(Boolean)
+      .map((path) => String(path.observed_end || "").slice(0, 10)));
+    const allThroughCutoff = ends.length > 0 && ends.every((end) => end !== "" && end >= cutoffDate);
+    const head = `Post-cutoff capture: ${integer.format(late.length)} of ${integer.format(strategies.length)} provider captures are dated after the ${formatDate(cutoffDate)} cutoff`;
+    return allThroughCutoff
+      ? `${head}; the observed intervals they carry run through the cutoff.`
+      : `${head}; observed intervals end on their own dates, shown per row.`;
   };
   const evidenceCaption = (title) => {
     const note = postCutoffCaptureNote();
