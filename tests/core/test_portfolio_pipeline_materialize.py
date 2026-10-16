@@ -24,6 +24,7 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
+    CurrentPointer,
     GenerationManifest,
     PipelineGate,
     PipelineSpec,
@@ -3991,6 +3992,87 @@ def test_production_spec_binds_stable_twenty_root_authority(
 
     assert result["root_count"] == 20
     assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
+
+    # REL-PROVIDER-ROOTS-001: the provider and epoch-manifest roots join the same
+    # release as targets. Opt-in, and every generation must be the ledger's own.
+    if not current_surfaces:
+        from test_provider_release_roots import (
+            _Fixture as _ProviderFixture,
+            _manifest as _provider_manifest,
+        )
+
+        providers = _ProviderFixture(tmp_path / "providers")
+        monkeypatch.setattr(
+            materializer,
+            "_ledger_provider_bindings",
+            lambda _ledger: {row["provider_id"]: row for row in providers.bindings},
+        )
+        real_recipe = materializer._recipe
+        monkeypatch.setattr(
+            materializer,
+            "_recipe",
+            lambda path: {
+                **real_recipe(path),
+                "epoch_manifest_generation": providers.recipe[
+                    "epoch_manifest_generation"
+                ],
+            },
+        )
+        # A provider pointer that dangles must travel through the recovery gate.
+        dangling_root = production_root.parent / "dataSchwab"
+        stage_generation(dangling_root, _provider_manifest("gone"))
+        (dangling_root / "CURRENT.json").write_bytes(
+            CurrentPointer(
+                generation_id="0" * 64,
+                manifest_sha256="1" * 64,
+                artifact_inventory_sha256="2" * 64,
+                pointer_schema_version=2,
+            ).to_json_bytes()
+        )
+        provider_spec_path = tmp_path / "with-providers" / "production-spec.json"
+        provider_result = materializer.build_production_spec(
+            recipe_path,
+            prepared_root,
+            prepared_root / "evidence" / "post-build-semantic.json",
+            production_root,
+            state_root,
+            provider_spec_path,
+            financial_artifacts_path=financial_artifacts,
+            provider_generations_path=providers.listing(),
+        )
+        provider_spec = PipelineSpec.from_json_bytes(provider_spec_path.read_bytes())
+        assert provider_result["root_count"] == 20 + len(materializer.PROVIDER_ROOTS)
+        assert set(provider_spec.roots) == set(materializer.PRODUCTION_ROOTS) | set(
+            materializer.PROVIDER_ROOTS
+        )
+        # the seven providers less the PARTIAL IBKR evidence, plus the epoch manifest
+        assert (
+            set(provider_spec.release_generations)
+            - set(spec.release_generations)
+            == set(materializer.PROVIDER_ROOTS) - {"provider-ibkr"}
+        )
+        assert "provider-ibkr" not in provider_spec.release_generations
+        assert provider_spec.roots["provider-ibkr"] == production_root.parent / "dataIBKR"
+        retained = next(
+            node for node in provider_spec.nodes if node.node_id == "retain-provider-ibkr"
+        )
+        assert retained.release_target is False
+        recovery = [
+            gate
+            for gate in provider_spec.gates
+            if gate.gate_id == core_pipeline._POINTER_RECOVERY_GATE
+        ]
+        assert len(recovery) == 1
+        recovery_rows = json.loads(recovery[0].path.read_text(encoding="utf-8"))[
+            "unusable_pointers"
+        ]
+        assert [row["root_id"] for row in recovery_rows] == ["provider-schwab"]
+        # a plain build never grows the gate list or the root set
+        assert not [
+            gate
+            for gate in plain.gates
+            if gate.gate_id == core_pipeline._POINTER_RECOVERY_GATE
+        ]
     if current_surfaces:
         selected = {node.node_id: node for node in spec.nodes}
         assert len(spec.release_generations) == 20

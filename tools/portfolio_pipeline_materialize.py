@@ -21,6 +21,7 @@ from quant_engine.core import (
     GenerationManifest,
     VerificationStatus,
     inventory_generation,
+    PointerIntegrityError,
     read_current,
     read_generation_bundle,
     runtime_environment_sha256,
@@ -175,6 +176,34 @@ PRODUCTION_ROOTS = {
     "us-sector": Path("analytics/decomposition-lenses/us-sector"),
     "weekly-returns": Path("analytics/weekly-returns"),
 }
+# Governed data roots that sit BESIDE ``dataPortfolio`` and that a release depends
+# on (REL-PROVIDER-ROOTS-001): the seven providers the provider ledger binds and the
+# epoch-manifest root. They are release targets in their own right so the
+# predecessor-graph restore reproduces provider inputs, not only derived outputs.
+PROVIDER_ROOTS: Final = {
+    "epoch-manifest": "dataEpochManifest",
+    "provider-alpaca": "dataAlpaca",
+    "provider-fidelity": "dataFidelity",
+    "provider-ibkr": "dataIBKR",
+    "provider-matrixport": "dataMatrixport",
+    "provider-portfolio123": "dataPortfolio123",
+    "provider-quantbase": "dataQuantbase",
+    "provider-schwab": "dataSchwab",
+}
+LEDGER_PROVIDER_ROOTS: Final = {
+    root_id.removeprefix("provider-"): root_id
+    for root_id in PROVIDER_ROOTS
+    if root_id.startswith("provider-")
+}
+# The ledger's own qualification of each bound provider generation decides whether
+# that generation may be current consumer authority. A PARTIAL generation is
+# immutable evidence (docs/architecture/system-boundaries.md): it is retained in
+# its root but is never published as CURRENT.
+PROVIDER_CURRENT_QUALIFICATIONS: Final = frozenset(
+    {"FINITE_STATIC", "PUBLISHED_COMPLETE", "STAGED_COMPLETE"}
+)
+PROVIDER_EVIDENCE_QUALIFICATIONS: Final = frozenset({"ACCEPTED_PARTIAL"})
+POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
 PRODUCTION_STAGE_ROOTS = {
     "correlation": Path("stages/analytics/correlation"),
     "europe-economic": Path("stages/analytics/decomposition-lenses/europe-economic"),
@@ -5005,6 +5034,151 @@ def _prepared_retained_cache_root(prepared_root: Path) -> Path:
     return Path(root).resolve()
 
 
+def _provider_root_paths(portfolio_root: Path) -> dict[str, Path]:
+    return {
+        root_id: portfolio_root.parent / name
+        for root_id, name in PROVIDER_ROOTS.items()
+    }
+
+
+def _ledger_provider_bindings(ledger_generation: Path) -> dict[str, dict[str, Any]]:
+    """The provider generations the selected provider ledger binds, by provider."""
+
+    for relative in ("provider-ledger.json", "normalized/provider-ledger.json"):
+        if (ledger_generation / relative).is_file():
+            catalog = _load(ledger_generation / relative, "provider ledger catalog")
+            break
+    else:
+        raise MaterializationError("provider ledger catalog is missing")
+    rows = catalog.get("provider_generations")
+    if not isinstance(rows, list):
+        raise MaterializationError("provider ledger binds no provider generations")
+    bound: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("provider_id"), str):
+            raise MaterializationError("provider ledger provider binding differs")
+        if row["provider_id"] in bound:
+            raise MaterializationError("provider ledger binds a provider twice")
+        bound[row["provider_id"]] = row
+    if set(bound) != set(LEDGER_PROVIDER_ROOTS):
+        raise MaterializationError("provider ledger provider set differs")
+    return bound
+
+
+def _provider_root_nodes(
+    provider_generations_path: Path,
+    ledger_generation: Path,
+    recipe: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """GenerationNodes for every provider root, each bound to the ledger by hash.
+
+    ``provider_generations_path`` lists, per provider root, the directory that
+    holds the exact generation the release depends on. Nothing here trusts that
+    list: each generation must equal, by id, manifest hash and catalog hash, what
+    the selected ledger recorded, and the ledger's own qualification decides
+    whether it is published as current authority or retained as evidence.
+    """
+
+    try:
+        listing = json.loads(provider_generations_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MaterializationError("provider generations list is unreadable") from exc
+    if (
+        not isinstance(listing, list)
+        or any(
+            not isinstance(row, dict) or set(row) != {"root_id", "source_dir"}
+            for row in listing
+        )
+        or sorted(str(row["root_id"]) for row in listing) != sorted(PROVIDER_ROOTS)
+    ):
+        raise MaterializationError(
+            "provider generations list must name every provider root exactly once"
+        )
+    bound = _ledger_provider_bindings(ledger_generation)
+    epoch = recipe.get("epoch_manifest_generation")
+    nodes: list[dict[str, Any]] = []
+    for row in sorted(listing, key=lambda item: str(item["root_id"])):
+        root_id = str(row["root_id"])
+        source = _absolute(row["source_dir"], f"{root_id} source_dir")
+        inventory = inventory_generation(source)
+        generation_id = _text(inventory["generation_id"], f"{root_id} generation_id")
+        if source.name != generation_id:
+            raise MaterializationError(f"{root_id} source directory name differs")
+        files = inventory.get("files")
+        if not isinstance(files, list):
+            raise MaterializationError(f"{root_id} generation inventory differs")
+        if root_id == "epoch-manifest":
+            if not isinstance(epoch, dict) or epoch.get("generation_id") != generation_id:
+                raise MaterializationError(
+                    "epoch-manifest generation differs from the recipe binding"
+                )
+            release_target = True
+        else:
+            binding = bound[root_id.removeprefix("provider-")]
+            if (
+                binding.get("generation_id") != generation_id
+                or binding.get("manifest_sha256") != inventory["manifest_sha256"]
+                or binding.get("catalog_sha256")
+                not in {item.get("sha256") for item in files}
+            ):
+                raise MaterializationError(
+                    f"{root_id} generation differs from the provider ledger binding"
+                )
+            qualification = binding.get("qualification")
+            if qualification in PROVIDER_CURRENT_QUALIFICATIONS:
+                release_target = True
+            elif qualification in PROVIDER_EVIDENCE_QUALIFICATIONS:
+                release_target = False
+            else:
+                raise MaterializationError(
+                    f"{root_id} qualification is not recognized: {qualification}"
+                )
+        nodes.append(
+            {
+                "depends_on": [],
+                "files": files,
+                "generation_id": generation_id,
+                "kind": "GENERATION",
+                "manifest_sha256": inventory["manifest_sha256"],
+                "node_id": f"publish-{root_id}" if release_target else f"retain-{root_id}",
+                "release_target": release_target,
+                "root_id": root_id,
+                "source_dir": str(source),
+            }
+        )
+    return nodes
+
+
+def _pointer_recovery_gate_payload(
+    release_roots: Mapping[str, Path], release_generations: Mapping[str, str]
+) -> dict[str, Any] | None:
+    """Derive, from disk, which release roots carry a pointer no consumer can read."""
+
+    rows: list[dict[str, str]] = []
+    for root_id in sorted(release_generations):
+        pointer = release_roots[root_id] / "CURRENT.json"
+        if not pointer.exists():
+            continue
+        try:
+            read_current(release_roots[root_id])
+        except PointerIntegrityError as exc:
+            rows.append(
+                {
+                    "failure": str(exc),
+                    "pointer_sha256": hashlib.sha256(pointer.read_bytes()).hexdigest(),
+                    "proposed_generation_id": release_generations[root_id],
+                    "root_id": root_id,
+                }
+            )
+    if not rows:
+        return None
+    return {
+        "disposition": "PROMOTE_BOUND_GENERATIONS",
+        "schema_version": 1,
+        "unusable_pointers": rows,
+    }
+
+
 def build_production_spec(
     recipe_path: Path,
     prepared_root: Path,
@@ -5019,6 +5193,7 @@ def build_production_spec(
     financial_artifacts_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
     predecessor_repair_gate_path: Path | None = None,
+    provider_generations_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
@@ -5165,6 +5340,19 @@ def build_production_spec(
             }
         )
 
+    provider_root_paths: dict[str, Path] = {}
+    if provider_generations_path is not None:
+        provider_root_paths = _provider_root_paths(portfolio_root)
+        for provider_node in _provider_root_nodes(
+            provider_generations_path, sources["provider-ledger"], recipe
+        ):
+            nodes.append(provider_node)
+            if provider_node["release_target"]:
+                sources[provider_node["root_id"]] = Path(provider_node["source_dir"])
+                generation_ids[provider_node["root_id"]] = provider_node[
+                    "generation_id"
+                ]
+
     panel_generation = sources["portfolio-panel"]
     panel_payload = _load(
         panel_generation / "data" / "dashboard_data.json", "prepared panel data"
@@ -5273,8 +5461,11 @@ def build_production_spec(
         "pipeline_id": recipe["pipeline_id"],
         "prepared_release_commit": prepared_release_commit,
         "production_roots": {
-            root_id: str(portfolio_root / relative)
-            for root_id, relative in PRODUCTION_ROOTS.items()
+            **{
+                root_id: str(portfolio_root / relative)
+                for root_id, relative in PRODUCTION_ROOTS.items()
+            },
+            **{root_id: str(path) for root_id, path in provider_root_paths.items()},
         },
         "schema_version": (
             3
@@ -5349,6 +5540,32 @@ def build_production_spec(
                 "sha256": hashlib.sha256(repair_bytes).hexdigest(),
             }
         )
+    # Provider roots whose own CURRENT pointer dangles or is schema v1 cannot be
+    # recorded as a predecessor graph. The pipeline admits exactly those roots
+    # under `predecessor-pointer-recovery` after re-deriving the failure from
+    # disk; the evidence is derived here, never supplied.
+    pointer_recovery_gates: list[dict[str, Any]] = []
+    recovery_payload = _pointer_recovery_gate_payload(
+        {
+            **{
+                root_id: portfolio_root / relative
+                for root_id, relative in PRODUCTION_ROOTS.items()
+            },
+            **provider_root_paths,
+        },
+        generation_ids,
+    )
+    if recovery_payload is not None:
+        recovery_path = spec_path.with_name("predecessor-pointer-recovery.json")
+        recovery_bytes = canonical_json_bytes(recovery_payload)
+        _write_exact(recovery_path, recovery_bytes)
+        pointer_recovery_gates.append(
+            {
+                "gate_id": POINTER_RECOVERY_GATE_ID,
+                "path": str(recovery_path),
+                "sha256": hashlib.sha256(recovery_bytes).hexdigest(),
+            }
+        )
     product_gates = _product_gate_rows(
         production_product_authority,
         product_path,
@@ -5397,12 +5614,16 @@ def build_production_spec(
             *product_gates,
             *manifest_gates,
             *predecessor_repair_gates,
+            *pointer_recovery_gates,
         ],
         "nodes": [*nodes, *artifact_rows],
         "pipeline_id": f"{recipe['pipeline_id']}-production",
         "roots": {
-            root_id: str(portfolio_root / relative)
-            for root_id, relative in PRODUCTION_ROOTS.items()
+            **{
+                root_id: str(portfolio_root / relative)
+                for root_id, relative in PRODUCTION_ROOTS.items()
+            },
+            **{root_id: str(path) for root_id, path in provider_root_paths.items()},
         },
         "schema_version": 1,
         "state_root": str(state_root),
@@ -5457,7 +5678,7 @@ def build_production_spec(
     return {
         "contract": str(contract_path),
         "nodes": len(spec["nodes"]),
-        "root_count": len(PRODUCTION_ROOTS),
+        "root_count": len(PRODUCTION_ROOTS) + len(provider_root_paths),
         "spec": str(spec_path),
         # Per-invocation work evidence. It is not part of the semantic gate, the
         # contract or the specification, so reporting it moves no pin.
@@ -7765,6 +7986,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     production_cmd.add_argument(
+        "--provider-generations",
+        type=Path,
+        help=(
+            "JSON list of {root_id, source_dir} naming the exact generation each "
+            "provider root and the epoch-manifest root depends on. Each must equal "
+            "the selected provider ledger's own binding by id and hash; the roots "
+            "then join the release as targets (REL-PROVIDER-ROOTS-001)."
+        ),
+    )
+    production_cmd.add_argument(
         "--financial-input-contract",
         type=Path,
         help=(
@@ -8018,6 +8249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.financial_artifacts,
                 args.financial_input_contract,
                 args.predecessor_repair_gate,
+                args.provider_generations,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         if storage is not None:
