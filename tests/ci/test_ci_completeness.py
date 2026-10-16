@@ -32,7 +32,7 @@ def _quality_command(prefix: str) -> str:
 
 def test_every_test_directory_is_run_by_quality() -> None:
     pytest_line = _quality_command(
-        "uv run --frozen --no-sync pytest -q --disable-socket --durations"
+        "uv run --frozen --no-sync python tools/stall_watchdog.py"
     )
     listed = set(re.findall(r"\btests/([A-Za-z0-9_]+)", pytest_line))
     on_disk = {
