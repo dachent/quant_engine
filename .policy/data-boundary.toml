@@ -25,6 +25,10 @@ forbidden_root_names = [
   "dataFidelity",
   "dataAlpaca",
   "dataPortfolio",
+  "dataRobuxio",
+  "dataProviderTrackRecord",
+  "dataStrategyBacktests",
+  "dataEpochManifest",
 ]
 forbidden_path_segments = [
   "data",
