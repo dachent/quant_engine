@@ -21,6 +21,14 @@ corrective-program acceptance conventions R1-R4):
 * R3 zero capital: a sub-period with zero beginning capital and zero ending
   value net of end-of-day flows is neutral; zero capital with any other result
   is undefined and the epoch is unavailable.
+* Post-liquidation credits: an epoch is closed at its last funded day, either
+  where its capital base reaches zero and money still arrives (a deferred
+  interest credit, a small residual) or at the caller's ``funded_end``.  The
+  time-weighted return chains the funded days only.  Every later sub-period is
+  recorded as a dated, signed, non-TWR ``PostLiquidationCredit``
+  (``(V_end - F_eod) - (V_begin + F_bod)``) so the dollars reach the strategy
+  P&L and totals instead of being dropped; a contribution after the closing
+  starts a new epoch, so it makes this one unavailable.
 * R4 MWR dating: ``DATE_ONLY`` legs at their NAV recognition date,
   ``EXACT_TIMESTAMP`` legs at their economic fill date (fail closed without it).
 
@@ -64,6 +72,7 @@ FLOW_AFTER_CLOSING_OBSERVATION = "FLOW_AFTER_CLOSING_OBSERVATION"
 NEGATIVE_CAPITAL_BASE = "NEGATIVE_CAPITAL_BASE"
 ZERO_CAPITAL_RETURN_UNDEFINED = "ZERO_CAPITAL_RETURN_UNDEFINED"
 NONPOSITIVE_LINK_FACTOR = "NONPOSITIVE_LINK_FACTOR"
+REFUNDING_AFTER_LIQUIDATION = "REFUNDING_AFTER_LIQUIDATION"
 
 _XIRR_CONTEXT = Context(prec=40)
 _P = ParamSpec("_P")
@@ -214,6 +223,24 @@ class SubperiodLink:
 
 
 @dataclass(frozen=True)
+class PostLiquidationCredit:
+    """Money earned or paid after an epoch's last funded day (non-TWR income).
+
+    ``amount`` is signed: ``(V_end - F_eod) - (V_begin + F_bod)`` of the
+    sub-period ``(start_date, end_date]``.  It is never part of the epoch's
+    time-weighted return.
+    """
+
+    start_date: date
+    end_date: date
+    beginning_value: Decimal
+    ending_value: Decimal
+    net_flow: Decimal
+    amount: Decimal
+    inferred_timing: bool
+
+
+@dataclass(frozen=True)
 class EpochLink:
     """Result of linking one epoch; numerics are ``None`` when unavailable.
 
@@ -241,6 +268,8 @@ class EpochLink:
     max_drawdown: Decimal | None
     failed_subperiod: tuple[date, date] | None = None
     rejected_legs: tuple[FlowLeg, ...] = ()
+    closed_on: date | None = None
+    post_liquidation_credits: tuple[PostLiquidationCredit, ...] = ()
 
     @property
     def end_date(self) -> date | None:
@@ -251,8 +280,18 @@ def link_epoch(
     observations: Mapping[date, Decimal],
     legs: Sequence[FlowLeg],
     opening: OpeningPoint,
+    funded_end: date | None = None,
+    close_on_zero_capital: bool = True,
 ) -> EpochLink:
     """Chain-link every observation after ``opening`` into one epoch TWR.
+
+    ``funded_end`` is the epoch's last funded day when the caller supplies
+    observations beyond it (the tail after a liquidation): sub-periods ending
+    after it are post-liquidation credits, not linked.  Without it the epoch
+    closes by itself at the first sub-period that starts at zero capital and
+    ends with value (see the module docstring); ``close_on_zero_capital=False``
+    keeps the older rule where that sub-period makes the epoch unavailable
+    (summed strategy series, whose callers re-open the path).
 
     Each leg belongs to the sub-period ending at the first observation on or
     after its NAV recognition date.  Legs recognized on or before the opening
@@ -306,7 +345,16 @@ def link_epoch(
     rejected_reason = FLOW_AFTER_CLOSING_OBSERVATION if rejected else None
     prior_day = opening.as_of
     prior_value = opening.value
+    closed_on: date | None = None
+    credits: list[PostLiquidationCredit] = []
+    if (
+        funded_end is not None
+        and _require_date(funded_end, "funded_end") < opening.as_of
+    ):
+        raise ReturnsError("funded_end precedes the opening point")
     for day in days:
+        if closed_on is None and funded_end is not None and day > funded_end:
+            closed_on = prior_day
         period_legs = [
             leg for leg in linked if prior_day < leg.nav_recognition_date <= day
         ]
@@ -322,6 +370,28 @@ def link_epoch(
         base = prior_value + beginning_flow if beginning_legs else prior_value
         numerator = ending_value - ending_flow
         neutral = base == 0
+        if closed_on is None and close_on_zero_capital and neutral and numerator != 0:
+            closed_on = prior_day
+        if closed_on is not None:
+            if any(leg.amount > 0 for leg in period_legs):
+                return unavailable(
+                    rejected_reason or REFUNDING_AFTER_LIQUIDATION, (prior_day, day)
+                )
+            if numerator != base:
+                credits.append(
+                    PostLiquidationCredit(
+                        prior_day,
+                        day,
+                        prior_value,
+                        ending_value,
+                        beginning_flow + ending_flow,
+                        numerator - base,
+                        any(leg.timing == DATE_ONLY for leg in period_legs),
+                    )
+                )
+            prior_day = day
+            prior_value = ending_value
+            continue
         factor = Decimal(1) if base <= 0 else numerator / base
         failure: str | None = None
         if base < 0:
@@ -357,6 +427,16 @@ def link_epoch(
         prior_value = ending_value
     if rejected_reason is not None:
         return unavailable(rejected_reason)
+    if closed_on is not None:
+        # Timing inferred only after the last funded day does not touch the TWR.
+        flags = (
+            (INFERRED_TIMING,)
+            if any(
+                leg.timing == DATE_ONLY and leg.nav_recognition_date <= closed_on
+                for leg in linked
+            )
+            else ()
+        )
     return EpochLink(
         status=AVAILABLE,
         reason=None,
@@ -368,6 +448,8 @@ def link_epoch(
         twr=index - Decimal(1),
         hwm_index=hwm,
         max_drawdown=max_drawdown,
+        closed_on=closed_on,
+        post_liquidation_credits=tuple(credits),
     )
 
 

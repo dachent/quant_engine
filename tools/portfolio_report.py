@@ -12321,6 +12321,21 @@ def _verified_epoch_authority_details(
                         if "performance_status" in manifest_row
                         else {}
                     ),
+                    # A closed epoch (liquidated and transferred out): the
+                    # dated, labelled non-TWR credits stay visible beside the
+                    # return; they are already inside the epoch's dollar gain.
+                    **(
+                        {
+                            field: manifest_row[field]
+                            for field in (
+                                "performance_closed_on",
+                                "post_liquidation_credits",
+                                "post_liquidation_income",
+                            )
+                        }
+                        if "performance_closed_on" in manifest_row
+                        else {}
+                    ),
                 }
                 if "mwr_status" in manifest_row or "performance_status" in manifest_row
                 else None

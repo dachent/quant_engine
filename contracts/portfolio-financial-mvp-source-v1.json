@@ -437,10 +437,10 @@
     "assignments": [
      {
       "strategy_id": "tt-portfolio",
-      "status": "ASSIGNMENT_ONLY",
+      "status": "FUNDED_MEMBERSHIP",
       "effective_start": "2025-11-25",
       "effective_end": "2026-01-04",
-      "authority": "OWNER_302_PREDECESSOR_BOUNDARY",
+      "authority": "OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED",
       "transition_group_id": "schwab-tt-qsi-transition-01"
      },
      {
@@ -465,10 +465,10 @@
     "assignments": [
      {
       "strategy_id": "tt-portfolio",
-      "status": "ASSIGNMENT_ONLY",
+      "status": "FUNDED_MEMBERSHIP",
       "effective_start": "2025-11-25",
       "effective_end": "2026-01-04",
-      "authority": "OWNER_302_PREDECESSOR_BOUNDARY",
+      "authority": "OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED",
       "transition_group_id": "schwab-tt-qsi-transition-02"
      },
      {
