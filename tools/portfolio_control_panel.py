@@ -1313,6 +1313,20 @@ def embedded_download_bytes(html: str, relative_path: str) -> bytes:
     return encoded
 
 
+def embedded_download_bytes_if_present(html: str, relative_path: str) -> bytes | None:
+    """`embedded_download_bytes`, or None when the page carries no such payload.
+
+    Only an absent payload is None; a payload that is present and unreadable raises.
+    """
+
+    metadata = _DOWNLOAD_METADATA.get(relative_path)
+    if metadata is None:
+        raise ControlPanelValidationError("embedded download is not a known payload")
+    if f'data-download-payload-prefix="{metadata[2]}"' not in html:
+        return None
+    return embedded_download_bytes(html, relative_path)
+
+
 _ENCODING_ATTRIBUTE: Final = re.compile(r'data-download-encoding="([a-z]+)"')
 
 

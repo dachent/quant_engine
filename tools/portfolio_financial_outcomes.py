@@ -1704,14 +1704,9 @@ def _verify_consumers(
             epochs["panel_generation"], "index.html"
         )
         try:
-            page = index_bytes.decode("utf-8")
-            prefix = panel_producer._DOWNLOAD_METADATA[panel_producer.REPORT_DOWNLOAD][
-                2
-            ]
-            if f'data-download-payload-prefix="{prefix}"' in page:
-                embedded_report = panel_producer.embedded_download_bytes(
-                    page, panel_producer.REPORT_DOWNLOAD
-                )
+            embedded_report = panel_producer.embedded_download_bytes_if_present(
+                index_bytes.decode("utf-8"), panel_producer.REPORT_DOWNLOAD
+            )
         except (UnicodeDecodeError, panel_producer.ControlPanelValidationError) as exc:
             raise FinancialOutcomeError(
                 f"panel embedded report is unreadable: {exc}"
