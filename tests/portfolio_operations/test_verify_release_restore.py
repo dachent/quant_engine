@@ -157,3 +157,52 @@ def test_sums_missing_from_the_restore_are_refused(tmp_path: Path) -> None:
         assert "not restored" in str(error)
     else:
         raise AssertionError("an unreproduced sum passed")
+
+
+def test_a_release_companion_is_restored_and_checked_by_hash(tmp_path: Path) -> None:
+    from quant_engine.core import CompanionInput
+
+    roots = {"alpha": tmp_path / "alpha"}
+    manifest = _manifest("alpha")
+    stage_generation(roots["alpha"], manifest)
+    coordination = tmp_path / "coordination"
+    content = b"launcher\n"
+    release = prepare_release(
+        coordination_root=coordination,
+        roots=roots,
+        proposed_generations={"alpha": manifest.generation_id},
+        code_commit="a" * 40,
+        created_at=datetime(2026, 10, 16, 12, tzinfo=UTC),
+        gates=(GateEvidence("test", "b" * 64),),
+        companions=(CompanionInput("note", "alpha", "RELEASE_NOTE.json", content),),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=release.release_id,
+        roots=roots,
+        companion_contents={"note": content},
+        skip_release_validation=True,
+    )
+    spec = PipelineSpec(
+        pipeline_id="restore-companion-test",
+        as_of_date=DAY,
+        code_commit="a" * 40,
+        created_at=datetime(2026, 10, 16, 12, tzinfo=UTC),
+        coordination_root=coordination,
+        state_root=tmp_path / "state",
+        roots=roots,
+        nodes=(),
+        gates=(),
+        companions=(),
+    )
+    tool.restore(spec, tmp_path / "clean")
+    assert (
+        tmp_path / "clean" / "roots" / "alpha" / "RELEASE_NOTE.json"
+    ).read_bytes() == content
+    (roots["alpha"] / "RELEASE_NOTE.json").write_bytes(b"tampered\n")
+    try:
+        tool.restore(spec, tmp_path / "clean2")
+    except tool.RestoreError as error:
+        assert "hash differs" in str(error)
+    else:
+        raise AssertionError("a tampered companion restored")

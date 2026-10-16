@@ -124,7 +124,18 @@ def restore(
             }
         )
     for companion in manifest.companions:
-        raise RestoreError(f"companion {companion.companion_id} is outside the restore")
+        relative = Path(*companion.relative_path.split("/"))
+        source_file = spec.roots[companion.root_id] / relative
+        if not source_file.is_file():
+            raise RestoreError(f"companion {companion.companion_id} is absent")
+        if (
+            hashlib.sha256(source_file.read_bytes()).hexdigest()
+            != companion.proposed_sha256
+        ):
+            raise RestoreError(f"companion {companion.companion_id} hash differs")
+        restored_companion = clean_room / "roots" / companion.root_id / relative
+        restored_companion.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_file, restored_companion)
     # Generations the release retains as evidence without publishing them (an
     # accepted PARTIAL provider generation) are not targets, so the release record
     # does not list them; the pipeline spec's non-target generation nodes do.
