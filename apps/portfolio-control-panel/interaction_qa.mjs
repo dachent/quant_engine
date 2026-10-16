@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -206,13 +206,20 @@ if (!epochOnly) {
   await mkdir(downloadDirectory, { recursive: true });
   for (const relative of downloads) {
     const link = page.locator(`a[download][href="${relative}"]`);
-    const pendingDownload = page.waitForEvent("download");
+    // The report is embedded gzip-compressed and inflated on click, so the
+    // `download` event fires after the inflate, not at the click.
+    const pendingDownload = page.waitForEvent("download", { timeout: 300_000 });
     await link.click();
     const download = await pendingDownload;
     const destination = path.join(downloadDirectory, path.basename(relative));
     await download.saveAs(destination);
     const downloaded = await readFile(destination);
     const actualSha256 = createHash("sha256").update(downloaded).digest("hex");
+    // The saved copy only exists to be hashed. Its digest and size are recorded
+    // in this check's evidence, and keeping a 330 MB duplicate of the report in
+    // every published generation's qa/ directory carries no further proof.
+    await rm(destination, { force: true });
+    await rmdir(downloadDirectory).catch(() => {});
     // A download that is written beside the page is checked against the
     // candidate's file inventory. The workbook is not: it is carried only as
     // base64 payload elements inside the page, because an .xlsx sitting in a

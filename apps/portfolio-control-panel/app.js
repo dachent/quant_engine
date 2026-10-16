@@ -141,8 +141,8 @@
     VERIFIED_GENERATION_BUNDLE_EXACT_BYTES: "Report-attested static publication — verified generation bundle exact bytes",
   });
   const EMBEDDED_DOWNLOAD_TYPES = Object.freeze({
-    "portfolio-report-data.json": Object.freeze({ mimeType: "application/json", payloadPrefix: "download-payload-report-json" }),
-    "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx" }),
+    "portfolio-report-data.json": Object.freeze({ mimeType: "application/json", payloadPrefix: "download-payload-report-json", encoding: "gzip" }),
+    "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx", encoding: "identity" }),
   });
   const EMBEDDED_DOWNLOAD_CHUNK_SIZE = 65536;
   // The report data is embedded rather than linked to the sibling file because
@@ -151,11 +151,11 @@
   // Every browser and interaction QA capture loads the panel over file://, so
   // the sibling route cannot satisfy the gate.
   //
-  // 8191 is the mechanism's ceiling, not a policy choice. `chunks.join("")`
-  // below builds one string and V8's MAX_STRING_LENGTH is 536870888, so 8192
-  // chunks of 65536 raise RangeError whatever this constant says.
-  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must
-  // equal this, and a test pins the two together.
+  // The report JSON is embedded gzip-compressed and inflated with
+  // DecompressionStream on click; the chunks are decoded one at a time and never
+  // joined into a single string. 8191 is a sanity bound on the chunk count, and
+  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must equal
+  // this; a test pins the two together.
   const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 8191;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   // F3: gate notes arrive from the producer already respelled as plain words (`note`; the
@@ -2404,19 +2404,23 @@
   }
 
   function bindEmbeddedDownloads() {
-    $$('a[data-download-payload-prefix]').forEach((link) => link.addEventListener("click", (event) => {
+    $$('a[data-download-payload-prefix]').forEach((link) => link.addEventListener("click", async (event) => {
       event.preventDefault();
       const filename = String(link.getAttribute("data-download-filename") || "");
       const metadata = EMBEDDED_DOWNLOAD_TYPES[filename];
       const mimeType = metadata?.mimeType;
       const payloadPrefix = String(link.getAttribute("data-download-payload-prefix") || "");
       const chunkCount = Number(link.getAttribute("data-download-chunk-count"));
+      const rawBytes = Number(link.getAttribute("data-download-raw-bytes"));
       if (!mimeType
           || payloadPrefix !== metadata.payloadPrefix
           || !Number.isInteger(chunkCount)
           || chunkCount < 1
           || chunkCount > EMBEDDED_DOWNLOAD_MAX_CHUNKS
           || link.getAttribute("data-download-mime") !== mimeType
+          || link.getAttribute("data-download-encoding") !== metadata.encoding
+          || !Number.isInteger(rawBytes)
+          || rawBytes < 1
           || link.getAttribute("href") !== `downloads/${filename}`
           || link.getAttribute("download") !== filename) {
         console.error("Embedded download metadata is invalid.");
@@ -2424,7 +2428,7 @@
         return;
       }
       try {
-        const chunks = [];
+        const parts = [];
         for (let index = 0; index < chunkCount; index += 1) {
           const payloadElement = document.getElementById(`${payloadPrefix}-${String(index).padStart(5, "0")}`);
           const chunk = String(payloadElement?.textContent || "");
@@ -2432,6 +2436,7 @@
           if (!(payloadElement instanceof HTMLScriptElement)
               || payloadElement.type !== "application/octet-stream"
               || payloadElement.getAttribute("data-download-filename") !== filename
+              || payloadElement.getAttribute("data-download-encoding") !== metadata.encoding
               || payloadElement.getAttribute("data-download-chunk-index") !== String(index)
               || !chunk
               || chunk.length > EMBEDDED_DOWNLOAD_CHUNK_SIZE
@@ -2439,13 +2444,21 @@
               || !validChunk) {
             throw new Error("Embedded download chunk is invalid.");
           }
-          chunks.push(chunk);
+          // Each chunk is a multiple of 4 base64 characters, so it decodes on
+          // its own; only one chunk's binary string is alive at a time.
+          const binary = window.atob(chunk);
+          const bytes = new Uint8Array(binary.length);
+          for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+          parts.push(bytes);
         }
-        const payload = chunks.join("");
-        const binary = window.atob(payload);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-        const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+        let blob = new Blob(parts, { type: mimeType });
+        if (metadata.encoding === "gzip") {
+          if (typeof DecompressionStream !== "function") throw new Error("This browser cannot decompress the embedded download.");
+          blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
+          blob = blob.slice(0, blob.size, mimeType);
+        }
+        if (blob.size !== rawBytes) throw new Error("Embedded download length differs from its declared size.");
+        const objectUrl = URL.createObjectURL(blob);
         const trigger = document.createElement("a");
         trigger.href = objectUrl;
         trigger.download = filename;

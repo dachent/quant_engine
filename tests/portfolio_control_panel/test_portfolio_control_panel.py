@@ -4,6 +4,7 @@ import base64
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -7238,7 +7239,15 @@ def test_report_download_link_embeds_exact_bytes_for_local_file_blob_download(
     assert f'download="{filename}"' in link
     assert f'data-download-filename="{filename}"' in link
     assert f'data-download-mime="{mime_type}"' in link
-    payload = base64.b64encode(content).decode("ascii")
+    encoding = "gzip" if relative_path == panel.REPORT_DOWNLOAD else "identity"
+    assert f'data-download-encoding="{encoding}"' in link
+    assert f'data-download-raw-bytes="{len(content)}"' in link
+    carried = (
+        gzip.compress(content, compresslevel=panel._DOWNLOAD_GZIP_LEVEL, mtime=0)
+        if encoding == "gzip"
+        else content
+    )
+    payload = base64.b64encode(carried).decode("ascii")
     chunks = [
         payload[index : index + panel._DOWNLOAD_BASE64_CHUNK_SIZE]
         for index in range(0, len(payload), panel._DOWNLOAD_BASE64_CHUNK_SIZE)
@@ -7249,10 +7258,12 @@ def test_report_download_link_embeds_exact_bytes_for_local_file_blob_download(
         assert (
             f'<script type="application/octet-stream" '
             f'id="{payload_id}-{index:05d}" data-download-filename="{filename}" '
+            f'data-download-encoding="{encoding}" '
             f'data-download-chunk-index="{index}">{chunk}</script>' in link
         )
     assert "data-download-base64=" not in link
     assert content.decode("latin-1", errors="ignore") not in link
+    assert panel.embedded_download_bytes(link, relative_path) == content
 
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     assert 'getAttribute("data-download-payload-prefix")' in renderer
@@ -13414,6 +13425,7 @@ def test_embedded_download_chunk_cap_is_one_shared_constant() -> None:
 def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
     """A payload the renderer would reject must not reach a published panel."""
 
+    # The workbook is carried byte-identical, so its chunk count is its size.
     oversized = b"x" * (
         (panel._DOWNLOAD_MAX_BASE64_CHUNKS + 1) * panel._DOWNLOAD_BASE64_CHUNK_SIZE
     )
@@ -13421,9 +13433,83 @@ def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
         panel.ControlPanelValidationError,
         match="exceeds the embedded download chunk cap",
     ):
-        panel._report_download_link(
-            "downloads/portfolio-report-data.json", "Report data", oversized
+        panel._report_download_link(panel.WORKBOOK_DOWNLOAD, "Workbook", oversized)
+
+
+def test_embedded_report_is_compressed_and_round_trips_exactly() -> None:
+    """The 332 MB report is carried gzip-compressed; every reader gets the same bytes."""
+
+    content = json.dumps(
+        {
+            "rows": [
+                {"date": f"2026-01-{day:02d}", "value": day / 7} for day in range(1, 29)
+            ]
+            * 400
+        }
+    ).encode("utf-8")
+    link = panel._report_download_link(panel.REPORT_DOWNLOAD, "Report", content)
+
+    assert panel.embedded_download_bytes(link, panel.REPORT_DOWNLOAD) == content
+    assert len(link) < len(content) // 4, "the embedded payload is not compressed"
+    again = panel._report_download_link(panel.REPORT_DOWNLOAD, "Report", content)
+    assert again == link, "the embedded payload is not deterministic"
+
+
+def test_embedded_download_encoding_and_gzip_integrity_are_enforced() -> None:
+    content = b'{"report_schema_version":1}\n' * 50
+    link = panel._report_download_link(panel.REPORT_DOWNLOAD, "Report", content)
+
+    stripped = link.replace(' data-download-encoding="gzip"', "")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="embedded download encoding differs"
+    ):
+        panel.embedded_download_bytes(stripped, panel.REPORT_DOWNLOAD)
+
+    carried = gzip.compress(content, compresslevel=6, mtime=0)
+    for damaged in (
+        carried[:-9],
+        carried + bytes([0]),
+        carried[:20] + bytes([255]) + carried[21:],
+    ):
+        forged = re.sub(
+            r"(>)[A-Za-z0-9+/=]+(</script>)",
+            lambda match: (
+                f"{match.group(1)}{base64.b64encode(damaged).decode()}{match.group(2)}"
+            ),
+            link,
         )
+        with pytest.raises(panel.ControlPanelValidationError, match="not valid gzip"):
+            panel.embedded_download_bytes(forged, panel.REPORT_DOWNLOAD)
+
+
+def test_built_panel_embeds_the_report_gzipped_and_enforces_the_size_budget(
+    inputs: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#540: the page carries the compressed report and refuses to outgrow its budget."""
+
+    arguments = (inputs["report"], inputs["legacy"], inputs["output"])
+    keywords = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+        "weekly_returns_root": inputs["weekly"],
+    }
+    candidate = panel.build_candidate(*arguments, **keywords)
+    html = (Path(str(candidate["candidate_dir"])) / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'data-download-encoding="gzip"' in html
+    report = (
+        Path(str(candidate["candidate_dir"]))
+        / "downloads"
+        / "portfolio-report-data.json"
+    ).read_bytes()
+    assert panel.embedded_download_bytes(html, panel.REPORT_DOWNLOAD) == report
+    assert f'data-download-raw-bytes="{len(report)}"' in html
+
+    monkeypatch.setattr(panel, "_INDEX_HTML_MAX_BYTES", 1024)
+    with pytest.raises(panel.ControlPanelValidationError, match="size budget"):
+        panel.build_candidate(*arguments, **keywords)
 
 
 def test_panel_publishes_the_report_current_capital_with_status_as_of_and_labels(

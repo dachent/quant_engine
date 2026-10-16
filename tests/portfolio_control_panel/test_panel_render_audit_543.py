@@ -2036,11 +2036,13 @@ def test_F40_a_failed_embedded_download_shows_a_toast_not_only_a_console_line() 
         r'console\.error\("Embedded download metadata is invalid\."\);\s+showToast\(',
         body,
     )
-    # the download path itself is #540's: its decode and chunk limits are unchanged here
-    assert (
-        'const payload = chunks.join("");' in body
-        and "EMBEDDED_DOWNLOAD_MAX_CHUNKS" in body
-    )
+    # #540: chunks are decoded one at a time (never joined into one string), the
+    # gzip report is inflated with DecompressionStream, and the inflated length
+    # must equal the declared raw size.
+    assert "EMBEDDED_DOWNLOAD_MAX_CHUNKS" in body
+    assert "chunks.join(" not in body
+    assert 'new DecompressionStream("gzip")' in body
+    assert "blob.size !== rawBytes" in body
 
 
 def test_F47_a_hash_with_quotes_cannot_break_the_view_selector(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import zlib
 from typing import Any
 
 # The contract whose census names which account sleeves hold a funded membership
@@ -271,6 +272,7 @@ def _embedded_payloads(data: bytes) -> dict[str, EmbeddedPayload]:
     """Decode ``<script type="application/octet-stream">`` base64 download chunks."""
 
     chunks: dict[str, list[tuple[int, int, int]]] = {}
+    encodings: dict[str, set[str]] = {}
     position = 0
     while True:
         start = data.find(_EMBED_OPEN, position)
@@ -287,6 +289,10 @@ def _embedded_payloads(data: bytes) -> dict[str, EmbeddedPayload]:
             chunks.setdefault(name.group(1), []).append(
                 (int(index.group(1)), tag_end + 1, end)
             )
+            encoding = re.search(r'data-download-encoding="([^"]+)"', tag)
+            encodings.setdefault(name.group(1), set()).add(
+                encoding.group(1) if encoding is not None else "identity"
+            )
         position = end + len(_EMBED_CLOSE)
     payloads: dict[str, EmbeddedPayload] = {}
     for filename, parts in sorted(chunks.items()):
@@ -294,21 +300,52 @@ def _embedded_payloads(data: bytes) -> dict[str, EmbeddedPayload]:
         digest = hashlib.sha256()
         carry = b""
         size = 0
+        file_encodings = encodings[filename]
+        if len(file_encodings) != 1 or not file_encodings <= {"identity", "gzip"}:
+            raise GenerationError(
+                f"index.html embedded payload {filename} mixes or declares an "
+                f"unknown encoding: {sorted(file_encodings)}"
+            )
+        # The digest and size are of the carried file, not of the wire bytes: a
+        # gzip payload is inflated incrementally so a 330 MB report is never
+        # held in memory a second time.
+        inflater = (
+            zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+            if file_encodings == {"gzip"}
+            else None
+        )
+
+        def feed(decoded: bytes) -> None:
+            nonlocal size
+            if inflater is not None:
+                decoded = inflater.decompress(decoded)
+            digest.update(decoded)
+            size += len(decoded)
+
         try:
             for _, body_start, body_end in parts:
                 body = carry + data[body_start:body_end].translate(None, b" \t\r\n")
                 usable = len(body) // 4 * 4
-                decoded = binascii.a2b_base64(body[:usable])
-                digest.update(decoded)
-                size += len(decoded)
+                feed(binascii.a2b_base64(body[:usable]))
                 carry = body[usable:]
             if carry:
-                decoded = binascii.a2b_base64(carry + b"=" * (-len(carry) % 4))
-                digest.update(decoded)
-                size += len(decoded)
+                feed(binascii.a2b_base64(carry + b"=" * (-len(carry) % 4)))
+            if inflater is not None:
+                tail = inflater.flush()
+                digest.update(tail)
+                size += len(tail)
+                if not inflater.eof or inflater.unused_data:
+                    raise GenerationError(
+                        f"index.html embedded payload {filename} gzip member is "
+                        "truncated or has trailing bytes"
+                    )
         except binascii.Error as exc:
             raise GenerationError(
                 f"index.html embedded payload {filename} is not base64: {exc}"
+            ) from exc
+        except zlib.error as exc:
+            raise GenerationError(
+                f"index.html embedded payload {filename} is not valid gzip: {exc}"
             ) from exc
         payloads[filename] = EmbeddedPayload(
             filename=filename,
