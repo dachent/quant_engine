@@ -1210,6 +1210,12 @@ def _recovered_pointer_bytes(
         / f"{target.root_id}.bin"
     )
     if not recorded.is_file():
+        if any(item.gate_id == _POINTER_RECOVERY_GATE_ID for item in manifest.gates):
+            # A pointer-recovery release keeps every found pointer verbatim; a
+            # missing copy must refuse, not canonicalize.
+            raise ReleaseConflictError(
+                f"recorded predecessor pointer bytes are missing: {target.root_id}"
+            )
         return target.previous_pointer.to_json_bytes()
     raw = recorded.read_bytes()
     if CurrentPointer.from_json_bytes(raw) != target.previous_pointer:
@@ -1351,6 +1357,8 @@ def prepare_release(
         previous_inventory_sha256: str | None
         try:
             previous_pointer = _read_optional_current(root)
+            if allow_unusable_predecessor_pointers and previous_pointer is not None:
+                recovered_pointer_bytes[root_id] = _read_recorded_bytes(root) or b""
             previous_inventory_sha256 = (
                 previous_pointer.artifact_inventory_sha256
                 if previous_pointer is not None

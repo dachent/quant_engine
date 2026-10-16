@@ -28,6 +28,7 @@ from quant_engine.core import (
     PipelineGate,
     PointerIntegrityError,
     ReleaseCommitError,
+    ReleaseConflictError,
     ReleaseValidationError,
     SourceArtifact,
     VerificationStatus,
@@ -509,3 +510,25 @@ def test_the_recorded_pointer_must_match_the_gate_before_commit(tmp_path) -> Non
     recorded.write_bytes(recorded.read_bytes() + b" ")
     with pytest.raises(PipelineExecutionError, match="differs from the recovery gate"):
         _verify_recovered_pointer_evidence(spec, manifest.release_id)
+
+
+def test_a_recovery_release_keeps_every_found_pointer_and_refuses_a_missing_copy(
+    tmp_path,
+) -> None:
+    from quant_engine.core.release import _recovered_pointer_bytes
+
+    world = _World(tmp_path)
+    healthy_raw = json.dumps(
+        json.loads(world.found["healthy"]), indent=2, sort_keys=False
+    ).encode()
+    (world.healthy / "CURRENT.json").write_bytes(healthy_raw)
+    manifest = world.prepare()
+    directory = world.coordination / "releases" / manifest.release_id / "pointers"
+    # healthy roots are kept verbatim as well, so a rollback never canonicalizes them
+    assert (directory / "healthy.bin").read_bytes() == healthy_raw
+    target = next(item for item in manifest.targets if item.root_id == "healthy")
+    assert _recovered_pointer_bytes(world.coordination, manifest, target) == healthy_raw
+    (directory / "dangling.bin").unlink()
+    dangling = next(item for item in manifest.targets if item.root_id == "dangling")
+    with pytest.raises(ReleaseConflictError, match="bytes are missing"):
+        _recovered_pointer_bytes(world.coordination, manifest, dangling)

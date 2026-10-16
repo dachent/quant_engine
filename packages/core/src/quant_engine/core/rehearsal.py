@@ -328,10 +328,13 @@ def rehearse_release_boundaries(
                 recorded_bytes = spec.coordination_root / "releases" / release_id
                 recorded_bytes = recorded_bytes / "pointers" / f"{target.root_id}.bin"
                 rehearsal_root.mkdir(parents=True, exist_ok=True)
+                if not recorded_bytes.is_file():
+                    raise RehearsalError(
+                        "recorded predecessor pointer bytes are missing: "
+                        f"{target.root_id}"
+                    )
                 (rehearsal_root / "CURRENT.json").write_bytes(
                     recorded_bytes.read_bytes()
-                    if recorded_bytes.is_file()
-                    else target.previous_pointer.to_json_bytes()
                 )
                 if (
                     _observed_pointer(rehearsal_root, recorded=True)

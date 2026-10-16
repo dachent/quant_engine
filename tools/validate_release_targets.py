@@ -273,10 +273,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             / "generations"
             / ledger_targets[0]["proposed_generation_id"]
         )
+        ledger_file = ledger_dir / "provider-ledger.json"
+        if not ledger_file.is_file():
+            ledger_file = ledger_dir / "normalized" / "provider-ledger.json"
         try:
-            loaded_ledger = _read_json(
-                ledger_dir / "provider-ledger.json", "provider ledger catalog"
-            )
+            loaded_ledger = _read_json(ledger_file, "provider ledger catalog")
         except ContractError as exc:
             print(_ascii(f"validate_release_targets: ERROR: {exc}"), file=sys.stderr)
             return EXIT_ERROR
