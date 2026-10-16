@@ -260,11 +260,77 @@ def build_capital_vertical(
         for assignment in sleeve["assignments"]
         if assignment["strategy_id"] in REQUIRED_STRATEGIES
     ]
+    policy = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "INVESTED_CAPITAL"
+    )
+    # A fund-scoped provider's capital is its fund allocations (#536), not an
+    # account-level opening purchase: the anchor is the capital event.
+    fund_scoped = capital._fund_scoped_providers(policy)
+    events = []
+    fund_scoped_openings = []
+    for anchor in ledger["capital_anchors"]:
+        if str(anchor["provider_id"]).upper() not in fund_scoped:
+            continue
+        epoch = next(
+            row
+            for row in epochs
+            if row["account_id"] == anchor["account_id"]
+            and row["effective_start"] == anchor["event_date"]
+        )
+        digest = capital._digest(anchor)
+        # No capital precedes the epoch: its account-ledger opening is empty
+        # (the exact recipe the capital verifier re-derives) and the allocation
+        # itself is the capital event of the opening day.
+        descriptor = {
+            "basis_scope": capital._ACCOUNT_LEDGER_BASIS_SCOPE,
+            "account_id": anchor["account_id"],
+            "ledger_period_start": epoch["effective_start"],
+            "ledger_period_end_exclusive": epoch["effective_start"],
+            "source_component_sha256s": [],
+        }
+        evidence = capital._digest(descriptor)
+        fund_scoped_openings.append(
+            {
+                "account_id": anchor["account_id"],
+                "amount": "0",
+                "basis_scope": capital._ACCOUNT_LEDGER_BASIS_SCOPE,
+                "classification": "OPENING_CONTRIBUTED_BASIS",
+                "currency": "USD",
+                "date": epoch["effective_start"],
+                "epoch_id": epoch["epoch_id"],
+                "event_id": "account-ledger-opening:%s:%s"
+                % (anchor["account_id"], epoch["effective_start"]),
+                "fx_evidence_sha256": evidence,
+                "fx_rate": "1",
+                "ledger_period_end_exclusive": epoch["effective_start"],
+                "ledger_period_start": epoch["effective_start"],
+                "source_component_sha256s": [],
+                "source_evidence_sha256": evidence,
+                "timestamp": None,
+            }
+        )
+        events.append(
+            {
+                "event_id": anchor["record_id"],
+                "epoch_id": epoch["epoch_id"],
+                "date": anchor["event_date"],
+                "timestamp": None,
+                "classification": "EXTERNAL_CONTRIBUTION",
+                "amount": anchor["amount"]["value"],
+                "currency": "USD",
+                "fx_rate": "1",
+                "source_evidence_sha256": digest,
+                "fx_evidence_sha256": digest,
+            }
+        )
     opening = []
     for fact in (
         row
         for row in ledger["flows"]
         if row.get("capital_type") == "OPENING_CONTRIBUTED_BASIS"
+        and str(row.get("provider_id") or "").upper() not in fund_scoped
     ):
         epoch = next(
             row
@@ -329,8 +395,8 @@ def build_capital_vertical(
             "required_epochs": epochs,
             "evaluation_date": "2026-09-05",
             "complete_through": ledger["as_of_date"],
-            "opening_basis": opening,
-            "events": [],
+            "opening_basis": [*opening, *fund_scoped_openings],
+            "events": events,
             "flow_coverage": coverage,
             "source_bindings": bindings,
             "correction_bindings": [],

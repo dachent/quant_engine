@@ -1292,9 +1292,11 @@ def test_cr2_custody_native_template_independent_report_and_panel(
     )
     rows = {r["strategy_id"]: r for r in catalog["current_capital"]["strategies"]}
     assert rows["robuxio-crypto"]["derived_cash"][0]["current_value"]["value"] == "8.9"
-    assert rows["volatis-strategy"]["derived_cash"][0]["current_value"]["value"] == "7"
+    # #536: Quantbase's one account funds several funds, so Volatis carries no
+    # derived cash line and its value is the fund NAV (Matrixport keeps its line).
+    assert "derived_cash" not in rows["volatis-strategy"]
     assert rows["robuxio-crypto"]["current_value"]["value"] == "119.9"
-    assert rows["volatis-strategy"]["current_value"]["value"] == "127"
+    assert rows["volatis-strategy"]["current_value"]["value"] == "120"
     assert reporter._current_capital(catalog) == catalog["current_capital"]
     reporter._verify_current_capital_accounts(
         catalog["current_capital"], reporter._accounts(catalog)
