@@ -76,6 +76,12 @@ _PORTFOLIO_PRODUCTION_REBIND_GATE: Final = "port-underwrite-production-rebind"
 _POST_BUILD_SEMANTIC_GATE: Final = "post-build-semantic"
 _PREDECESSOR_REPAIR_GATE: Final = "predecessor-authority-repair"
 _POINTER_RECOVERY_GATE: Final = "predecessor-pointer-recovery"
+_RECOVERABLE_POINTER_FAILURES: Final = frozenset(
+    {
+        "current generation manifest is missing",
+        "legacy pointer schema is not accepted as current authority",
+    }
+)
 _COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES: Final = 64 * 1024
 _PORTFOLIO_PROFILE: Final = "PORTFOLIO_SOURCE_TO_PANEL_V1"
 _PORTFOLIO_STAGE_ORDER: Final = (
@@ -4478,6 +4484,10 @@ def _verify_pointer_recovery_gate(spec: PipelineSpec, path: Path) -> None:
         try:
             read_current(root)
         except PointerIntegrityError as exc:
+            if str(exc) not in _RECOVERABLE_POINTER_FAILURES:
+                raise PipelineValidationError(
+                    f"predecessor pointer is damaged, not recoverable: {root_id}"
+                ) from exc
             if str(exc) != row["failure"]:
                 raise PipelineValidationError(
                     f"unusable predecessor failure differs: {root_id}"
@@ -4495,6 +4505,44 @@ def _verify_pointer_recovery_gate(spec: PipelineSpec, path: Path) -> None:
             raise PipelineValidationError(
                 f"unusable predecessor pointer is not in the recovery gate: {root_id}"
             ) from exc
+
+
+def _verify_recovered_pointer_evidence(spec: PipelineSpec, release_id: str) -> None:
+    """The pointer bytes a prepared release recorded are the bytes the gate approved.
+
+    The gate binds each unusable pointer by sha256, but ``prepare_release`` reads the
+    pointer again to record it, and rollback later restores the recorded copy. Checking
+    the recorded copy against the gate, after prepare and again before commit, closes the
+    window between the two reads and ties the verbatim restore to hashed evidence.
+    """
+
+    for gate in spec.gates:
+        if gate.gate_id != _POINTER_RECOVERY_GATE:
+            continue
+        payload = _object(
+            json.loads(gate.path.read_text(encoding="utf-8")),
+            "predecessor pointer recovery gate",
+        )
+        for row in _objects(
+            payload["unusable_pointers"], "unusable predecessor pointers"
+        ):
+            recorded = (
+                spec.coordination_root
+                / "releases"
+                / release_id
+                / "pointers"
+                / f"{row['root_id']}.bin"
+            )
+            if (
+                recorded.is_symlink()
+                or not recorded.is_file()
+                or hashlib.sha256(recorded.read_bytes()).hexdigest()
+                != row["pointer_sha256"]
+            ):
+                raise PipelineExecutionError(
+                    "recorded predecessor pointer differs from the recovery gate: "
+                    f"{row['root_id']}"
+                )
 
 
 def _verify_gates(
@@ -4709,6 +4757,8 @@ def execute_pipeline(
             raise PipelineValidationError("prepared release code commit differs")
     _, existing_journal = read_release(spec.coordination_root, release_id)
     state = existing_journal.state
+    if state is not ReleaseState.COMMITTED:
+        _verify_recovered_pointer_evidence(spec, release_id)
     if commit:
         companion_contents = {
             item.companion_id: item.source_path.read_bytes() for item in spec.companions

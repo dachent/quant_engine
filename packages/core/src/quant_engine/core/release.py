@@ -1079,6 +1079,16 @@ def _read_optional_current(root: Path) -> CurrentPointer | None:
         return None
 
 
+def _read_recorded_bytes(root: Path) -> bytes | None:
+    path = root.resolve() / "CURRENT.json"
+    if path.is_symlink():
+        raise ReleaseConflictError("CURRENT.json must not be a symlink")
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def _read_recorded_current(root: Path) -> CurrentPointer | None:
     """Read pointer bytes without accepting the referenced generation inventory."""
 
@@ -1352,14 +1362,22 @@ def prepare_release(
                 or allow_unusable_predecessor_pointers
             ):
                 raise
-            previous_pointer = _read_recorded_current(root)
+            if allow_unusable_predecessor_pointers:
+                # One read: the pointer recorded in the release and the bytes kept for
+                # rollback come from the same bytes.
+                raw_pointer = _read_recorded_bytes(root)
+                previous_pointer = (
+                    CurrentPointer.from_json_bytes(raw_pointer)
+                    if raw_pointer is not None
+                    else None
+                )
+                if raw_pointer is not None:
+                    recovered_pointer_bytes[root_id] = raw_pointer
+            else:
+                previous_pointer = _read_recorded_current(root)
             previous_inventory_sha256 = _recorded_inventory_claim(
                 root, previous_pointer
             )
-            if allow_unusable_predecessor_pointers and previous_pointer is not None:
-                recovered_pointer_bytes[root_id] = (
-                    root.resolve() / "CURRENT.json"
-                ).read_bytes()
         targets.append(
             ReleaseTarget(
                 root_id=root_id,

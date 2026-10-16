@@ -25,6 +25,7 @@ from quant_engine.core import (
     CurrentPointer,
     GateEvidence,
     GenerationManifest,
+    PipelineGate,
     PointerIntegrityError,
     ReleaseCommitError,
     ReleaseValidationError,
@@ -457,3 +458,54 @@ def test_a_successor_can_recover_a_root_that_a_committed_release_bound(
     )
     assert read_current(world.dangling).generation_id == replacement.generation_id
     read_current_release(world.coordination, world.roots)
+
+
+def test_the_pipeline_refuses_a_gate_that_admits_a_damaged_pointer(tmp_path) -> None:
+    world = _World(tmp_path)
+    publish_generation(world.healthy, world.proposed["healthy"].generation_id)
+    (
+        world.healthy
+        / "generations"
+        / world.proposed["healthy"].generation_id
+        / "x.json"
+    ).write_bytes(b"edited after publication\n")
+    pointer = (world.healthy / "CURRENT.json").read_bytes()
+    rows = [
+        {
+            "failure": "current generation artifact inventory hash differs",
+            "pointer_sha256": hashlib.sha256(pointer).hexdigest(),
+            "proposed_generation_id": world.generations["healthy"],
+            "root_id": "healthy",
+        }
+    ]
+    with pytest.raises(PipelineValidationError, match="damaged"):
+        _verify_pointer_recovery_gate(
+            _spec(world), _gate_file(tmp_path, world, rows=rows)
+        )
+
+
+def test_the_recorded_pointer_must_match_the_gate_before_commit(tmp_path) -> None:
+    from quant_engine.core.pipeline import (
+        PipelineExecutionError,
+        _verify_recovered_pointer_evidence,
+    )
+
+    world = _World(tmp_path)
+    manifest = world.prepare()
+    gate = PipelineGate(
+        "predecessor-pointer-recovery",
+        _gate_file(tmp_path, world),
+        hashlib.sha256(_gate_file(tmp_path, world).read_bytes()).hexdigest(),
+    )
+    spec = SimpleNamespace(coordination_root=world.coordination, gates=(gate,))
+    _verify_recovered_pointer_evidence(spec, manifest.release_id)
+    recorded = (
+        world.coordination
+        / "releases"
+        / manifest.release_id
+        / "pointers"
+        / "dangling.bin"
+    )
+    recorded.write_bytes(recorded.read_bytes() + b" ")
+    with pytest.raises(PipelineExecutionError, match="differs from the recovery gate"):
+        _verify_recovered_pointer_evidence(spec, manifest.release_id)

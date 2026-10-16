@@ -203,6 +203,19 @@ PROVIDER_CURRENT_QUALIFICATIONS: Final = frozenset(
     {"FINITE_STATIC", "PUBLISHED_COMPLETE", "STAGED_COMPLETE"}
 )
 PROVIDER_EVIDENCE_QUALIFICATIONS: Final = frozenset({"ACCEPTED_PARTIAL"})
+# The only root the data-root gate treats as evidence-only (tools/check_data_roots.py).
+# A ledger that newly qualified another provider PARTIAL would otherwise drop it from
+# the release without an error.
+EVIDENCE_ONLY_PROVIDER_ROOTS: Final = frozenset({"provider-ibkr"})
+# The only refusals a root's own pointer may carry and still be admitted by the
+# `predecessor-pointer-recovery` gate. Anything else (a generation edited after
+# publication, a manifest hash difference) is damage, not a missing or legacy pointer.
+RECOVERABLE_POINTER_FAILURES: Final = frozenset(
+    {
+        "current generation manifest is missing",
+        "legacy pointer schema is not accepted as current authority",
+    }
+)
 POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
 PRODUCTION_STAGE_ROOTS = {
     "correlation": Path("stages/analytics/correlation"),
@@ -5065,6 +5078,35 @@ def _ledger_provider_bindings(ledger_generation: Path) -> dict[str, dict[str, An
     return bound
 
 
+def _catalog_hash_bound(
+    generation: Path,
+    declared: Sequence[Mapping[str, Any]],
+    files: Sequence[Mapping[str, Any]],
+    catalog_sha256: object,
+) -> bool:
+    """Whether the ledger's catalog hash is this generation's own catalog.
+
+    The catalog is either a file the generation holds or, for a generation whose
+    catalog is retained elsewhere (Portfolio123 keeps only its manifest here), an
+    artifact its manifest declares. A declared artifact whose file IS present at its
+    declared location must match its declared hash: a swapped catalog is not bound by
+    a manifest line that its own bytes contradict.
+    """
+
+    if not isinstance(catalog_sha256, str):
+        return False
+    declaring = [row for row in declared if row.get("sha256") == catalog_sha256]
+    for row in declaring:
+        artifact_id = str(row.get("artifact_id"))
+        for candidate in (
+            generation / artifact_id,
+            generation / Path(artifact_id).name,
+        ):
+            if candidate.is_file() and _sha(candidate)[0] != catalog_sha256:
+                return False
+    return bool(declaring) or catalog_sha256 in {item.get("sha256") for item in files}
+
+
 def _provider_root_nodes(
     provider_generations_path: Path,
     ledger_generation: Path,
@@ -5118,20 +5160,15 @@ def _provider_root_nodes(
             release_target = True
         else:
             binding = bound[root_id.removeprefix("provider-")]
-            # The catalog the ledger hashed is either a file the generation holds
-            # or, for a generation whose catalog is retained elsewhere (Portfolio123
-            # keeps only its manifest here), an artifact its manifest declares.
-            declared = {
-                item.get("sha256")
-                for item in _load(source / "generation.json", f"{root_id} manifest")[
-                    "artifacts"
-                ]
-            }
+            declared_rows = _load(source / "generation.json", f"{root_id} manifest")[
+                "artifacts"
+            ]
             if (
                 binding.get("generation_id") != generation_id
                 or binding.get("manifest_sha256") != inventory["manifest_sha256"]
-                or binding.get("catalog_sha256")
-                not in {item.get("sha256") for item in files} | declared
+                or not _catalog_hash_bound(
+                    source, declared_rows, files, binding.get("catalog_sha256")
+                )
             ):
                 raise MaterializationError(
                     f"{root_id} generation differs from the provider ledger binding"
@@ -5140,6 +5177,11 @@ def _provider_root_nodes(
             if qualification in PROVIDER_CURRENT_QUALIFICATIONS:
                 release_target = True
             elif qualification in PROVIDER_EVIDENCE_QUALIFICATIONS:
+                if root_id not in EVIDENCE_ONLY_PROVIDER_ROOTS:
+                    raise MaterializationError(
+                        f"{root_id} is qualified PARTIAL but is not a declared "
+                        "evidence-only root"
+                    )
                 release_target = False
             else:
                 raise MaterializationError(
@@ -5176,6 +5218,10 @@ def _pointer_recovery_gate_payload(
         try:
             read_current(release_roots[root_id])
         except PointerIntegrityError as exc:
+            if str(exc) not in RECOVERABLE_POINTER_FAILURES:
+                raise MaterializationError(
+                    f"{root_id} pointer is damaged, not recoverable: {exc}"
+                ) from exc
             rows.append(
                 {
                     "failure": str(exc),

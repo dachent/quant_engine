@@ -280,3 +280,46 @@ def test_a_catalog_retained_elsewhere_binds_through_the_manifest_declaration(
     fixture.write_ledger()
     with pytest.raises(materializer.MaterializationError, match="ledger binding"):
         fixture.nodes()
+
+
+def test_a_catalog_whose_declared_file_carries_other_bytes_is_refused(tmp_path) -> None:
+    """The manifest declares the catalog the ledger hashed, but the file there is swapped."""
+
+    fixture = _Fixture(tmp_path)
+    schwab = fixture.sources["provider-schwab"]
+    manifest = json.loads((schwab / "generation.json").read_text("utf-8"))
+    declared = manifest["artifacts"][0]
+    # the ledger hashes the declared artifact; a different file sits at its location
+    for row in fixture.bindings:
+        if row["provider_id"] == "schwab":
+            row["catalog_sha256"] = declared["sha256"]
+    fixture.write_ledger()
+    (schwab / Path(declared["artifact_id"]).name).write_bytes(b"swapped catalog\n")
+    with pytest.raises(materializer.MaterializationError, match="ledger binding"):
+        fixture.nodes()
+
+
+def test_only_the_declared_evidence_only_root_may_be_qualified_partial(
+    tmp_path,
+) -> None:
+    fixture = _Fixture(tmp_path)
+    for row in fixture.bindings:
+        if row["provider_id"] == "schwab":
+            row["qualification"] = "ACCEPTED_PARTIAL"
+    fixture.write_ledger()
+    with pytest.raises(materializer.MaterializationError, match="evidence-only root"):
+        fixture.nodes()
+
+
+def test_a_damaged_pointer_is_not_recoverable(tmp_path) -> None:
+    """A generation edited after publication is damage, not a missing or legacy pointer."""
+
+    root = tmp_path / "damaged"
+    manifest = _manifest("damaged")
+    directory = stage_generation(root, manifest).parent
+    publish_generation(root, manifest.generation_id)
+    (directory / "extra.json").write_bytes(b"edited after publication\n")
+    with pytest.raises(materializer.MaterializationError, match="damaged"):
+        materializer._pointer_recovery_gate_payload(
+            {"damaged": root}, {"damaged": manifest.generation_id}
+        )

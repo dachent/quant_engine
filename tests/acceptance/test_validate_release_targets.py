@@ -990,3 +990,27 @@ def test_a_provider_catalog_the_manifest_declares_binds_without_the_file(
         ]
     }
     assert list(rt.provider_binding(target, tmp_path, base_panel(), ledger)) == []
+
+
+def test_a_declared_catalog_whose_present_bytes_differ_is_a_blocker(
+    tmp_path: Path,
+) -> None:
+    write_manifest(
+        tmp_path,
+        GOOD_GEN,
+        artifacts=[
+            {
+                "artifact_id": "normalized/schwab-generation.json",
+                "sha256": _sha(PROVIDER_CATALOG_BYTES),
+            }
+        ],
+    )
+    (tmp_path / "generations" / GOOD_GEN / "schwab-generation.json").write_bytes(
+        b"swapped catalog\n"
+    )
+    target = make_target("provider-schwab", tmp_path, GOOD_GEN)
+    findings = list(
+        rt.provider_binding(target, tmp_path, base_panel(), _ledger(target))
+    )
+    assert [f.check_id for f in findings] == ["release.provider_binding"]
+    assert "contradict" in findings[0].message

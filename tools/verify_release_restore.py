@@ -6,8 +6,11 @@ tool proves it. It reads a committed release (the coordination root's
 ``CURRENT_RELEASE.json`` and release record) and the spec's data roots, copies ONLY the
 bound generations into an empty clean-room directory, re-derives each pointer with
 ``publish_generation`` from the release's own identities, and requires that
-``read_current_release`` then passes over the restored roots. Nothing outside the
-clean-room directory is written.
+``read_current`` then resolves every restored root to exactly the generation, manifest
+hash and inventory hash the release bound. A release also binds each root's directory
+identity, so ``read_current_release`` cannot pass in a different location by design;
+adopting restored roots needs a new release over them. Nothing outside the clean-room
+directory is written, and the clean room must lie outside every governed root.
 
 Usage: ``python tools/verify_release_restore.py --spec SPEC --clean-room DIR
 [--expect-sums FILE]``. ``--expect-sums`` is a ``SHA256SUMS`` file whose
@@ -60,6 +63,15 @@ def restore(
 ) -> dict[str, object]:
     if clean_room.exists() and any(clean_room.iterdir()):
         raise RestoreError("clean-room directory must be empty")
+    resolved_clean_room = clean_room.resolve()
+    for governed in (spec.coordination_root, *spec.roots.values()):
+        governed_resolved = governed.resolve()
+        if (
+            governed_resolved == resolved_clean_room
+            or governed_resolved in resolved_clean_room.parents
+            or resolved_clean_room in governed_resolved.parents
+        ):
+            raise RestoreError("the clean room must be outside every governed root")
     authority_path = spec.coordination_root / "CURRENT_RELEASE.json"
     authority = ReleaseAuthorityPointer.from_json_bytes(authority_path.read_bytes())
     manifest, journal = read_release(spec.coordination_root, authority.release_id)

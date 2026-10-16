@@ -206,3 +206,14 @@ def test_a_release_companion_is_restored_and_checked_by_hash(tmp_path: Path) -> 
         assert "hash differs" in str(error)
     else:
         raise AssertionError("a tampered companion restored")
+
+
+def test_a_clean_room_inside_a_governed_root_is_refused(tmp_path: Path) -> None:
+    spec, _ = _committed(tmp_path)
+    for inside in (tmp_path / "alpha" / "clean", tmp_path / "coordination" / "clean"):
+        try:
+            tool.restore(spec, inside)
+        except tool.RestoreError as error:
+            assert "outside every governed root" in str(error)
+        else:
+            raise AssertionError("a clean room inside a governed root was accepted")

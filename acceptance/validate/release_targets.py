@@ -433,16 +433,34 @@ def _file_sha256s(directory: Path) -> set[str]:
     return digests
 
 
-def _declared_artifact_sha256s(generation_dir: Path) -> set[str]:
-    """The sha256 of every artifact the generation manifest declares."""
+def _catalog_hash_bound(generation_dir: Path, catalog_sha256: object) -> bool:
+    """Whether the ledger's catalog hash is this generation's own catalog.
 
+    A file the generation holds, or an artifact its manifest declares when the catalog
+    is retained elsewhere; a declared artifact whose file is present at its declared
+    location must carry exactly the declared bytes.
+    """
+
+    if not isinstance(catalog_sha256, str):
+        return False
     try:
         artifacts = json.loads((generation_dir / GENERATION_MANIFEST).read_bytes())[
             "artifacts"
         ]
-        return {item["sha256"] for item in artifacts}
+        declaring = [item for item in artifacts if item["sha256"] == catalog_sha256]
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
-        return set()
+        declaring = []
+    for item in declaring:
+        artifact_id = str(item["artifact_id"])
+        for candidate in (
+            generation_dir / artifact_id,
+            generation_dir / Path(artifact_id).name,
+        ):
+            if candidate.is_file() and (
+                hashlib.sha256(candidate.read_bytes()).hexdigest() != catalog_sha256
+            ):
+                return False
+    return bool(declaring) or catalog_sha256 in _file_sha256s(generation_dir)
 
 
 def _panel_account_manifest_artifacts(panel: Mapping[str, Any]) -> dict[str, str]:
@@ -593,16 +611,15 @@ def provider_binding(
             "$.provider_generations.manifest_sha256",
             "the provider ledger binds a different manifest hash",
         )
-    if row.get("catalog_sha256") not in (
-        _file_sha256s(generation_dir) | _declared_artifact_sha256s(generation_dir)
-    ):
+    if not _catalog_hash_bound(generation_dir, row.get("catalog_sha256")):
         yield finding(
             row.get("catalog_sha256"),
-            "the sha256 of a file present in the generation or an artifact its "
-            "manifest declares",
+            "the sha256 of a file present in the generation or of an artifact its "
+            "manifest declares (and whose present bytes agree)",
             "$.provider_generations.catalog_sha256",
             "no file in the target generation and no declared artifact has the "
-            "catalog hash the ledger recorded",
+            "catalog hash the ledger recorded, or the bytes at a declared location "
+            "contradict it",
         )
 
 
