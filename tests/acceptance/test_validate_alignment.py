@@ -3450,7 +3450,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.census is None
     assert state.problem is not None
     assert (
-        "49a19ebfa1e7dded94fa21241e5011d60c9b1bb6e41dd587c9943dbe14017d7b"
+        "012d49141c9055f56965c21e440abf20c6b3ca8ca185233c913aedda3a086191"
         in state.problem
     )
     assert (
@@ -3476,7 +3476,6 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
         == 2
     )
     assert not [t for t in tuples if t[1] == "ASSIGNMENT_ONLY"]
-    assert ("tt-portfolio", "FUNDED_MEMBERSHIP", "2025-11-25", "2026-06-21") in tuples
 
 
 def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None:

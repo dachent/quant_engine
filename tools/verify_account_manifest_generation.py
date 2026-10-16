@@ -72,9 +72,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "1976735968c1e75fd83572ec16200688340d2bc8f0ca8cc68e1d9e0a9addd6c0"
+    "2a022a459d3e83dbdc2497b7c24b5a9d7b5074449912bf26cae4b22d82ae3159"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30028
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30007
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -2246,7 +2246,7 @@ def _parse_numeric_projection(
     post_liquidation: tuple[object, ...] | None = None
     if _POST_LIQUIDATION_FIELDS <= set(row):
         raw_credits = row["post_liquidation_credits"]
-        if type(raw_credits) is not list or not raw_credits or status != "AVAILABLE":
+        if type(raw_credits) is not list or status != "AVAILABLE":
             _fail()
         parsed_credits: list[tuple[object, ...]] = []
         for credit in raw_credits:
@@ -5881,21 +5881,31 @@ def _verify_mixed_admission(
         if type(continuity) is not bool:
             _fail()
         if status == "FUNDED":
+            funded_keys = {
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+                "status",
+                "continuity_to_successor",
+                "authority_kind",
+                "funded_nav_record_ids",
+            }
             if (
-                set(raw)
-                != {
-                    "account_id",
-                    "strategy_id",
-                    "effective_start",
-                    "effective_end",
-                    "status",
-                    "continuity_to_successor",
-                    "authority_kind",
-                    "funded_nav_record_ids",
-                }
+                not funded_keys <= set(raw) <= funded_keys | {"funded_end"}
                 or raw.get("authority_kind") != "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
             ):
                 _fail()
+            if "funded_end" in raw:
+                # The last funded day of a liquidated and transferred account.
+                funded_end_day = _parse_canonical_date(raw["funded_end"])
+                assignment_start = _date_value(mapped_by_key[key]["effective_start"])
+                assignment_stop = mapped_by_key[key]["effective_end"]
+                if funded_end_day < assignment_start or (
+                    assignment_stop is not None
+                    and funded_end_day > _date_value(assignment_stop)
+                ):
+                    _fail()
             ids = raw.get("funded_nav_record_ids")
             if (
                 not isinstance(ids, list)
@@ -6096,7 +6106,7 @@ def _mixed_numeric_facts(
     assignment: Mapping[str, object],
     bridge: Mapping[str, object],
     *,
-    carries_tail: bool = False,
+    funded_end: date | None = None,
 ) -> _IndependentEpochFacts:
     ledger = bridge["ledger"]
     events = bridge["events"]
@@ -6261,14 +6271,12 @@ def _mixed_numeric_facts(
         _fail()
     assignment_end = (
         cutoff
-        if assignment["effective_end"] is None or carries_tail
+        if assignment["effective_end"] is None
         else min(cutoff, _date_value(assignment["effective_end"]))
     )
-    # The last epoch of an account's chain that ends on a stated date carries
-    # the account's later observations; its return closes at that date.
-    funded_end = (
-        min(cutoff, _date_value(assignment["effective_end"])) if carries_tail else None
-    )
+    if funded_end is not None:
+        # The return closes at the policy's last funded day (#539).
+        funded_end = min(cutoff, funded_end)
     facts = _parse_epoch_facts(
         nav_facts,
         flow_facts,
@@ -6400,18 +6408,6 @@ def _verify_mixed_output_and_state(
     expected_rows: list[dict[str, object]] = []
     comparison = _NumericComparison(0, 0, 0)
     blocker_chains: list[dict[str, object]] = []
-    last_start_by_account: dict[object, object] = {}
-    for assignment in mapped:
-        account = assignment["account_id"]
-        last_start_by_account[account] = max(
-            last_start_by_account.get(account, ""), assignment["effective_start"]
-        )
-    final_chain_keys = {
-        tuple(_assignment_record(assignment).values())
-        for assignment in mapped
-        if assignment["effective_start"]
-        == last_start_by_account[assignment["account_id"]]
-    }
     for assignment in _sorted_mixed_output_assignments(mapped):
         key = tuple(_assignment_record(assignment).values())
         candidate = candidate_by_key[key]
@@ -6477,12 +6473,16 @@ def _verify_mixed_output_and_state(
                     }
                 )
                 continue
+            policy_funded_end = policy_row.get("funded_end")
             facts = _mixed_numeric_facts(
                 selected,
                 assignment,
                 bridge,
-                carries_tail=assignment["effective_end"] is not None
-                and key in final_chain_keys,
+                funded_end=(
+                    None
+                    if policy_funded_end is None
+                    else _date_value(policy_funded_end)
+                ),
             )
             predecessor_assignment = admission["predecessor_by_key"].get(key)
             predecessor_fact: _IndependentPredecessorFact | None = None

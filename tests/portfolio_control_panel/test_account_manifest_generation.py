@@ -29406,3 +29406,102 @@ def test_independent_verifier_matches_the_producer_on_a_funded_end_tail(
     assert [
         link["end_date"] for link in verifier_row["observation_trace"]["links"]
     ] == ["2026-01-02"]
+
+
+def test_policy_funded_end_closes_the_epoch_end_to_end_and_the_verifier_agrees(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """#539: a policy ``funded_end`` flows producer -> payloads -> independent verifier."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    policy = json.loads(selected.admission_policy.contents)
+    funded = [row for row in policy["admissions"] if row["status"] == "FUNDED"]
+    assert len(funded) == 1
+    funded[0]["funded_end"] = "2026-01-31"
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "mixed admission with funded end", canonical_json_bytes(policy)
+            ),
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    closed_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_account_manifest_payloads(closed_selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert row["performance_closed_on"] == "2026-01-31"
+    assert [
+        (credit["start_date"], credit["end_date"], credit["amount"])
+        for credit in row["post_liquidation_credits"]
+    ] == [("2026-01-31", "2026-02-01", "10")]
+    assert row["post_liquidation_income"] == "10"
+    assert [link["end_date"] for link in row["observation_trace"]["links"]] == [
+        "2026-01-31"
+    ]
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, closed_selected), payloads
+    )
+
+    # A verifier that is told a different funded end refuses the manifest.
+    other = json.loads(closed_selected.admission_policy.contents)
+    next(row for row in other["admissions"] if row["status"] == "FUNDED")[
+        "funded_end"
+    ] = "2026-01-30"
+    values["admission_policy"] = InputSnapshot.from_bytes(
+        "mixed admission, other funded end", canonical_json_bytes(other)
+    )
+    other_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(Exception):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, other_selected), payloads
+        )
+
+
+def test_closed_epoch_with_a_flat_tail_has_no_credits_and_still_verifies(
+    verifier_module: Any,
+) -> None:
+    """A funded end followed by unchanged NAV closes the epoch with an empty credit list."""
+
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2026-01-01": Decimal("100"),
+        "2026-01-02": Decimal("110"),
+        "2026-01-03": Decimal("110"),
+        "2026-01-04": Decimal("110"),
+    }
+    row = producer_module.analyze_epoch(
+        navs, {}, {}, {}, {}, None, "2026-01-01", None, funded_end="2026-01-02"
+    )
+    assert row is not None
+    assert row["performance_closed_on"] == "2026-01-02"
+    assert row["post_liquidation_credits"] == []
+    assert row["post_liquidation_income"] == Decimal("0")
+    facts = verifier_module._IndependentEpochFacts(
+        "flat-account",
+        date(2026, 1, 1),
+        date(2026, 1, 4),
+        tuple(
+            verifier_module._IndependentNavFact(
+                date.fromisoformat(as_of_date), "USD", value
+            )
+            for as_of_date, value in navs.items()
+        ),
+        (),
+        None,
+        True,
+        None,
+        date(2026, 1, 2),
+    )
+    expected = verifier_module._derive_first_available_nav_epoch(facts)
+    assert expected["post_liquidation_credits"] == []
+    projection = {
+        key: json.loads(json.dumps(value, default=str))
+        for key, value in expected.items()
+    }
+    assert projection["performance_closed_on"] == "2026-01-02"

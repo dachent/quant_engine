@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "dfbbe750c8cf7c71d8911309726d63bacb4cbb11305ef73889dc5061313e2d0e"
+        "71692a8540f8a77ffa75bf6b83c9a9ad947520f878c22c3c8f20cf73d7414dfe"
     )
 
 
@@ -1475,9 +1475,7 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
         "p123-eu": 1,
         "qsi": 2,
         "robuxio-crypto": 1,
-        # The fourth TT account (4054) was liquidated and transferred out on
-        # 2026-06-22 (#539): its sleeve is a closed funded epoch, not current.
-        "tt-portfolio": 3,
+        "tt-portfolio": 4,
         "volatis-strategy": 1,
     }
     assert len(transition_rows) == 4
@@ -1497,17 +1495,13 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
     ]
     assert tt_funded
     # Open memberships, plus the closed funded epochs the owner ruled on (#539):
-    # the two accounts later assigned to QSI (to 2026-01-04) and the liquidated
-    # and transferred account (to 2026-06-21, never a July exit).
+    # the two accounts later assigned to QSI (to 2026-01-04).
     assert sorted(str(row["effective_end"]) for row in tt_funded) == sorted(
-        ["None"] * 3 + ["2026-01-04", "2026-01-04", "2026-06-21"]
+        ["None"] * 4 + ["2026-01-04", "2026-01-04"]
     )
     assert {
         row["authority"] for row in tt_funded if row["effective_end"] is not None
-    } == {
-        "OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED",
-        "OWNER_539_LIQUIDATED_AND_TRANSFERRED",
-    }
+    } == {"OWNER_539_TT_PREDECESSOR_EPOCH_FUNDED"}
 
 
 def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes() -> (

@@ -470,7 +470,6 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
             "tools/rebind_current_epoch_crosswalk.py",
             _PREPARATION,
-            "contracts/account-strategy-current-epoch-crosswalk-v1.json",
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
             "schemas/portfolio/account-strategy-current-epoch-crosswalk.schema.json",

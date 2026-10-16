@@ -2789,8 +2789,22 @@ def load_admission_policy(
                 "continuity_to_successor": admission["continuity_to_successor"],
             }
             continue
-        if set(admission) != common | {"authority_kind", "funded_nav_record_ids"}:
+        if not (
+            common | {"authority_kind", "funded_nav_record_ids"}
+            <= set(admission)
+            <= common | {"authority_kind", "funded_nav_record_ids", "funded_end"}
+        ):
             raise ManifestError(f"admission {index} FUNDED keys are invalid")
+        # The epoch's last funded day when the account was later liquidated and
+        # transferred out: the return closes there and what follows is dated
+        # post-liquidation income (#539).  The evidence window is unchanged.
+        funded_end = admission.get("funded_end")
+        if funded_end is not None:
+            funded_end = _iso_date(funded_end, f"admission {index}.funded_end")
+            if not _in_window(funded_end, key[2], key[3]):
+                raise ManifestError(
+                    f"admission {index}.funded_end is outside the assignment"
+                )
         authority_kind = _require_nonempty_text(
             admission.get("authority_kind"), f"admission {index}.authority_kind"
         )
@@ -2837,6 +2851,7 @@ def load_admission_policy(
             "funded_nav_record_ids": list(record_ids),
             "funded_nav_dates": evidence_dates,
             "continuity_to_successor": admission["continuity_to_successor"],
+            "funded_end": funded_end,
         }
     if set(admissions) != assignment_keys:
         raise ManifestError(
@@ -3355,10 +3370,10 @@ def analyze_epoch(
 ) -> dict[str, Any] | None:
     """Account for one funded epoch: capital basis plus R1-R4 performance.
 
-    ``funded_end`` is the epoch's last funded day when its window carries the
-    account's later observations (a liquidated account's tail): dollars run to
-    the last observation, the time-weighted return closes at ``funded_end`` and
-    everything after it is a post-liquidation credit.
+    ``funded_end`` (admission policy) is the epoch's last funded day when the
+    account was later liquidated and transferred out: the time-weighted return
+    closes there and every later sub-period of the window is a post-liquidation
+    credit inside ``gain``.
 
     Capital (opening basis, invested, withdrawn, gain, RONC and the XIRR
     diagnostic) keeps its owner-approved meaning.  Performance -- the
@@ -3885,15 +3900,10 @@ def _assemble_manifest_impl(
                 prev_closing = None
                 prev_closing_date = None
                 continue
-            # The last epoch of an account's chain that ends on a stated date
-            # (a liquidated account) carries the account's later observations:
-            # dollars run to the last one, the return closes at ``w1`` and the
-            # tail is post-liquidation income.
-            carries_tail = w1 is not None and index == len(chain) - 1
             window = {
                 d: v
                 for d, v in series.get(aid, {}).items()
-                if d >= w0 and (carries_tail or w1 is None or d <= w1)
+                if d >= w0 and (w1 is None or d <= w1)
             }
             final_nav_date = max(window, default=None)
             if final_nav_date is not None and not flow_coverage.is_complete(
@@ -4000,12 +4010,12 @@ def _assemble_manifest_impl(
                 local_internal_out,
                 prev_closing,
                 w0,
-                None if carries_tail else w1,
+                w1,
                 prev_closing_date,
                 opening_anchor=opening_anchors[0] if opening_anchors else None,
                 capital_allocation_legs=allocation_legs,
                 pre_start_observation=pre_start_observation,
-                funded_end=w1 if carries_tail else None,
+                funded_end=admission.get("funded_end"),
             )
             if stats is not None and stats.get("unavailable_status"):
                 unavailable_row = {
@@ -4844,7 +4854,7 @@ def _validate_post_liquidation_credits(
     """Re-derive each post-liquidation credit from the row's own legs."""
 
     credits = row.get("post_liquidation_credits")
-    if not isinstance(credits, list) or not credits:
+    if not isinstance(credits, list):
         raise ManifestError(f"row {index} post-liquidation credits are invalid")
     prior_end = closed_on
     total = Decimal(0)
@@ -5071,13 +5081,10 @@ def _validate_manifest_semantics(
                 or (effective_end is not None and closed_on > effective_end)
             ):
                 raise ManifestError(f"row {index} performance closing is invalid")
-        # A closed epoch carries the account's later observations (the tail
-        # after its last funded day), so its dollars run past ``effective_end``.
-        dollar_end = None if closed_on is not None else effective_end
         if (
             start > end
             or start < effective_start
-            or (dollar_end is not None and end > dollar_end)
+            or (effective_end is not None and end > effective_end)
         ):
             raise ManifestError(f"row {index} observation interval is invalid")
 
@@ -5126,7 +5133,7 @@ def _validate_manifest_semantics(
                     f"row[{index}].capital_flow_trace[{flow_index}].date",
                 )
                 recognition_date = None
-            if not _in_window(event_date, effective_start, dollar_end):
+            if not _in_window(event_date, effective_start, effective_end):
                 raise ManifestError(
                     f"row {index} capital flow trace event date is outside epoch"
                 )
@@ -5255,7 +5262,7 @@ def _validate_manifest_semantics(
             start=start,
             end=end,
             effective_start=effective_start,
-            effective_end=dollar_end,
+            effective_end=effective_end,
             opening_basis=str(opening_basis),
             opening_capital=money["opening_capital"],
             current_value=money["current_value"],

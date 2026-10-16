@@ -343,7 +343,6 @@
     },
     "post_liquidation_credits": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
