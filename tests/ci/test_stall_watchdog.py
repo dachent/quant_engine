@@ -24,3 +24,11 @@ def test_silent_command_is_killed_with_stall_exit(capsys: object) -> None:
 
 def test_exit_code_is_passed_through() -> None:
     assert stall_watchdog.run([sys.executable, "-c", "raise SystemExit(3)"], 5.0) == 3
+
+
+def test_leading_python_runs_the_current_interpreter(capsys: object) -> None:
+    code = "import sys; print(sys.executable)"
+    assert (
+        stall_watchdog.main(["--stall-seconds", "5", "--", "python", "-c", code]) == 0
+    )
+    assert sys.executable in capsys.readouterr().out  # type: ignore[attr-defined]

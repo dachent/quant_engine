@@ -109,6 +109,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
+    if command[0] in ("python", "python3"):
+        # Hosted runners put their own Python first on PATH, not the project venv.
+        command = [sys.executable, *command[1:]]
     return run(command, args.stall_seconds)
 
 
