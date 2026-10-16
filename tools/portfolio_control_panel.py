@@ -1324,6 +1324,49 @@ def _gunzip_exact(content: bytes) -> bytes:
     return raw
 
 
+_PANEL_LENS_REPRESENTATION: Final = "SURFACE_SERIES_ONCE_V1"
+
+
+def _panel_wire_form(data: Mapping[str, Any]) -> dict[str, Any]:
+    """The published panel payload: every lens surface's series is carried once.
+
+    The assembled payload repeats data two ways: each lens record repeats the
+    series of its default surface (`lens.series` == `lens.surfaces[default].series`),
+    and `decomposition_lenses.lenses` repeats `modes.LIVE_ONLY`. Together that is
+    ~99 MB of the 364 MB payload. The repeats are removed only where they are
+    exactly equal to the copy that stays, so no value is lost, and the schema
+    names the representation.
+    """
+
+    lenses = data.get("decomposition_lenses")
+    modes = lenses.get("modes") if isinstance(lenses, Mapping) else None
+    if not isinstance(lenses, Mapping) or not isinstance(modes, Mapping):
+        return dict(data)
+
+    def deduplicated(row: Any) -> Any:
+        if not isinstance(row, Mapping) or "series" not in row:
+            return row
+        surfaces = row.get("surfaces")
+        default = row.get("default_surface")
+        if (
+            isinstance(surfaces, Mapping)
+            and isinstance(surfaces.get(default), Mapping)
+            and surfaces[default].get("series") == row["series"]
+        ):
+            return {key: value for key, value in row.items() if key != "series"}
+        return row
+
+    wire_modes = {
+        mode: [deduplicated(row) for row in rows] if isinstance(rows, list) else rows
+        for mode, rows in modes.items()
+    }
+    wire_lenses = {**lenses, "modes": wire_modes}
+    if wire_lenses.get("lenses") == modes.get("LIVE_ONLY"):
+        del wire_lenses["lenses"]
+    wire_lenses["representation"] = _PANEL_LENS_REPRESENTATION
+    return {**data, "decomposition_lenses": wire_lenses}
+
+
 def _panel_data_parts(
     data: Mapping[str, Any], data_bytes: bytes
 ) -> list[tuple[str, bool, bytes]]:
@@ -11601,12 +11644,13 @@ def _rendered_files(
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital
+    wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
-        data,
+        wire_data,
         authority_snapshots[PANEL_DATA_SCHEMA][0],
         authority_snapshots[ACCOUNT_MANIFEST_SCHEMA][0],
     )
-    data_bytes = canonical_json_bytes(data)
+    data_bytes = canonical_json_bytes(wire_data)
     legacy_data_path, _legacy_data_content, legacy_data_sha256 = legacy_snapshots[
         "legacy_data"
     ]
@@ -11619,7 +11663,7 @@ def _rendered_files(
         "analytics.css": template_files["analytics.css"],
         "app.js": template_files["app.js"],
         "data/dashboard_data.json": data_bytes,
-        "data/dashboard_data.js": _panel_data_script(data, data_bytes),
+        "data/dashboard_data.js": _panel_data_script(wire_data, data_bytes),
         "data/freshness-health.json": freshness_content,
     }
     if candidate_driver_map_content is not None:

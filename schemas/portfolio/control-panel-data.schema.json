@@ -354,9 +354,10 @@
     "decomposition_lenses": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["default_evidence_mode", "default_lens", "evidence_modes", "lenses", "modes", "plan_bundle_id", "plan_manifest_sha256"],
+      "required": ["default_evidence_mode", "default_lens", "evidence_modes", "modes", "plan_bundle_id", "plan_manifest_sha256"],
       "properties": {
         "default_evidence_mode": { "const": "LIVE_ONLY" },
+        "representation": { "const": "SURFACE_SERIES_ONCE_V1" },
         "default_lens": { "type": "string" },
         "evidence_modes": {
           "type": "array",
@@ -1907,7 +1908,9 @@
     },
     "decomposition_lens": {
       "type": "object",
-      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "unavailable_count"],
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "source_sha256", "sources", "unavailable_count"],
+      "if": { "required": ["surfaces"] },
+      "else": { "required": ["series"] },
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
         "analytics_schema_version": { "enum": [1, 2, 3] },
