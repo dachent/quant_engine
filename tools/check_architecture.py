@@ -137,13 +137,22 @@ def _imports(
         elif isinstance(node, ast.ImportFrom):
             names = tuple(a.name for a in node.names)
             if node.level == 0:
-                if node.module:
-                    yield node.lineno, node.module, names
+                module = node.module or ""
             elif package and node.level <= len(package):
                 base = package[: len(package) - (node.level - 1)]
                 module = ".".join(
                     [*base, *(node.module.split(".") if node.module else [])]
                 )
+            else:
+                continue
+            if not module:
+                continue
+            if module == "quant_engine":
+                # `from quant_engine import core` / `from .. import core`: each
+                # name is itself a package of the namespace.
+                for name in names:
+                    yield node.lineno, f"quant_engine.{name}", ()
+            else:
                 yield node.lineno, module, names
 
 
@@ -463,12 +472,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if json.loads(EDGES.read_text(encoding="utf-8")) != edges_contract():
         print("allowed-edges.json is stale; run --write-docs", file=sys.stderr)
         return 1
-    committed_graph = json.loads(GRAPH.read_text(encoding="utf-8"))
-    if committed_graph.get("package_edges") != import_graph(files)["package_edges"]:
-        print(
-            "import-graph.json package edges are stale; run --write-docs",
-            file=sys.stderr,
-        )
+    if json.loads(GRAPH.read_text(encoding="utf-8")) != import_graph(files):
+        print("import-graph.json is stale; run --write-docs", file=sys.stderr)
         return 1
     if new or stale:
         if new:
