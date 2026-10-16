@@ -13475,11 +13475,16 @@ def test_embedded_download_encoding_and_gzip_integrity_are_enforced() -> None:
     content = b'{"report_schema_version":1}\n' * 50
     link = panel._report_download_link(panel.REPORT_DOWNLOAD, "Report", content)
 
+    # a payload without the attribute is a pre-#540 file's own bytes, never inflated
     stripped = link.replace(' data-download-encoding="gzip"', "")
+    assert panel.embedded_download_bytes(stripped, panel.REPORT_DOWNLOAD) != content
+    unknown = link.replace(
+        'data-download-encoding="gzip"', 'data-download-encoding="br"'
+    )
     with pytest.raises(
         panel.ControlPanelValidationError, match="embedded download encoding differs"
     ):
-        panel.embedded_download_bytes(stripped, panel.REPORT_DOWNLOAD)
+        panel.embedded_download_bytes(unknown, panel.REPORT_DOWNLOAD)
 
     carried = gzip.compress(content, compresslevel=6, mtime=0)
     for damaged in (
@@ -13635,6 +13640,38 @@ def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
     ]
     with pytest.raises(panel.ControlPanelValidationError, match="exactly one slice"):
         panel._panel_data_script(ambiguous, canonical_json_bytes(ambiguous))
+
+
+def test_built_panel_carries_the_report_only_inside_index_html(
+    inputs: dict[str, Any],
+) -> None:
+    """#540: no downloads/ copy; candidate.json records the embedded digest and size."""
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    directory = Path(str(candidate["candidate_dir"]))
+    assert not (directory / "downloads").exists()
+    record = json.loads((directory / "candidate.json").read_text(encoding="utf-8"))
+    assert panel.REPORT_DOWNLOAD not in record["artifact_sha256"]
+    html = (directory / "index.html").read_text(encoding="utf-8")
+    embedded = panel.embedded_download_bytes(html, panel.REPORT_DOWNLOAD)
+    assert record["embedded_artifacts"] == {
+        panel.REPORT_DOWNLOAD: {
+            "encoding": "gzip",
+            "sha256": hashlib.sha256(embedded).hexdigest(),
+            "size_bytes": len(embedded),
+        }
+    }
+    data = json.loads(
+        (directory / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    assert data["meta"]["report_sha256"] == hashlib.sha256(embedded).hexdigest()
 
 
 def test_built_panel_data_script_carries_exactly_the_published_json(
@@ -14195,7 +14232,7 @@ try {
     accountLabel,
     actualDownloadSha256,
     contextSummary,
-    expectedDownloadSha256: candidate.artifact_sha256["downloads/portfolio-report-data.json"],
+    expectedDownloadSha256: candidate.embedded_artifacts["downloads/portfolio-report-data.json"].sha256,
   });
   await page.close();
   console.log(JSON.stringify(results));

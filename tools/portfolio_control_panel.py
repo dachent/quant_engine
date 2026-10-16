@@ -1292,7 +1292,8 @@ def embedded_download_bytes(html: str, relative_path: str) -> bytes:
         else "identity"
         for _index, attributes, _payload in found
     }
-    if encodings != {_DOWNLOAD_ENCODINGS[relative_path]}:
+    # A payload without the attribute predates #540 and is the file's own bytes.
+    if len(encodings) != 1 or not encodings <= {"identity", "gzip"}:
         raise ControlPanelValidationError("embedded download encoding differs")
     try:
         encoded = base64.b64decode(
@@ -11692,24 +11693,24 @@ def _rendered_files(
             "index.html exceeds the panel size budget: "
             f"{len(files['index.html'])} bytes > {_INDEX_HTML_MAX_BYTES}"
         )
-    # The workbook is served from the base64 payload inlined above, never from a
-    # file beside the page: `app.js` intercepts the click and rebuilds it from
-    # those chunks, and only reads the href as an identifier. Keeping an .xlsx in
-    # the generation directory is therefore pure liability -- the production
-    # roots live under a SharePoint sync root, and the sync client rewrites
-    # Office documents in place, injecting `customXml` document properties. That
-    # silently changes bytes inside a published, content-addressed generation:
-    # it is what left the 2026-08-16 report pointer unverifiable, and what made
-    # two byte-identical copies of this workbook diverge from each other during
-    # materialisation. Every other artifact this pipeline publishes is a format
-    # the sync client leaves alone.
-    files.update(
-        {
-            relative: content
-            for relative, content in downloads.items()
-            if relative != WORKBOOK_DOWNLOAD
-        }
-    )
+    # Neither download is written beside the page. Both are served from the
+    # base64 payload inlined above: `app.js` intercepts the click and rebuilds the
+    # file from those chunks, and only reads the href as an identifier.
+    #
+    # The workbook: an .xlsx in the generation directory is pure liability -- the
+    # production roots live under a SharePoint sync root, and the sync client
+    # rewrites Office documents in place, injecting `customXml` document
+    # properties. That silently changes bytes inside a published,
+    # content-addressed generation: it is what left the 2026-08-16 report pointer
+    # unverifiable, and what made two byte-identical copies of this workbook
+    # diverge from each other during materialisation.
+    #
+    # The report JSON (#540): the page already carries it byte for byte, the
+    # report generation it came from stays hash-bound by `meta.report_sha256` and
+    # the `report` input binding, and `candidate.json` records the embedded
+    # digest in `embedded_artifacts`. A second 330 MB copy under `downloads/`
+    # added no proof and doubled the generation. Readers take it from the page
+    # through `embedded_download_bytes`.
     bound_inputs: dict[str, tuple[Path, str]] = {
         "report": (report_path, report_identity_values["sha256"]),
         "decomposition": (decomposition_path, decomposition_identity["sha256"]),
@@ -11941,6 +11942,23 @@ def _panel_id(files: Mapping[str, bytes]) -> str:
     return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
 
+def _embedded_artifact_records(files: Mapping[str, bytes]) -> dict[str, Any]:
+    """Digest and size of each download the page carries instead of a file."""
+
+    html = files["index.html"].decode("utf-8")
+    records: dict[str, Any] = {}
+    for relative, (_name, _mime, prefix) in sorted(_DOWNLOAD_METADATA.items()):
+        if relative in files or f'data-download-payload-prefix="{prefix}"' not in html:
+            continue
+        content = embedded_download_bytes(html, relative)
+        records[relative] = {
+            "encoding": _DOWNLOAD_ENCODINGS[relative],
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+    return records
+
+
 def _candidate_record(
     files: Mapping[str, bytes], data: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -11959,6 +11977,7 @@ def _candidate_record(
         "portfolio_as_of": data["meta"]["portfolio_as_of"],
         "correlation_generation_id": data["meta"]["correlation_generation_id"],
         "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
+        "embedded_artifacts": _embedded_artifact_records(files),
         "report_generation_id": data["meta"]["report_generation_id"],
         "state": "STAGED",
     }

@@ -238,11 +238,16 @@ if (!epochOnly) {
     // established upstream by the panel's `report_workbook` binding and the
     // workbook parity receipt; what remains to prove here is that the download
     // path reconstructs it faithfully, which is what this check is named for.
-    const expectedSha256 = Object.prototype.hasOwnProperty.call(
+    // The report is also carried only inside the page (#540): its digest is the one
+    // `candidate.json` records for the embedded bytes, so a download that inflates
+    // wrongly cannot agree with it.
+    const recordedEmbedded = candidateRecord.embedded_artifacts?.[relative]?.sha256;
+    const inInventory = Object.prototype.hasOwnProperty.call(
       candidateRecord.artifact_sha256, relative,
-    )
+    );
+    const expectedSha256 = inInventory
       ? candidateRecord.artifact_sha256[relative]
-      : await page.evaluate(async (href) => {
+      : recordedEmbedded ?? await page.evaluate(async (href) => {
         const link = document.querySelector(`a[download][href="${href}"]`);
         const prefix = link?.getAttribute("data-download-payload-prefix");
         const count = Number(link?.getAttribute("data-download-chunk-count"));
@@ -272,9 +277,9 @@ if (!epochOnly) {
         relative_path: relative,
         sha256: actualSha256,
         size_bytes: downloaded.length,
-        expected_source: Object.prototype.hasOwnProperty.call(
-          candidateRecord.artifact_sha256, relative,
-        ) ? "candidate_artifact_inventory" : "embedded_payload",
+        expected_source: inInventory
+          ? "candidate_artifact_inventory"
+          : recordedEmbedded ? "candidate_embedded_artifact_record" : "embedded_payload",
       },
     ));
   }
