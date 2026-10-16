@@ -379,11 +379,7 @@ def _parts_payload_sha256(literal: bytes) -> str | None:
     except ValueError as exc:
         raise GenerationError(f"dashboard_data.js parts are not JSON: {exc}") from exc
     parts = descriptor.get("parts") if isinstance(descriptor, dict) else None
-    if (
-        not isinstance(parts, list)
-        or not parts
-        or descriptor.get("encoding") != "gzip"
-    ):
+    if not isinstance(parts, list) or not parts or descriptor.get("encoding") != "gzip":
         return None
     digest = hashlib.sha256()
     total = 0

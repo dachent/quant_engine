@@ -1160,7 +1160,10 @@ def test_gzip_parts_data_script_carries_the_published_panel_payload(
     assert [f.check_id for f in run(gen_dir)] == ["expected.not_supplied"]
     scan = load_generation(gen_dir).scan
     assert scan.panel_script_global == "PORTFOLIO_DATA_PARTS"
-    assert scan.panel_script_payload_sha256 == scan.stripped_sha256["data/dashboard_data.json"]
+    assert (
+        scan.panel_script_payload_sha256
+        == scan.stripped_sha256["data/dashboard_data.json"]
+    )
 
 
 def test_corrupt_gzip_part_in_the_data_script_is_unreadable(tmp_path: Path) -> None:
@@ -1535,7 +1538,9 @@ def _parts_script(panel_bytes: bytes, kind: str) -> bytes:
         parts[0].update(
             raw_bytes=len(forged),
             sha256=hashlib.sha256(forged).hexdigest(),
-            gzip_base64=base64.b64encode(gzip.compress(forged, mtime=0)).decode("ascii"),
+            gzip_base64=base64.b64encode(gzip.compress(forged, mtime=0)).decode(
+                "ascii"
+            ),
         )
     descriptor = {
         "encoding": "gzip",
@@ -1545,7 +1550,11 @@ def _parts_script(panel_bytes: bytes, kind: str) -> bytes:
         "total_sha256": hashlib.sha256(panel_bytes).hexdigest(),
         "version": 1,
     }
-    return b"window.PORTFOLIO_DATA_PARTS = " + json.dumps(descriptor).encode("ascii") + b";\n"
+    return (
+        b"window.PORTFOLIO_DATA_PARTS = "
+        + json.dumps(descriptor).encode("ascii")
+        + b";\n"
+    )
 
 
 def _replace_gzip_embedded_report(gen_dir: Path) -> None:

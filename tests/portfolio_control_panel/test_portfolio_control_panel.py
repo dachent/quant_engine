@@ -13562,7 +13562,9 @@ def test_panel_data_script_parts_reassemble_to_the_exact_json_bytes() -> None:
         gzip.decompress(base64.b64decode(part["gzip_base64"]))
         for part in descriptor["parts"]
     )
-    assert json.loads(lazy) == data["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"]
+    assert (
+        json.loads(lazy) == data["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"]
+    )
     # the browser parses head + "[]" + tail while the lazy array stays compressed
     core = json.loads(head + b"[]" + tail)
     assert core["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"] == []
@@ -13581,7 +13583,9 @@ def test_panel_data_script_without_a_hybrid_array_is_one_eager_part() -> None:
     data_bytes = canonical_json_bytes(data)
     descriptor, raw = _inflate_panel_script(panel._panel_data_script(data, data_bytes))
     assert raw == data_bytes
-    assert [(part["id"], part["lazy"]) for part in descriptor["parts"]] == [("all", False)]
+    assert [(part["id"], part["lazy"]) for part in descriptor["parts"]] == [
+        ("all", False)
+    ]
 
 
 def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
@@ -13590,7 +13594,9 @@ def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
     data = _panel_data_with_hybrid()
     data_bytes = canonical_json_bytes(data)
     monkeypatch.setattr(panel, "_PANEL_PART_MAX_RAW_BYTES", 16)
-    with pytest.raises(panel.ControlPanelValidationError, match="renderer string limit"):
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="renderer string limit"
+    ):
         panel._panel_data_script(data, data_bytes)
     monkeypatch.undo()
     monkeypatch.setattr(panel, "_PANEL_SCRIPT_MAX_BYTES", 64)
@@ -13599,7 +13605,9 @@ def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
     monkeypatch.undo()
     # the array text appears twice: the split cannot say which one is the lazy slice
     ambiguous = _panel_data_with_hybrid()
-    ambiguous["duplicate"] = ambiguous["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"]
+    ambiguous["duplicate"] = ambiguous["decomposition_lenses"]["modes"][
+        "LIVE_PLUS_BACKTEST"
+    ]
     with pytest.raises(panel.ControlPanelValidationError, match="exactly one slice"):
         panel._panel_data_script(ambiguous, canonical_json_bytes(ambiguous))
 
@@ -13616,7 +13624,9 @@ def test_built_panel_data_script_carries_exactly_the_published_json(
         weekly_returns_root=inputs["weekly"],
     )
     directory = Path(str(candidate["candidate_dir"]))
-    descriptor, raw = _inflate_panel_script((directory / "data" / "dashboard_data.js").read_bytes())
+    descriptor, raw = _inflate_panel_script(
+        (directory / "data" / "dashboard_data.js").read_bytes()
+    )
     assert raw == (directory / "data" / "dashboard_data.json").read_bytes()
     assert descriptor["encoding"] == "gzip" and descriptor["version"] == 1
 
@@ -15376,7 +15386,9 @@ try {
     before, after = observed["before"], observed["after"]
     assert before["placeholder"] == 0 and before["disabled"] is False
     assert before["liveRows"] == len(live)
-    assert before["partsKept"] == ["lazy"], "only the lazy part stays compressed at boot"
+    assert before["partsKept"] == ["lazy"], (
+        "only the lazy part stays compressed at boot"
+    )
     assert after["loaded"] == len(hybrid)
     assert after["pressed"] == "true" and after["appState"] == "ready"
     assert after["partsKept"] == [], "the compressed lazy part is released once parsed"
