@@ -1278,7 +1278,9 @@ def embedded_download_bytes(html: str, relative_path: str) -> bytes:
     if not chunks or [index for index, _ in chunks] != list(range(len(chunks))):
         raise ControlPanelValidationError("embedded download payload is incomplete")
     encodings = {
-        match.group(1) if (match := _ENCODING_ATTRIBUTE.search(attributes)) else "identity"
+        match.group(1)
+        if (match := _ENCODING_ATTRIBUTE.search(attributes))
+        else "identity"
         for _index, attributes, _payload in found
     }
     if encodings != {_DOWNLOAD_ENCODINGS[relative_path]}:

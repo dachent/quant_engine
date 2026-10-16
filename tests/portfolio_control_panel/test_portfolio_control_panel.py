@@ -13433,16 +13433,19 @@ def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
         panel.ControlPanelValidationError,
         match="exceeds the embedded download chunk cap",
     ):
-        panel._report_download_link(
-            panel.WORKBOOK_DOWNLOAD, "Workbook", oversized
-        )
+        panel._report_download_link(panel.WORKBOOK_DOWNLOAD, "Workbook", oversized)
 
 
 def test_embedded_report_is_compressed_and_round_trips_exactly() -> None:
     """The 332 MB report is carried gzip-compressed; every reader gets the same bytes."""
 
     content = json.dumps(
-        {"rows": [{"date": f"2026-01-{day:02d}", "value": day / 7} for day in range(1, 29)] * 400}
+        {
+            "rows": [
+                {"date": f"2026-01-{day:02d}", "value": day / 7} for day in range(1, 29)
+            ]
+            * 400
+        }
     ).encode("utf-8")
     link = panel._report_download_link(panel.REPORT_DOWNLOAD, "Report", content)
 
@@ -13463,15 +13466,19 @@ def test_embedded_download_encoding_and_gzip_integrity_are_enforced() -> None:
         panel.embedded_download_bytes(stripped, panel.REPORT_DOWNLOAD)
 
     carried = gzip.compress(content, compresslevel=6, mtime=0)
-    for damaged in (carried[:-9], carried + bytes([0]), carried[:20] + bytes([255]) + carried[21:]):
+    for damaged in (
+        carried[:-9],
+        carried + bytes([0]),
+        carried[:20] + bytes([255]) + carried[21:],
+    ):
         forged = re.sub(
             r"(>)[A-Za-z0-9+/=]+(</script>)",
-            lambda match: f"{match.group(1)}{base64.b64encode(damaged).decode()}{match.group(2)}",
+            lambda match: (
+                f"{match.group(1)}{base64.b64encode(damaged).decode()}{match.group(2)}"
+            ),
             link,
         )
-        with pytest.raises(
-            panel.ControlPanelValidationError, match="not valid gzip"
-        ):
+        with pytest.raises(panel.ControlPanelValidationError, match="not valid gzip"):
             panel.embedded_download_bytes(forged, panel.REPORT_DOWNLOAD)
 
 
@@ -13488,9 +13495,15 @@ def test_built_panel_embeds_the_report_gzipped_and_enforces_the_size_budget(
         "weekly_returns_root": inputs["weekly"],
     }
     candidate = panel.build_candidate(*arguments, **keywords)
-    html = (Path(str(candidate["candidate_dir"])) / "index.html").read_text(encoding="utf-8")
+    html = (Path(str(candidate["candidate_dir"])) / "index.html").read_text(
+        encoding="utf-8"
+    )
     assert 'data-download-encoding="gzip"' in html
-    report = (Path(str(candidate["candidate_dir"])) / "downloads" / "portfolio-report-data.json").read_bytes()
+    report = (
+        Path(str(candidate["candidate_dir"]))
+        / "downloads"
+        / "portfolio-report-data.json"
+    ).read_bytes()
     assert panel.embedded_download_bytes(html, panel.REPORT_DOWNLOAD) == report
     assert f'data-download-raw-bytes="{len(report)}"' in html
 
