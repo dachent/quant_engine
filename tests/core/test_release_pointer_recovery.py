@@ -580,3 +580,46 @@ def test_recovery_refuses_a_damaged_pointer_the_gate_never_admitted(tmp_path) ->
     ).write_bytes(b"edited after publication\n")
     with pytest.raises(PointerIntegrityError, match="inventory"):
         world.prepare()
+
+
+def test_the_gate_file_must_still_match_the_hash_it_was_bound_with(tmp_path) -> None:
+    from quant_engine.core.pipeline import (
+        PipelineExecutionError,
+        _verify_recovered_pointer_evidence,
+    )
+
+    world = _World(tmp_path)
+    manifest = world.prepare()
+    path = _gate_file(tmp_path, world)
+    pinned = hashlib.sha256(path.read_bytes()).hexdigest()
+    spec = SimpleNamespace(
+        coordination_root=world.coordination,
+        gates=(PipelineGate("predecessor-pointer-recovery", path, pinned),),
+    )
+    _verify_recovered_pointer_evidence(spec, manifest.release_id)
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(PipelineExecutionError, match="changed after it was bound"):
+        _verify_recovered_pointer_evidence(spec, manifest.release_id)
+
+
+def test_a_healthy_pointer_that_changes_while_it_is_recorded_is_refused(
+    tmp_path, monkeypatch
+) -> None:
+    import quant_engine.core.release as release_module
+
+    world = _World(tmp_path)
+    real = release_module._read_recorded_bytes
+    healthy = world.healthy.resolve()
+    calls = {"count": 0}
+
+    def racing(root):
+        raw = real(root)
+        if root.resolve() == healthy:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                return (raw or b"") + b" "
+        return raw
+
+    monkeypatch.setattr(release_module, "_read_recorded_bytes", racing)
+    with pytest.raises(ReleaseConflictError, match="changed while it was recorded"):
+        world.prepare()

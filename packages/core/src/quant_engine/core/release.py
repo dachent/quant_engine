@@ -1363,11 +1363,19 @@ def prepare_release(
         ):
             raise PublicationRejectedError("release target coverage is not complete")
         previous_inventory_sha256: str | None
+        # The raw bytes bracket the validated read: the pointer that is recorded, the
+        # bytes kept for rollback and the pointer read_current accepted are one state.
+        bytes_before = (
+            _read_recorded_bytes(root) if allow_unusable_predecessor_pointers else None
+        )
         try:
             previous_pointer = _read_optional_current(root)
             if allow_unusable_predecessor_pointers and previous_pointer is not None:
                 healthy_raw = _read_recorded_bytes(root) or b""
-                if CurrentPointer.from_json_bytes(healthy_raw) != previous_pointer:
+                if (
+                    healthy_raw != bytes_before
+                    or CurrentPointer.from_json_bytes(healthy_raw) != previous_pointer
+                ):
                     raise ReleaseConflictError(
                         f"current pointer changed while it was recorded: {root_id}"
                     )

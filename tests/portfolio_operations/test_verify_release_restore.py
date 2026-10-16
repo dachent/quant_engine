@@ -237,3 +237,15 @@ def test_a_sums_row_is_found_only_as_that_file_in_that_providers_root(
             assert "not restored" in str(error)
         else:
             raise AssertionError("a misplaced sums row passed")
+
+
+def test_a_clean_room_redirected_during_the_restore_is_refused(tmp_path: Path) -> None:
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    tool._confirm_clean_room(clean, clean.resolve())
+    try:
+        tool._confirm_clean_room(clean, (tmp_path / "elsewhere").resolve())
+    except tool.RestoreError as error:
+        assert "redirected" in str(error)
+    else:
+        raise AssertionError("a redirected clean room was accepted")
