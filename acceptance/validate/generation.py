@@ -357,13 +357,58 @@ def _embedded_payloads(data: bytes) -> dict[str, EmbeddedPayload]:
 
 
 def _script_payload_sha256(data: bytes) -> str | None:
-    """sha256 of the JSON literal inside ``window.X = {...};``."""
+    """sha256 of the JSON literal inside ``window.X = {...};``.
+
+    A script that carries ``window.PORTFOLIO_DATA_PARTS`` holds the payload as gzip
+    parts; the digest is then of the inflated parts concatenated in order, which is the
+    byte string ``data/dashboard_data.json`` must equal.
+    """
 
     start = data.find(b"{")
     end = data.rfind(b"}")
     if start < 0 or end < start:
         return None
+    if data[:start].strip().endswith(b"PORTFOLIO_DATA_PARTS ="):
+        return _parts_payload_sha256(bytes(data[start : end + 1]))
     return hashlib.sha256(memoryview(data)[start : end + 1]).hexdigest()
+
+
+def _parts_payload_sha256(literal: bytes) -> str | None:
+    try:
+        descriptor = json.loads(literal)
+    except ValueError as exc:
+        raise GenerationError(f"dashboard_data.js parts are not JSON: {exc}") from exc
+    parts = descriptor.get("parts") if isinstance(descriptor, dict) else None
+    if not isinstance(parts, list) or not parts or descriptor.get("encoding") != "gzip":
+        return None
+    digest = hashlib.sha256()
+    total = 0
+    for part in parts:
+        if not isinstance(part, dict) or not isinstance(part.get("gzip_base64"), str):
+            return None
+        try:
+            carried = binascii.a2b_base64(part["gzip_base64"], strict_mode=True)
+            inflater = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+            raw = inflater.decompress(carried) + inflater.flush()
+        except (binascii.Error, zlib.error) as exc:
+            raise GenerationError(
+                f"dashboard_data.js part {part.get('id')!r} is not valid gzip: {exc}"
+            ) from exc
+        if not inflater.eof or inflater.unused_data:
+            raise GenerationError(
+                f"dashboard_data.js part {part.get('id')!r} gzip member is "
+                "truncated or has trailing bytes"
+            )
+        if (
+            part.get("raw_bytes") != len(raw)
+            or part.get("sha256") != hashlib.sha256(raw).hexdigest()
+        ):
+            return None
+        digest.update(raw)
+        total += len(raw)
+    if descriptor.get("total_bytes") != total:
+        return None
+    return digest.hexdigest()
 
 
 def _iter_files(gen_dir: Path) -> list[Path]:

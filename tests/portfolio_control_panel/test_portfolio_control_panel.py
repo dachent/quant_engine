@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
@@ -13512,6 +13513,134 @@ def test_built_panel_embeds_the_report_gzipped_and_enforces_the_size_budget(
         panel.build_candidate(*arguments, **keywords)
 
 
+def _inflate_panel_script(script: bytes) -> tuple[dict[str, Any], bytes]:
+    prefix = b"window.PORTFOLIO_DATA_PARTS = "
+    assert script.startswith(prefix) and script.endswith(b";\n")
+    descriptor = json.loads(script[len(prefix) : -2])
+    raw = b"".join(
+        gzip.decompress(base64.b64decode(part["gzip_base64"], validate=True))
+        for part in descriptor["parts"]
+    )
+    return descriptor, raw
+
+
+def _panel_data_with_hybrid(rows: int = 3) -> dict[str, Any]:
+    return {
+        "panel_schema_version": 25,
+        "unicode": "café — ✓",
+        "decomposition_lenses": {
+            "default_evidence_mode": "LIVE_ONLY",
+            "modes": {
+                "LIVE_ONLY": [{"lens_id": "A", "series": [{"series_id": "x"}]}],
+                "LIVE_PLUS_BACKTEST": [
+                    {"lens_id": f"L{index}", "series": [{"series_id": "x", "n": index}]}
+                    for index in range(rows)
+                ],
+            },
+        },
+        "tail": {"z": [1, 2, 3]},
+    }
+
+
+def test_panel_data_script_parts_reassemble_to_the_exact_json_bytes() -> None:
+    """#540: dashboard_data.js is gzip parts; head + lazy + tail IS dashboard_data.json."""
+
+    data = _panel_data_with_hybrid()
+    data_bytes = canonical_json_bytes(data)
+    script = panel._panel_data_script(data, data_bytes)
+    descriptor, raw = _inflate_panel_script(script)
+
+    assert raw == data_bytes
+    assert descriptor["total_sha256"] == hashlib.sha256(data_bytes).hexdigest()
+    assert descriptor["total_bytes"] == len(data_bytes)
+    assert [(part["id"], part["lazy"]) for part in descriptor["parts"]] == [
+        ("head", False),
+        ("lazy", True),
+        ("tail", False),
+    ]
+    head, lazy, tail = (
+        gzip.decompress(base64.b64decode(part["gzip_base64"]))
+        for part in descriptor["parts"]
+    )
+    assert (
+        json.loads(lazy) == data["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"]
+    )
+    # the browser parses head + "[]" + tail while the lazy array stays compressed
+    core = json.loads(head + b"[]" + tail)
+    assert core["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"] == []
+    assert core["tail"] == data["tail"]
+    assert core["unicode"] == data["unicode"]
+    for part in descriptor["parts"]:
+        raw_part = gzip.decompress(base64.b64decode(part["gzip_base64"]))
+        assert part["raw_bytes"] == len(raw_part)
+        assert part["sha256"] == hashlib.sha256(raw_part).hexdigest()
+    assert panel._panel_data_script(data, data_bytes) == script, "not deterministic"
+
+
+def test_panel_data_script_without_a_hybrid_array_is_one_eager_part() -> None:
+    data = _panel_data_with_hybrid()
+    del data["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"]
+    data_bytes = canonical_json_bytes(data)
+    descriptor, raw = _inflate_panel_script(panel._panel_data_script(data, data_bytes))
+    assert raw == data_bytes
+    assert [(part["id"], part["lazy"]) for part in descriptor["parts"]] == [
+        ("all", False)
+    ]
+
+
+def test_panel_data_script_refuses_oversized_parts_and_an_ambiguous_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _panel_data_with_hybrid()
+    data_bytes = canonical_json_bytes(data)
+    monkeypatch.setattr(panel, "_PANEL_PART_MAX_RAW_BYTES", 16)
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="renderer string limit"
+    ):
+        panel._panel_data_script(data, data_bytes)
+    monkeypatch.undo()
+    # each eager part is under the limit, but head + tail are joined into one string
+    head_tail = sum(
+        len(raw)
+        for _id, lazy, raw in panel._panel_data_parts(data, data_bytes)
+        if not lazy
+    )
+    monkeypatch.setattr(panel, "_PANEL_PART_MAX_RAW_BYTES", head_tail - 1)
+    with pytest.raises(panel.ControlPanelValidationError, match="eager parts exceed"):
+        panel._panel_data_script(data, data_bytes)
+    monkeypatch.undo()
+    monkeypatch.setattr(panel, "_PANEL_SCRIPT_MAX_BYTES", 64)
+    with pytest.raises(panel.ControlPanelValidationError, match="size budget"):
+        panel._panel_data_script(data, data_bytes)
+    monkeypatch.undo()
+    # the array text appears twice: the split cannot say which one is the lazy slice
+    ambiguous = _panel_data_with_hybrid()
+    ambiguous["duplicate"] = ambiguous["decomposition_lenses"]["modes"][
+        "LIVE_PLUS_BACKTEST"
+    ]
+    with pytest.raises(panel.ControlPanelValidationError, match="exactly one slice"):
+        panel._panel_data_script(ambiguous, canonical_json_bytes(ambiguous))
+
+
+def test_built_panel_data_script_carries_exactly_the_published_json(
+    inputs: dict[str, Any],
+) -> None:
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    directory = Path(str(candidate["candidate_dir"]))
+    descriptor, raw = _inflate_panel_script(
+        (directory / "data" / "dashboard_data.js").read_bytes()
+    )
+    assert raw == (directory / "data" / "dashboard_data.json").read_bytes()
+    assert descriptor["encoding"] == "gzip" and descriptor["version"] == 1
+
+
 def test_panel_publishes_the_report_current_capital_with_status_as_of_and_labels(
     inputs: dict[str, Any],
 ) -> None:
@@ -15194,3 +15323,82 @@ def test_a_second_stream_with_compressed_drive_shaped_bytes_is_clean(
     )
     findings = panel.qa_evidence_inventory_findings(qa)
     assert not any("page.pdf" in f and "locator" in f for f in findings)
+
+
+def test_540_panel_boots_from_gzip_parts_and_loads_backtest_lenses_on_demand(
+    inputs: dict[str, Path],
+) -> None:
+    """#540 in Chromium over file://: head/tail inflate at boot, the lens array on click."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    data_path = candidate / "data" / "dashboard_data.json"
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    live = data["decomposition_lenses"]["modes"]["LIVE_ONLY"]
+    hybrid = copy.deepcopy(live)
+    for lens in hybrid:
+        lens["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    data["decomposition_lenses"]["modes"]["LIVE_PLUS_BACKTEST"] = hybrid
+    data_bytes = canonical_json_bytes(data)
+    data_path.write_bytes(data_bytes)
+    (candidate / "data" / "dashboard_data.js").write_bytes(
+        panel._panel_data_script(data, data_bytes)
+    )
+    node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+try {
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.goto(pathToFileURL(process.env.G2_PANEL_HTML).href + "#attribution", { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+  const before = await page.evaluate(() => ({
+    placeholder: window.PORTFOLIO_DATA.decomposition_lenses.modes.LIVE_PLUS_BACKTEST.length,
+    liveRows: window.PORTFOLIO_DATA.decomposition_lenses.modes.LIVE_ONLY.length,
+    partsKept: window.PORTFOLIO_DATA_PARTS.parts.filter((part) => part.gzip_base64 !== null).map((part) => part.id),
+    disabled: document.querySelector('[data-factor-evidence-mode="LIVE_PLUS_BACKTEST"]').disabled,
+  }));
+  await page.locator('[data-factor-evidence-mode="LIVE_PLUS_BACKTEST"]').click();
+  await page.waitForFunction(() => document.documentElement.dataset.lazyData === "ready");
+  const after = await page.evaluate(() => ({
+    loaded: window.PORTFOLIO_DATA.decomposition_lenses.modes.LIVE_PLUS_BACKTEST.length,
+    pressed: document.querySelector('[data-factor-evidence-mode="LIVE_PLUS_BACKTEST"]').getAttribute("aria-pressed"),
+    partsKept: window.PORTFOLIO_DATA_PARTS.parts.filter((part) => part.gzip_base64 !== null).map((part) => part.id),
+    appState: document.querySelector("#app")?.dataset.appState,
+  }));
+  console.log(JSON.stringify({ before, after, pageErrors }));
+} finally { await browser.close(); }
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = str(Path(executable).resolve())
+    env["G2_PANEL_HTML"] = str((candidate / "index.html").resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout.splitlines()[-1])
+    assert observed["pageErrors"] == []
+    before, after = observed["before"], observed["after"]
+    assert before["placeholder"] == 0 and before["disabled"] is False
+    assert before["liveRows"] == len(live)
+    assert before["partsKept"] == ["lazy"], (
+        "only the lazy part stays compressed at boot"
+    )
+    assert after["loaded"] == len(hybrid)
+    assert after["pressed"] == "true" and after["appState"] == "ready"
+    assert after["partsKept"] == [], "the compressed lazy part is released once parsed"

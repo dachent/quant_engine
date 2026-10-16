@@ -59,6 +59,7 @@ class Spec:
     extra_files: dict[str, bytes] = field(default_factory=dict)
     post_write: list[Callable[[Path], None]] = field(default_factory=list)
     gzip_embed: bool = False
+    parts_script: str | None = None  # "good" | "other-bytes" | "bad-gzip"
 
 
 def _twr_row(
@@ -979,6 +980,8 @@ def build(root: Path, spec: Spec | None = None) -> Path:
     panel["meta"].setdefault("report_sha256", _sha(report_bytes))
     panel_bytes = _dump(panel)
     script_bytes = b"window.PORTFOLIO_DATA = " + panel_bytes + b"\n;"
+    if spec.parts_script is not None:
+        script_bytes = _parts_script(panel_bytes, spec.parts_script)
     encoded = base64.b64encode(
         gzip.compress(report_bytes, mtime=0) if spec.gzip_embed else report_bytes
     )
@@ -1146,6 +1149,27 @@ def test_gzip_embedded_report_download_matches_the_published_report(
     payload = payloads["portfolio-report-data.json"]
     assert payload.size_bytes == len(report)
     assert payload.sha256 == hashlib.sha256(report).hexdigest()
+
+
+def test_gzip_parts_data_script_carries_the_published_panel_payload(
+    tmp_path: Path,
+) -> None:
+    """#540: dashboard_data.js is gzip parts; their concatenation must be the JSON."""
+
+    gen_dir = build(tmp_path, Spec(parts_script="good"))
+    assert [f.check_id for f in run(gen_dir)] == ["expected.not_supplied"]
+    scan = load_generation(gen_dir).scan
+    assert scan.panel_script_global == "PORTFOLIO_DATA_PARTS"
+    assert (
+        scan.panel_script_payload_sha256
+        == scan.stripped_sha256["data/dashboard_data.json"]
+    )
+
+
+def test_corrupt_gzip_part_in_the_data_script_is_unreadable(tmp_path: Path) -> None:
+    gen_dir = build(tmp_path, Spec(parts_script="bad-gzip"))
+    with pytest.raises(GenerationError, match="dashboard_data.js part"):
+        load_generation(gen_dir)
 
 
 def test_corrupt_gzip_embedded_report_download_is_unreadable_not_silently_passed(
@@ -1487,6 +1511,49 @@ def _big_move(report: dict[str, Any]) -> None:
             "return": "-0.3",
             "evidence_layer": "ACCOUNT_LIVE",
         }
+    )
+
+
+def _parts_script(panel_bytes: bytes, kind: str) -> bytes:
+    """dashboard_data.js as the builder writes it: gzip parts of the payload bytes."""
+    cut = len(panel_bytes) // 3
+    slices = [panel_bytes[:cut], panel_bytes[cut : 2 * cut], panel_bytes[2 * cut :]]
+    parts = []
+    for index, raw in enumerate(slices):
+        carried = gzip.compress(raw, mtime=0)
+        if kind == "bad-gzip" and index == 1:
+            carried = carried[:-9]
+        parts.append(
+            {
+                "id": f"p{index}",
+                "lazy": index == 1,
+                "raw_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "gzip_base64": base64.b64encode(carried).decode("ascii"),
+            }
+        )
+    if kind == "other-bytes":
+        # a well-formed part that is not the published slice, with its own matching digest
+        forged = slices[0] + b" "
+        parts[0].update(
+            raw_bytes=len(forged),
+            sha256=hashlib.sha256(forged).hexdigest(),
+            gzip_base64=base64.b64encode(gzip.compress(forged, mtime=0)).decode(
+                "ascii"
+            ),
+        )
+    descriptor = {
+        "encoding": "gzip",
+        "lazy_pointer": ["decomposition_lenses", "modes", "LIVE_PLUS_BACKTEST"],
+        "parts": parts,
+        "total_bytes": len(panel_bytes),
+        "total_sha256": hashlib.sha256(panel_bytes).hexdigest(),
+        "version": 1,
+    }
+    return (
+        b"window.PORTFOLIO_DATA_PARTS = "
+        + json.dumps(descriptor).encode("ascii")
+        + b";\n"
     )
 
 
@@ -2157,6 +2224,11 @@ CASES: dict[str, tuple[str, str, Spec]] = {
         "identity.embedded_payload_copies",
         checks.BLOCKER_AUTHORITY,
         Spec(gzip_embed=True, post_write=[_replace_gzip_embedded_report]),
+    ),
+    "panel_script_parts_other_bytes": (
+        "identity.embedded_payload_copies",
+        checks.BLOCKER_AUTHORITY,
+        Spec(parts_script="other-bytes"),
     ),
     "inactive_unknown_account": (
         "universe.inactive_accounts_in_current",
