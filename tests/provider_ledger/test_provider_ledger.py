@@ -10341,3 +10341,95 @@ def test_quantbase_fee_funded_sell_without_a_journal_fails_closed(
 ) -> None:
     with pytest.raises(ledger.ProviderLedgerError, match="lacks its fee journal"):
         _quantbase_cash_rows(tmp_path, orphan_fee_sell=True)
+
+
+def test_quantbase_fee_pairing_is_global_not_greedy(tmp_path: Path) -> None:
+    """#566 review: sells of 100 and 104, journals of 102 then 100 pair 102-104, 100-100."""
+
+    root, catalog, manifest = _quantbase_cash_activity_fixture(tmp_path)
+    csv_path = root / "source-runs" / catalog["legacy_lineage"]["run_id"]
+    csv_path = csv_path / "artifacts/csv/account_activity.csv"
+    header = (
+        "activity_type,amount,fund,id,time,type,created_at,created_to_cover_fees,"
+        "date,symbol,filled_at,is_rebalance\n"
+    )
+    lines = [
+        "filled_txn,-100.00,107,s1,2026-02-03T19:00:00Z,SELL,,True,,,,False",
+        "filled_txn,-104.00,107,s2,2026-02-03T19:00:00Z,SELL,,True,,,,False",
+        "journal,102.00,,j1,,PARTNER_SUB_FEE,2026-02-02T11:00:00Z,,,,,",
+        "journal,100.00,,j2,,PARTNER_SUB_FEE,2026-02-02T12:00:00Z,,,,,",
+    ]
+    csv_path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8-sig")
+    manifest = _make_two_artifact_manifest(
+        {"source/csv/account_activity.csv": csv_path}
+    )
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+
+    rows = {
+        row["source_record_id"]: row
+        for row in ledger._quantbase_cash_activity(
+            "quantbase",
+            "gen-1",
+            manifest,
+            catalog,
+            root,
+            {account_id},
+            {"volatis-strategy"},
+            {
+                account_id: [
+                    {"effective_start": "2024-10-01", "strategy_id": "volatis-strategy"}
+                ]
+            },
+        )
+    }
+
+    assert rows["j1"]["funded_by_record_id"] == rows["s2"]["record_id"]
+    assert rows["j2"]["funded_by_record_id"] == rows["s1"]["record_id"]
+
+
+def test_quantbase_dividend_attribution_ignores_orders_after_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """#566 review: a later order by another fund never changes an earlier dividend."""
+
+    root, catalog, manifest = _quantbase_cash_activity_fixture(tmp_path)
+    csv_path = root / "source-runs" / catalog["legacy_lineage"]["run_id"]
+    csv_path = csv_path / "artifacts/csv/account_activity.csv"
+    header = (
+        "activity_type,amount,fund,id,time,type,created_at,created_to_cover_fees,"
+        "date,symbol,filled_at,is_rebalance\n"
+    )
+    lines = [
+        "order,,107,o1,2026-01-05T20:00:00Z,,,False,,SHV,2026-01-05T20:00:01Z,",
+        "order,,14,o2,2026-03-05T20:00:00Z,,,False,,SHV,2026-03-05T20:00:01Z,",
+        "dividend,10.00,,d1,,,,,2026-01-30T05:00:00Z,SHV,,",
+    ]
+    csv_path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8-sig")
+    manifest = _make_two_artifact_manifest(
+        {"source/csv/account_activity.csv": csv_path}
+    )
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+    assignments = {
+        account_id: [
+            {"effective_start": "2024-10-01", "strategy_id": "volatis-strategy"}
+        ]
+    }
+
+    def attributed(cutoff: date | None) -> str | None:
+        rows = ledger._quantbase_cash_activity(
+            "quantbase",
+            "gen-1",
+            manifest,
+            catalog,
+            root,
+            {account_id},
+            {"volatis-strategy"},
+            assignments,
+            financial_cutoff=cutoff,
+        )
+        return next(row for row in rows if row["source_record_id"] == "d1")["fund_id"]
+
+    # With the later order inside the data the symbol is shared (unattributed);
+    # bounded at the cutoff only fund 107 had traded it.
+    assert attributed(None) is None
+    assert attributed(date(2026, 2, 1)) == "107"

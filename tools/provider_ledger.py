@@ -2269,21 +2269,30 @@ def _quantbase_cash_activity(
         "quantbase account activity",
     )
     source_artifact_id = f"source/{activity_rel.as_posix()}"
-    funds_by_symbol: dict[str, set[str]] = defaultdict(set)
-    for row in rows:
-        symbol = str(row.get("symbol") or "").strip()
-        if (
-            row.get("activity_type") == "order"
-            and symbol
-            and symbol != "$USD"
-            and str(row.get("filled_at") or "").strip()
-        ):
-            funds_by_symbol[symbol].add(str(row.get("fund") or "").strip())
 
     def timestamp(value: object, name: str) -> datetime:
         return datetime.fromisoformat(
             _utc_timestamp(value, name).replace("Z", "+00:00")
         )
+
+    # Symbol ownership uses only orders filled on or before the financial
+    # cutoff, so evidence after it never decides a dividend's fund.
+    funds_by_symbol: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        filled_at = str(row.get("filled_at") or "").strip()
+        if (
+            row.get("activity_type") == "order"
+            and symbol
+            and symbol != "$USD"
+            and filled_at
+            and (
+                financial_cutoff is None
+                or timestamp(filled_at, "quantbase order filled_at").date()
+                <= financial_cutoff
+            )
+        ):
+            funds_by_symbol[symbol].add(str(row.get("fund") or "").strip())
 
     def amount_object(value: Decimal) -> dict[str, str]:
         return {
@@ -2314,7 +2323,12 @@ def _quantbase_cash_activity(
         )
 
     def record(
-        kind: str, source_id: str, day: date, amount: Decimal, fund: str | None, **extra
+        kind: str,
+        source_id: str,
+        day: date,
+        amount: Decimal,
+        fund: str | None,
+        **extra: Any,
     ) -> dict[str, Any]:
         strategy_id, mapping_status = mapped(fund, day)
         return {
@@ -2364,7 +2378,7 @@ def _quantbase_cash_activity(
         projected.append(fee_row)
         fee_sells.append((observed, magnitude, source_id, fee_row))
 
-    used: set[str] = set()
+    journals: list[tuple[Mapping[str, str], str, datetime, Decimal, str]] = []
     for row in sorted(
         (r for r in rows if r.get("activity_type") == "journal"),
         key=lambda item: (str(item.get("created_at")), str(item.get("id"))),
@@ -2378,24 +2392,51 @@ def _quantbase_cash_activity(
         amount = _observed_decimal(row.get("amount"), "quantbase journal amount")
         if amount is None or amount <= 0:
             raise ProviderLedgerError("quantbase fee journal amount is invalid")
-        source_id = _text(row.get("id"), "quantbase journal id")
-        best: tuple[Decimal, str, dict[str, Any]] | None = None
-        for fill_time, sell_amount, sell_id, fee_row in fee_sells:
-            if sell_id in used:
+        journals.append(
+            (row, journal_type, created, amount, _text(row.get("id"), "journal id"))
+        )
+    # Pair journals with fee-funded sells globally: a maximum matching over the
+    # candidate pairs (closest amount first), so a sell is orphaned only when no
+    # one-to-one pairing covers it.
+    candidates: list[list[int]] = []
+    for _row, _type, created, amount, _source in journals:
+        pairs = sorted(
+            (abs(amount - sell_amount), index)
+            for index, (fill_time, sell_amount, _sell_id, _fee_row) in enumerate(
+                fee_sells
+            )
+            if abs((fill_time - created).days) <= _QUANTBASE_FEE_MATCH_DAYS
+            and abs(amount - sell_amount) <= _QUANTBASE_FEE_MATCH_TOLERANCE * amount
+        )
+        candidates.append([index for _difference, index in pairs])
+    journal_for_sell: dict[int, int] = {}
+
+    def augment(journal_index: int, seen: set[int]) -> bool:
+        for sell_index in candidates[journal_index]:
+            if sell_index in seen:
                 continue
-            gap = abs((fill_time - created).days)
-            difference = abs(amount - sell_amount)
-            if gap <= _QUANTBASE_FEE_MATCH_DAYS and (
-                difference <= _QUANTBASE_FEE_MATCH_TOLERANCE * amount
+            seen.add(sell_index)
+            if sell_index not in journal_for_sell or augment(
+                journal_for_sell[sell_index], seen
             ):
-                if best is None or difference < best[0]:
-                    best = (difference, sell_id, fee_row)
+                journal_for_sell[sell_index] = journal_index
+                return True
+        return False
+
+    for journal_index in range(len(journals)):
+        augment(journal_index, set())
+    sell_for_journal = {value: key for key, value in journal_for_sell.items()}
+    used = {fee_sells[index][2] for index in journal_for_sell}
+    for journal_index, (_row, journal_type, created, amount, source_id) in enumerate(
+        journals
+    ):
         funding: dict[str, Any] = {"funding": "ACCOUNT_CASH"}
-        if best is not None:
-            used.add(best[1])
+        if journal_index in sell_for_journal:
             funding = {
                 "funding": "IN_FUND_SELL",
-                "funded_by_record_id": best[2]["record_id"],
+                "funded_by_record_id": fee_sells[sell_for_journal[journal_index]][3][
+                    "record_id"
+                ],
             }
         if journal_type == "AUM_FEE":
             # An account-level cost: it belongs to no single fund.
@@ -2435,17 +2476,17 @@ def _quantbase_cash_activity(
             raise ProviderLedgerError("quantbase dividend amount is invalid")
         symbol = _text(row.get("symbol"), "quantbase dividend symbol")
         holders = funds_by_symbol.get(symbol, set())
-        fund = next(iter(holders)) if len(holders) == 1 else None
+        dividend_fund = next(iter(holders)) if len(holders) == 1 else None
         projected.append(
             record(
                 "DIVIDEND",
                 _text(row.get("id"), "quantbase dividend id"),
                 day,
                 amount,
-                fund,
+                dividend_fund,
                 fund_attribution_basis=(
                     "SYMBOL_TRADED_BY_EXACTLY_ONE_FUND"
-                    if fund is not None
+                    if dividend_fund is not None
                     else "UNATTRIBUTED_SYMBOL_NOT_TRADED_BY_EXACTLY_ONE_FUND"
                 ),
                 in_fund_nav=False,

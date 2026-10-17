@@ -3015,22 +3015,24 @@ def fund_scoped_account_cash_lines(
             ]
             if not selected:
                 continue
-            amounts = []
-            for row in selected:
-                amount = _object(row.get("amount"), "account cash amount")
+            amounts: list[Decimal] = []
+            for item in selected:
+                amount = _object(item.get("amount"), "account cash amount")
+                value = _decimal(amount.get("value"), "account cash amount")
                 if (
                     amount.get("status") != "AVAILABLE"
                     or amount.get("currency") != "USD"
+                    or value is None
                 ):
                     raise BaselineValidationError("account cash amount is not USD")
-                amounts.append(_decimal(amount.get("value"), "account cash amount"))
-            ids = sorted(str(row["record_id"]) for row in selected)
+                amounts.append(value)
+            ids = sorted(str(item["record_id"]) for item in selected)
             lines.append(
                 {
                     "label": label,
                     "as_of_date": max(
-                        _date(row["event_date"], "account cash date")
-                        for row in selected
+                        _date(item["event_date"], "account cash date")
+                        for item in selected
                     ).isoformat(),
                     "current_value": _capital_amount(_exact_sum(amounts)),
                     "event_count": len(selected),
