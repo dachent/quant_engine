@@ -417,7 +417,8 @@ def _script_payload_sha256(data: bytes) -> str | None:
 
     A script that carries ``window.PORTFOLIO_DATA_PARTS`` holds the payload as gzip
     parts; the digest is then of the inflated parts concatenated in order, which is the
-    byte string ``data/dashboard_data.json`` must equal.
+    byte string ``data/dashboard_data.json`` must equal, without its trailing
+    newline (the digest every other check compares is of the stripped file).
     """
 
     start = data.find(b"{")
@@ -439,6 +440,7 @@ def _parts_payload_sha256(literal: bytes) -> str | None:
         return None
     digest = hashlib.sha256()
     total = 0
+    held = b""
     for part in parts:
         if not isinstance(part, dict) or not isinstance(part.get("gzip_base64"), str):
             return None
@@ -460,8 +462,13 @@ def _parts_payload_sha256(literal: bytes) -> str | None:
             or part.get("sha256") != hashlib.sha256(raw).hexdigest()
         ):
             return None
-        digest.update(raw)
         total += len(raw)
+        # Hold back trailing whitespace: the published JSON ends with one newline
+        # that belongs to the file, not to the payload the panel digest names.
+        pending = held + raw
+        stripped = pending.rstrip(b" \t\r\n")
+        digest.update(stripped)
+        held = pending[len(stripped) :]
     if descriptor.get("total_bytes") != total:
         return None
     return digest.hexdigest()
