@@ -105,7 +105,7 @@ _ACCOUNT_FACTS: Final = {
     ),
     "matrixport": ("capital_anchors", "nav_observations"),
     "portfolio123": (),
-    "quantbase": ("capital_anchors", "flows", "nav_observations"),
+    "quantbase": ("capital_anchors", "flows", "nav_observations", "transactions"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 _PROVIDER_SOURCE_SEGMENTS: Final = {
@@ -2213,6 +2213,290 @@ def _quantbase_flows(
     return projected
 
 
+# A fee journal is covered by an in-fund fee sell of the same month and amount
+# (a sell is sized in whole fund units, so it differs from the journal by a
+# rounding): the window and the relative tolerance are the declared matching rule.
+_QUANTBASE_FEE_MATCH_DAYS: Final = 31
+_QUANTBASE_FEE_MATCH_TOLERANCE: Final = Decimal("0.025")
+_QUANTBASE_COST_JOURNAL_TYPES: Final = frozenset({"PARTNER_SUB_FEE", "AUM_FEE"})
+
+
+def _quantbase_cash_activity(
+    provider_id: str,
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Admit the Quantbase account-cash facts the fund NAV does not carry (#536).
+
+    Dividends are paid to account cash and are not in the fund NAV.  A dividend
+    belongs to the fund that traded its symbol when exactly one fund did; a
+    symbol traded by several funds is left unattributed, never split by guess.
+    A subscription or AUM fee journal is paid either by an in-fund fee sell
+    (already inside the fund NAV) or from account cash, decided by matching it
+    to a fee-funded sell of the same month and amount.  Fee-funded sells are
+    retained strategy costs.  An AUM fee is an account-level cost.
+    """
+
+    account_id = _CSV_FACT_ACCOUNT[provider_id]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    activity_rel = Path("csv/account_activity.csv")
+    artifact = _find_manifest_artifact(
+        manifest, f"source/{activity_rel.as_posix()}", "quantbase account activity"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(
+            root / "source-runs" / run_id / "artifacts",
+            activity_rel,
+            "quantbase account activity",
+        ),
+        artifact.sha256,
+        # Columns a capture may lack (symbol, date, created_to_cover_fees) are
+        # read where a row type needs them, so an older capture still loads.
+        {"activity_type", "amount", "created_at", "fund", "id", "time", "type"},
+        "quantbase account activity",
+    )
+    source_artifact_id = f"source/{activity_rel.as_posix()}"
+
+    def timestamp(value: object, name: str) -> datetime:
+        return datetime.fromisoformat(
+            _utc_timestamp(value, name).replace("Z", "+00:00")
+        )
+
+    # Symbol ownership uses only orders filled on or before the financial
+    # cutoff, so evidence after it never decides a dividend's fund.
+    funds_by_symbol: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        filled_at = str(row.get("filled_at") or "").strip()
+        if (
+            row.get("activity_type") == "order"
+            and symbol
+            and symbol != "$USD"
+            and filled_at
+            and (
+                financial_cutoff is None
+                or timestamp(filled_at, "quantbase order filled_at").date()
+                <= financial_cutoff
+            )
+        ):
+            funds_by_symbol[symbol].add(str(row.get("fund") or "").strip())
+
+    def amount_object(value: Decimal) -> dict[str, str]:
+        return {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": format(value.normalize(), "f"),
+        }
+
+    def excluded(row: Mapping[str, str], day: date) -> bool:
+        if financial_cutoff is not None and day > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                provider_id,
+                "transactions",
+                artifact.artifact_id,
+                row,
+                day,
+                financial_cutoff,
+            )
+            return True
+        return False
+
+    def mapped(fund: str | None, day: date) -> tuple[str | None, str]:
+        if fund != _QUANTBASE_FUND_ID:
+            return None, "UNMAPPED"
+        return _mapped_strategy_for_account(
+            account_id, day, accounts, strategies, assignments
+        )
+
+    def record(
+        kind: str,
+        source_id: str,
+        day: date,
+        amount: Decimal,
+        fund: str | None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        strategy_id, mapping_status = mapped(fund, day)
+        return {
+            "account_id": account_id,
+            "amount": amount_object(amount),
+            "event_date": day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "fund_id": fund,
+            "generation_id": generation_id,
+            "kind": kind,
+            "mapping_status": mapping_status,
+            "provider_id": provider_id,
+            "record_id": f"quantbase-cash-activity:{kind}:{source_id}",
+            "source_artifact_id": source_artifact_id,
+            "source_record_id": source_id,
+            "strategy_id": strategy_id,
+            **extra,
+        }
+
+    projected: list[dict[str, Any]] = []
+    fee_sells: list[tuple[datetime, Decimal, str, dict[str, Any]]] = []
+    for row in rows:
+        if (
+            row.get("activity_type") != "filled_txn"
+            or str(row.get("type") or "").upper() != "SELL"
+            or str(row.get("created_to_cover_fees") or "").strip().lower() != "true"
+        ):
+            continue
+        fund = str(row.get("fund") or "").strip()
+        observed = timestamp(row.get("time"), "quantbase fee sell time")
+        if excluded(row, observed.date()):
+            continue
+        magnitude = _observed_decimal(row.get("amount"), "quantbase fee sell amount")
+        if magnitude is None:
+            raise ProviderLedgerError("quantbase fee sell amount is unavailable")
+        magnitude = abs(magnitude)
+        source_id = _text(row.get("id"), "quantbase fee sell id")
+        fee_row = record(
+            "FEE_FUNDING_SELL",
+            source_id,
+            observed.date(),
+            -magnitude,
+            fund,
+            cost_basis="IN_FUND_FEE_SELL_RETAINED_STRATEGY_COST",
+            in_fund_nav=True,
+        )
+        projected.append(fee_row)
+        fee_sells.append((observed, magnitude, source_id, fee_row))
+
+    journals: list[tuple[Mapping[str, str], str, datetime, Decimal, str]] = []
+    for row in sorted(
+        (r for r in rows if r.get("activity_type") == "journal"),
+        key=lambda item: (str(item.get("created_at")), str(item.get("id"))),
+    ):
+        journal_type = str(row.get("type") or "").upper()
+        if journal_type not in _QUANTBASE_COST_JOURNAL_TYPES:
+            continue
+        created = timestamp(row.get("created_at"), "quantbase journal created_at")
+        if excluded(row, created.date()):
+            continue
+        amount = _observed_decimal(row.get("amount"), "quantbase journal amount")
+        if amount is None or amount <= 0:
+            raise ProviderLedgerError("quantbase fee journal amount is invalid")
+        journals.append(
+            (row, journal_type, created, amount, _text(row.get("id"), "journal id"))
+        )
+    # Pair journals with fee-funded sells globally: a maximum matching over the
+    # candidate pairs (closest amount first), so a sell is orphaned only when no
+    # one-to-one pairing covers it.
+    candidates: list[list[int]] = []
+    for _row, _type, created, amount, _source in journals:
+        pairs = sorted(
+            (abs(amount - sell_amount), index)
+            for index, (fill_time, sell_amount, _sell_id, _fee_row) in enumerate(
+                fee_sells
+            )
+            if abs((fill_time - created).days) <= _QUANTBASE_FEE_MATCH_DAYS
+            and abs(amount - sell_amount) <= _QUANTBASE_FEE_MATCH_TOLERANCE * amount
+        )
+        candidates.append([index for _difference, index in pairs])
+    journal_for_sell: dict[int, int] = {}
+
+    def augment(journal_index: int, seen: set[int]) -> bool:
+        for sell_index in candidates[journal_index]:
+            if sell_index in seen:
+                continue
+            seen.add(sell_index)
+            if sell_index not in journal_for_sell or augment(
+                journal_for_sell[sell_index], seen
+            ):
+                journal_for_sell[sell_index] = journal_index
+                return True
+        return False
+
+    for journal_index in range(len(journals)):
+        augment(journal_index, set())
+    sell_for_journal = {value: key for key, value in journal_for_sell.items()}
+    used = {fee_sells[index][2] for index in journal_for_sell}
+    for journal_index, (_row, journal_type, created, amount, source_id) in enumerate(
+        journals
+    ):
+        funding: dict[str, Any] = {"funding": "ACCOUNT_CASH"}
+        if journal_index in sell_for_journal:
+            funding = {
+                "funding": "IN_FUND_SELL",
+                "funded_by_record_id": fee_sells[sell_for_journal[journal_index]][3][
+                    "record_id"
+                ],
+            }
+        if journal_type == "AUM_FEE":
+            # An account-level cost: it belongs to no single fund.
+            projected.append(
+                record(
+                    "FEE_JOURNAL:AUM_FEE",
+                    source_id,
+                    created.date(),
+                    -amount,
+                    None,
+                    scope="ACCOUNT_LEVEL_NOT_ATTRIBUTABLE_TO_A_FUND",
+                    **funding,
+                )
+            )
+        else:
+            projected.append(
+                record(
+                    "FEE_JOURNAL:PARTNER_SUB_FEE",
+                    source_id,
+                    created.date(),
+                    -amount,
+                    _QUANTBASE_FUND_ID,
+                    **funding,
+                )
+            )
+    if any(sell[2] not in used for sell in fee_sells):
+        raise ProviderLedgerError("quantbase fee-funded sell lacks its fee journal")
+
+    for row in rows:
+        if row.get("activity_type") != "dividend":
+            continue
+        day = timestamp(row.get("date"), "quantbase dividend date").date()
+        if excluded(row, day):
+            continue
+        amount = _observed_decimal(row.get("amount"), "quantbase dividend amount")
+        if amount is None or amount <= 0:
+            raise ProviderLedgerError("quantbase dividend amount is invalid")
+        symbol = _text(row.get("symbol"), "quantbase dividend symbol")
+        holders = funds_by_symbol.get(symbol, set())
+        dividend_fund = next(iter(holders)) if len(holders) == 1 else None
+        projected.append(
+            record(
+                "DIVIDEND",
+                _text(row.get("id"), "quantbase dividend id"),
+                day,
+                amount,
+                dividend_fund,
+                fund_attribution_basis=(
+                    "SYMBOL_TRADED_BY_EXACTLY_ONE_FUND"
+                    if dividend_fund is not None
+                    else "UNATTRIBUTED_SYMBOL_NOT_TRADED_BY_EXACTLY_ONE_FUND"
+                ),
+                in_fund_nav=False,
+                symbol=symbol,
+            )
+        )
+    projected.sort(key=lambda item: (str(item["event_date"]), str(item["record_id"])))
+    return projected
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     spec = _load_json(path, "provider-ledger spec")
     base_keys = {
@@ -4218,6 +4502,7 @@ def _project_account_facts(
             "capital_anchors",
             "flows",
             "nav_observations",
+            "transactions",
         }:
             if manifest is None or root is None:
                 raise ProviderLedgerError(
@@ -4277,6 +4562,19 @@ def _project_account_facts(
                 )
             elif source_fact == "nav_observations":
                 rows = _quantbase_nav_observations(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
+                    financial_cutoff=financial_cutoff,
+                    cutoff_findings=exceptions,
+                )
+            elif source_fact == "transactions":
+                rows = _quantbase_cash_activity(
+                    provider_id,
                     generation_id,
                     manifest,
                     catalog,
