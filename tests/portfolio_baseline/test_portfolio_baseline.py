@@ -5539,3 +5539,77 @@ def test_fund_scoped_provider_account_builds_no_derived_cash_line():
         check["status"] == "FAIL"
         for check in baseline._current_capital_checks(block, **arguments)
     )
+
+
+def test_fund_scoped_strategy_shows_dividends_and_fees_as_labelled_lines():
+    """#536: NAV stays the value; dividends and cash-paid fees sit beside it."""
+
+    case = _cr2_custody_cash_case()
+    for fact in ("flows", "capital_anchors"):
+        for row in case["provider_catalog"][fact]:
+            row["provider_id"] = "quantbase"
+    case["custody_authority"]["fund_scoped_providers"] = ["QUANTBASE"]
+
+    def activity(record_id, kind, value, **extra):
+        return {
+            "account_id": "acct-a1",
+            "provider_id": "quantbase",
+            "record_id": record_id,
+            "event_date": "2026-09-10",
+            "kind": kind,
+            "mapping_status": "MAPPED",
+            "strategy_id": "alpha",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": value},
+            **extra,
+        }
+
+    case["provider_catalog"]["transactions"] = [
+        activity("div-1", "DIVIDEND", "10"),
+        activity("div-2", "DIVIDEND", "2.5"),
+        activity(
+            "fee-cash", "FEE_JOURNAL:PARTNER_SUB_FEE", "-4", funding="ACCOUNT_CASH"
+        ),
+        activity(
+            "fee-fund", "FEE_JOURNAL:PARTNER_SUB_FEE", "-3", funding="IN_FUND_SELL"
+        ),
+        activity("fee-sell", "FEE_FUNDING_SELL", "-3"),
+        # Another provider's, an unmapped fund's and a later row are not this line.
+        {**activity("div-other", "DIVIDEND", "99"), "provider_id": "matrixport"},
+        {
+            **activity("div-unmapped", "DIVIDEND", "98"),
+            "mapping_status": "UNMAPPED",
+            "strategy_id": None,
+        },
+        {**activity("div-late", "DIVIDEND", "97"), "event_date": "2026-09-18"},
+    ]
+
+    block = baseline._build_current_capital(**case)
+
+    row = block["strategies"][0]
+    assert row["current_value"]["value"] == "105"
+    lines = {line["label"]: line for line in row["account_cash_lines"]}
+    assert (
+        lines["DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV"]["current_value"][
+            "value"
+        ]
+        == "12.5"
+    )
+    assert lines["DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV"]["event_count"] == 2
+    assert lines["FEES_PAID_FROM_ACCOUNT_CASH"]["current_value"]["value"] == "-4"
+    assert lines["IN_FUND_FEE_FUNDED_SELLS_COST"]["current_value"]["value"] == "-3"
+    _cc_schema_validator("current_capital").validate(block)
+    arguments = {
+        key: case[key]
+        for key in ("assignments", "nav", "provider_admissions", "provider_catalog")
+    }
+    assert all(
+        check["status"] != "FAIL"
+        for check in baseline._current_capital_checks(block, **arguments)
+    )
+    block["strategies"][0]["account_cash_lines"][0]["current_value"]["value"] = "13"
+    failed = [
+        check
+        for check in baseline._current_capital_checks(block, **arguments)
+        if check["status"] == "FAIL"
+    ]
+    assert failed and "account cash lines differ" in failed[0]["error"]

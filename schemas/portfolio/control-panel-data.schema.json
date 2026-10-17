@@ -1466,6 +1466,7 @@
             "$ref": "#/$defs/custody_handoff_custody_cash"
           }
         },
+        "account_cash_lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/custody_handoff_account_cash_line"}},
         "reason": {
           "type": [
             "string",
@@ -1682,6 +1683,18 @@
           }
         }
       ]
+    },
+    "custody_handoff_account_cash_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "as_of_date", "current_value", "event_count", "events_sha256"],
+      "properties": {
+        "label": {"enum": ["DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV", "FEES_PAID_FROM_ACCOUNT_CASH", "IN_FUND_FEE_FUNDED_SELLS_COST"]},
+        "as_of_date": {"type": "string", "format": "date"},
+        "current_value": {"$ref": "#/$defs/custody_handoff_usd_amount"},
+        "event_count": {"type": "integer", "minimum": 1},
+        "events_sha256": {"$ref": "#/$defs/custody_handoff_sha256"}
+      }
     },
     "custody_handoff_custody_cash": {
       "type": "object",

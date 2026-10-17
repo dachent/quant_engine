@@ -530,6 +530,18 @@
         }
       }
     },
+    "account_cash_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "as_of_date", "current_value", "event_count", "events_sha256"],
+      "properties": {
+        "label": {"enum": ["DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV", "FEES_PAID_FROM_ACCOUNT_CASH", "IN_FUND_FEE_FUNDED_SELLS_COST"]},
+        "as_of_date": {"type": "string", "format": "date"},
+        "current_value": {"$ref": "#/$defs/usd_amount"},
+        "event_count": {"type": "integer", "minimum": 1},
+        "events_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "custody_cash": {
       "type": "object",
       "additionalProperties": false,
@@ -713,6 +725,7 @@
         "current_weight": {"type": ["string", "null"], "minLength": 1},
         "members": {"type": "array", "items": {"$ref": "#/$defs/current_member"}},
         "derived_cash": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/custody_cash"}},
+        "account_cash_lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/account_cash_line"}},
         "reason": {"type": ["string", "null"], "minLength": 1},
         "scope": {"enum": ["SYSTEMATIC", "RETAINED_EXCLUDED"]},
         "status": {"$ref": "#/$defs/capital_status"},
