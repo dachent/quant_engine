@@ -21207,6 +21207,28 @@ def _mvp_audit_001_selected_with_unmatched_facts(
     module: Any, *, include_nav: bool, include_flow: bool
 ) -> object:
     selected = _pinned_assignment_semantics_selected_inputs(module)
+    # Account 19 is assigned a strategy before and after 2026-02-01, so its
+    # facts on that day fall in a gap between two strategy intervals: no
+    # assignment owns them and no GENERAL reason disposes them.
+    baseline_payload = selected.baseline.json_object()
+    baseline_payload["assignments"].extend(
+        [
+            _assignment(
+                "synthetic-pinned-19",
+                "STRATEGY_MAPPED",
+                "2025-01-01",
+                "2025-12-31",
+                "synthetic-strategy-19-a",
+            ),
+            _assignment(
+                "synthetic-pinned-19",
+                "STRATEGY_MAPPED",
+                "2026-03-01",
+                None,
+                "synthetic-strategy-19-b",
+            ),
+        ]
+    )
     ledger = selected.provider_ledger.json_object()
     if include_nav:
         ledger["nav_observations"].append(
@@ -21231,6 +21253,18 @@ def _mvp_audit_001_selected_with_unmatched_facts(
         "mvp audit unmatched synthetic ledger", canonical_json_bytes(ledger)
     )
     values = _selected_input_kwargs(selected)
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "mvp audit unmatched synthetic baseline",
+        canonical_json_bytes(baseline_payload),
+    )
+    values["baseline"] = baseline_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
     values["provider_ledger"] = ledger_snapshot
     values["provider_ledger_manifest"] = _generation_manifest_snapshot(
         catalog=ledger_snapshot,
@@ -29505,3 +29539,145 @@ def test_closed_epoch_with_a_flat_tail_has_no_credits_and_still_verifies(
         for key, value in expected.items()
     }
     assert projection["performance_closed_on"] == "2026-01-02"
+
+
+def _selected_with_general_and_blocked_facts(module: Any) -> object:
+    """One account per disposition: gap (blocked), predates, follows, never assigned."""
+    selected = _mvp_audit_001_selected_with_unmatched_facts(
+        module, include_nav=True, include_flow=False
+    )
+    baseline_payload = selected.baseline.json_object()
+    baseline_payload["accounts"].extend(
+        {
+            "account_id": account_id,
+            "base_currency": "USD",
+            "provider": "SYNTHETIC",
+            "role": "INVESTMENT",
+        }
+        for account_id in ("synthetic-pinned-20", "synthetic-pinned-21")
+    )
+    baseline_payload["assignments"].append(
+        _assignment(
+            "synthetic-pinned-20",
+            "STRATEGY_MAPPED",
+            "2025-03-01",
+            "2025-12-31",
+            "synthetic-strategy-20",
+        )
+    )
+    ledger = selected.provider_ledger.json_object()
+    for record_id, account_id, day in (
+        ("general-nav-predates", "synthetic-pinned-20", "2025-02-01"),
+        ("general-nav-follows", "synthetic-pinned-20", "2026-02-01"),
+        ("general-nav-never-assigned", "synthetic-pinned-21", "2026-02-01"),
+    ):
+        ledger["nav_observations"].append(
+            {
+                "record_id": record_id,
+                "account_id": account_id,
+                "as_of_date": day,
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "5.00"},
+            }
+        )
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "general disposition synthetic baseline", canonical_json_bytes(baseline_payload)
+    )
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "general disposition synthetic ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["baseline"] = baseline_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values["provider_ledger"] = ledger_snapshot
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger_snapshot,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_facts_outside_every_strategy_interval_are_general_unless_in_a_gap(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Predating, following or never-assigned facts are explicit GENERAL; a gap stays blocked."""
+    selected = _selected_with_general_and_blocked_facts(perimeter_module)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+
+    general = {
+        fact["source_identity"]["record_id"]: fact for fact in perimeter["general_facts"]
+    }
+    assert {
+        record_id: (fact["reason"], fact["disposition"], fact["status"])
+        for record_id, fact in general.items()
+    } == {
+        "general-nav-predates": (
+            "PREDATES_FIRST_STRATEGY_ASSIGNMENT",
+            "GENERAL_OUT_OF_STRATEGY_PERIMETER",
+            "GENERAL",
+        ),
+        "general-nav-follows": (
+            "FOLLOWS_LAST_STRATEGY_ASSIGNMENT",
+            "GENERAL_OUT_OF_STRATEGY_PERIMETER",
+            "GENERAL",
+        ),
+        "general-nav-never-assigned": (
+            "NO_STRATEGY_ASSIGNED_TO_ACCOUNT",
+            "GENERAL_OUT_OF_STRATEGY_PERIMETER",
+            "GENERAL",
+        ),
+    }
+    assert perimeter["general_fact_count"] == 3
+    # The fact in the gap between two strategy intervals of one account is the
+    # only undisposed fact, so the perimeter still refuses a one-to-one verdict.
+    assert [fact["source_identity"]["record_id"] for fact in perimeter["unassigned_facts"]] == [
+        "mvp-audit-unmatched-nav"
+    ]
+    assert perimeter["unassigned_fact_count"] == 1
+    assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
+    # The independent verifier re-derives the same partition from the inputs.
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+        payloads,
+    )
+
+
+def test_strategy_assigned_account_with_an_undisposed_fact_fails_the_perimeter(
+    perimeter_module: Any,
+) -> None:
+    """No strategy-assigned account may carry a fact that is neither owned nor GENERAL."""
+    selected = _selected_with_general_and_blocked_facts(perimeter_module)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    assigned = {
+        row["account_id"]
+        for row in perimeter["rows"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    }
+    undisposed = [
+        fact for fact in perimeter["unassigned_facts"] if fact["account_id"] in assigned
+    ]
+    assert undisposed, "the gap fact belongs to a strategy-assigned account"
+    assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
+    assert all(fact["status"] == "BLOCKED" for fact in undisposed)
+    # GENERAL never covers a day inside a strategy interval of its account.
+    for fact in perimeter["general_facts"]:
+        for row in perimeter["rows"]:
+            if (
+                row["account_id"] == fact["account_id"]
+                and row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+            ):
+                inside = row["effective_start"] <= fact["fact_date"] and (
+                    row["effective_end"] is None
+                    or fact["fact_date"] <= row["effective_end"]
+                )
+                assert not inside

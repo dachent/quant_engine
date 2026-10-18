@@ -3216,6 +3216,49 @@ def _perimeter_identity(
     event_sources: set[str] = set()
     raw_by_id: dict[str, tuple[str, str, int | None]] = {}
     unassigned_facts: list[dict[str, object]] = []
+    general_facts: list[dict[str, object]] = []
+
+    def general_reason(account: str, day: str) -> str | None:
+        # Re-derived from the account's STRATEGY_MAPPED intervals alone.
+        mapped = [
+            (start, end)
+            for start, end, _index, disposition in ordered_intervals.get(account, ())
+            if disposition == "STRATEGY_MAPPED"
+        ]
+        if not mapped:
+            return "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+        starts = [start.isoformat() for start, _end in mapped if start is not None]
+        if starts and day < min(starts):
+            return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
+        ends = [end.isoformat() for _start, end in mapped if end is not None]
+        if len(ends) == len(mapped) and day > max(ends):
+            return "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"
+        return None
+
+    def file_unassigned(fact: dict[str, object], account: str, day: str) -> None:
+        reason = general_reason(account, day)
+        if reason is None:
+            unassigned_facts.append(
+                {
+                    **fact,
+                    "status": "BLOCKED",
+                    "blocker_code": (
+                        "NO_ASSIGNMENT_MATCH"
+                        if account in account_by_id
+                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+                    ),
+                }
+            )
+        else:
+            general_facts.append(
+                {
+                    **fact,
+                    "status": "GENERAL",
+                    "disposition": "GENERAL_OUT_OF_STRATEGY_PERIMETER",
+                    "reason": reason,
+                }
+            )
+
     counts: dict[int, list[int]] = {
         index: [0, 0, 0, 0] for index in range(len(assignments))
     }
@@ -3243,20 +3286,16 @@ def _perimeter_identity(
             _fail()
         index = _fact_assignment(nav_account, nav_date.isoformat(), ordered_intervals)
         if index is None:
-            unassigned_facts.append(
+            file_unassigned(
                 {
                     "source_kind": "NAV",
                     "source_identity": {"record_id": nav["record_id"]},
                     "account_id": nav_account,
                     "fact_date": nav_date.isoformat(),
                     "assignment_match_count": 0,
-                    "status": "BLOCKED",
-                    "blocker_code": (
-                        "NO_ASSIGNMENT_MATCH"
-                        if nav_account in account_by_id
-                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                    ),
-                }
+                },
+                nav_account,
+                nav_date.isoformat(),
             )
         else:
             assignment_index = ordered_intervals[nav_account][index][2]
@@ -3308,7 +3347,7 @@ def _perimeter_identity(
         if event_account != raw_account or event_date != raw_date or index != raw_index:
             _fail()
         if index is None:
-            unassigned_facts.append(
+            file_unassigned(
                 {
                     "source_kind": "RAW_FLOW",
                     "source_identity": {"record_id": source_id},
@@ -3319,27 +3358,24 @@ def _perimeter_identity(
                     "account_id": event_account,
                     "fact_date": event_date,
                     "assignment_match_count": 0,
-                    "status": "BLOCKED",
-                    "blocker_code": (
-                        "NO_ASSIGNMENT_MATCH"
-                        if event_account in account_by_id
-                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                    ),
-                }
+                },
+                event_account,
+                event_date,
             )
         else:
             assignment_index = ordered_intervals[event_account][index][2]
             counts[assignment_index][3] += 1
     if event_sources != raw_ids:
         _fail()
-    unassigned_facts.sort(
-        key=lambda item: (
-            0 if item["source_kind"] == "NAV" else 1,
-            str(item["account_id"]),
-            str(item["fact_date"]),
-            str(item["source_identity"]["record_id"]),
+    for sortable in (unassigned_facts, general_facts):
+        sortable.sort(
+            key=lambda item: (
+                0 if item["source_kind"] == "NAV" else 1,
+                str(item["account_id"]),
+                str(item["fact_date"]),
+                str(item["source_identity"]["record_id"]),
+            )
         )
-    )
     for row in rows:
         assignment_key = (
             row["account_id"],
@@ -3426,6 +3462,8 @@ def _perimeter_identity(
             2 if fact["source_kind"] == "RAW_FLOW" else 1 for fact in unassigned_facts
         ),
         "unassigned_facts": unassigned_facts,
+        "general_fact_count": len(general_facts),
+        "general_facts": general_facts,
         "rows": rows,
     }
     if perimeter != expected:

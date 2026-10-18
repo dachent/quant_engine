@@ -1063,6 +1063,40 @@ def _assignment_row_for_fact(
     return rows_by_interval[key]
 
 
+_GENERAL_DISPOSITION = "GENERAL_OUT_OF_STRATEGY_PERIMETER"
+
+
+def _general_reason(
+    account_id: str,
+    fact_date: str,
+    assignments: Sequence[Mapping[str, object]],
+) -> str | None:
+    """Why a fact outside every assignment interval is GENERAL, or None if undisposed.
+
+    Derived only from the account's STRATEGY_MAPPED assignment rows: nothing
+    that predates the account's first defined strategy, follows its last closed
+    strategy, or belongs to an account no strategy was ever assigned to can be
+    something a defined strategy depends on.  A fact that falls in a gap between
+    two strategy intervals of the same account is not disposed and stays
+    blocked.
+    """
+
+    mapped = [
+        assignment
+        for assignment in assignments
+        if assignment["account_id"] == account_id
+        and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    ]
+    if not mapped:
+        return "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+    if fact_date < min(str(assignment["effective_start"]) for assignment in mapped):
+        return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
+    ends = [assignment["effective_end"] for assignment in mapped]
+    if all(end is not None for end in ends) and fact_date > max(map(str, ends)):
+        return "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"
+    return None
+
+
 def _count_facts(
     *,
     nav_facts: Sequence[Mapping[str, object]],
@@ -1074,8 +1108,9 @@ def _count_facts(
     ],
     known_accounts: Mapping[str, str],
     provider_ledger_as_of_date: date,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     unassigned: list[dict[str, object]] = []
+    general: list[dict[str, object]] = []
     nav_record_ids: set[str] = set()
     nav_account_dates: set[tuple[str, str]] = set()
     for index, fact in enumerate(nav_facts):
@@ -1112,21 +1147,35 @@ def _count_facts(
             known_accounts=known_accounts,
         )
         if row is None:
-            unassigned.append(
-                {
-                    "source_kind": "NAV",
-                    "source_identity": {"record_id": record_id},
-                    "account_id": account_id,
-                    "fact_date": as_of_date,
-                    "assignment_match_count": 0,
-                    "status": "BLOCKED",
-                    "blocker_code": (
-                        "NO_ASSIGNMENT_MATCH"
-                        if account_id in known_accounts
-                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                    ),
-                }
-            )
+            reason = _general_reason(account_id, as_of_date, assignments)
+            entry: dict[str, object] = {
+                "source_kind": "NAV",
+                "source_identity": {"record_id": record_id},
+                "account_id": account_id,
+                "fact_date": as_of_date,
+                "assignment_match_count": 0,
+            }
+            if reason is None:
+                unassigned.append(
+                    {
+                        **entry,
+                        "status": "BLOCKED",
+                        "blocker_code": (
+                            "NO_ASSIGNMENT_MATCH"
+                            if account_id in known_accounts
+                            else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+                        ),
+                    }
+                )
+            else:
+                general.append(
+                    {
+                        **entry,
+                        "status": "GENERAL",
+                        "disposition": _GENERAL_DISPOSITION,
+                        "reason": reason,
+                    }
+                )
         else:
             row["available_nav" if status == "AVAILABLE" else "unavailable_nav"] += 1
 
@@ -1213,40 +1262,55 @@ def _count_facts(
                 "raw/classified flow assignment disagrees"
             )
         if row is None:
-            unassigned.append(
-                {
-                    "source_kind": "RAW_FLOW",
-                    "source_identity": {"record_id": source_record_id},
-                    "classified_projection_identity": {
-                        "event_id": event_id,
-                        "source_record_id": source_record_id,
-                    },
-                    "account_id": account_id,
-                    "fact_date": event_date,
-                    "assignment_match_count": 0,
-                    "status": "BLOCKED",
-                    "blocker_code": (
-                        "NO_ASSIGNMENT_MATCH"
-                        if account_id in known_accounts
-                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                    ),
-                }
-            )
+            reason = _general_reason(account_id, event_date, assignments)
+            flow_entry: dict[str, object] = {
+                "source_kind": "RAW_FLOW",
+                "source_identity": {"record_id": source_record_id},
+                "classified_projection_identity": {
+                    "event_id": event_id,
+                    "source_record_id": source_record_id,
+                },
+                "account_id": account_id,
+                "fact_date": event_date,
+                "assignment_match_count": 0,
+            }
+            if reason is None:
+                unassigned.append(
+                    {
+                        **flow_entry,
+                        "status": "BLOCKED",
+                        "blocker_code": (
+                            "NO_ASSIGNMENT_MATCH"
+                            if account_id in known_accounts
+                            else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+                        ),
+                    }
+                )
+            else:
+                general.append(
+                    {
+                        **flow_entry,
+                        "status": "GENERAL",
+                        "disposition": _GENERAL_DISPOSITION,
+                        "reason": reason,
+                    }
+                )
         else:
             row["classified_flows"] += 1
     if classified_source_record_ids != raw_record_ids:
         raise AccountAssignmentPerimeterError(
             "raw/classified flow lineage is not one-to-one"
         )
-    unassigned.sort(
-        key=lambda item: (
-            0 if item["source_kind"] == "NAV" else 1,
-            str(item["account_id"]),
-            str(item["fact_date"]),
-            str(item["source_identity"]["record_id"]),
+    for facts in (unassigned, general):
+        facts.sort(
+            key=lambda item: (
+                0 if item["source_kind"] == "NAV" else 1,
+                str(item["account_id"]),
+                str(item["fact_date"]),
+                str(item["source_identity"]["record_id"]),
+            )
         )
-    )
-    return unassigned
+    return unassigned, general
 
 
 def _expected_payload(
@@ -1286,7 +1350,7 @@ def _expected_payload(
     }
     if len(selected_providers) != len(selected_accounts):
         raise AccountAssignmentPerimeterError("baseline account shape is invalid")
-    unassigned_facts = _count_facts(
+    unassigned_facts, general_facts = _count_facts(
         nav_facts=nav_facts,
         raw_flow_facts=raw_flow_facts,
         classified_flow_facts=classified_flow_facts,
@@ -1353,6 +1417,8 @@ def _expected_payload(
             2 if fact["source_kind"] == "RAW_FLOW" else 1 for fact in unassigned_facts
         ),
         "unassigned_facts": unassigned_facts,
+        "general_fact_count": len(general_facts),
+        "general_facts": general_facts,
         "rows": rows,
     }
 
