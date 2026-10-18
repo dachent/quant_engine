@@ -5613,3 +5613,25 @@ def test_fund_scoped_strategy_shows_dividends_and_fees_as_labelled_lines():
         if check["status"] == "FAIL"
     ]
     assert failed and "account cash lines differ" in failed[0]["error"]
+
+
+def test_matrixport_wallet_sleeve_equals_the_product_nav():
+    """#568: a wallet that funds products builds no derived cash; sleeve equals NAV.
+
+    The stablecoin conversion between a wallet deposit and the product
+    subscription is a cost outside capital, never a cash line in the sleeve.
+    """
+
+    case = _cr2_custody_cash_case()
+    for fact in ("flows", "capital_anchors"):
+        for row in case["provider_catalog"][fact]:
+            row["provider_id"] = "matrixport"
+    case["custody_authority"]["fund_scoped_providers"] = ["MATRIXPORT"]
+
+    block = baseline._build_current_capital(**case)
+
+    row = block["strategies"][0]
+    nav = row["members"][0]["value"]["value"]
+    assert "derived_cash" not in row
+    assert row["current_value"]["value"] == nav
+    _cc_schema_validator("current_capital").validate(block)
