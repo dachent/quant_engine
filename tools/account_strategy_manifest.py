@@ -590,7 +590,8 @@ def _tail_epoch_keys(
     for chain in full_chains.values():
         if not chain:
             continue
-        last = max(chain, key=lambda assignment: str(assignment["_key"][2]))
+        # A missing start (an unbounded historical row) is earlier than any date.
+        last = max(chain, key=lambda assignment: str(assignment["_key"][2] or ""))
         key = last["_key"]
         admission = admissions.get(key)
         if (
@@ -5039,6 +5040,17 @@ def _validate_manifest_semantics(
     if not isinstance(rows, list):
         raise ManifestError("manifest rows must be a list")
     seen_epochs: set[tuple[str, str, str, str | None]] = set()
+    # Only an account's last epoch can be a tail epoch (#557); an intermediate
+    # epoch that liquidates keeps its bounded evidence window.
+    final_start_by_account: dict[str, str] = {}
+    for candidate in rows:
+        if isinstance(candidate, Mapping) and isinstance(
+            candidate.get("effective_start"), str
+        ):
+            account = str(candidate.get("account_id"))
+            start_text = str(candidate["effective_start"])
+            if start_text > final_start_by_account.get(account, ""):
+                final_start_by_account[account] = start_text
     for index, value in enumerate(rows):
         if not isinstance(value, Mapping):
             raise ManifestError(f"manifest row {index} must be an object")
@@ -5143,7 +5155,13 @@ def _validate_manifest_semantics(
                 raise ManifestError(f"row {index} performance closing is invalid")
         # A closed epoch with an explicit funded end keeps its evidence window
         # open through the cutoff: its post-end tail is part of the epoch (#557).
-        window_end = None if closed_on is not None else effective_end
+        window_end = (
+            None
+            if closed_on is not None
+            and effective_end is not None
+            and effective_start == final_start_by_account.get(epoch_key[0])
+            else effective_end
+        )
         if (
             start > end
             or start < effective_start

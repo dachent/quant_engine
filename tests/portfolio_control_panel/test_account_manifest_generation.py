@@ -30016,3 +30016,23 @@ def test_final_closed_epoch_carries_its_tail_through_the_cutoff_end_to_end(
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
+
+
+def test_tail_epoch_keys_treat_a_null_start_history_row_as_earliest() -> None:
+    """A missing-start historical row never hides the final mapped tail epoch."""
+    from tools import account_strategy_manifest as producer_module
+
+    history = {"_key": ("acct", "history", None, None)}
+    mapped = {"_key": ("acct", "strategy", "2025-01-01", "2025-12-31")}
+    admissions = {
+        mapped["_key"]: {"status": "FUNDED", "funded_end": "2025-12-31"},
+    }
+    assert producer_module._tail_epoch_keys(
+        {"acct": [history, mapped]}, admissions
+    ) == {mapped["_key"]}
+    # Without a declared funded end there is no tail.
+    admissions[mapped["_key"]] = {"status": "FUNDED", "funded_end": None}
+    assert (
+        producer_module._tail_epoch_keys({"acct": [history, mapped]}, admissions)
+        == set()
+    )
