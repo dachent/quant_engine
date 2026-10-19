@@ -3230,9 +3230,6 @@ def _perimeter_identity(
         starts = [start.isoformat() for start, _end in mapped if start is not None]
         if starts and day < min(starts):
             return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
-        ends = [end.isoformat() for _start, end in mapped if end is not None]
-        if len(ends) == len(mapped) and day > max(ends):
-            return "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"
         return None
 
     def file_unassigned(fact: dict[str, object], account: str, day: str) -> None:

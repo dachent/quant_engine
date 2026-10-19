@@ -21207,27 +21207,18 @@ def _mvp_audit_001_selected_with_unmatched_facts(
     module: Any, *, include_nav: bool, include_flow: bool
 ) -> object:
     selected = _pinned_assignment_semantics_selected_inputs(module)
-    # Account 19 is assigned a strategy before and after 2026-02-01, so its
-    # facts on that day fall in a gap between two strategy intervals: no
-    # assignment owns them and no GENERAL reason disposes them.
+    # Account 19 had a strategy that ended before 2026-02-01, so its facts on
+    # that day follow the last strategy interval: no assignment owns them and
+    # no GENERAL reason disposes them (they may be that strategy's post-end cash).
     baseline_payload = selected.baseline.json_object()
-    baseline_payload["assignments"].extend(
-        [
-            _assignment(
-                "synthetic-pinned-19",
-                "STRATEGY_MAPPED",
-                "2025-01-01",
-                "2025-12-31",
-                "synthetic-strategy-19-a",
-            ),
-            _assignment(
-                "synthetic-pinned-19",
-                "STRATEGY_MAPPED",
-                "2026-03-01",
-                None,
-                "synthetic-strategy-19-b",
-            ),
-        ]
+    baseline_payload["assignments"].append(
+        _assignment(
+            "synthetic-pinned-19",
+            "STRATEGY_MAPPED",
+            "2025-01-01",
+            "2025-12-31",
+            "synthetic-strategy-19",
+        )
     )
     ledger = selected.provider_ledger.json_object()
     if include_nav:
@@ -29542,7 +29533,7 @@ def test_closed_epoch_with_a_flat_tail_has_no_credits_and_still_verifies(
 
 
 def _selected_with_general_and_blocked_facts(module: Any) -> object:
-    """One account per disposition: gap (blocked), predates, follows, never assigned."""
+    """One account per disposition: post-end (blocked), predates, never assigned."""
     selected = _mvp_audit_001_selected_with_unmatched_facts(
         module, include_nav=True, include_flow=False
     )
@@ -29605,10 +29596,10 @@ def _selected_with_general_and_blocked_facts(module: Any) -> object:
     return module.AccountManifestSelectedInputs(**values)
 
 
-def test_facts_outside_every_strategy_interval_are_general_unless_in_a_gap(
+def test_facts_outside_every_strategy_interval_are_general_only_when_no_strategy_can_own_them(
     perimeter_module: Any, verifier_module: Any
 ) -> None:
-    """Predating, following or never-assigned facts are explicit GENERAL; a gap stays blocked."""
+    """Never-assigned and predating facts are GENERAL; a post-end fact stays blocked."""
     selected = _selected_with_general_and_blocked_facts(perimeter_module)
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
     perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
@@ -29626,24 +29617,19 @@ def test_facts_outside_every_strategy_interval_are_general_unless_in_a_gap(
             "GENERAL_OUT_OF_STRATEGY_PERIMETER",
             "GENERAL",
         ),
-        "general-nav-follows": (
-            "FOLLOWS_LAST_STRATEGY_ASSIGNMENT",
-            "GENERAL_OUT_OF_STRATEGY_PERIMETER",
-            "GENERAL",
-        ),
         "general-nav-never-assigned": (
             "NO_STRATEGY_ASSIGNED_TO_ACCOUNT",
             "GENERAL_OUT_OF_STRATEGY_PERIMETER",
             "GENERAL",
         ),
     }
-    assert perimeter["general_fact_count"] == 3
-    # The fact in the gap between two strategy intervals of one account is the
-    # only undisposed fact, so the perimeter still refuses a one-to-one verdict.
-    assert [
+    assert perimeter["general_fact_count"] == 2
+    # Facts after a strategy's last interval (accounts 19 and 20) are not
+    # disposed, so the perimeter still refuses a one-to-one verdict.
+    assert sorted(
         fact["source_identity"]["record_id"] for fact in perimeter["unassigned_facts"]
-    ] == ["mvp-audit-unmatched-nav"]
-    assert perimeter["unassigned_fact_count"] == 1
+    ) == ["general-nav-follows", "mvp-audit-unmatched-nav"]
+    assert perimeter["unassigned_fact_count"] == 2
     assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
     # The independent verifier re-derives the same partition from the inputs.
     verifier_module.IndependentAccountManifestVerifier().verify(
@@ -29667,7 +29653,7 @@ def test_strategy_assigned_account_with_an_undisposed_fact_fails_the_perimeter(
     undisposed = [
         fact for fact in perimeter["unassigned_facts"] if fact["account_id"] in assigned
     ]
-    assert undisposed, "the gap fact belongs to a strategy-assigned account"
+    assert undisposed, "a post-end fact belongs to a strategy-assigned account"
     assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
     assert all(fact["status"] == "BLOCKED" for fact in undisposed)
     # GENERAL never covers a day inside a strategy interval of its account.

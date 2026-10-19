@@ -137,7 +137,7 @@
         "assignment_match_count": {"const": 0},
         "status": {"const": "GENERAL"},
         "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
-        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT", "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"]}
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
       }
     },
     "general_raw_flow": {
@@ -153,7 +153,7 @@
         "assignment_match_count": {"const": 0},
         "status": {"const": "GENERAL"},
         "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
-        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT", "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"]}
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
       }
     },
     "assignment_identity": {

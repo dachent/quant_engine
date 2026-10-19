@@ -1074,11 +1074,11 @@ def _general_reason(
     """Why a fact outside every assignment interval is GENERAL, or None if undisposed.
 
     Derived only from the account's STRATEGY_MAPPED assignment rows: nothing
-    that predates the account's first defined strategy, follows its last closed
-    strategy, or belongs to an account no strategy was ever assigned to can be
-    something a defined strategy depends on.  A fact that falls in a gap between
-    two strategy intervals of the same account is not disposed and stays
-    blocked.
+    that predates the account's first defined strategy, or belongs to an account
+    no strategy was ever assigned to, can be something a defined strategy
+    depends on.  A fact after the last closed strategy interval of a
+    strategy-assigned account may still be that strategy's post-end cash, so it
+    stays undisposed (blocked) until a rule declares it out of the product.
     """
 
     mapped = [
@@ -1091,9 +1091,6 @@ def _general_reason(
         return "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
     if fact_date < min(str(assignment["effective_start"]) for assignment in mapped):
         return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
-    ends = [assignment["effective_end"] for assignment in mapped]
-    if all(end is not None for end in ends) and fact_date > max(map(str, ends)):
-        return "FOLLOWS_LAST_STRATEGY_ASSIGNMENT"
     return None
 
 
