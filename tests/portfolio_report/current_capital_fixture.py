@@ -538,6 +538,19 @@ def cr2_custody_native_source(
     )
     policy["policy_status"] = "READY"
     policy["shared_flow_contract"]["extension_status"] = "READY"
+    # The shipped contract lists both Quantbase and Matrixport as fund-scoped
+    # (#536, #568), so no shipped provider builds a derived cash line. This
+    # synthetic world keeps Matrixport outside the list so the retained
+    # derived-cash route stays covered end to end; the receipt is re-bound to
+    # the changed payload in this test-only contract copy.
+    import portfolio_financial_mvp_contract as contract_tool
+
+    policy["provider_custody_perimeter"]["fund_scoped_providers"] = ["QUANTBASE"]
+    policy["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"][
+        "payload_sha256"
+    ] = contract_tool._owner_decision_payload_digests(policy)[
+        "PROVIDER_CUSTODY_PERIMETER"
+    ]
 
     def bind(provider, newfiles, catalog_update=None):
         ref = spec["providers"][provider]
