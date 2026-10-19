@@ -1070,6 +1070,7 @@ def _general_reason(
     account_id: str,
     fact_date: str,
     assignments: Sequence[Mapping[str, object]],
+    known_accounts: Mapping[str, str],
 ) -> str | None:
     """Why a fact outside every assignment interval is GENERAL, or None if undisposed.
 
@@ -1088,7 +1089,13 @@ def _general_reason(
         and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
     ]
     if not mapped:
-        return "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+        # An account outside the selected baseline is named as such, so the
+        # disposition never reads as a statement about a selected account.
+        return (
+            "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+            if account_id in known_accounts
+            else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+        )
     if fact_date < min(str(assignment["effective_start"]) for assignment in mapped):
         return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
     return None
@@ -1144,7 +1151,9 @@ def _count_facts(
             known_accounts=known_accounts,
         )
         if row is None:
-            reason = _general_reason(account_id, as_of_date, assignments)
+            reason = _general_reason(
+                account_id, as_of_date, assignments, known_accounts
+            )
             entry: dict[str, object] = {
                 "source_kind": "NAV",
                 "source_identity": {"record_id": record_id},
@@ -1259,7 +1268,9 @@ def _count_facts(
                 "raw/classified flow assignment disagrees"
             )
         if row is None:
-            reason = _general_reason(account_id, event_date, assignments)
+            reason = _general_reason(
+                account_id, event_date, assignments, known_accounts
+            )
             flow_entry: dict[str, object] = {
                 "source_kind": "RAW_FLOW",
                 "source_identity": {"record_id": source_record_id},

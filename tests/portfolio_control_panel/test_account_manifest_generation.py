@@ -20896,7 +20896,7 @@ def test_absent_baseline_flow_is_retained_general_counted_and_verified(
             "assignment_match_count": 0,
             "status": "GENERAL",
             "disposition": "GENERAL_OUT_OF_STRATEGY_PERIMETER",
-            "reason": "NO_STRATEGY_ASSIGNED_TO_ACCOUNT",
+            "reason": "ACCOUNT_NOT_IN_SELECTED_BASELINE",
         }
     ]
     assert all(

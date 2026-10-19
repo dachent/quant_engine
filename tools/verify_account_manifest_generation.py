@@ -3226,7 +3226,11 @@ def _perimeter_identity(
             if disposition == "STRATEGY_MAPPED"
         ]
         if not mapped:
-            return "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+            return (
+                "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
+                if account in account_by_id
+                else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+            )
         starts = [start.isoformat() for start, _end in mapped if start is not None]
         if starts and day < min(starts):
             return "PREDATES_FIRST_STRATEGY_ASSIGNMENT"

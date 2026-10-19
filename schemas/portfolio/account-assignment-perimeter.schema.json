@@ -6,6 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "artifact_id", "as_of_date", "selected_baseline_identity", "full_perimeter_identity", "selected_baseline_account_count", "account_count", "assignment_count", "partition_counts", "fact_bijection_status", "unassigned_fact_count", "unassigned_projection_count", "unassigned_facts", "rows"],
+  "dependentRequired": {
+    "general_fact_count": ["general_facts"],
+    "general_facts": ["general_fact_count"]
+  },
   "properties": {
     "schema_version": {"const": 1},
     "artifact_id": {"const": "account-assignment-perimeter"},
@@ -137,7 +141,7 @@
         "assignment_match_count": {"const": 0},
         "status": {"const": "GENERAL"},
         "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
-        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "ACCOUNT_NOT_IN_SELECTED_BASELINE", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
       }
     },
     "general_raw_flow": {
@@ -153,7 +157,7 @@
         "assignment_match_count": {"const": 0},
         "status": {"const": "GENERAL"},
         "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
-        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "ACCOUNT_NOT_IN_SELECTED_BASELINE", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
       }
     },
     "assignment_identity": {
