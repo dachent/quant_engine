@@ -1414,8 +1414,13 @@ def _expected_payload(
             2 if fact["source_kind"] == "RAW_FLOW" else 1 for fact in unassigned_facts
         ),
         "unassigned_facts": unassigned_facts,
-        "general_fact_count": len(general_facts),
-        "general_facts": general_facts,
+        # Present only when a fact was disposed GENERAL, so every perimeter
+        # without one keeps its bytes.
+        **(
+            {"general_fact_count": len(general_facts), "general_facts": general_facts}
+            if general_facts
+            else {}
+        ),
         "rows": rows,
     }
 

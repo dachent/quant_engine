@@ -3459,8 +3459,11 @@ def _perimeter_identity(
             2 if fact["source_kind"] == "RAW_FLOW" else 1 for fact in unassigned_facts
         ),
         "unassigned_facts": unassigned_facts,
-        "general_fact_count": len(general_facts),
-        "general_facts": general_facts,
+        **(
+            {"general_fact_count": len(general_facts), "general_facts": general_facts}
+            if general_facts
+            else {}
+        ),
         "rows": rows,
     }
     if perimeter != expected:

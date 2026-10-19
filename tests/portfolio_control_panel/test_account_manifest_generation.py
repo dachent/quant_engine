@@ -19688,11 +19688,13 @@ def test_assignment_perimeter_retains_nav_for_unassigned_baseline_account(
 
     assert payload["selected_baseline_account_count"] == 2
     assert payload["account_count"] == 1
-    assert payload["unassigned_fact_count"] == 1
-    assert payload["unassigned_projection_count"] == 1
-    assert payload["unassigned_facts"][0]["source_identity"] == {
+    # The reserve account never had a strategy: its NAV is retained as GENERAL.
+    assert payload["unassigned_fact_count"] == 0
+    assert payload["general_fact_count"] == 1
+    assert payload["general_facts"][0]["source_identity"] == {
         "record_id": "reserve-nav"
     }
+    assert payload["general_facts"][0]["reason"] == "NO_STRATEGY_ASSIGNED_TO_ACCOUNT"
 
 
 def _pinned_assignment_semantics_selected_inputs(module: Any) -> object:
@@ -20014,8 +20016,12 @@ def test_blocked_builder_retains_outside_interval_facts_before_classification(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(outside)
     perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
     classified = json.loads(payloads["authority/classified-flows.json"])
-    assert perimeter["unassigned_fact_count"] == 2
-    assert perimeter["unassigned_projection_count"] == 3
+    # Both facts predate account 09's first strategy interval: GENERAL, retained.
+    assert perimeter["unassigned_fact_count"] == 0
+    assert perimeter["general_fact_count"] == 2
+    assert {fact["reason"] for fact in perimeter["general_facts"]} == {
+        "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
+    }
     assert (
         next(
             event
@@ -20199,6 +20205,21 @@ def test_independent_verifier_rejects_assignment_perimeter_reassignment(
 
 def _selected_with_unassigned_unresolved_facts(module: Any) -> object:
     selected = _pinned_assignment_semantics_selected_inputs(module)
+    # Account 19's strategy ended before the facts, so no assignment owns them
+    # and they are not GENERAL: they may be that strategy's post-end cash.
+    baseline_payload = selected.baseline.json_object()
+    baseline_payload["assignments"].append(
+        _assignment(
+            "synthetic-pinned-19",
+            "STRATEGY_MAPPED",
+            "2025-01-01",
+            "2025-12-31",
+            "synthetic-strategy-19",
+        )
+    )
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "synthetic post-end baseline", canonical_json_bytes(baseline_payload)
+    )
     ledger = selected.provider_ledger.json_object()
     ledger["nav_observations"].append(
         {
@@ -20221,6 +20242,14 @@ def _selected_with_unassigned_unresolved_facts(module: Any) -> object:
         "synthetic ledger with retained blocked facts", canonical_json_bytes(ledger)
     )
     values = _selected_input_kwargs(selected)
+    values["baseline"] = baseline_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
     values["provider_ledger"] = provider_ledger
     values["provider_ledger_manifest"] = _generation_manifest_snapshot(
         catalog=provider_ledger,
@@ -20246,7 +20275,7 @@ def test_unassigned_and_unresolved_facts_are_retained_blocked_and_verified(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
 
     assert perimeter["selected_baseline_account_count"] == 19
-    assert perimeter["account_count"] == 18
+    assert perimeter["account_count"] == 19
     assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
     assert perimeter["unassigned_fact_count"] == 2
     assert perimeter["unassigned_projection_count"] == 3
@@ -20296,7 +20325,7 @@ def test_unassigned_and_unresolved_facts_are_retained_blocked_and_verified(
     assert "synthetic-unassigned-nav" not in calculation_nav_ids
     assert "synthetic-unassigned-flow" not in calculation_flow_ids
     assert output["authority_readiness"]["publication_readiness"] == "NOT_READY"
-    assert len(output["rows"]) == 15
+    assert len(output["rows"]) == 16
     assert all(
         row["status"] == "BLOCKED_ADMISSION"
         and not set(row).intersection(
@@ -20319,7 +20348,7 @@ def test_unassigned_and_unresolved_facts_are_retained_blocked_and_verified(
     )
     report = json.loads(report_bytes)
     assert report["counts"]["selected_baseline_account_count"] == 19
-    assert report["counts"]["account_count"] == 18
+    assert report["counts"]["account_count"] == 19
     assert report["counts"]["observed_nav_fact_count"] == 19
     assert report["counts"]["observed_raw_flow_count"] == 19
     assert report["counts"]["classified_event_count"] == 19
@@ -20835,7 +20864,7 @@ def _selected_with_absent_baseline_flow(module: Any) -> object:
     return module.AccountManifestSelectedInputs(**values)
 
 
-def test_absent_baseline_flow_is_retained_blocked_counted_and_verified(
+def test_absent_baseline_flow_is_retained_general_counted_and_verified(
     perimeter_module: Any,
     verifier_module: Any,
 ) -> None:
@@ -20847,9 +20876,14 @@ def test_absent_baseline_flow_is_retained_blocked_counted_and_verified(
     assert perimeter["selected_baseline_account_count"] == 18
     assert perimeter["account_count"] == 18
     assert perimeter["assignment_count"] == 26
-    assert perimeter["unassigned_fact_count"] == 1
-    assert perimeter["unassigned_projection_count"] == 2
-    assert perimeter["unassigned_facts"] == [
+    # No strategy was ever assigned to the absent account, so its flow is an
+    # explicit GENERAL fact, retained and counted, never an assignment.
+    assert perimeter["fact_bijection_status"] == "ONE_TO_ONE_VERIFIED"
+    assert perimeter["unassigned_fact_count"] == 0
+    assert perimeter["unassigned_projection_count"] == 0
+    assert perimeter["unassigned_facts"] == []
+    assert perimeter["general_fact_count"] == 1
+    assert perimeter["general_facts"] == [
         {
             "source_kind": "RAW_FLOW",
             "source_identity": {"record_id": "synthetic-absent-flow"},
@@ -20860,8 +20894,9 @@ def test_absent_baseline_flow_is_retained_blocked_counted_and_verified(
             "account_id": "synthetic-absent-account",
             "fact_date": "2025-12-31",
             "assignment_match_count": 0,
-            "status": "BLOCKED",
-            "blocker_code": "ACCOUNT_NOT_IN_SELECTED_BASELINE",
+            "status": "GENERAL",
+            "disposition": "GENERAL_OUT_OF_STRATEGY_PERIMETER",
+            "reason": "NO_STRATEGY_ASSIGNED_TO_ACCOUNT",
         }
     ]
     assert all(
@@ -20898,8 +20933,8 @@ def test_absent_baseline_flow_is_retained_blocked_counted_and_verified(
     )
     assert report["counts"]["observed_raw_flow_count"] == 19
     assert report["counts"]["classified_event_count"] == 19
-    assert report["counts"]["unmatched_fact_count"] == 1
-    assert report["counts"]["unmatched_projection_count"] == 2
+    assert report["counts"]["unmatched_fact_count"] == 0
+    assert report["counts"]["unmatched_projection_count"] == 0
     assert report["numeric_verification"]["candidate_count"] == 0
 
 
@@ -20912,18 +20947,16 @@ def test_independent_verifier_rejects_absent_baseline_flow_mutations(
     selected = _selected_with_absent_baseline_flow(perimeter_module)
     payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
     perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
-    absent = perimeter["unassigned_facts"][0]
+    absent = perimeter["general_facts"][0]
     if mutation == "blocker":
-        absent["blocker_code"] = "NO_ASSIGNMENT_MATCH"
+        absent["reason"] = "PREDATES_FIRST_STRATEGY_ASSIGNMENT"
     elif mutation == "linkage":
         absent["classified_projection_identity"]["event_id"] = (
             "classified-flow:synthetic-other-flow"
         )
     elif mutation == "assign":
-        perimeter["fact_bijection_status"] = "ONE_TO_ONE_VERIFIED"
-        perimeter["unassigned_fact_count"] = 0
-        perimeter["unassigned_projection_count"] = 0
-        perimeter["unassigned_facts"] = []
+        del perimeter["general_fact_count"]
+        del perimeter["general_facts"]
         perimeter["rows"][0]["raw_flows"] += 1
         perimeter["rows"][0]["classified_flows"] += 1
     else:
