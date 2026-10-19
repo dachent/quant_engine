@@ -53,7 +53,7 @@ from decimal import Context, Decimal, localcontext
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Collection, Mapping, Sequence, cast
 
 from quant_engine.core import InputSnapshot
 from quant_engine.core.contracts import (
@@ -573,6 +573,49 @@ def load_flow_classification_policy(
     )
 
 
+def _tail_epoch_keys(
+    full_chains: Mapping[str, Sequence[Mapping[str, Any]]],
+    admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+) -> set[tuple[str, str, str, str | None]]:
+    """Final closed epochs whose admission declares a funded end (#557).
+
+    The epoch ends on its crosswalk date and its return closes at the funded
+    end, while the evidence window (receipt, coverage and facts) runs through
+    the cutoff so the post-end tail stays inside the same strategy epoch.  Only
+    the last row of an account's full chain qualifies: a later row owns the
+    facts that follow.
+    """
+
+    tails: set[tuple[str, str, str, str | None]] = set()
+    for chain in full_chains.values():
+        if not chain:
+            continue
+        last = max(chain, key=lambda assignment: str(assignment["_key"][2]))
+        key = last["_key"]
+        admission = admissions.get(key)
+        if (
+            key[3] is not None
+            and admission is not None
+            and admission.get("status") == "FUNDED"
+            and admission.get("funded_end") is not None
+        ):
+            tails.add(key)
+    return tails
+
+
+def _final_closed_assignment_keys(
+    assignments: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str, str, str | None]]:
+    """The closed assignment that ends each account's mapped chain."""
+
+    last: dict[str, tuple[str, str, str, str | None]] = {}
+    for assignment in assignments:
+        key = _assignment_key(dict(assignment))
+        if key[0] not in last or key[2] > last[key[0]][2]:
+            last[key[0]] = key
+    return {key for key in last.values() if key[3] is not None}
+
+
 def _validate_flow_coverage_payload(
     payload: Mapping[str, Any],
     coverage_snapshot: InputSnapshot,
@@ -641,6 +684,7 @@ def _validate_flow_coverage_payload(
     if assignment_identity != {"sha256": expected_sha256, "count": expected_count}:
         raise ManifestError("flow coverage mapped assignment identity differs")
     expected_keys = {_assignment_key(assignment) for assignment in mapped_assignments}
+    final_closed_keys = _final_closed_assignment_keys(mapped_assignments)
     declared_receipts = payload["receipt_artifacts"]
     if not isinstance(declared_receipts, list):
         raise ManifestError("flow coverage receipt artifacts must be a list")
@@ -734,7 +778,17 @@ def _validate_flow_coverage_payload(
             raise ManifestError(f"flow coverage row {index}.status is invalid")
         if (
             requested_start != effective_start
-            or (effective_end is not None and requested_end != effective_end)
+            or (
+                effective_end is not None
+                and requested_end != effective_end
+                # The final closed epoch of an account chain may carry its
+                # evidence through the cutoff (the post-end tail, #557); the
+                # assembly proves the admission declares that tail.
+                and not (
+                    requested_end == coverage_as_of_date
+                    and assignment_key in final_closed_keys
+                )
+            )
             or (
                 effective_end is None
                 and status == "BLOCKED"
@@ -3038,6 +3092,7 @@ def validate_evidence_coverage(
     *,
     supporting_internal_counterparty_source_record_ids: Sequence[str] = (),
     selected_assignment_keys: Sequence[tuple[str, str, str, str | None]] = (),
+    tail_keys: Collection[tuple[str, str, str, str | None]] = (),
 ) -> None:
     """Every source fact must map to exactly one known account epoch.
 
@@ -3060,7 +3115,7 @@ def validate_evidence_coverage(
             if _in_window(
                 event_date,
                 assignment["_key"][2],
-                assignment["_key"][3],
+                None if assignment["_key"] in tail_keys else assignment["_key"][3],
             )
         ]
         if len(matches) == 2:
@@ -3844,6 +3899,7 @@ def _assemble_manifest_impl(
     *,
     manifest_schema_version: int = _MANIFEST_SCHEMA_VERSION,
     capital_anchors: list[dict[str, Any]] | None = None,
+    tail_keys: Collection[tuple[str, str, str, str | None]] = (),
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unavailable_navs = unavailable_navs or {}
@@ -3856,14 +3912,18 @@ def _assemble_manifest_impl(
             key = assignment["_key"]
             strategy_id = key[1]
             w0 = key[2]
-            w1 = key[3]
+            # A tail epoch keeps its crosswalk end as identity; its evidence
+            # window runs through the cutoff and its return closes at the
+            # admission's funded end (#557).
+            identity_end = key[3]
+            w1 = None if key in tail_keys else key[3]
             admission = admissions[key]
             base: dict[str, Any] = {
                 "account_id": aid,
                 "provider": provider,
                 "strategy_id": strategy_id,
                 "effective_start": w0,
-                "effective_end": w1,
+                "effective_end": identity_end,
                 "admission_status": admission["status"],
                 "admission_policy_reference": admission["authority_kind"],
                 "admission_authority_kind": admission["authority_kind"],
@@ -5081,10 +5141,13 @@ def _validate_manifest_semantics(
                 or (effective_end is not None and closed_on > effective_end)
             ):
                 raise ManifestError(f"row {index} performance closing is invalid")
+        # A closed epoch with an explicit funded end keeps its evidence window
+        # open through the cutoff: its post-end tail is part of the epoch (#557).
+        window_end = None if closed_on is not None else effective_end
         if (
             start > end
             or start < effective_start
-            or (effective_end is not None and end > effective_end)
+            or (window_end is not None and end > window_end)
         ):
             raise ManifestError(f"row {index} observation interval is invalid")
 
@@ -5133,7 +5196,7 @@ def _validate_manifest_semantics(
                     f"row[{index}].capital_flow_trace[{flow_index}].date",
                 )
                 recognition_date = None
-            if not _in_window(event_date, effective_start, effective_end):
+            if not _in_window(event_date, effective_start, window_end):
                 raise ManifestError(
                     f"row {index} capital flow trace event date is outside epoch"
                 )
@@ -5262,7 +5325,7 @@ def _validate_manifest_semantics(
             start=start,
             end=end,
             effective_start=effective_start,
-            effective_end=effective_end,
+            effective_end=window_end,
             opening_basis=str(opening_basis),
             opening_capital=money["opening_capital"],
             current_value=money["current_value"],
@@ -5698,6 +5761,7 @@ def _build_manifest_candidate_from_snapshots_impl(
         manifest_schema_version = _MANIFEST_SCHEMA_VERSION
     buckets = flow_buckets_from_classes(reconciled_events)
     series, unavailable_navs = parse_nav_observations(ledger)
+    tail_keys = _tail_epoch_keys(perimeter.full_chains, admissions)
     validate_evidence_coverage(
         ledger,
         reconciled_events,
@@ -5709,6 +5773,7 @@ def _build_manifest_candidate_from_snapshots_impl(
         selected_assignment_keys=tuple(
             _assignment_key(assignment) for assignment in mapped_assignments
         ),
+        tail_keys=tail_keys,
     )
     flow_coverage_identity: dict[str, object] = {
         "artifact": flow_coverage_artifact,
@@ -5748,6 +5813,7 @@ def _build_manifest_candidate_from_snapshots_impl(
         unavailable_navs,
         manifest_schema_version=manifest_schema_version,
         capital_anchors=capital_anchors,
+        tail_keys=tail_keys,
     )
     if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
         _mwr_payloads_from_governed_inputs(

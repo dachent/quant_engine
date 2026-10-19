@@ -2076,6 +2076,10 @@ def _c3_mapped_assignments(
             {key: value for key, value in assignment.items() if key != "assignment_id"}
             for assignment in mapped
         ]
+    tails = _tail_assignment_keys(selected_inputs)
+    for assignment in mapped:
+        if _tail_key(assignment) in tails:
+            assignment["_evidence_open"] = True
     return mapped, providers
 
 
@@ -2103,7 +2107,9 @@ def _c3_assignment_identity(mapped: list[dict[str, object]]) -> dict[str, object
 
 
 def _c3_in_interval(value: str, assignment: Mapping[str, object]) -> bool:
-    end = assignment["effective_end"]
+    # A tail epoch (#557) keeps its crosswalk end as identity; its evidence
+    # window is open through the cutoff.
+    end = None if assignment.get("_evidence_open") else assignment["effective_end"]
     return value >= str(assignment["effective_start"]) and (
         end is None or value <= str(end)
     )
@@ -2733,6 +2739,66 @@ def _validate_mixed_receipt_cardinality(
         )
 
 
+def _tail_key(assignment: Mapping[str, object]) -> tuple[str, str, str, str | None]:
+    end = assignment["effective_end"]
+    return (
+        str(assignment["account_id"]),
+        str(assignment["strategy_id"]),
+        str(assignment["effective_start"]),
+        None if end is None else str(end),
+    )
+
+
+def _tail_assignment_keys(
+    selected_inputs: "AccountManifestSelectedInputs",
+    mapped: Sequence[Mapping[str, object]] | None = None,
+) -> set[tuple[str, str, str, str | None]]:
+    """Final closed epochs whose admission declares a funded end.
+
+    The return closes at the funded end; the evidence window (receipt,
+    coverage, facts) runs through the cutoff so the post-end tail stays inside
+    the same strategy epoch (#557).  Only the last row of an account's full
+    baseline chain qualifies: a later row owns the facts that follow.
+    """
+
+    del mapped
+    if selected_inputs.admission_policy is None:
+        return set()
+    try:
+        policy = selected_inputs.admission_policy.json_object("admission policy")
+        baseline = selected_inputs.baseline.json_object("selected baseline")
+    except ValueError:
+        return set()
+    admissions = policy.get("admissions")
+    assignments = baseline.get("assignments")
+    if not isinstance(admissions, list) or not isinstance(assignments, list):
+        return set()
+    declared = {
+        _tail_key(row)
+        for row in admissions
+        if isinstance(row, Mapping)
+        and row.get("status") == "FUNDED"
+        and row.get("funded_end") is not None
+        and row.get("effective_end") is not None
+    }
+    last: dict[str, Mapping[str, object]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, Mapping):
+            continue
+        account = str(assignment.get("account_id"))
+        current = last.get(account)
+        if current is None or str(assignment.get("effective_start") or "") > str(
+            current.get("effective_start") or ""
+        ):
+            last[account] = assignment
+    return {
+        _tail_key(item)
+        for item in last.values()
+        if item.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+        and item.get("effective_end") is not None
+    } & declared
+
+
 def _mixed_receipt_routes(
     selected_inputs: AccountManifestSelectedInputs,
     mapped: list[dict[str, object]],
@@ -2782,6 +2848,7 @@ def _mixed_receipt_routes(
         )
     routes: list[dict[str, object]] = []
     routed_keys: set[tuple[object, ...]] = set()
+    tail_keys = _tail_assignment_keys(selected_inputs, mapped)
     for receipt_id in authority_ids:
         assert isinstance(receipt_id, str)
         receipt = selected_inputs.retrieval_receipts[receipt_id]
@@ -2811,6 +2878,12 @@ def _mixed_receipt_routes(
             and (
                 assignment["effective_end"] is None
                 or assignment["effective_end"] == end
+                # A final closed epoch whose admission declares a funded end
+                # carries its evidence through the cutoff (#557).
+                or (
+                    end == provider_ledger_date
+                    and tail_keys.issuperset({_tail_key(assignment)})
+                )
             )
         ]
         if len(matches) != 1:

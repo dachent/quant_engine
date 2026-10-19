@@ -4696,6 +4696,78 @@ def _validate_provider_receipt_date_authority(
         )
 
 
+def _independent_tail_keys(
+    selected: IndependentVerifierInputs,
+) -> set[tuple[str, str, str, str | None]]:
+    """Final closed epochs whose admission declares a funded end (#557).
+
+    Re-derived from the baseline and the admission policy alone: the epoch ends
+    on its crosswalk date, its evidence window runs through the cutoff.
+    """
+
+    baseline = _strict_object(_require_snapshot(selected.baseline).contents)
+    policy = _strict_object(_require_snapshot(selected.admission_policy).contents)
+    assignments = baseline.get("assignments")
+    admissions = policy.get("admissions")
+    if not isinstance(assignments, list) or not isinstance(admissions, list):
+        _fail()
+    declared = {
+        (
+            str(row["account_id"]),
+            str(row["strategy_id"]),
+            str(row["effective_start"]),
+            str(row["effective_end"]),
+        )
+        for row in admissions
+        if isinstance(row, dict)
+        and row.get("status") == "FUNDED"
+        and row.get("funded_end") is not None
+        and row.get("effective_end") is not None
+    }
+    last: dict[str, dict[str, object]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            _fail()
+        account = str(assignment.get("account_id"))
+        start = str(assignment.get("effective_start") or "")
+        if account not in last or start > str(
+            last[account].get("effective_start") or ""
+        ):
+            last[account] = assignment
+    tails: set[tuple[str, str, str, str | None]] = set()
+    for assignment in last.values():
+        if (
+            assignment.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+            and assignment.get("effective_end") is not None
+        ):
+            key = (
+                str(assignment["account_id"]),
+                str(assignment["strategy_id"]),
+                str(assignment["effective_start"]),
+                str(assignment["effective_end"]),
+            )
+            if key in declared:
+                tails.add(key)
+    return {(a, s, st, e) for a, s, st, e in tails}
+
+
+def _is_tail(
+    assignment: Mapping[str, object],
+    tail_keys: set[tuple[str, str, str, str | None]],
+) -> bool:
+    end = assignment.get("effective_end")
+    return (
+        end is not None
+        and (
+            str(assignment["account_id"]),
+            str(assignment["strategy_id"]),
+            str(assignment["effective_start"]),
+            str(end),
+        )
+        in tail_keys
+    )
+
+
 def _verify_mixed_authority_and_coverage_many(
     selected: IndependentVerifierInputs,
     normalized: Mapping[str, bytes],
@@ -4705,6 +4777,7 @@ def _verify_mixed_authority_and_coverage_many(
 ) -> dict[str, object]:
     """Independently route every selected receipt and reconstruct coverage."""
 
+    tail_keys = _independent_tail_keys(selected)
     authority_snapshot = _require_snapshot(selected.receipt_authority)
     if normalized[_MIXED_AUTHORITY_PATH] != authority_snapshot.contents:
         _fail()
@@ -5114,6 +5187,10 @@ def _verify_mixed_authority_and_coverage_many(
             and (
                 assignment["effective_end"] is None
                 or assignment["effective_end"] == requested_end.isoformat()
+                or (
+                    requested_end == _selected_date(selected.provider_ledger)
+                    and _is_tail(assignment, tail_keys)
+                )
             )
         ]
         if len(routed) != 1:
@@ -5793,11 +5870,17 @@ def _verify_mixed_calculation_bridge(
         routes=authority_state["routes"],
     )
 
+    tail_keys = _independent_tail_keys(selected)
+
     def in_interval(value: object, assignment: Mapping[str, object]) -> bool:
         fact_date = _date_value(value)
         start = _date_value(assignment["effective_start"])
         end_value = assignment["effective_end"]
-        end = None if end_value is None else _date_value(end_value)
+        end = (
+            None
+            if end_value is None or _is_tail(assignment, tail_keys)
+            else _date_value(end_value)
+        )
         return start <= fact_date and (end is None or fact_date <= end)
 
     rows = [
@@ -6402,6 +6485,7 @@ def _mixed_numeric_facts(
     assignment_end = (
         cutoff
         if assignment["effective_end"] is None
+        or _is_tail(assignment, _independent_tail_keys(selected))
         else min(cutoff, _date_value(assignment["effective_end"]))
     )
     if funded_end is not None:
@@ -6497,6 +6581,7 @@ def _verify_mixed_output_and_state(
             for anchor in source_capital_anchors
         )
     }
+    mixed_tail_keys = _independent_tail_keys(selected)
     cutoff_excluded_allocation_keys = {
         tuple(_assignment_record(assignment).values())
         for assignment in mapped
@@ -6509,6 +6594,7 @@ def _verify_mixed_output_and_state(
             <= calculation_cutoff
             and (
                 assignment["effective_end"] is None
+                or _is_tail(assignment, mixed_tail_keys)
                 or _date_value(anchor["event_date"])
                 <= _date_value(assignment["effective_end"])
             )
@@ -6527,6 +6613,7 @@ def _verify_mixed_output_and_state(
             <= calculation_cutoff
             and (
                 assignment["effective_end"] is None
+                or _is_tail(assignment, mixed_tail_keys)
                 or _date_value(flow["event_date"])
                 <= _date_value(assignment["effective_end"])
             )
