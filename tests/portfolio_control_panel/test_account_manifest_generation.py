@@ -29614,7 +29614,8 @@ def test_facts_outside_every_strategy_interval_are_general_unless_in_a_gap(
     perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
 
     general = {
-        fact["source_identity"]["record_id"]: fact for fact in perimeter["general_facts"]
+        fact["source_identity"]["record_id"]: fact
+        for fact in perimeter["general_facts"]
     }
     assert {
         record_id: (fact["reason"], fact["disposition"], fact["status"])
@@ -29639,9 +29640,9 @@ def test_facts_outside_every_strategy_interval_are_general_unless_in_a_gap(
     assert perimeter["general_fact_count"] == 3
     # The fact in the gap between two strategy intervals of one account is the
     # only undisposed fact, so the perimeter still refuses a one-to-one verdict.
-    assert [fact["source_identity"]["record_id"] for fact in perimeter["unassigned_facts"]] == [
-        "mvp-audit-unmatched-nav"
-    ]
+    assert [
+        fact["source_identity"]["record_id"] for fact in perimeter["unassigned_facts"]
+    ] == ["mvp-audit-unmatched-nav"]
     assert perimeter["unassigned_fact_count"] == 1
     assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
     # The independent verifier re-derives the same partition from the inputs.
