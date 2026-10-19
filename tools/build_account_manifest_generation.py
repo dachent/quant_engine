@@ -1101,6 +1101,97 @@ def _general_reason(
     return None
 
 
+_POST_END_DISPOSITIONS = {
+    "INCLUDED_PRODUCT_EPOCH": "POST_END_TAIL_ATTRIBUTED_TO_STRATEGY",
+    "EXCLUDED_DEPRECATED_HISTORY_ONLY": "POST_END_HISTORY_EXCLUDED_BY_PRODUCT_DISPOSITION",
+    "EXCLUDED_IMMATERIAL": "POST_END_HISTORY_EXCLUDED_BY_PRODUCT_DISPOSITION",
+}
+
+
+def _post_end_target(
+    account_id: str,
+    fact_date: str,
+    assignments: Sequence[Mapping[str, object]],
+    crosswalk_dispositions: Mapping[tuple[str, str, str, str], str],
+) -> tuple[str, str] | None:
+    """The strategy a fact after an account's last closed interval belongs to.
+
+    The fact is the post-end tail of that strategy's closed epoch, or excluded
+    history when the owner crosswalk declares the epoch outside the product.
+    None when every mapped interval is not closed, the fact is inside the
+    chain, or the crosswalk does not name the epoch (the fact stays blocked).
+    """
+
+    mapped = [
+        assignment
+        for assignment in assignments
+        if assignment["account_id"] == account_id
+        and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    ]
+    if not mapped or any(assignment["effective_end"] is None for assignment in mapped):
+        return None
+    last = max(
+        mapped,
+        key=lambda assignment: (
+            str(assignment["effective_end"]),
+            str(assignment["effective_start"]),
+        ),
+    )
+    if fact_date <= str(last["effective_end"]):
+        return None
+    disposition = crosswalk_dispositions.get(
+        (
+            account_id,
+            str(last["strategy_id"]),
+            str(last["effective_start"]),
+            str(last["effective_end"]),
+        )
+    )
+    if disposition is None:
+        return None
+    return str(last["strategy_id"]), disposition
+
+
+def _post_end_summaries(
+    facts: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Per strategy and disposition: how many post-end facts and over which dates.
+
+    The perimeter is count-only and numeric-free, so no amount appears here; the
+    counts and the date span say exactly which facts to read for their value.
+    """
+
+    groups: dict[tuple[str, str, str], list[Mapping[str, object]]] = {}
+    for fact in facts:
+        groups.setdefault(
+            (
+                str(fact["strategy_id"]),
+                str(fact["disposition"]),
+                str(fact["product_epoch_disposition"]),
+            ),
+            [],
+        ).append(fact)
+    summaries: list[dict[str, object]] = []
+    for (strategy_id, disposition, product), members in sorted(groups.items()):
+        dates = sorted(str(fact["fact_date"]) for fact in members)
+        summaries.append(
+            {
+                "strategy_id": strategy_id,
+                "disposition": disposition,
+                "product_epoch_disposition": product,
+                "nav_fact_count": sum(
+                    1 for fact in members if fact["source_kind"] == "NAV"
+                ),
+                "raw_flow_fact_count": sum(
+                    1 for fact in members if fact["source_kind"] == "RAW_FLOW"
+                ),
+                "first_fact_date": dates[0],
+                "last_fact_date": dates[-1],
+            }
+        )
+    return summaries
+
+
 def _count_facts(
     *,
     nav_facts: Sequence[Mapping[str, object]],
@@ -1112,9 +1203,59 @@ def _count_facts(
     ],
     known_accounts: Mapping[str, str],
     provider_ledger_as_of_date: date,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    crosswalk_dispositions: Mapping[tuple[str, str, str, str], str] | None = None,
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
     unassigned: list[dict[str, object]] = []
     general: list[dict[str, object]] = []
+    post_end: list[dict[str, object]] = []
+    dispositions = crosswalk_dispositions or {}
+
+    def dispose(
+        entry: dict[str, object],
+        account_id: str,
+        fact_date: str,
+    ) -> None:
+        reason = _general_reason(account_id, fact_date, assignments, known_accounts)
+        if reason is not None:
+            general.append(
+                {
+                    **entry,
+                    "status": "GENERAL",
+                    "disposition": _GENERAL_DISPOSITION,
+                    "reason": reason,
+                }
+            )
+            return
+        target = _post_end_target(account_id, fact_date, assignments, dispositions)
+        if target is not None:
+            strategy_id, product = target
+            post_end.append(
+                {
+                    **entry,
+                    "status": "POST_END",
+                    "disposition": _POST_END_DISPOSITIONS[product],
+                    "strategy_id": strategy_id,
+                    "product_epoch_disposition": product,
+                }
+            )
+            return
+        unassigned.append(
+            {
+                **entry,
+                "status": "BLOCKED",
+                "blocker_code": (
+                    "NO_ASSIGNMENT_MATCH"
+                    if account_id in known_accounts
+                    else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+                ),
+            }
+        )
+
     nav_record_ids: set[str] = set()
     nav_account_dates: set[tuple[str, str]] = set()
     for index, fact in enumerate(nav_facts):
@@ -1151,37 +1292,17 @@ def _count_facts(
             known_accounts=known_accounts,
         )
         if row is None:
-            reason = _general_reason(
-                account_id, as_of_date, assignments, known_accounts
+            dispose(
+                {
+                    "source_kind": "NAV",
+                    "source_identity": {"record_id": record_id},
+                    "account_id": account_id,
+                    "fact_date": as_of_date,
+                    "assignment_match_count": 0,
+                },
+                account_id,
+                as_of_date,
             )
-            entry: dict[str, object] = {
-                "source_kind": "NAV",
-                "source_identity": {"record_id": record_id},
-                "account_id": account_id,
-                "fact_date": as_of_date,
-                "assignment_match_count": 0,
-            }
-            if reason is None:
-                unassigned.append(
-                    {
-                        **entry,
-                        "status": "BLOCKED",
-                        "blocker_code": (
-                            "NO_ASSIGNMENT_MATCH"
-                            if account_id in known_accounts
-                            else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                        ),
-                    }
-                )
-            else:
-                general.append(
-                    {
-                        **entry,
-                        "status": "GENERAL",
-                        "disposition": _GENERAL_DISPOSITION,
-                        "reason": reason,
-                    }
-                )
         else:
             row["available_nav" if status == "AVAILABLE" else "unavailable_nav"] += 1
 
@@ -1268,48 +1389,28 @@ def _count_facts(
                 "raw/classified flow assignment disagrees"
             )
         if row is None:
-            reason = _general_reason(
-                account_id, event_date, assignments, known_accounts
-            )
-            flow_entry: dict[str, object] = {
-                "source_kind": "RAW_FLOW",
-                "source_identity": {"record_id": source_record_id},
-                "classified_projection_identity": {
-                    "event_id": event_id,
-                    "source_record_id": source_record_id,
+            dispose(
+                {
+                    "source_kind": "RAW_FLOW",
+                    "source_identity": {"record_id": source_record_id},
+                    "classified_projection_identity": {
+                        "event_id": event_id,
+                        "source_record_id": source_record_id,
+                    },
+                    "account_id": account_id,
+                    "fact_date": event_date,
+                    "assignment_match_count": 0,
                 },
-                "account_id": account_id,
-                "fact_date": event_date,
-                "assignment_match_count": 0,
-            }
-            if reason is None:
-                unassigned.append(
-                    {
-                        **flow_entry,
-                        "status": "BLOCKED",
-                        "blocker_code": (
-                            "NO_ASSIGNMENT_MATCH"
-                            if account_id in known_accounts
-                            else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                        ),
-                    }
-                )
-            else:
-                general.append(
-                    {
-                        **flow_entry,
-                        "status": "GENERAL",
-                        "disposition": _GENERAL_DISPOSITION,
-                        "reason": reason,
-                    }
-                )
+                account_id,
+                event_date,
+            )
         else:
             row["classified_flows"] += 1
     if classified_source_record_ids != raw_record_ids:
         raise AccountAssignmentPerimeterError(
             "raw/classified flow lineage is not one-to-one"
         )
-    for facts in (unassigned, general):
+    for facts in (unassigned, general, post_end):
         facts.sort(
             key=lambda item: (
                 0 if item["source_kind"] == "NAV" else 1,
@@ -1318,7 +1419,12 @@ def _count_facts(
                 str(item["source_identity"]["record_id"]),
             )
         )
-    return unassigned, general
+    return (
+        unassigned,
+        general,
+        post_end,
+        _post_end_summaries(post_end),
+    )
 
 
 def _expected_payload(
@@ -1358,7 +1464,25 @@ def _expected_payload(
     }
     if len(selected_providers) != len(selected_accounts):
         raise AccountAssignmentPerimeterError("baseline account shape is invalid")
-    unassigned_facts, general_facts = _count_facts(
+    crosswalk_dispositions: dict[tuple[str, str, str, str], str] = {}
+    if selected_inputs.current_epoch_crosswalk is not None:
+        _validate_current_epoch_crosswalk(
+            selected_inputs.baseline,
+            selected_inputs.current_epoch_crosswalk,
+            baseline_generation_id=selected_inputs.baseline_generation_id,
+        )
+        for crosswalk_row in selected_inputs.current_epoch_crosswalk.json_object(
+            "current epoch crosswalk"
+        )["rows"]:
+            crosswalk_dispositions[
+                (
+                    str(crosswalk_row["account_id"]),
+                    str(crosswalk_row["strategy_id"]),
+                    str(crosswalk_row["effective_start"]),
+                    str(crosswalk_row["effective_end"]),
+                )
+            ] = str(crosswalk_row["product_epoch_disposition"])
+    unassigned_facts, general_facts, post_end_facts, post_end_summaries = _count_facts(
         nav_facts=nav_facts,
         raw_flow_facts=raw_flow_facts,
         classified_flow_facts=classified_flow_facts,
@@ -1366,6 +1490,7 @@ def _expected_payload(
         rows_by_interval=rows_by_interval,
         known_accounts=selected_providers,
         provider_ledger_as_of_date=ledger_as_of_date,
+        crosswalk_dispositions=crosswalk_dispositions,
     )
     full_perimeter_preimage = [
         {
@@ -1430,6 +1555,15 @@ def _expected_payload(
         **(
             {"general_fact_count": len(general_facts), "general_facts": general_facts}
             if general_facts
+            else {}
+        ),
+        **(
+            {
+                "post_end_fact_count": len(post_end_facts),
+                "post_end_facts": post_end_facts,
+                "post_end_summaries": post_end_summaries,
+            }
+            if post_end_facts
             else {}
         ),
         "rows": rows,

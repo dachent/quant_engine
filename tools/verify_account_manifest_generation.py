@@ -3217,6 +3217,42 @@ def _perimeter_identity(
     raw_by_id: dict[str, tuple[str, str, int | None]] = {}
     unassigned_facts: list[dict[str, object]] = []
     general_facts: list[dict[str, object]] = []
+    post_end_facts: list[dict[str, object]] = []
+    crosswalk_dispositions: dict[tuple[str, str, str, str], str] = {}
+    if selected.current_epoch_crosswalk is not None:
+        crosswalk_rows = _strict_object(selected.current_epoch_crosswalk.contents).get(
+            "rows"
+        )
+        if not isinstance(crosswalk_rows, list):
+            _fail()
+        for crosswalk_row in crosswalk_rows:
+            if not isinstance(crosswalk_row, dict):
+                _fail()
+            crosswalk_dispositions[
+                (
+                    str(crosswalk_row["account_id"]),
+                    str(crosswalk_row["strategy_id"]),
+                    str(crosswalk_row["effective_start"]),
+                    str(crosswalk_row["effective_end"]),
+                )
+            ] = str(crosswalk_row["product_epoch_disposition"])
+
+    def post_end_target(account: str, day: str) -> tuple[str, str] | None:
+        chain = [
+            (start, end, index)
+            for start, end, index, disposition in ordered_intervals.get(account, ())
+            if disposition == "STRATEGY_MAPPED"
+        ]
+        if not chain or any(end is None for _start, end, _index in chain):
+            return None
+        start, end, index = max(chain, key=lambda item: (item[1], item[0]))
+        if start is None or end is None or day <= end.isoformat():
+            return None
+        strategy = str(assignments[index]["strategy_id"])
+        product = crosswalk_dispositions.get(
+            (account, strategy, start.isoformat(), end.isoformat())
+        )
+        return None if product is None else (strategy, product)
 
     def general_reason(account: str, day: str) -> str | None:
         # Re-derived from the account's STRATEGY_MAPPED intervals alone.
@@ -3238,19 +3274,7 @@ def _perimeter_identity(
 
     def file_unassigned(fact: dict[str, object], account: str, day: str) -> None:
         reason = general_reason(account, day)
-        if reason is None:
-            unassigned_facts.append(
-                {
-                    **fact,
-                    "status": "BLOCKED",
-                    "blocker_code": (
-                        "NO_ASSIGNMENT_MATCH"
-                        if account in account_by_id
-                        else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
-                    ),
-                }
-            )
-        else:
+        if reason is not None:
             general_facts.append(
                 {
                     **fact,
@@ -3259,6 +3283,35 @@ def _perimeter_identity(
                     "reason": reason,
                 }
             )
+            return
+        target = post_end_target(account, day)
+        if target is not None:
+            strategy, product = target
+            post_end_facts.append(
+                {
+                    **fact,
+                    "status": "POST_END",
+                    "disposition": (
+                        "POST_END_TAIL_ATTRIBUTED_TO_STRATEGY"
+                        if product == "INCLUDED_PRODUCT_EPOCH"
+                        else "POST_END_HISTORY_EXCLUDED_BY_PRODUCT_DISPOSITION"
+                    ),
+                    "strategy_id": strategy,
+                    "product_epoch_disposition": product,
+                }
+            )
+            return
+        unassigned_facts.append(
+            {
+                **fact,
+                "status": "BLOCKED",
+                "blocker_code": (
+                    "NO_ASSIGNMENT_MATCH"
+                    if account in account_by_id
+                    else "ACCOUNT_NOT_IN_SELECTED_BASELINE"
+                ),
+            }
+        )
 
     counts: dict[int, list[int]] = {
         index: [0, 0, 0, 0] for index in range(len(assignments))
@@ -3368,7 +3421,7 @@ def _perimeter_identity(
             counts[assignment_index][3] += 1
     if event_sources != raw_ids:
         _fail()
-    for sortable in (unassigned_facts, general_facts):
+    for sortable in (unassigned_facts, general_facts, post_end_facts):
         sortable.sort(
             key=lambda item: (
                 0 if item["source_kind"] == "NAV" else 1,
@@ -3376,6 +3429,32 @@ def _perimeter_identity(
                 str(item["fact_date"]),
                 str(item["source_identity"]["record_id"]),
             )
+        )
+    post_end_summaries: list[dict[str, object]] = []
+    grouped: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    for fact in post_end_facts:
+        grouped.setdefault(
+            (
+                str(fact["strategy_id"]),
+                str(fact["disposition"]),
+                str(fact["product_epoch_disposition"]),
+            ),
+            [],
+        ).append(fact)
+    for (strategy, disposition, product), members in sorted(grouped.items()):
+        fact_dates = sorted(str(fact["fact_date"]) for fact in members)
+        post_end_summaries.append(
+            {
+                "strategy_id": strategy,
+                "disposition": disposition,
+                "product_epoch_disposition": product,
+                "nav_fact_count": sum(fact["source_kind"] == "NAV" for fact in members),
+                "raw_flow_fact_count": sum(
+                    fact["source_kind"] == "RAW_FLOW" for fact in members
+                ),
+                "first_fact_date": fact_dates[0],
+                "last_fact_date": fact_dates[-1],
+            }
         )
     for row in rows:
         assignment_key = (
@@ -3466,6 +3545,15 @@ def _perimeter_identity(
         **(
             {"general_fact_count": len(general_facts), "general_facts": general_facts}
             if general_facts
+            else {}
+        ),
+        **(
+            {
+                "post_end_fact_count": len(post_end_facts),
+                "post_end_facts": post_end_facts,
+                "post_end_summaries": post_end_summaries,
+            }
+            if post_end_facts
             else {}
         ),
         "rows": rows,
