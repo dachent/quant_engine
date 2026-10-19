@@ -29701,3 +29701,214 @@ def test_strategy_assigned_account_with_an_undisposed_fact_fails_the_perimeter(
                     or fact["fact_date"] <= row["effective_end"]
                 )
                 assert not inside
+
+
+_POST_END_CLASSES = {
+    12: "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+    13: "EXCLUDED_IMMATERIAL",
+    14: "INCLUDED_PRODUCT_EPOCH",
+    15: "INCLUDED_PRODUCT_EPOCH",
+}
+
+
+def _post_end_selected_inputs(module: Any, *, with_crosswalk: bool = True) -> object:
+    """Accounts 12-15 end their only strategy interval before facts that follow it."""
+    selected = _mixed_crosswalk_selected_inputs(module)
+    baseline_payload = selected.baseline.json_object()
+    closed = {f"synthetic-account-{number:02d}" for number in _POST_END_CLASSES}
+    baseline_payload["assignments"] = [
+        row
+        for row in baseline_payload["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        or row["account_id"] not in closed
+    ]
+    baseline = InputSnapshot.from_bytes(
+        "post-end synthetic baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    _unused, crosswalk_snapshot = _crosswalk_bound_to_mutated_synthetic_baseline(
+        selected, baseline_payload
+    )
+    crosswalk = crosswalk_snapshot.json_object()
+    crosswalk["selected_baseline"]["generation_id"] = json.loads(
+        baseline_manifest.contents
+    )["generation_id"]
+    rows = crosswalk["rows"]
+    by_account = {row["account_id"]: row for row in rows}
+    fixed: set[str] = set()
+    for number, wanted in _POST_END_CLASSES.items():
+        account = f"synthetic-account-{number:02d}"
+        row = by_account[account]
+        if row["product_epoch_disposition"] != wanted:
+            other = next(
+                item
+                for item in rows
+                if item["product_epoch_disposition"] == wanted
+                and item["account_id"] not in fixed
+                and item is not row
+            )
+            for key in ("product_epoch_disposition", "owner_reason"):
+                row[key], other[key] = other[key], row[key]
+        fixed.add(account)
+    ledger = selected.provider_ledger.json_object()
+    for number, value in ((12, "100"), (13, "7"), (14, "250"), (15, "300")):
+        account = f"synthetic-account-{number:02d}"
+        ledger["nav_observations"].append(
+            {
+                "record_id": f"post-end-nav-{number}",
+                "account_id": account,
+                "as_of_date": "2026-01-15",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+            }
+        )
+        ledger["nav_observations"].append(
+            {
+                "record_id": f"post-end-nav-late-{number}",
+                "account_id": account,
+                "as_of_date": "2026-01-20",
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": value + "5",
+                },
+            }
+        )
+    ledger["flows"].append(
+        {
+            "record_id": "post-end-flow-14",
+            "account_id": "synthetic-account-14",
+            "event_date": "2026-01-20",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "5.50"},
+        }
+    )
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "post-end synthetic ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+            "current_epoch_crosswalk": (
+                InputSnapshot.from_bytes(
+                    "post-end synthetic crosswalk", canonical_json_bytes(crosswalk)
+                )
+                if with_crosswalk
+                else None
+            ),
+        }
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_post_end_facts_get_a_derived_disposition_per_crosswalk_class(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Attributed tail for an included epoch; excluded history for deprecated/immaterial."""
+    selected = _post_end_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+
+    assert perimeter["unassigned_fact_count"] == 0
+    assert perimeter["fact_bijection_status"] == "ONE_TO_ONE_VERIFIED"
+    assert perimeter["post_end_fact_count"] == 9
+    by_account: dict[str, set[tuple[str, str, str]]] = {}
+    for fact in perimeter["post_end_facts"]:
+        by_account.setdefault(fact["account_id"], set()).add(
+            (fact["disposition"], fact["product_epoch_disposition"], fact["status"])
+        )
+    attributed = (
+        "POST_END_TAIL_ATTRIBUTED_TO_STRATEGY",
+        "INCLUDED_PRODUCT_EPOCH",
+        "POST_END",
+    )
+    excluded = "POST_END_HISTORY_EXCLUDED_BY_PRODUCT_DISPOSITION"
+    assert by_account == {
+        "synthetic-account-12": {
+            (excluded, "EXCLUDED_DEPRECATED_HISTORY_ONLY", "POST_END")
+        },
+        "synthetic-account-13": {(excluded, "EXCLUDED_IMMATERIAL", "POST_END")},
+        "synthetic-account-14": {attributed},
+        "synthetic-account-15": {attributed},
+    }
+    summaries = {row["strategy_id"]: row for row in perimeter["post_end_summaries"]}
+    deprecated = summaries["synthetic-strategy-12"]
+    assert deprecated["disposition"] == excluded
+    assert deprecated["nav_fact_count"] == 2 and deprecated["raw_flow_fact_count"] == 0
+    assert (deprecated["first_fact_date"], deprecated["last_fact_date"]) == (
+        "2026-01-15",
+        "2026-01-20",
+    )
+    included = summaries["synthetic-strategy-14"]
+    assert included["disposition"] == "POST_END_TAIL_ATTRIBUTED_TO_STRATEGY"
+    assert included["nav_fact_count"] == 2 and included["raw_flow_fact_count"] == 1
+    # The perimeter stays numeric-free: no amount appears in any post-end entry.
+    assert "value" not in json.dumps(perimeter["post_end_facts"])
+    assert "value" not in json.dumps(perimeter["post_end_summaries"])
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_post_end_fact_without_a_crosswalk_epoch_stays_undisposed(
+    perimeter_module: Any,
+) -> None:
+    """No derived rule without the owner crosswalk: the fact stays blocked."""
+    selected = _post_end_selected_inputs(perimeter_module, with_crosswalk=False)
+    ledger = selected.provider_ledger.json_object()
+    perimeter = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected,
+            nav_facts=[
+                {
+                    "record_id": item["record_id"],
+                    "account_id": item["account_id"],
+                    "as_of_date": item["as_of_date"],
+                    "nav": {"status": item["nav"]["status"]},
+                }
+                for item in ledger["nav_observations"]
+            ],
+            raw_flow_facts=[
+                {
+                    "record_id": item["record_id"],
+                    "account_id": item["account_id"],
+                    "event_date": item["event_date"],
+                }
+                for item in ledger["flows"]
+            ],
+            classified_flow_facts=[
+                {
+                    "event_id": f"classified-flow:{item['record_id']}",
+                    "source_record_id": item["record_id"],
+                    "account_id": item["account_id"],
+                    "event_date": item["event_date"],
+                }
+                for item in ledger["flows"]
+            ],
+        )
+    )
+    assert "post_end_facts" not in perimeter
+    assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
+    assert perimeter["unassigned_fact_count"] == 9
+    assert {fact["account_id"] for fact in perimeter["unassigned_facts"]} == {
+        f"synthetic-account-{number}" for number in range(12, 16)
+    }
