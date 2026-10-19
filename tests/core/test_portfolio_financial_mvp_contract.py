@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "ea6f5ca757e11c249cca9661e117bb73f4c61175b6347441f4f5e225cb809b47"
+        "8dcedf280c4d3aec39cc5b872a2d0b3a97dac9e59655ce45f78f5a8dc60f929f"
     )
 
 
@@ -4599,7 +4599,7 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "decision_status": "APPROVED",
         "decision_authority": "OWNER_318",
         "approval_evidence": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225081900"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6244265295"
         ),
         "amends_approval_evidence": (
             "https://github.com/dachent/quant_engine/issues/330#issuecomment-5957619019"
@@ -4628,9 +4628,9 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
             "the sleeve NAV and allocation path. A cash line below zero at any event "
             "date fails closed."
         ),
-        "fund_scoped_providers": ["QUANTBASE"],
-        "fund_scoped_treatment": "FUND_SCOPED_PROVIDER_ACCOUNT_INVESTED_CAPITAL_IS_THE_GROSS_FUND_ALLOCATIONS_TO_THE_STRATEGY_FUND_AT_FILL_DATES; MONEY_SENT_TO_OTHER_FUNDS_OF_THE_ACCOUNT_IS_NEVER_THE_STRATEGY_CAPITAL; ACCOUNT_DEPOSITS_AND_WITHDRAWALS_ARE_NOT_THE_STRATEGY_CAPITAL; IN_FUND_FEE_FUNDED_SELLS_ARE_A_COST_NOT_NETTED_FROM_CAPITAL; DIVIDENDS_PAID_TO_ACCOUNT_CASH_AND_FEES_PAID_FROM_ACCOUNT_CASH_ARE_LABELLED_LINES_BESIDE_NAV; NO_DERIVED_CASH_LINE_FOR_THE_STRATEGY",
-        "fund_scoped_effect": "For a provider listed in fund_scoped_providers, one account funds more than one fund. A strategy's invested capital is the gross sum of the allocations to that strategy's fund (OPENING_CAPITAL_ANCHOR and STRATEGY_CAPITAL_ALLOCATION facts), each at its fill date and counted once. Account deposits and withdrawals are not that strategy's capital and money sent to the account's other funds is never its capital. In-fund sells that pay fees are a cost of the strategy and are not subtracted from capital. Dividends paid to account cash and fees paid from account cash are reported as labelled lines beside the fund NAV so the result reads NAV plus dividends minus cash-paid fees. No derived cash line is built for such a strategy. TWR, MWR, HWM and drawdown keep the fund NAV and allocation path.",
+        "fund_scoped_providers": ["MATRIXPORT", "QUANTBASE"],
+        "fund_scoped_treatment": "FUND_SCOPED_PROVIDER_ACCOUNT_INVESTED_CAPITAL_IS_THE_GROSS_FUND_ALLOCATIONS_TO_THE_STRATEGY_FUND_AT_FILL_DATES; MONEY_SENT_TO_OTHER_FUNDS_OF_THE_ACCOUNT_IS_NEVER_THE_STRATEGY_CAPITAL; ACCOUNT_DEPOSITS_AND_WITHDRAWALS_ARE_NOT_THE_STRATEGY_CAPITAL; IN_FUND_FEE_FUNDED_SELLS_ARE_A_COST_NOT_NETTED_FROM_CAPITAL; DIVIDENDS_PAID_TO_ACCOUNT_CASH_AND_FEES_PAID_FROM_ACCOUNT_CASH_ARE_LABELLED_LINES_BESIDE_NAV; NO_DERIVED_CASH_LINE_FOR_THE_STRATEGY; FOR_A_WALLET_FUNDING_PRODUCTS_THE_PRODUCT_SUBSCRIPTION_ANCHOR_IS_THE_STRATEGY_CAPITAL; THE_STABLECOIN_CONVERSION_BETWEEN_DEPOSIT_AND_SUBSCRIPTION_IS_A_COST_NOT_CAPITAL",
+        "fund_scoped_effect": "For a provider listed in fund_scoped_providers, one account funds more than one fund or product (a Quantbase fund, a Matrixport product). A strategy's invested capital is the gross sum of the allocations to that strategy's fund (OPENING_CAPITAL_ANCHOR and STRATEGY_CAPITAL_ALLOCATION facts), each at its fill date and counted once. Account deposits and withdrawals are not that strategy's capital and money sent to the account's other funds is never its capital. In-fund sells that pay fees are a cost of the strategy and are not subtracted from capital. Dividends paid to account cash and fees paid from account cash are reported as labelled lines beside the fund NAV so the result reads NAV plus dividends minus cash-paid fees. For a wallet that funds products the capital is the product subscription (the capital anchor at its date FX); wallet deposits and withdrawals, and the stablecoin conversion between deposit and subscription, are not capital. No derived cash line is built for such a strategy. TWR, MWR, HWM and drawdown keep the fund NAV and allocation path.",
         "examples": [
             "An owner deposits 100 into the provider cash account and the provider "
             "buys 96 of the strategy fund from it: invested capital is 100, the "
@@ -4643,21 +4643,21 @@ def test_repo_contract_binds_verified_provider_custody_authority() -> None:
         "authority_issue": 330,
         "policy_owner_issue": 318,
         "evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225081900"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6244265295"
         ),
-        "comment_id": 6225081900,
+        "comment_id": 6244265295,
         "digest_evidence_url": (
-            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6225157557"
+            "https://github.com/dachent/quant_engine/issues/330#issuecomment-6244278273"
         ),
-        "digest_comment_id": 6225157557,
-        "approved_on": "2026-10-16",
-        "payload_sha256": "544d6d74fadab26714758b37857cec1ece40aa5e6aa88d34a8d468c03e17d960",
+        "digest_comment_id": 6244278273,
+        "approved_on": "2026-10-17",
+        "payload_sha256": "3948b7dce61adf98d8dba98ed000699e1e8c5db7d4a474cffa3dcd1b9b880a1b",
     }
     assert (
         contract_tool.owner_decision_receipt_digests(contract)[
             "PROVIDER_CUSTODY_PERIMETER"
         ]
-        == "544d6d74fadab26714758b37857cec1ece40aa5e6aa88d34a8d468c03e17d960"
+        == "3948b7dce61adf98d8dba98ed000699e1e8c5db7d4a474cffa3dcd1b9b880a1b"
     )
 
 
@@ -4673,10 +4673,10 @@ def test_fund_scoped_custody_decision_is_complete_paired_and_policy_driven() -> 
     decision = policy["provider_custody_perimeter"]
     receipt = policy["owner_decision_receipts"]["PROVIDER_CUSTODY_PERIMETER"]
 
-    assert decision["fund_scoped_providers"] == ["QUANTBASE"]
+    assert decision["fund_scoped_providers"] == ["MATRIXPORT", "QUANTBASE"]
     assert decision["approval_evidence"] == receipt["evidence_url"]
     assert decision["amends_approval_evidence"].endswith("5957619019")
-    assert receipt["approved_on"] == "2026-10-16"
+    assert receipt["approved_on"] == "2026-10-17"
     assert "NO_DERIVED_CASH_LINE" in decision["fund_scoped_treatment"]
     assert (
         contract_tool.owner_decision_receipt_digests(

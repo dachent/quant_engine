@@ -2474,9 +2474,9 @@ def test_fund_scoped_account_capital_is_the_gross_fund_allocations_not_deposits(
 
     # A provider the policy does not list keeps the account-deposit treatment.
     other_provider = deepcopy(deposit)
-    other_provider["provider_id"] = "matrixport"
+    other_provider["provider_id"] = "alpaca"
     other_anchor = deepcopy(first)
-    other_anchor["provider_id"] = "matrixport"
+    other_anchor["provider_id"] = "alpaca"
     other_case = deepcopy(case)
     other_case["events"] = [event_for(other_provider, "d-1")]
     capital._verify_selected_facts(
