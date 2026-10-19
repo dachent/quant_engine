@@ -2131,6 +2131,108 @@ def test_without_declaration_atoms_return(tmp_path: Path) -> None:
         publish_generation_candidate(stripped, output, staged["generation_id"])
 
 
+def _undeclared_spec(tmp_path: Path) -> tuple[Path, dict[str, Any], list[str]]:
+    """The declared-account topology with no zero-activity attestation: named atoms."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["declared_zero_activity_accounts"] = []
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    general = [
+        gap
+        for gap in manifest.coverage.known_gaps
+        if gap.startswith(("account_topology:", "unmapped_tws_value:"))
+    ]
+    assert general
+    return spec_path, spec, general
+
+
+def test_declared_general_exclusions_complete_the_boundary(tmp_path: Path) -> None:
+    spec_path, spec, general = _undeclared_spec(tmp_path)
+    spec["declared_general_exclusions"] = [
+        {"gap": gap, "provenance": "owner ruling 2026-10-16, GENERAL history"}
+        for gap in general
+    ]
+    declared = tmp_path / "ibkr-general-spec.json"
+    declared.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(declared)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert manifest.coverage.known_gaps == ()
+    boundary = manifest.coverage.boundary
+    assert "General history outside the strategy perimeter" in boundary
+    assert "owner ruling 2026-10-16" in boundary
+    for gap in general:
+        assert gap in boundary
+    output = tmp_path / "ibkr-general-output"
+    staged = stage_generation_candidate(declared, output)
+    assert staged["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert publish_generation_candidate(declared, output, staged["generation_id"])[
+        "published"
+    ]
+
+
+def test_declared_general_exclusion_covers_only_the_gap_it_names(
+    tmp_path: Path,
+) -> None:
+    _, spec, general = _undeclared_spec(tmp_path)
+    assert len(general) > 1
+    spec["declared_general_exclusions"] = [
+        {"gap": general[0], "provenance": "owner ruling 2026-10-16"}
+    ]
+    partial = tmp_path / "ibkr-general-partial-spec.json"
+    partial.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(partial)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+
+
+def test_declared_general_exclusion_that_matches_no_gap_is_refused(
+    tmp_path: Path,
+) -> None:
+    _, spec, general = _undeclared_spec(tmp_path)
+    spec["declared_general_exclusions"] = [
+        {"gap": gap, "provenance": "owner ruling 2026-10-16"} for gap in general
+    ] + [{"gap": "unmapped_tws_value:0000000000000000", "provenance": "stale"}]
+    stale = tmp_path / "ibkr-general-stale-spec.json"
+    stale.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="matches no observed gap"):
+        build_generation(stale)
+
+
+def test_declared_general_exclusion_is_limited_to_authorized_gap_classes(
+    tmp_path: Path,
+) -> None:
+    _, spec, _ = _undeclared_spec(tmp_path)
+    for atom in (
+        "declared_zero_activity_abuse:tws_position:0123456789abcdef",
+        "Zero API order rows do not prove complete order visibility",
+    ):
+        spec["declared_general_exclusions"] = [
+            {"gap": atom, "provenance": "owner ruling 2026-10-16"}
+        ]
+        refused = tmp_path / "ibkr-general-class-spec.json"
+        refused.write_bytes(canonical_json_bytes(spec))
+        with pytest.raises(IbkrGenerationError, match="authorized gap class"):
+            build_generation(refused)
+
+
+def test_declared_general_exclusions_must_be_unique_and_strict(
+    tmp_path: Path,
+) -> None:
+    _, spec, general = _undeclared_spec(tmp_path)
+    row = {"gap": general[0], "provenance": "owner ruling 2026-10-16"}
+    spec["declared_general_exclusions"] = [row, dict(row)]
+    duplicate = tmp_path / "ibkr-general-duplicate-spec.json"
+    duplicate.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="must be unique"):
+        build_generation(duplicate)
+    spec["declared_general_exclusions"] = [{**row, "pattern": "*"}]
+    extra = tmp_path / "ibkr-general-extra-spec.json"
+    extra.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="keys differ"):
+        build_generation(extra)
+
+
 def test_unknown_account_yields_named_atom(tmp_path: Path) -> None:
     """A sixth unknown TWS account → named masked atom, PARTIAL."""
     spec_path = _declared_account_spec(tmp_path)

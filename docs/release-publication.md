@@ -114,8 +114,10 @@ and a rollback restores them verbatim. A successor release may add roots: the
 predecessor graph is judged over the roots it bound.
 
 `tools/check_data_roots.py` is the read-only gate: every data root resolves through
-`read_current`, except an evidence-only root (today `dataIBKR`), which must retain
-hash-verified generations and carries no pointer a consumer may follow.
+`read_current`, except an evidence-only root (`dataIBKR` while its generation is
+qualified PARTIAL), which must retain hash-verified generations and carries no pointer
+a consumer may follow. Once a COMPLETE generation is published the pointer is followable
+and the root is judged like any other.
 
 `tools/verify_release_restore.py` proves a committed release is reproducible from the
 durable stores: it copies only the bound generations (and any generation the spec

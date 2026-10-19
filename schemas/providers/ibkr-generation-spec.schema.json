@@ -40,6 +40,10 @@
     "declared_zero_activity_accounts": {
       "type": "array",
       "items": {"$ref": "#/$defs/zeroActivityAccount"}
+    },
+    "declared_general_exclusions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/generalExclusion"}
     }
   },
   "$defs": {
@@ -83,6 +87,15 @@
         "root_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
         "schema_name": {"type": "string", "minLength": 1},
         "schema_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "generalExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap", "provenance"],
+      "properties": {
+        "gap": {"type": "string", "minLength": 1},
+        "provenance": {"type": "string", "minLength": 1}
       }
     },
     "zeroActivityAccount": {
