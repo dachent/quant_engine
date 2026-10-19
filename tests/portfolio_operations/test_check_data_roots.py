@@ -149,15 +149,22 @@ def test_evidence_only_root_passes_on_hash_verified_generations(tmp_path: Path) 
     assert ok and "evidence-only" in message and "1 generation" in message
 
 
-def test_evidence_only_root_refuses_a_followable_pointer(tmp_path: Path) -> None:
+def test_evidence_only_root_with_a_followable_pointer_is_ordinary_authority(
+    tmp_path: Path,
+) -> None:
+    # read_current refuses a PARTIAL generation, so a followable pointer means a
+    # COMPLETE generation was published: the root is judged as any published root.
     root = tmp_path / "dataIBKR"
     generation = _publish(root)
     _retain_payload(root, generation)
     publish_generation(root, generation)  # re-bind the pointer to the inventory
     ok, message = gate.check_root(root)
-    assert not ok and "followable CURRENT pointer" in message
+    assert ok and message == f"CURRENT -> {generation[:12]}"
+    # the same root with its generation damaged is a failure, not evidence-only
+    (root / "generations" / generation / "generation.json").write_bytes(b"{}")
+    assert not gate.check_root(root)[0]
     (root / "CURRENT.json").unlink()
-    assert gate.check_root(root)[0]
+    assert not gate.check_root(root)[0]
 
 
 def test_evidence_only_root_fails_on_corrupt_missing_or_empty_payload(

@@ -276,8 +276,17 @@ Version 1 hash-binds the accepted portfolio baseline and all 26 inventoried
 legacy artifacts. Version 2 additionally requires exactly one Activity Flex
 refresh and one read-only TWS snapshot. Version 3 adds an optional
 `declared_zero_activity_accounts` list for accounts with no NAV history that
-must be mapped via owner attestation rather than curve matching. Absolute
-roots, raw provider evidence, and the private spec remain outside Git.
+must be mapped via owner attestation rather than curve matching, and an
+optional `declared_general_exclusions` list. Each entry names one exact residual
+gap atom and the owner ruling that places it outside the strategy perimeter
+(GENERAL history: an account never assigned to a strategy, or a window that
+predates the account's first strategy assignment). A declared gap is listed in the
+manifest boundary text and no longer makes the coverage `PARTIAL`; a declaration
+that matches no observed gap is refused, so a stale ruling cannot linger. The
+perimeter's own GENERAL disposition is derived independently from the assignment
+rows, so a declaration never hides a gap of a strategy-assigned account from the
+ledger. Absolute roots, raw provider evidence, and the private spec remain outside
+Git.
 
 ```powershell
 uv run --frozen --no-sync python tools/ibkr_generation.py build <private-spec>

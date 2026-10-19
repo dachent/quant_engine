@@ -197,6 +197,26 @@ def _parse_zero_activity(
     return parsed
 
 
+def _parse_general_exclusions(value: object) -> dict[str, str]:
+    """Gaps the owner ruled GENERAL history: outside the strategy perimeter.
+
+    An exact gap atom (never a pattern) and the ruling it rests on. The atom names
+    only hashed or internal ids, so the declaration carries no provider account id.
+    """
+
+    if value is None:
+        return {}
+    parsed: dict[str, str] = {}
+    for item in _objects(value, "declared_general_exclusions"):
+        _strict(item, {"gap", "provenance"}, "declared_general_exclusion")
+        gap = _text(item["gap"], "general_exclusion.gap")
+        provenance = _text(item["provenance"], "general_exclusion.provenance")
+        if gap in parsed:
+            raise IbkrGenerationError("declared general exclusion gap must be unique")
+        parsed[gap] = provenance
+    return parsed
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -216,12 +236,15 @@ def _load_spec(path: Path) -> dict[str, Any]:
     }
     if schema_version == SPEC_SCHEMA_VERSION:
         expected_keys.add("declared_zero_activity_accounts")
+        if "declared_general_exclusions" in spec:
+            expected_keys.add("declared_general_exclusions")
     _strict(spec, expected_keys, "spec")
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
         raise IbkrGenerationError("minimum_crosswalk_overlap must be at least 2")
     if schema_version == SPEC_SCHEMA_VERSION:
         _parse_zero_activity(spec.get("declared_zero_activity_accounts"))
+        _parse_general_exclusions(spec.get("declared_general_exclusions"))
     return spec
 
 
@@ -1835,11 +1858,25 @@ def build_generation(
             "Some activity rows have an ambiguous provider-reported account scope"
         )
 
-    undeclared = [
-        gap
-        for gap in raw_gaps
-        if declared_exclusion(gap, account_scope_exceptions) is None
-    ]
+    general_exclusions = _parse_general_exclusions(
+        spec.get("declared_general_exclusions")
+    )
+    unobserved = sorted(set(general_exclusions) - set(raw_gaps))
+    if unobserved:
+        raise IbkrGenerationError(
+            "declared general exclusion matches no observed gap: "
+            + "; ".join(unobserved)
+        )
+
+    def resolve_exclusion(gap: str) -> str | None:
+        if gap in general_exclusions:
+            return (
+                "General history outside the strategy perimeter "
+                f"({general_exclusions[gap]}): {gap}"
+            )
+        return declared_exclusion(gap, account_scope_exceptions)
+
+    undeclared = [gap for gap in raw_gaps if resolve_exclusion(gap) is None]
     if undeclared:
         coverage_status = CoverageStatus.PARTIAL
         known_gaps = tuple(raw_gaps)
@@ -1849,7 +1886,7 @@ def build_generation(
 
     exclusion_reasons: list[str] = []
     for gap in raw_gaps:
-        reason = declared_exclusion(gap, account_scope_exceptions)
+        reason = resolve_exclusion(gap)
         if reason is not None:
             exclusion_reasons.append(reason)
 

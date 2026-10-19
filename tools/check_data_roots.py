@@ -101,10 +101,27 @@ def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
     )
 
 
+def _publishes_current_authority(root: Path) -> bool:
+    """True when the root's pointer resolves through ``read_current``.
+
+    ``read_current`` refuses a PARTIAL generation, so a followable pointer means a
+    COMPLETE generation was published: the root is ordinary current authority, and the
+    evidence-only designation (a PARTIAL qualification) no longer describes it.
+    """
+
+    if not (root / "CURRENT.json").exists():
+        return False
+    try:
+        read_current(root)
+    except Exception:  # noqa: BLE001 - an unreadable pointer is not current authority
+        return False
+    return True
+
+
 def check_root(root: Path) -> tuple[bool, str]:
     """Return (ok, message) for one data root."""
 
-    if root.name in EVIDENCE_ONLY_ROOTS:
+    if root.name in EVIDENCE_ONLY_ROOTS and not _publishes_current_authority(root):
         # Taken whether or not generations/ exists: an evidence-only root that lost its
         # retained evidence must fail, not pass as an empty root.
         return check_evidence_root(root, EVIDENCE_ONLY_ROOTS[root.name])
