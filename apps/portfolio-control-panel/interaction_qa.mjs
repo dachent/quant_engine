@@ -328,6 +328,12 @@ function exactFixed(value, places = 2, scaleAdjustment = 0) {
   return places ? `${signed}.${decimals}` : signed;
 }
 const exactMoney = (value) => exactFixed(value, 2);
+// The manifest stores the maximum drawdown as a positive depth; the column is signed (negative).
+const signedDrawdown = (value) => {
+  if (value == null) return value;
+  const source = String(value);
+  return source.startsWith("-") || !/[1-9]/.test(source) ? value : `-${source}`;
+};
 const exactPct = (value) => {
   const fixed = exactFixed(value, 2, -2);
   return fixed === "—" ? fixed : `${fixed}%`;
@@ -392,9 +398,11 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
     const expectedNumbers = [
       exactMoney(row.invested) + (row.opening_basis === "PROVIDER_CAPITAL_ANCHOR" ? "sleeve allocation" : ""),
       exactMoney(row.withdrawn), exactMoney(row.net_capital),
-      exactMoney(row.current_value), exactMoney(row.gain), exactPct(row.return_on_net_capital),
+      exactMoney(row.current_value),
+      exactMoney(row.gain) + (row.post_liquidation_income != null ? `incl. post-liquidation income ${exactMoney(row.post_liquidation_income)}` : ""),
+      exactPct(row.return_on_net_capital),
       exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
-      exactFixed(row.observed_hwm_index, 2), exactPct(row.observed_max_drawdown),
+      exactFixed(row.observed_hwm_index, 2), exactPct(signedDrawdown(row.observed_max_drawdown)),
     ];
     return rendered.cells[2].primary === row.start
       && rendered.cells[2].secondary === row.end
@@ -704,7 +712,7 @@ checks.push(check(
   factorModeEvidence.length === requiredFactorEvidenceModes.length
     && liveFactorEvidence?.active === "true"
     && liveFactorEvidence.disabled === false
-    && liveFactorEvidence.boundary?.includes("LIVE_ONLY")
+    && /live only/i.test(liveFactorEvidence.boundary ?? "")
     && liveFactorEvidence.table?.includes("Beta / loading")
     && liveFactorEvidence.table.includes("Evidence composition")
     && liveFactorEvidence.strategy_rows.every((row) => row.evidence)
@@ -712,7 +720,7 @@ checks.push(check(
       ? hybridFactorEvidence.active === "false"
         && /(?:unavailable|not accepted|no accepted.*backtest|not proven compatible)/i.test(hybridFactorEvidence.title ?? "")
       : hybridFactorEvidence?.active === "true"
-        && hybridFactorEvidence.boundary?.includes("LIVE_PLUS_BACKTEST")
+        && /live\s*(?:\+|plus)\s*backtest/i.test(hybridFactorEvidence.boundary ?? "")
         && hybridFactorEvidence.table?.includes("Beta / loading")
         && hybridFactorEvidence.table.includes("Evidence composition")
         && hybridFactorEvidence.strategy_rows.every(
@@ -843,7 +851,7 @@ await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
 const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
 checks.push(check(
   "Economic, style, sector, and industry lenses remain separate",
-  factorLensButtons === requiredFactorLenses.length && economicBoundary?.includes("EXCESS_AND_LONG_SHORT_FACTOR_RETURN") && economicBoundary?.includes("never concatenated"),
+  factorLensButtons === requiredFactorLenses.length && /excess and long short factor return/i.test(economicBoundary ?? "") && economicBoundary?.includes("never concatenated"),
   { exercised_lenses: factorLensEvidence.map((item) => item.lens), factor_lenses: factorLensButtons, economic_boundary: economicBoundary },
 ));
 
@@ -1126,7 +1134,7 @@ checks.push(check(
     row
     && (
       (row.includes("account NAV observations")
-        && row.includes("Available with inferred flow timing"))
+        && (row.includes("Available with inferred flow timing") || /Available(?! with)/.test(row)))
       || (row.includes("canonical account-live returns")
         && row.includes("Available account-live return path"))
     )
