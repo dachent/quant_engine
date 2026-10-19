@@ -473,11 +473,13 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _PREPARATION,
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
+            "schemas/portfolio/account-assignment-perimeter.schema.json",
             "schemas/portfolio/account-strategy-current-epoch-crosswalk.schema.json",
         ),
         "contracts": (
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
+            "schemas/portfolio/account-assignment-perimeter.schema.json",
         ),
         "producer": (_ACCOUNT_MANIFEST, "stage_account_manifest_generation"),
         "artifacts": (
