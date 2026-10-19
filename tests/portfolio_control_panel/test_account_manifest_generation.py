@@ -29912,3 +29912,127 @@ def test_post_end_fact_without_a_crosswalk_epoch_stays_undisposed(
     assert {fact["account_id"] for fact in perimeter["unassigned_facts"]} == {
         f"synthetic-account-{number}" for number in range(12, 16)
     }
+
+
+def _closed_tail_selected_inputs(module: Any) -> object:
+    """The funded mixed epoch ends 2026-01-31 in baseline and crosswalk; its tail follows."""
+    selected = _mixed_composer_selected_inputs(module)
+    baseline_payload = selected.baseline.json_object()
+    policy = json.loads(selected.admission_policy.contents)
+    funded = next(row for row in policy["admissions"] if row["status"] == "FUNDED")
+    target = next(
+        row
+        for row in baseline_payload["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        and row["account_id"] == funded["account_id"]
+        and row["strategy_id"] == funded["strategy_id"]
+    )
+    target["effective_end"] = "2026-01-31"
+    baseline = InputSnapshot.from_bytes(
+        "closed tail synthetic baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    _unused, crosswalk_snapshot = _crosswalk_bound_to_mutated_synthetic_baseline(
+        selected, baseline_payload
+    )
+    crosswalk = crosswalk_snapshot.json_object()
+    crosswalk["selected_baseline"]["generation_id"] = json.loads(
+        baseline_manifest.contents
+    )["generation_id"]
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "closed tail crosswalk", canonical_json_bytes(crosswalk)
+            ),
+        }
+    )
+    census = json.loads(selected.membership_census.contents)
+    for sleeve in census["current_census"]["account_sleeves"]:
+        for item in sleeve["assignments"]:
+            if (
+                item["strategy_id"] == funded["strategy_id"]
+                and item["effective_start"] == funded["effective_start"]
+                and item["effective_end"] is None
+            ):
+                item["effective_end"] = "2026-01-31"
+    values["membership_census"] = InputSnapshot.from_bytes(
+        "closed tail census", canonical_json_bytes(census)
+    )
+    interim = module.AccountManifestSelectedInputs(**values)
+    mapped, _ = module._c3_mapped_assignments(interim)
+    records = [module._c3_assignment_record(item) for item in mapped]
+    policy["assignment_sha256"] = hashlib.sha256(
+        json.dumps(
+            sorted(
+                records,
+                key=lambda item: (
+                    item["account_id"],
+                    item["strategy_id"],
+                    item["effective_start"],
+                    str(item["effective_end"]),
+                ),
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    funded["effective_end"] = "2026-01-31"
+    funded["funded_end"] = "2026-01-31"
+    values["admission_policy"] = InputSnapshot.from_bytes(
+        "closed tail admission", canonical_json_bytes(policy)
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_final_closed_epoch_carries_its_tail_through_the_cutoff_end_to_end(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """#557: the crosswalk ends the epoch; the post-end tail stays inside its evidence window."""
+    selected = _closed_tail_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert row["effective_end"] == "2026-01-31"
+    assert row["performance_closed_on"] == "2026-01-31"
+    assert [
+        (credit["start_date"], credit["end_date"], credit["amount"])
+        for credit in row["post_liquidation_credits"]
+    ] == [("2026-01-31", "2026-02-01", "10")]
+    assert row["post_liquidation_income"] == "10"
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_tail_epoch_keys_treat_a_null_start_history_row_as_earliest() -> None:
+    """A missing-start historical row never hides the final mapped tail epoch."""
+    from tools import account_strategy_manifest as producer_module
+
+    history = {"_key": ("acct", "history", None, None)}
+    mapped = {"_key": ("acct", "strategy", "2025-01-01", "2025-12-31")}
+    admissions = {
+        mapped["_key"]: {"status": "FUNDED", "funded_end": "2025-12-31"},
+    }
+    assert producer_module._tail_epoch_keys(
+        {"acct": [history, mapped]}, admissions
+    ) == {mapped["_key"]}
+    # Without a declared funded end there is no tail.
+    admissions[mapped["_key"]] = {"status": "FUNDED", "funded_end": None}
+    assert (
+        producer_module._tail_epoch_keys({"acct": [history, mapped]}, admissions)
+        == set()
+    )
