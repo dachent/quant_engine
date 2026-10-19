@@ -130,6 +130,37 @@ def test_boundary_policy_floor_requires_the_new_roots() -> None:
         assert name.lower() in boundary._REQUIRED_PROVIDER_ROOTS, name
 
 
+def _stage_partial(root: Path) -> str:
+    """An accepted PARTIAL generation: immutable evidence that is never published."""
+
+    content = b"synthetic-content"
+    manifest = GenerationManifest.build(
+        as_of_date=AS_OF,
+        adapter=AdapterIdentity("synthetic-baseline", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.PARTIAL,
+            boundary="synthetic accounts on the stated as-of date",
+            fact_types=("positions", "transactions"),
+            observed_start=date(2026, 1, 1),
+            observed_end=AS_OF,
+            known_gaps=("synthetic gap",),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="inputs/tracker.json",
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=AS_OF,
+                schema_name="synthetic-portfolio-input",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation(root, manifest)
+    return manifest.generation_id
+
+
 def _retain_payload(root: Path, generation: str) -> Path:
     payload = root / "generations" / generation / "tracker.json"
     payload.write_bytes(b"synthetic-content")
@@ -138,13 +169,14 @@ def _retain_payload(root: Path, generation: str) -> Path:
 
 def test_evidence_only_root_passes_on_hash_verified_generations(tmp_path: Path) -> None:
     root = tmp_path / "dataIBKR"
-    generation = _publish(root)
+    generation = _stage_partial(root)
     _retain_payload(root, generation)
     # a dangling pointer is the audited defect; for an evidence-only root the
     # retained generation is what matters and the pointer is not authority
-    pointer = json.loads((root / "CURRENT.json").read_text(encoding="utf-8"))
-    pointer["generation_id"] = "0" * 64
-    (root / "CURRENT.json").write_text(json.dumps(pointer), encoding="utf-8")
+    (root / "CURRENT.json").write_text(
+        json.dumps({"generation_id": "0" * 64, "pointer_schema_version": 2}),
+        encoding="utf-8",
+    )
     ok, message = gate.check_root(root)
     assert ok and "evidence-only" in message and "1 generation" in message
 
@@ -167,12 +199,32 @@ def test_evidence_only_root_with_a_followable_pointer_is_ordinary_authority(
     assert not gate.check_root(root)[0]
 
 
-def test_evidence_only_root_fails_on_corrupt_missing_or_empty_payload(
+def test_a_root_that_published_complete_authority_never_falls_back_to_evidence_only(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "dataIBKR"
     generation = _publish(root)
+    _retain_payload(root, generation)
+    publish_generation(root, generation)  # re-bind the pointer to the inventory
+    assert gate.check_root(root)[0]
+    # the published pointer vanishes, dangles or is corrupted: the root held COMPLETE
+    # authority, so it is judged as a published root and fails closed
+    (root / "CURRENT.json").write_text(
+        json.dumps({"generation_id": "0" * 64, "pointer_schema_version": 2}),
+        encoding="utf-8",
+    )
+    ok, message = gate.check_root(root)
+    assert not ok and "evidence-only" not in message
     (root / "CURRENT.json").unlink()
+    ok, message = gate.check_root(root)
+    assert not ok and "CURRENT.json is missing" in message
+
+
+def test_evidence_only_root_fails_on_corrupt_missing_or_empty_payload(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataIBKR"
+    generation = _stage_partial(root)
     ok, message = gate.check_root(root)
     assert not ok and "none of its declared artifact bytes" in message
     payload = _retain_payload(root, generation)
@@ -191,8 +243,7 @@ def test_evidence_only_root_verifies_every_present_copy_of_a_declared_artifact(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "dataIBKR"
-    generation = _publish(root)
-    (root / "CURRENT.json").unlink()
+    generation = _stage_partial(root)
     directory = root / "generations" / generation
     (directory / "inputs").mkdir()
     (directory / "inputs" / "tracker.json").write_bytes(b"synthetic-content")

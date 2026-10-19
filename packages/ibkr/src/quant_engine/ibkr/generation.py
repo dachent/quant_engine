@@ -197,6 +197,17 @@ def _parse_zero_activity(
     return parsed
 
 
+# The gap classes an owner ruling may place outside the strategy perimeter: an account
+# the Flex query never returns (snapshot-only topology and its unmapped TWS values) and a
+# missing weekday statement window. A declared-zero-activity abuse atom, or any other gap,
+# is evidence against the declaration and is never excluded by this list.
+_GENERAL_EXCLUSION_GAP_CLASSES = (
+    "account_topology:snapshot_only:",
+    "unmapped_tws_value:",
+    "missing weekday statement for account-",
+)
+
+
 def _parse_general_exclusions(value: object) -> dict[str, str]:
     """Gaps the owner ruled GENERAL history: outside the strategy perimeter.
 
@@ -210,6 +221,10 @@ def _parse_general_exclusions(value: object) -> dict[str, str]:
     for item in _objects(value, "declared_general_exclusions"):
         _strict(item, {"gap", "provenance"}, "declared_general_exclusion")
         gap = _text(item["gap"], "general_exclusion.gap")
+        if not gap.startswith(_GENERAL_EXCLUSION_GAP_CLASSES):
+            raise IbkrGenerationError(
+                "declared general exclusion is not an authorized gap class"
+            )
         provenance = _text(item["provenance"], "general_exclusion.provenance")
         if gap in parsed:
             raise IbkrGenerationError("declared general exclusion gap must be unique")

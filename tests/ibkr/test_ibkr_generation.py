@@ -2199,6 +2199,23 @@ def test_declared_general_exclusion_that_matches_no_gap_is_refused(
         build_generation(stale)
 
 
+def test_declared_general_exclusion_is_limited_to_authorized_gap_classes(
+    tmp_path: Path,
+) -> None:
+    _, spec, _ = _undeclared_spec(tmp_path)
+    for atom in (
+        "declared_zero_activity_abuse:tws_position:0123456789abcdef",
+        "Zero API order rows do not prove complete order visibility",
+    ):
+        spec["declared_general_exclusions"] = [
+            {"gap": atom, "provenance": "owner ruling 2026-10-16"}
+        ]
+        refused = tmp_path / "ibkr-general-class-spec.json"
+        refused.write_bytes(canonical_json_bytes(spec))
+        with pytest.raises(IbkrGenerationError, match="authorized gap class"):
+            build_generation(refused)
+
+
 def test_declared_general_exclusions_must_be_unique_and_strict(
     tmp_path: Path,
 ) -> None:
