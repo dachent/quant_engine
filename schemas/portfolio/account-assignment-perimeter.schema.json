@@ -6,6 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "artifact_id", "as_of_date", "selected_baseline_identity", "full_perimeter_identity", "selected_baseline_account_count", "account_count", "assignment_count", "partition_counts", "fact_bijection_status", "unassigned_fact_count", "unassigned_projection_count", "unassigned_facts", "rows"],
+  "dependentRequired": {
+    "general_fact_count": ["general_facts"],
+    "general_facts": ["general_fact_count"]
+  },
   "properties": {
     "schema_version": {"const": 1},
     "artifact_id": {"const": "account-assignment-perimeter"},
@@ -25,6 +29,16 @@
         "oneOf": [
           {"$ref": "#/$defs/unassigned_nav"},
           {"$ref": "#/$defs/unassigned_raw_flow"}
+        ]
+      }
+    },
+    "general_fact_count": {"type": "integer", "minimum": 0},
+    "general_facts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/general_nav"},
+          {"$ref": "#/$defs/general_raw_flow"}
         ]
       }
     },
@@ -113,6 +127,37 @@
         "assignment_match_count": {"const": 0},
         "status": {"const": "BLOCKED"},
         "blocker_code": {"enum": ["NO_ASSIGNMENT_MATCH", "ACCOUNT_NOT_IN_SELECTED_BASELINE"]}
+      }
+    },
+    "general_nav": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_identity", "account_id", "fact_date", "assignment_match_count", "status", "disposition", "reason"],
+      "properties": {
+        "source_kind": {"const": "NAV"},
+        "source_identity": {"$ref": "#/$defs/record_identity"},
+        "account_id": {"type": "string", "minLength": 1},
+        "fact_date": {"$ref": "#/$defs/date"},
+        "assignment_match_count": {"const": 0},
+        "status": {"const": "GENERAL"},
+        "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "ACCOUNT_NOT_IN_SELECTED_BASELINE", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
+      }
+    },
+    "general_raw_flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_identity", "classified_projection_identity", "account_id", "fact_date", "assignment_match_count", "status", "disposition", "reason"],
+      "properties": {
+        "source_kind": {"const": "RAW_FLOW"},
+        "source_identity": {"$ref": "#/$defs/record_identity"},
+        "classified_projection_identity": {"$ref": "#/$defs/classified_projection_identity"},
+        "account_id": {"type": "string", "minLength": 1},
+        "fact_date": {"$ref": "#/$defs/date"},
+        "assignment_match_count": {"const": 0},
+        "status": {"const": "GENERAL"},
+        "disposition": {"const": "GENERAL_OUT_OF_STRATEGY_PERIMETER"},
+        "reason": {"enum": ["NO_STRATEGY_ASSIGNED_TO_ACCOUNT", "ACCOUNT_NOT_IN_SELECTED_BASELINE", "PREDATES_FIRST_STRATEGY_ASSIGNMENT"]}
       }
     },
     "assignment_identity": {
