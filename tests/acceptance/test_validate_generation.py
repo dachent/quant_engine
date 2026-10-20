@@ -6392,3 +6392,17 @@ def test_independent_no_oracle_marks_the_run_and_forbids_a_baseline(
     both = ("--independent-no-oracle", "--cutoff", CUTOFF, "--expected", str(baseline))
     assert _cli(str(gen_dir), *both) == 2
     assert _cli(str(gen_dir), "--independent-no-oracle") == 2
+
+
+def _closed_epoch(report: dict[str, Any]) -> None:
+    """A12-style closed epoch (#539): the report row's TWR ends at performance_closed_on."""
+
+    report["twr_mwr"][0]["performance_closed_on"] = EARLY
+
+
+def test_closed_epoch_twr_window_ends_at_performance_closed_on(tmp_path: Path) -> None:
+    row = _window_row("twr.account", "A1", "0.1", window_start=START, as_of=EARLY)
+    closed = _expected_only(run(build(tmp_path, Spec(report=[_closed_epoch])), [row]))
+    assert ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY) not in closed
+    open_epoch = _expected_only(run(build(tmp_path / "open"), [row]))
+    assert ("expected.as_of_beyond_authority", checks.BLOCKER_AUTHORITY) in open_epoch

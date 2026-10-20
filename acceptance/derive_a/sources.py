@@ -100,6 +100,7 @@ class Assignment:
     effective_start: dt.date
     effective_end: dt.date | None
     disposition: str
+    funded_end: dt.date | None = None
 
 
 @dataclass(frozen=True)
@@ -128,9 +129,16 @@ def parse_crosswalk(data: bytes) -> Crosswalk:
                     f"crosswalk effective_end of {raw.get('assignment_id')}",
                 ),
                 disposition=str(raw["product_epoch_disposition"]),
+                funded_end=optional_date(raw.get("funded_end"), "crosswalk funded_end"),
             )
         )
     rows.sort(key=lambda row: (row.account_id, row.effective_start))
+    for row in rows:
+        if row.funded_end is not None and (
+            row.funded_end < row.effective_start
+            or (row.effective_end is not None and row.funded_end > row.effective_end)
+        ):
+            raise InputError("crosswalk funded_end outside assignment interval")
     return Crosswalk(
         calculation_cutoff_date=iso_date(document.get("calculation_cutoff_date")),
         as_of_date=iso_date(document.get("as_of_date")),
@@ -462,6 +470,22 @@ def parse_quantbase_sleeve(
     """
 
     rows = csv_rows(activity)
+    # Source identities count once, including when a retained capture overlaps.
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+    unique = []
+    for row in rows:
+        key = (row.get("activity_type", ""), row.get("id", ""))
+        if key[0] not in {"filled_txn", "order"}:
+            unique.append(row)
+            continue
+        if key[1] and key in seen:
+            if seen[key] != row:
+                raise InputError(f"conflicting Quantbase source identity {key}")
+            continue
+        if key[1]:
+            seen[key] = row
+        unique.append(row)
+    rows = unique
     fund_ids = sorted(
         {
             row["fund"]

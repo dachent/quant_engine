@@ -1513,6 +1513,222 @@ def unpinned_entry(path: Path) -> dict[str, object]:
     return {"family": "test", "path": str(path), "sha256": None, "bytes": None}
 
 
+AMENDED_RECEIPT_A_BODY = (
+    "Owner decision record: amends the PROVIDER_CUSTODY_PERIMETER decision. "
+    "For the Matrixport wallet, which funds products, a strategy's invested "
+    "capital is the product subscription (the capital anchor at the "
+    "subscription date FX). Wallet deposits and withdrawals are not the "
+    "strategy's capital. The stablecoin conversion between deposit and "
+    "subscription is a cost that is not part of capital, and no derived cash "
+    "line is built."
+)
+
+
+def amended_custody_policy(
+    fund_scoped_providers: tuple[str, ...] = ("MATRIXPORT", "QUANTBASE"),
+) -> dict[str, object]:
+    """The amended PROVIDER_CUSTODY_PERIMETER decision with its full key set."""
+    return {
+        "plain_language": (
+            "Owner cash moved into a provider-held cash or wallet account that "
+            "funds one governed strategy."
+        ),
+        "decision_status": "APPROVED",
+        "decision_authority": "OWNER_318",
+        "approval_evidence": "https://example.test/a",
+        "amends_approval_evidence": "https://example.test/amended",
+        "selected_treatment": "raw",
+        "recommended_treatment": None,
+        "calculation_effect": "raw",
+        "fund_scoped_providers": list(fund_scoped_providers),
+        "fund_scoped_treatment": "FUND_SCOPED_RAW_TREATMENT",
+        "fund_scoped_effect": "raw",
+        "examples": [],
+    }
+
+
+def custody_authority_files(
+    policy: dict[str, object], receipt_a_body: str = AMENDED_RECEIPT_A_BODY
+) -> dict[str, str]:
+    """Owner policy + receipt A/B fixture files digest-bound to the policy."""
+    import hashlib
+
+    receipt = {
+        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "evidence_url": "https://example.test/a",
+        "comment_id": 1,
+        "digest_evidence_url": "https://example.test/b",
+        "digest_comment_id": 2,
+        "approved_on": "2026-10-17",
+        "payload_sha256": hashlib.sha256(
+            (
+                json.dumps(
+                    {"decision": policy},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n"
+            ).encode()
+        ).hexdigest(),
+    }
+    receipt_b_machine = {
+        "schema_version": 1,
+        "authority_issue": 330,
+        "policy_owner_issue": 318,
+        "policy_id": "PORT-INVESTED-CAPITAL-1",
+        "approval_evidence_url": receipt["evidence_url"],
+        "approved_on": "2026-10-17",
+        "decision_payload_sha256": {
+            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
+        },
+    }
+    return {
+        "policy.json": json.dumps(policy),
+        "receipt-a.json": json.dumps({"id": 1, "body": receipt_a_body}),
+        "receipt-b.json": json.dumps(receipt),
+        "receipt-b-response.json": json.dumps(
+            {
+                "id": 2,
+                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
+                + json.dumps(receipt_b_machine)
+                + "\n```",
+            }
+        ),
+        "contract.json": json.dumps(
+            {
+                "financial_outcomes": [
+                    {
+                        "outcome_id": "INVESTED_CAPITAL",
+                        "calculation_contract": {
+                            "provider_custody_perimeter": policy,
+                            "owner_decision_receipts": {
+                                "PROVIDER_CUSTODY_PERIMETER": receipt
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+    }
+
+
+def custody_v3_fixture(
+    tmp_path: Path,
+    policy: dict[str, object],
+    *,
+    receipt_a_body: str = AMENDED_RECEIPT_A_BODY,
+) -> tuple[dict[str, object], dict[str, Path], list[dict[str, object]]]:
+    """A minimal schema-3 fixture: one Quantbase and one Matrixport account."""
+    files = {
+        "provider-ledger.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "nav_observations": [],
+                "flows": [],
+                "capital_anchors": [],
+            }
+        ),
+        "account-strategy-current-epoch-crosswalk.json": json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": [
+                    {
+                        **included_row("volatis", "volatis-strategy"),
+                        "provider": "QUANTBASE",
+                    },
+                    {
+                        **included_row("robuxio", "robuxio-crypto"),
+                        "provider": "MATRIXPORT",
+                    },
+                ],
+            }
+        ),
+        "dashboard_Volatis_Strategy_pricehistory.csv": "time,value\n09/17/2026,105\n",
+        "account_activity.csv": "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\ntransfer,DEPOSIT,,100,2026-09-01T12:00:00+00:00,,C,deposit-1,10000,provider-account-1\nfilled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
+        "nav_daily.csv": "day_timestamp_utc,nav\n2026-09-02T00:00:00Z,1\n",
+        "wallet_deposits.csv": "state,currency,amount,created_at_utc\nconfirmed,USDC,10,2026-09-01T00:00:00Z\n",
+        "wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
+        "yfinance-history.json": json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "USDC-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-01", "Close": "1"},
+                    {"Ticker": "USDT-USD", "Date": "2026-09-02", "Close": "1"},
+                ]
+            }
+        ),
+        "generation.json": json.dumps(
+            {
+                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "as_of_date": "2026-09-17",
+                "coverage": {
+                    "observed_end": "2026-09-17",
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+            }
+        ),
+        "rates.csv": "date,currency,base_currency,rate,provider,ticker,field,timing\n2026-09-01,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-01,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-02,USDT,USD,1,x,USDT-USD,Close,x\n2026-09-17,USDC,USD,1,x,USDC-USD,Close,x\n2026-09-17,USDT,USD,1,x,USDT-USD,Close,x\n",
+    }
+    files.update(custody_authority_files(policy, receipt_a_body))
+    paths = {}
+    for name, contents in files.items():
+        path = tmp_path / name
+        path.write_text(contents, encoding="utf-8")
+        paths[name] = path
+    generation = json.loads(paths["generation.json"].read_text(encoding="utf-8"))
+    generation["artifacts"] = [
+        {
+            "artifact_id": artifact_id,
+            "sha256": pinned_entry(paths[name])["sha256"],
+            "size_bytes": pinned_entry(paths[name])["bytes"],
+            "as_of_date": "2026-09-17",
+            "schema": "synthetic-native-artifact-v1",
+        }
+        for artifact_id, name in (
+            ("raw/yfinance-history.json", "yfinance-history.json"),
+            ("rates.csv", "rates.csv"),
+        )
+    ]
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    entries = [
+        pinned_entry(paths[name])
+        for name in (
+            "provider-ledger.json",
+            "account-strategy-current-epoch-crosswalk.json",
+            "dashboard_Volatis_Strategy_pricehistory.csv",
+            "account_activity.csv",
+            "nav_daily.csv",
+            "wallet_deposits.csv",
+            "wallet_bills.csv",
+            "yfinance-history.json",
+        )
+    ]
+    for family, name in {
+        "financial_source_contract": "contract.json",
+        "fx_generation_manifest": "generation.json",
+        "fx_usdc_usd_daily": "yfinance-history.json",
+        "fx_usdt_usd_daily": "yfinance-history.json",
+        "fx_daily_rates": "rates.csv",
+        "provider_capital_policy": "policy.json",
+        "provider_capital_owner_receipt_a": "receipt-a.json",
+        "provider_capital_owner_receipt_b": "receipt-b.json",
+        "provider_capital_owner_receipt_b_response": "receipt-b-response.json",
+    }.items():
+        entry = pinned_entry(paths[name])
+        entry["family"] = family
+        entries.append(entry)
+    manifest = {
+        "schema": "qe-cp-acceptance-inputs/3",
+        "cutoff": "2026-09-17",
+        "inputs": entries,
+    }
+    return manifest, paths, entries
+
+
 def write_manifest_role_fixtures(tmp_path: Path) -> dict[str, Path]:
     """Write one tiny fixture per input role, named for manifest selection."""
     fixtures = {
@@ -2450,37 +2666,9 @@ def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
 ):
     """A conflicting included account cannot leave a partial v3 systematic total."""
     derivation = load_derivation_module()
-    policy = {"selected_treatment": "raw", "calculation_effect": "raw"}
-    receipt = {
-        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
-        "authority_issue": 330,
-        "policy_owner_issue": 318,
-        "evidence_url": "https://example.test/a",
-        "comment_id": 1,
-        "digest_evidence_url": "https://example.test/b",
-        "digest_comment_id": 2,
-        "approved_on": "2026-10-02",
-        "payload_sha256": "",
-    }
-    import hashlib
-
-    receipt["payload_sha256"] = hashlib.sha256(
-        (
-            json.dumps({"decision": policy}, sort_keys=True, separators=(",", ":"))
-            + "\n"
-        ).encode()
-    ).hexdigest()
-    receipt_b = {
-        "schema_version": 1,
-        "authority_issue": 330,
-        "policy_owner_issue": 318,
-        "policy_id": "PORT-INVESTED-CAPITAL-1",
-        "approval_evidence_url": receipt["evidence_url"],
-        "approved_on": "2026-10-02",
-        "decision_payload_sha256": {
-            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
-        },
-    }
+    policy = amended_custody_policy()
+    authority_files = custody_authority_files(policy)
+    receipt = json.loads(authority_files["receipt-b.json"])
     base_rows = [
         {**included_row("volatis", "volatis-strategy"), "provider": "QUANTBASE"},
         {**included_row("robuxio", "robuxio-crypto"), "provider": "MATRIXPORT"},
@@ -2544,37 +2732,11 @@ def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
                 ]
             }
         ),
-        "contract.json": json.dumps(
-            {
-                "financial_outcomes": [
-                    {
-                        "outcome_id": "INVESTED_CAPITAL",
-                        "calculation_contract": {
-                            "provider_custody_perimeter": policy,
-                            "owner_decision_receipts": {
-                                "PROVIDER_CUSTODY_PERIMETER": receipt
-                            },
-                        },
-                    }
-                ]
-            }
-        ),
-        "policy.json": json.dumps(policy),
-        "receipt-a.json": json.dumps(
-            {
-                "id": 1,
-                "body": "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal subtracts cash line below zero is an error",
-            }
-        ),
-        "receipt-b.json": json.dumps(receipt),
-        "receipt-b-response.json": json.dumps(
-            {
-                "id": 2,
-                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
-                + json.dumps(receipt_b)
-                + "\n```",
-            }
-        ),
+        "contract.json": authority_files["contract.json"],
+        "policy.json": authority_files["policy.json"],
+        "receipt-a.json": authority_files["receipt-a.json"],
+        "receipt-b.json": authority_files["receipt-b.json"],
+        "receipt-b-response.json": authority_files["receipt-b-response.json"],
         "generation.json": json.dumps(
             {
                 "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
@@ -3111,45 +3273,11 @@ def test_oracle_v3_b_native_success_wallet_deposit_is_admitted_for_custody():
     assert result["robuxio-crypto"]["invested"] == Decimal("101")
 
 
-def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
-    """A schema-3 public derive keeps a 100 owner deposit distinct from a 96 buy."""
+def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Path):
+    """Under the amended perimeter, fund-scoped capital is the gross fund allocations."""
     derivation = load_derivation_module()
-    policy = {"selected_treatment": "raw", "calculation_effect": "raw"}
-    receipt = {
-        "decision_id": "PROVIDER_CUSTODY_PERIMETER",
-        "authority_issue": 330,
-        "policy_owner_issue": 318,
-        "evidence_url": "https://example.test/a",
-        "comment_id": 1,
-        "digest_evidence_url": "https://example.test/b",
-        "digest_comment_id": 2,
-        "approved_on": "2026-10-02",
-        "payload_sha256": "",
-    }
-    import hashlib
-
-    receipt["payload_sha256"] = hashlib.sha256(
-        (
-            json.dumps(
-                {"decision": policy},
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-    ).hexdigest()
-    receipt_b_machine = {
-        "schema_version": 1,
-        "authority_issue": 330,
-        "policy_owner_issue": 318,
-        "policy_id": "PORT-INVESTED-CAPITAL-1",
-        "approval_evidence_url": receipt["evidence_url"],
-        "approved_on": "2026-10-02",
-        "decision_payload_sha256": {
-            "PROVIDER_CUSTODY_PERIMETER": receipt["payload_sha256"]
-        },
-    }
+    policy = amended_custody_policy()
+    authority_files = custody_authority_files(policy)
     files = {
         "provider-ledger.json": json.dumps(
             {
@@ -3201,37 +3329,11 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
                 ]
             }
         ),
-        "contract.json": json.dumps(
-            {
-                "financial_outcomes": [
-                    {
-                        "outcome_id": "INVESTED_CAPITAL",
-                        "calculation_contract": {
-                            "provider_custody_perimeter": policy,
-                            "owner_decision_receipts": {
-                                "PROVIDER_CUSTODY_PERIMETER": receipt
-                            },
-                        },
-                    }
-                ]
-            }
-        ),
-        "policy.json": json.dumps(policy),
-        "receipt-a.json": json.dumps(
-            {
-                "id": 1,
-                "body": "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal subtracts cash line below zero is an error",
-            }
-        ),
-        "receipt-b.json": json.dumps(receipt),
-        "receipt-b-response.json": json.dumps(
-            {
-                "id": 2,
-                "body": "<!-- financial-mvp-owner-decision-receipts-v1 -->\n```json\n"
-                + json.dumps(receipt_b_machine)
-                + "\n```",
-            }
-        ),
+        "contract.json": authority_files["contract.json"],
+        "policy.json": authority_files["policy.json"],
+        "receipt-a.json": authority_files["receipt-a.json"],
+        "receipt-b.json": authority_files["receipt-b.json"],
+        "receipt-b-response.json": authority_files["receipt-b-response.json"],
         "generation.json": json.dumps(
             {
                 "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
@@ -3289,26 +3391,36 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     values = {
         (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
     }
-    assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
-    assert values[("capital.strategy_cash.cutoff", "volatis-strategy")] == "4.00"
-    assert values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
-    # No capture proves a boundary in this synthetic selection, so each cash line
-    # ends at its last event (the capture-free MX-2 fallback); the row is keyed by
-    # strategy, provider and account.
-    coverage_ends = {
-        row["entity"]: (row["value"], row["unit"], row["as_of"])
-        for row in output["metrics"]
-        if row["metric_id"] == "date.strategy_cash.coverage_end"
-    }
-    assert coverage_ends == {
-        "volatis-strategy|quantbase|volatis": ("2026-09-01", "date", "2026-09-17"),
-    }
-    # robuxio's cash line is withheld in this selection, so its row is not derivable.
-    assert {
-        row["entity"]
+    # The 100 account deposit is not strategy capital; the 96 fund buy is.
+    assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "96.00"
+    # The strategy's current capital is the fund NAV alone: no cash line added.
+    assert values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
+    # The derived-cash metrics lose their meaning for a fund-scoped provider and
+    # move to NOT-DERIVABLE with the policy reason, for both custody strategies.
+    cash_metric_ids = ("capital.strategy_cash.cutoff", "date.strategy_cash.coverage_end")
+    assert not [
+        row for row in output["metrics"] if row["metric_id"] in cash_metric_ids
+    ]
+    cash_reasons = {
+        (row["metric_id"], row["entity"]): row["reason"]
         for row in output["not_derivable"]
-        if row["metric_id"] == "date.strategy_cash.coverage_end"
-    } == {"robuxio-crypto|matrixport|robuxio"}
+        if row["metric_id"] in cash_metric_ids
+    }
+    assert "fund-scoped" in cash_reasons[
+        ("capital.strategy_cash.cutoff", "volatis-strategy")
+    ]
+    assert {
+        entity
+        for metric_id, entity in cash_reasons
+        if metric_id == "date.strategy_cash.coverage_end"
+    } == {"volatis-strategy|quantbase|volatis", "robuxio-crypto|matrixport|robuxio"}
+    # robuxio holds no units in this selection, so its capital facts stay withheld.
+    not_derivable_ids = {
+        (row["metric_id"], row["entity"]) for row in output["not_derivable"]
+    }
+    assert ("invested_capital.strategy.cutoff", "robuxio-crypto") in not_derivable_ids
+    assert ("capital.strategy.cutoff", "robuxio-crypto") in not_derivable_ids
+    assert ("capital.portfolio.systematic.cutoff", "portfolio") in not_derivable_ids
 
     rates_path = paths["rates.csv"]
     admitted_rates = rates_path.read_text(encoding="utf-8")
@@ -3334,7 +3446,17 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     missing_fx_ids = {
         (row["metric_id"], row["entity"]) for row in missing_fx["not_derivable"]
     }
-    assert ("capital.strategy_cash.cutoff", "robuxio-crypto") in missing_fx_ids
+    missing_fx_values = {
+        (row["metric_id"], row["entity"]): row["value"]
+        for row in missing_fx["metrics"]
+    }
+    # The deposit's event-date FX row is gone, so the custody events fail closed...
+    assert ("invested_capital.strategy.cutoff", "volatis-strategy") in missing_fx_ids
+    # ...but a fund-scoped strategy's NAV capital never depended on them.
+    assert ("capital.strategy.cutoff", "volatis-strategy") not in missing_fx_ids
+    assert (
+        missing_fx_values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
+    )
     rates_path.write_text(admitted_rates, encoding="utf-8")
     generation["artifacts"][1].update(
         sha256=pinned_entry(rates_path)["sha256"],
@@ -3387,7 +3509,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     same_values = {
         (row["metric_id"], row["entity"]): row["value"] for row in same["metrics"]
     }
-    assert same_values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
+    assert same_values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
 
     activity_path = paths["account_activity.csv"]
     activity_path.write_text(
@@ -3398,36 +3520,23 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     for index, entry in enumerate(entries):
         if entry["path"] == str(activity_path):
             entries[index] = pinned_entry(activity_path)
-    unavailable = derivation.derive(tmp_path, manifest)
-    unavailable_ids = {
-        (row["metric_id"], row["entity"]) for row in unavailable["not_derivable"]
+    available = derivation.derive(tmp_path, manifest)
+    available_values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in available["metrics"]
     }
-    assert {
-        ("invested_capital.strategy.cutoff", "volatis-strategy"),
-        ("capital.strategy_cash.cutoff", "volatis-strategy"),
-        ("capital.strategy.cutoff", "volatis-strategy"),
-        ("capital.portfolio.systematic.cutoff", "portfolio"),
-        ("weight.strategy.cutoff", "volatis-strategy"),
-    }.issubset(unavailable_ids)
-    assert {
-        ("weight.strategy.cutoff", strategy_id)
-        for strategy_id in (
-            "volatis-strategy",
-            "robuxio-crypto",
-            *(f"generic-strategy-{index}" for index in range(2, 7)),
-        )
-    }.issubset(unavailable_ids)
-    # A withheld cash line leaves its coverage row not derivable too.
+    # An omitted account deposit is not an omitted capital fact: the gross
+    # allocation anchors the fund-scoped strategy's invested capital by itself.
     assert (
-        "date.strategy_cash.coverage_end",
-        "volatis-strategy|quantbase|volatis",
-    ) in unavailable_ids
+        available_values[("invested_capital.strategy.cutoff", "volatis-strategy")]
+        == "96.00"
+    )
+    assert available_values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
 
     activity_path.write_text(
-        "activity_type,type,fund,amount,created_at,time\n"
-        "transfer,DEPOSIT,,50,2026-09-01T12:00:00+00:00,\n"
-        "transfer,DEPOSIT,,100,2026-09-02T12:00:00+00:00,\n"
-        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\n"
+        "transfer,DEPOSIT,,50,2026-09-01T12:00:00+00:00,,C,deposit-1,5000,provider-account-1\n"
+        "transfer,DEPOSIT,,100,2026-09-02T12:00:00+00:00,,C,deposit-2,10000,provider-account-1\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
         encoding="utf-8",
     )
     for index, entry in enumerate(entries):
@@ -3437,12 +3546,22 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     negative_ids = {
         (row["metric_id"], row["entity"]) for row in negative["not_derivable"]
     }
+    negative_values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in negative["metrics"]
+    }
+    # The negative-cash fail-closed check guards the derived cash line; a
+    # fund-scoped strategy has no such line, so the intraday shape of account
+    # funding cannot poison the allocation-anchored capital.
+    assert (
+        negative_values[("invested_capital.strategy.cutoff", "volatis-strategy")]
+        == "96.00"
+    )
     assert ("capital.strategy_cash.cutoff", "volatis-strategy") in negative_ids
 
     activity_path.write_text(
-        "activity_type,type,fund,amount,created_at,time\n"
-        "transfer,UNSUPPORTED,,100,2026-09-01T12:00:00+00:00,\n"
-        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00\n",
+        "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\n"
+        "transfer,UNSUPPORTED,,100,2026-09-01T12:00:00+00:00,,C,transfer-x,10000,provider-account-1\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
         encoding="utf-8",
     )
     for index, entry in enumerate(entries):
@@ -3452,7 +3571,15 @@ def test_oracle_v3_b_public_derive_uses_pinned_raw_volatis_cash(tmp_path: Path):
     unsupported_ids = {
         (row["metric_id"], row["entity"]) for row in unsupported["not_derivable"]
     }
-    assert ("capital.strategy_cash.cutoff", "volatis-strategy") in unsupported_ids
+    unsupported_values = {
+        (row["metric_id"], row["entity"]): row["value"]
+        for row in unsupported["metrics"]
+    }
+    assert ("invested_capital.strategy.cutoff", "volatis-strategy") in unsupported_ids
+    assert ("capital.strategy.cutoff", "volatis-strategy") not in unsupported_ids
+    assert (
+        unsupported_values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
+    )
 
     activity_path.write_text(
         "activity_type,type,fund,amount,created_at,time\n"
@@ -4446,3 +4573,533 @@ def test_raw_custody_capital_reports_the_days_of_each_event_type() -> None:
         "owner": [date(2026, 9, 1)],
         "allocation": [date(2026, 9, 2)],
     }
+
+
+# ------------------------- amended PROVIDER_CUSTODY_PERIMETER (R1) -------------------------
+
+
+def test_oracle_v3_b_unlisted_provider_keeps_account_scoped_cash_line(tmp_path: Path):
+    """A provider outside fund_scoped_providers keeps the deposit-based cash line."""
+    derivation = load_derivation_module()
+    policy = amended_custody_policy(fund_scoped_providers=("ELSEWHERE",))
+    manifest, paths, entries = custody_v3_fixture(tmp_path, policy)
+
+    output = derivation.derive(tmp_path, manifest)
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+
+    assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
+    assert values[("capital.strategy_cash.cutoff", "volatis-strategy")] == "4.00"
+    assert values[("capital.strategy.cutoff", "volatis-strategy")] == "109.00"
+    # No capture proves a boundary in this synthetic selection, so the cash line
+    # ends at its last event (the capture-free MX-2 fallback).
+    coverage_ends = {
+        row["entity"]: row["value"]
+        for row in output["metrics"]
+        if row["metric_id"] == "date.strategy_cash.coverage_end"
+    }
+    assert coverage_ends == {"volatis-strategy|quantbase|volatis": "2026-09-01"}
+
+    # The negative-cash fail-closed check still guards the unlisted cash line.
+    activity_path = paths["account_activity.csv"]
+    activity_path.write_text(
+        "activity_type,type,fund,amount,created_at,time,status,id,amount_cents,destination_account_id\n"
+        "transfer,DEPOSIT,,50,2026-09-01T12:00:00+00:00,,C,deposit-1,5000,provider-account-1\n"
+        "transfer,DEPOSIT,,100,2026-09-02T12:00:00+00:00,,C,deposit-2,10000,provider-account-1\n"
+        "filled_txn,BUY,107,96,,2026-09-01T13:00:00+00:00,,,,\n",
+        encoding="utf-8",
+    )
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(activity_path):
+            entries[index] = pinned_entry(activity_path)
+    negative = derivation.derive(tmp_path, manifest)
+    negative_ids = {
+        (row["metric_id"], row["entity"]) for row in negative["not_derivable"]
+    }
+    assert ("capital.strategy_cash.cutoff", "volatis-strategy") in negative_ids
+    assert ("invested_capital.strategy.cutoff", "volatis-strategy") in negative_ids
+
+
+def test_oracle_v3_b_fund_scoped_skips_the_cash_line_negative_check():
+    """The negative-cash fail-closed check guards a cash line fund-scoped strategies lack."""
+    derivation = load_derivation_module()
+    rows = [
+        {
+            "activity_type": "transfer",
+            "type": "DEPOSIT",
+            "status": "C",
+            "id": "deposit-1",
+            "amount": "100",
+            "amount_cents": "10000",
+            "destination_account_id": "provider-account-1",
+            "created_at": "2026-09-01T12:00:00+00:00",
+        },
+        {
+            "activity_type": "filled_txn",
+            "type": "BUY",
+            "fund": "107",
+            "amount": "196",
+            "time": "2026-09-01T13:00:00+00:00",
+        },
+    ]
+    fx = {"USDC": {date(2026, 9, 1): Decimal("1")}, "USDT": {}}
+
+    with pytest.raises(ValueError, match="raw custody cash is negative"):
+        derivation.raw_custody_capital(rows, [], [], fx)
+
+    result = derivation.raw_custody_capital(
+        rows, [], [], fx, fund_scoped_strategies=frozenset({"volatis-strategy"})
+    )
+
+    # Account funding is not capital for a fund-scoped strategy; the gross
+    # allocation is, and no cash line is computed or checked.
+    assert result["volatis-strategy"]["allocation"] == Decimal("196")
+
+
+def test_oracle_v3_b_amended_decision_key_set_is_exact(tmp_path: Path):
+    """A perimeter with an extra key or a partial amendment is refused outright."""
+    derivation = load_derivation_module()
+
+    extra_key = amended_custody_policy()
+    extra_key["unexpected_key"] = "x"
+    manifest, _, _ = custody_v3_fixture(tmp_path, extra_key)
+    with pytest.raises(
+        derivation.ManifestError, match="exactly the approved decision key set"
+    ):
+        derivation.derive(tmp_path, manifest)
+
+    partial = amended_custody_policy()
+    del partial["fund_scoped_effect"]
+    manifest, _, _ = custody_v3_fixture(tmp_path, partial)
+    with pytest.raises(
+        derivation.ManifestError, match="incomplete fund-scoped key set"
+    ):
+        derivation.derive(tmp_path, manifest)
+
+    unamended = amended_custody_policy()
+    for key in (
+        "amends_approval_evidence",
+        "fund_scoped_effect",
+        "fund_scoped_providers",
+        "fund_scoped_treatment",
+    ):
+        del unamended[key]
+    manifest, _, _ = custody_v3_fixture(tmp_path, unamended)
+    output = derivation.derive(tmp_path, manifest)
+    # The pre-amendment shape stays admissible: every custody strategy then
+    # keeps the account-scoped treatment.
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+    assert values[("invested_capital.strategy.cutoff", "volatis-strategy")] == "100.00"
+
+
+def test_oracle_v3_b_tampered_perimeter_fails_closed(tmp_path: Path):
+    """Editing the scoped provider list without new owner evidence is refused."""
+    derivation = load_derivation_module()
+    manifest, paths, entries = custody_v3_fixture(
+        tmp_path, amended_custody_policy()
+    )
+
+    # Tamper with the policy file alone: it no longer matches the contract.
+    policy_path = paths["policy.json"]
+    tampered = json.loads(policy_path.read_text(encoding="utf-8"))
+    tampered["fund_scoped_providers"] = ["QUANTBASE"]
+    policy_path.write_text(json.dumps(tampered), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(policy_path):
+            updated = pinned_entry(policy_path)
+            updated["family"] = "provider_capital_policy"
+            entries[index] = updated
+    with pytest.raises(
+        derivation.ManifestError, match="differs from selected contract"
+    ):
+        derivation.derive(tmp_path, manifest)
+
+    # Tamper with the contract body too: the owner digest receipt no longer
+    # binds the payload.
+    contract_path = paths["contract.json"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["financial_outcomes"][0]["calculation_contract"][
+        "provider_custody_perimeter"
+    ]["fund_scoped_providers"] = ["QUANTBASE"]
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(contract_path):
+            updated = pinned_entry(contract_path)
+            updated["family"] = "financial_source_contract"
+            entries[index] = updated
+    with pytest.raises(
+        derivation.ManifestError, match="does not bind the selected payload"
+    ):
+        derivation.derive(tmp_path, manifest)
+
+
+def test_oracle_v3_b_owner_receipt_a_must_bind_the_fund_scoped_body(tmp_path: Path):
+    """The old account-scoped approval text cannot authorize the amended perimeter."""
+    derivation = load_derivation_module()
+    stale_body = (
+        "PROVIDER_CUSTODY_PERIMETER each deposit adds and each withdrawal "
+        "subtracts cash line below zero is an error"
+    )
+    manifest, _, _ = custody_v3_fixture(
+        tmp_path, amended_custody_policy(), receipt_a_body=stale_body
+    )
+
+    with pytest.raises(
+        derivation.ManifestError, match="receipt A does not bind"
+    ):
+        derivation.derive(tmp_path, manifest)
+
+
+# ------------------------- funded epochs and funded_end closures (R1/#539) ---------
+
+
+def test_derive_spans_tiled_funded_epochs_and_strategy_keeps_predecessor(
+    tmp_path: Path,
+):
+    """OWNER_539: a funded predecessor epoch joins the account ITD and its strategy."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [
+                nav("account-p", "2025-11-24", "100"),
+                nav("account-p", "2026-01-04", "110"),
+                nav("account-p", "2026-01-05", "110"),
+                nav("account-p", "2026-09-17", "121"),
+                nav("account-q", "2026-09-16", "50"),
+                nav("account-q", "2026-09-17", "55"),
+            ],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                "account_id": "account-p",
+                "strategy_id": "strategy-old",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2025-11-25",
+                "effective_end": "2026-01-04",
+            },
+            {
+                "account_id": "account-p",
+                "strategy_id": "strategy-new",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2026-01-05",
+                "effective_end": None,
+            },
+            {
+                "account_id": "account-q",
+                "strategy_id": "strategy-old",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2026-09-16",
+                "effective_end": None,
+            },
+        ],
+    )
+
+    output = derivation.derive(tmp_path)
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+
+    # Account ITD spans both tiled funded epochs: 100 -> 110 -> 121 = +21%.
+    assert values[("twr.account", "account-p")] == "0.2100000000"
+    assert values[("capital.account.cutoff", "account-p")] == "121.00"
+    # The predecessor epoch earns its +10% inside its own strategy, and the
+    # continuing member compounds after it: 1.1 x 1.1 - 1.
+    assert values[("twr.strategy", "strategy-old")] == "0.2100000000"
+    # The successor strategy sees only the successor epoch: 110 -> 121.
+    assert values[("twr.strategy", "strategy-new")] == "0.1000000000"
+    # Cutoff capital follows the current mapping only.
+    assert values[("capital.strategy.cutoff", "strategy-old")] == "55.00"
+    assert values[("capital.strategy.cutoff", "strategy-new")] == "121.00"
+
+
+def test_derive_fails_closed_when_funded_epochs_leave_a_gap(tmp_path: Path):
+    """An unfunded gap between included epochs must not be spanned silently."""
+    derivation = load_derivation_module()
+    write_selected_inputs(
+        tmp_path,
+        derivation,
+        {
+            "nav_observations": [
+                nav("account-p", "2025-11-24", "100"),
+                nav("account-p", "2026-01-04", "110"),
+                nav("account-p", "2026-09-17", "121"),
+            ],
+            "flows": [],
+            "capital_anchors": [],
+        },
+        [
+            {
+                "account_id": "account-p",
+                "strategy_id": "strategy-old",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2025-11-25",
+                "effective_end": "2026-01-04",
+            },
+            {
+                "account_id": "account-p",
+                "strategy_id": "strategy-new",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "effective_start": "2026-02-01",
+                "effective_end": None,
+            },
+        ],
+    )
+
+    output = derivation.derive(tmp_path)
+    not_derivable = {
+        (row["metric_id"], row["entity"]): row["reason"]
+        for row in output["not_derivable"]
+    }
+
+    assert "unfunded gap" in not_derivable[("twr.account", "account-p")]
+    assert "unfunded gap" in not_derivable[("flows.account.net", "account-p")]
+    # The capital and source-date facts do not depend on the epoch tiling.
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+    assert values[("capital.account.cutoff", "account-p")] == "121.00"
+
+
+def write_closure_manifest_fixture(
+    tmp_path: Path,
+    ledger: dict[str, object],
+    crosswalk_rows: list[dict[str, object]],
+    declared_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    """A schema-2 selected-inputs fixture carrying a declared account manifest."""
+    role_paths = write_manifest_role_fixtures(tmp_path)
+    ledger.setdefault("as_of_date", "2026-09-17")
+    role_paths["provider-ledger.json"].write_text(
+        json.dumps(ledger), encoding="utf-8"
+    )
+    role_paths["account-strategy-current-epoch-crosswalk.json"].write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "calculation_cutoff_date": "2026-09-17",
+                "rows": crosswalk_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    declared_path = tmp_path / "declared-cutoff-manifest.json"
+    declared_path.write_text(
+        json.dumps(
+            {"calculation_cutoff_date": "2026-09-17", "rows": declared_rows}
+        ),
+        encoding="utf-8",
+    )
+    entries = [pinned_entry(path) for path in role_paths.values()]
+    declared_entry = pinned_entry(declared_path)
+    declared_entry["family"] = "declared_cutoff_date"
+    entries.append(declared_entry)
+    return {
+        "schema": "qe-cp-acceptance-inputs/2",
+        "cutoff": "2026-09-17",
+        "inputs": entries,
+    }
+
+
+CLOSURE_CROSSWALK_ROWS = [
+    {
+        "account_id": "account-c",
+        "strategy_id": "tt-portfolio",
+        "provider": "SCHWAB",
+        "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+        "effective_start": "2025-11-25",
+        "effective_end": None,
+    },
+    {
+        "account_id": "account-d",
+        "strategy_id": "strategy-d",
+        "provider": "SCHWAB",
+        "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+        "effective_start": "2026-01-01",
+        "effective_end": None,
+    },
+]
+CLOSURE_LEDGER = {
+    "as_of_date": "2026-09-17",
+    "nav_observations": [
+        nav("account-c", "2025-11-25", "100"),
+        nav("account-c", "2025-12-01", "250"),
+        nav("account-c", "2026-06-21", "200"),
+        nav("account-c", "2026-06-22", "10"),
+        nav("account-c", "2026-09-17", "15"),
+        nav("account-d", "2026-01-01", "1000"),
+        nav("account-d", "2026-09-17", "1000"),
+    ],
+    "flows": [
+        flow(
+            "deposit-c",
+            "account-c",
+            "100",
+            "EXTERNAL_CONTRIBUTION",
+            occurred_on="2025-12-01",
+        ),
+        flow(
+            "liquidation-c",
+            "account-c",
+            "-190",
+            "EXTERNAL_WITHDRAWAL",
+            occurred_on="2026-06-22",
+        ),
+    ],
+    "capital_anchors": [],
+}
+CLOSURE_DECLARED_ROWS = [
+    {
+        "account_id": "account-c",
+        "strategy_id": "tt-portfolio",
+        "effective_start": "2025-11-25",
+        "effective_end": None,
+        "performance_closed_on": "2026-06-21",
+        "post_liquidation_income": "5",
+    },
+    {
+        "account_id": "account-d",
+        "strategy_id": "strategy-d",
+        "effective_start": "2026-01-01",
+        "effective_end": None,
+    },
+]
+
+
+def test_derive_closed_epoch_closes_only_twr_at_funded_end(tmp_path: Path):
+    """A liquidated account closes only its account-level TWR at funded_end.
+
+    The account flows and MWR keep the full window through the cutoff: the
+    post-funded_end liquidation withdrawal is a real flow, never dropped, and
+    the MWR terminal value is the actual cutoff NAV. The account's remaining
+    cutoff NAV is really held money: it stays cutoff capital at account,
+    strategy and portfolio level, and the strategy return keeps linking the
+    closed member's post-liquidation value periods.
+    """
+    derivation = load_derivation_module()
+    manifest = write_closure_manifest_fixture(
+        tmp_path, CLOSURE_LEDGER, CLOSURE_CROSSWALK_ROWS, CLOSURE_DECLARED_ROWS
+    )
+
+    output = derivation.derive(tmp_path, manifest)
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+    as_of = {
+        (row["metric_id"], row["entity"]): row["as_of"] for row in output["metrics"]
+    }
+
+    # Only the TWR stops at the funded_end: (250-100)/100 x 200/250 - 1 = +20%.
+    assert values[("twr.account", "account-c")] == "0.2000000000"
+    assert as_of[("twr.account", "account-c")] == "2026-06-21"
+    # Flows after the funded_end (the -190 liquidation withdrawal) are real
+    # flows in the full window: net 100 - 190, count 2, through the cutoff.
+    assert values[("flows.account.net", "account-c")] == "-90.00"
+    assert values[("flows.account.count", "account-c")] == "2"
+    assert as_of[("flows.account.net", "account-c")] == "2026-09-17"
+    assert as_of[("flows.account.count", "account-c")] == "2026-09-17"
+    # The MWR runs the full window with the cutoff NAV 15 as terminal value.
+    assert values[("mwr.account", "account-c")] == "0.0433595344"
+    assert as_of[("mwr.account", "account-c")] == "2026-09-17"
+    # The residual 15 is the account's actual cutoff NAV and stays capital;
+    # the 5 of labelled post-liquidation income inside it is never added twice.
+    assert values[("capital.account.cutoff", "account-c")] == "15.00"
+    assert as_of[("capital.account.cutoff", "account-c")] == "2026-09-17"
+    capital_note = next(
+        row["notes"]
+        for row in output["metrics"]
+        if row["metric_id"] == "capital.account.cutoff" and row["entity"] == "account-c"
+    )
+    assert "post-liquidation income" in capital_note
+    assert "never added a second time" in capital_note
+    # The source still observed the account through the cutoff.
+    assert values[("date.source_last_observation", "account-c")] == "2026-09-17"
+    # The strategy still holds the closed member's value: the residual stays in
+    # the strategy capital and the portfolio total.
+    assert values[("capital.strategy.cutoff", "tt-portfolio")] == "15.00"
+    assert values[("capital.portfolio.systematic.cutoff", "portfolio")] == "1015.00"
+    # The strategy series keeps linking the member's post-liquidation value
+    # periods: 1.5 x 0.8 x (10+190)/200 x 15/10 - 1 = +80%.
+    assert values[("twr.strategy", "tt-portfolio")] == "0.8000000000"
+
+
+def test_derive_closed_epoch_rejects_an_unreconciled_income_declaration(
+    tmp_path: Path,
+):
+    """A declared post-liquidation income that contradicts the raw bytes fails closed."""
+    derivation = load_derivation_module()
+    tampered_rows = [
+        {**row, "post_liquidation_income": "6"}
+        if row["account_id"] == "account-c"
+        else row
+        for row in CLOSURE_DECLARED_ROWS
+    ]
+    manifest = write_closure_manifest_fixture(
+        tmp_path, CLOSURE_LEDGER, CLOSURE_CROSSWALK_ROWS, tampered_rows
+    )
+
+    output = derivation.derive(tmp_path, manifest)
+    not_derivable = {
+        (row["metric_id"], row["entity"]): row["reason"]
+        for row in output["not_derivable"]
+    }
+
+    assert "does not reconcile" in not_derivable[("capital.account.cutoff", "account-c")]
+    assert "does not reconcile" in not_derivable[("twr.account", "account-c")]
+    assert ("capital.strategy.cutoff", "tt-portfolio") in not_derivable
+    # The source observation date is a raw fact and survives the distrusted closure.
+    values = {
+        (row["metric_id"], row["entity"]): row["value"] for row in output["metrics"]
+    }
+    assert values[("date.source_last_observation", "account-c")] == "2026-09-17"
+    assert values[("capital.account.cutoff", "account-d")] == "1000.00"
+
+
+def test_declared_manifest_rows_must_match_the_crosswalk_epochs(tmp_path: Path):
+    """A declared manifest that drops or invents an epoch row is not an input."""
+    derivation = load_derivation_module()
+    manifest = write_closure_manifest_fixture(
+        tmp_path, CLOSURE_LEDGER, CLOSURE_CROSSWALK_ROWS, CLOSURE_DECLARED_ROWS[1:]
+    )
+
+    with pytest.raises(derivation.ManifestError, match="do not match"):
+        derivation.derive(tmp_path, manifest)
+
+
+def test_epoch_window_problem_tiles_contiguous_epochs_only():
+    """Overlap, gaps, and an open epoch followed by another are all refused."""
+    derivation = load_derivation_module()
+
+    assert (
+        derivation.epoch_window_problem(
+            [
+                (date(2025, 11, 25), date(2026, 1, 4), "a"),
+                (date(2026, 1, 5), None, "b"),
+            ]
+        )
+        is None
+    )
+    assert "overlap" in derivation.epoch_window_problem(
+        [
+            (date(2025, 11, 25), date(2026, 1, 5), "a"),
+            (date(2026, 1, 5), None, "b"),
+        ]
+    )
+    assert "gap" in derivation.epoch_window_problem(
+        [
+            (date(2025, 11, 25), date(2026, 1, 4), "a"),
+            (date(2026, 2, 1), None, "b"),
+        ]
+    )
+    assert "open-ended" in derivation.epoch_window_problem(
+        [
+            (date(2025, 11, 25), None, "a"),
+            (date(2026, 1, 5), None, "b"),
+        ]
+    )
