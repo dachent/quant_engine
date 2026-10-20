@@ -328,10 +328,14 @@ POLICY_DECISION_KEYS = frozenset(
     }
 )
 POLICY_DECISION_AUTHORITIES = frozenset({"OWNER_318", "SHARED_FLOW_POLICY_324"})
-FUND_POLICY_KEYS = frozenset({
-    "amends_approval_evidence", "fund_scoped_providers",
-    "fund_scoped_treatment", "fund_scoped_effect",
-})
+FUND_POLICY_KEYS = frozenset(
+    {
+        "amends_approval_evidence",
+        "fund_scoped_providers",
+        "fund_scoped_treatment",
+        "fund_scoped_effect",
+    }
+)
 COMPILED_RECEIPT_KEYS = frozenset(
     {
         "approved_on",
@@ -729,7 +733,9 @@ def _load_inputs_manifest_v3(
             raise InputError(f"{tag} has a malformed bytes value for {path}")
         if family in V3_IGNORED_FAMILIES:
             if epoch_metadata is not None:
-                raise InputError(f"{tag} names multiple declared-cutoff metadata inputs")
+                raise InputError(
+                    f"{tag} names multiple declared-cutoff metadata inputs"
+                )
             epoch_metadata = (path, digest, size)
             ignored.append(path)
             continue
@@ -1884,7 +1890,8 @@ def _validate_policy_decision(policy: object, what: str) -> dict[str, Any]:
     """The native approved-decision shape; unresolved states fail closed."""
 
     if not isinstance(policy, dict) or set(policy) not in (
-        POLICY_DECISION_KEYS, POLICY_DECISION_KEYS | FUND_POLICY_KEYS
+        POLICY_DECISION_KEYS,
+        POLICY_DECISION_KEYS | FUND_POLICY_KEYS,
     ):
         raise InputError(f"{what} does not carry exactly the approved decision key set")
     if policy["decision_status"] != "APPROVED":
@@ -1923,9 +1930,15 @@ def _validate_policy_decision(policy: object, what: str) -> dict[str, Any]:
             if not isinstance(policy[key], str) or not policy[key].strip():
                 raise InputError(f"{what} {key} must be a non-empty string")
         providers = policy["fund_scoped_providers"]
-        if (not isinstance(providers, list) or not providers
-                or any(not isinstance(p, str) or p not in {"MATRIXPORT", "QUANTBASE"} for p in providers)
-                or len(providers) != len(set(providers))):
+        if (
+            not isinstance(providers, list)
+            or not providers
+            or any(
+                not isinstance(p, str) or p not in {"MATRIXPORT", "QUANTBASE"}
+                for p in providers
+            )
+            or len(providers) != len(set(providers))
+        ):
             raise InputError(f"{what} unsupported or duplicate fund_scoped_providers")
     return policy
 
@@ -2085,10 +2098,18 @@ def reconcile_owner_receipt_evidence(
             f"{tag}: compiled owner receipt is not structurally equal to the "
             "contract's owner_decision_receipts entry"
         )
-    if calculation["provider_custody_perimeter"]["approval_evidence"] != compiled["evidence_url"]:
+    if (
+        calculation["provider_custody_perimeter"]["approval_evidence"]
+        != compiled["evidence_url"]
+    ):
         raise InputError(f"{tag}: policy approval_evidence does not bind comment A")
-    if not comment_a["body"].strip() or comment_a["user"]["login"] != comment_b["user"]["login"]:
-        raise InputError(f"{tag}: owner approval body or paired owner identity is missing/inconsistent")
+    if (
+        not comment_a["body"].strip()
+        or comment_a["user"]["login"] != comment_b["user"]["login"]
+    ):
+        raise InputError(
+            f"{tag}: owner approval body or paired owner identity is missing/inconsistent"
+        )
     if (
         comment_a["id"] != compiled["comment_id"]
         or comment_a["html_url"] != compiled["evidence_url"]
@@ -3454,7 +3475,9 @@ class CustodyFacts:
     first_allocation: dt.date | None = None
 
 
-def _quantbase_account_cash_labels(data: bytes, fund_id: str, cutoff: dt.date) -> tuple[str, ...]:
+def _quantbase_account_cash_labels(
+    data: bytes, fund_id: str, cutoff: dt.date
+) -> tuple[str, ...]:
     """Label account-paid income/costs beside NAV; never add them to capital.
 
     Dividend attribution requires a symbol traded by exactly one fund before
@@ -3474,50 +3497,70 @@ def _quantbase_account_cash_labels(data: bytes, fund_id: str, cutoff: dt.date) -
     rows = list(unique.values())
     symbols: dict[str, set[str]] = {}
     fills: dict[str, list[dt.date]] = {}
-    for row in rows:
-        if row.get("activity_type") != "order" or row.get("executed") != "Y":
+    for fill_row in rows:
+        if fill_row.get("activity_type") != "order" or fill_row.get("executed") != "Y":
             continue
-        day = iso_date(row.get("filled_at"))
+        day = iso_date(fill_row.get("filled_at"))
         if day is not None and day <= cutoff:
-            fills.setdefault(row.get("transaction", ""), []).append(day)
-            if row.get("symbol") and row.get("fund"):
-                symbols.setdefault(row["symbol"], set()).add(row["fund"])
+            fills.setdefault(fill_row.get("transaction", ""), []).append(day)
+            if fill_row.get("symbol") and fill_row.get("fund"):
+                symbols.setdefault(fill_row["symbol"], set()).add(fill_row["fund"])
     dividends = ZERO
     unattributed = ZERO
     journals: list[tuple[str, dt.date, Decimal, str]] = []
     sells: list[tuple[str, dt.date, Decimal, str]] = []
     aum = ZERO
-    for row in rows:
-        kind = row.get("activity_type")
-        amount = decimal_or_none(row.get("amount"))
-        if kind == "dividend":
-            day = iso_date(row.get("date"))
+    for label_row in rows:
+        label_kind = label_row.get("activity_type")
+        amount = decimal_or_none(label_row.get("amount"))
+        if label_kind == "dividend":
+            day = iso_date(label_row.get("date"))
             if day is None or amount is None:
                 return ("account-cash labels NOT_DERIVABLE: malformed dividend",)
             if day <= cutoff:
-                funds = symbols.get(row.get("symbol", ""), set())
+                funds = symbols.get(label_row.get("symbol", ""), set())
                 if funds == {fund_id}:
                     dividends += amount
                 elif len(funds) != 1:
                     unattributed += amount
-        elif kind == "journal" and row.get("status") == "COMPLETE":
-            day = iso_date(row.get("completed_at")) or iso_date(row.get("created_at"))
+        elif label_kind == "journal" and label_row.get("status") == "COMPLETE":
+            day = iso_date(label_row.get("completed_at")) or iso_date(
+                label_row.get("created_at")
+            )
             if day is not None and day <= cutoff and amount is not None:
-                if row.get("type") in QUANTBASE_FEE_JOURNAL_TYPES:
-                    journals.append((row.get("id", ""), day, abs(amount), row["type"]))
-                    if row["type"] == "AUM_FEE":
+                if label_row.get("type") in QUANTBASE_FEE_JOURNAL_TYPES:
+                    journals.append(
+                        (label_row.get("id", ""), day, abs(amount), label_row["type"])
+                    )
+                    if label_row["type"] == "AUM_FEE":
                         aum += abs(amount)
-        elif kind == "filled_txn" and row.get("created_to_cover_fees") == "True":
-            days = fills.get(row.get("id", ""), [])
+        elif (
+            label_kind == "filled_txn"
+            and label_row.get("created_to_cover_fees") == "True"
+        ):
+            days = fills.get(label_row.get("id", ""), [])
             if days and amount is not None:
-                sells.append((row.get("id", ""), max(days), abs(amount), row.get("fund", "")))
+                sells.append(
+                    (
+                        label_row.get("id", ""),
+                        max(days),
+                        abs(amount),
+                        label_row.get("fund", ""),
+                    )
+                )
     candidates = {
-        i: sorted((j for j, journal in enumerate(journals)
-                   if (sale[1].year, sale[1].month) == (journal[1].year, journal[1].month)),
-                  key=lambda j: (abs(sale[2] - journals[j][2]), journals[j][0]))
+        i: sorted(
+            (
+                j
+                for j, journal in enumerate(journals)
+                if (sale[1].year, sale[1].month) == (journal[1].year, journal[1].month)
+            ),
+            key=lambda j: (abs(sale[2] - journals[j][2]), journals[j][0]),
+        )
         for i, sale in enumerate(sells)
     }
     matches: dict[int, int] = {}
+
     def match(i: int, visited: set[int]) -> bool:
         for j in candidates[i]:
             if j in visited:
@@ -3527,58 +3570,98 @@ def _quantbase_account_cash_labels(data: bytes, fund_id: str, cutoff: dt.date) -
                 matches[j] = i
                 return True
         return False
-    complete = all([match(i, set()) for i in sorted(candidates, key=lambda i: sells[i][0])])
+
+    complete = all(
+        [match(i, set()) for i in sorted(candidates, key=lambda i: sells[i][0])]
+    )
     fund_cost = sum((sale[2] for sale in sells if sale[3] == fund_id), ZERO)
-    cash_fees = sum((j[2] for i, j in enumerate(journals)
-                     if i not in matches and j[3] == "PARTNER_SUB_FEE"), ZERO)
+    cash_fees = sum(
+        (
+            j[2]
+            for i, j in enumerate(journals)
+            if i not in matches and j[3] == "PARTNER_SUB_FEE"
+        ),
+        ZERO,
+    )
     return (
         f"DIVIDENDS_PAID_TO_ACCOUNT_CASH_NOT_IN_FUND_NAV {_money(dividends)} USD; "
         f"unattributed/shared-symbol account dividends {_money(unattributed)} USD",
         f"IN_FUND_FEE_FUNDED_SELLS_COST -{_money(fund_cost)} USD; cost, not netted from gross allocations",
-        (f"FEES_PAID_FROM_ACCOUNT_CASH -{_money(cash_fees)} USD "
-         "(account scope, matched journals excluded; same-month closest-amount maximum matching)"
-         if complete else "FEES_PAID_FROM_ACCOUNT_CASH NOT_DERIVABLE: unmatched fee-funded sell"),
+        (
+            f"FEES_PAID_FROM_ACCOUNT_CASH -{_money(cash_fees)} USD "
+            "(account scope, matched journals excluded; same-month closest-amount maximum matching)"
+            if complete
+            else "FEES_PAID_FROM_ACCOUNT_CASH NOT_DERIVABLE: unmatched fee-funded sell"
+        ),
         f"ACCOUNT_LEVEL_AUM_FEES -{_money(aum)} USD; not attributed to fund capital",
     )
 
 
 def _fund_facts(
-    strategy_id: str, source: AccountSource, files: Mapping[str, InputFile],
-    fx: FxSourceV3, cutoff: dt.date, native: MatrixportNative | None,
+    strategy_id: str,
+    source: AccountSource,
+    files: Mapping[str, InputFile],
+    fx: FxSourceV3,
+    cutoff: dt.date,
+    native: MatrixportNative | None,
 ) -> CustodyFacts | str:
     """Gross fund allocations from native fills, never account funding or fees."""
     failures: list[str] = []
     events: list[CashEvent] = []
     labels: tuple[str, ...] = ()
     if source.provider == "QUANTBASE":
-        failures.extend(u.reason for u in source.flows.unusable
-                        if u.effective_date is None or u.effective_date <= cutoff)
-        events = [CashEvent(f.effective_date, f.amount, "allocation", f.record_id)
-                  for f in source.flows.flows
-                  if f.amount > ZERO and f.effective_date <= cutoff]
-        inputs = (QB_ACTIVITY, QB_ACCOUNTS)
-        labels = _quantbase_account_cash_labels(files[QB_ACTIVITY].data, source.fund_id or "", cutoff)
+        failures.extend(
+            u.reason
+            for u in source.flows.unusable
+            if u.effective_date is None or u.effective_date <= cutoff
+        )
+        events = [
+            CashEvent(f.effective_date, f.amount, "allocation", f.record_id)
+            for f in source.flows.flows
+            if f.amount > ZERO and f.effective_date <= cutoff
+        ]
+        inputs: tuple[str, ...] = (QB_ACTIVITY, QB_ACCOUNTS)
+        labels = _quantbase_account_cash_labels(
+            files[QB_ACTIVITY].data, source.fund_id or "", cutoff
+        )
     elif source.provider == "MATRIXPORT" and native is not None:
         for sub in native.subscriptions:
             if sub.event_day <= cutoff:
-                amount = _convert_event(fx, sub.currency, sub.event_day, sub.amount,
-                                        sub.order_id, failures)
+                amount = _convert_event(
+                    fx, sub.currency, sub.event_day, sub.amount, sub.order_id, failures
+                )
                 if amount is not None:
-                    events.append(CashEvent(sub.event_day, amount, "allocation", sub.order_id))
+                    events.append(
+                        CashEvent(sub.event_day, amount, "allocation", sub.order_id)
+                    )
         failures.extend(reason for day, reason in native.unsupported if day <= cutoff)
-        inputs = (MP_NATIVE_SUBSCRIPTION, MP_NATIVE_GENERATION, MP_NATIVE_CATALOG,
-                  FX_HISTORY, FX_RATES)
+        inputs = (
+            MP_NATIVE_SUBSCRIPTION,
+            MP_NATIVE_GENERATION,
+            MP_NATIVE_CATALOG,
+            FX_HISTORY,
+            FX_RATES,
+        )
     elif source.provider == "MATRIXPORT":
-        wallet = parse_matrixport_wallet(files[MP_DEPOSITS].data, files[MP_BILLS].data,
-                                         files[MP_DISPOSITIONS].data, files[MP_NAV].data)
+        wallet = parse_matrixport_wallet(
+            files[MP_DEPOSITS].data,
+            files[MP_BILLS].data,
+            files[MP_DISPOSITIONS].data,
+            files[MP_NAV].data,
+        )
         raw, failures = _matrixport_cash_events(wallet, fx, cutoff)
-        events = [CashEvent(e.day, -e.amount, e.kind, e.record)
-                  for e in raw if e.kind == "allocation"]
+        events = [
+            CashEvent(e.day, -e.amount, e.kind, e.record)
+            for e in raw
+            if e.kind == "allocation"
+        ]
         inputs = (MP_BILLS, MP_NAV, FX_HISTORY, FX_RATES)
     else:
         return f"unsupported fund-scoped provider {source.provider}"
     if failures or not events:
-        return "fund-scoped allocation proof incomplete: " + "; ".join(failures or ["no fund allocations"])
+        return "fund-scoped allocation proof incomplete: " + "; ".join(
+            failures or ["no fund allocations"]
+        )
     unique: dict[str, CashEvent] = {}
     for event in events:
         if event.record in unique and unique[event.record] != event:
@@ -3586,11 +3669,19 @@ def _fund_facts(
         unique[event.record] = event
     gross = sum((e.amount for e in unique.values()), ZERO)
     return CustodyFacts(
-        gross, gross, ZERO, len(unique), max(e.day for e in unique.values()), inputs,
-        (f"fund-scoped {strategy_id}: gross fund allocations {_money(gross)}, "
-         "each counted once at fill/subscription event-date FX; account funding, "
-         "other funds, fee sells and wallet conversion costs are not capital; "
-         "current capital is fund NAV; no derived cash line",) + labels,
+        gross,
+        gross,
+        ZERO,
+        len(unique),
+        max(e.day for e in unique.values()),
+        inputs,
+        (
+            f"fund-scoped {strategy_id}: gross fund allocations {_money(gross)}, "
+            "each counted once at fill/subscription event-date FX; account funding, "
+            "other funds, fee sells and wallet conversion costs are not capital; "
+            "current capital is fund NAV; no derived cash line",
+        )
+        + labels,
         first_allocation=min(e.day for e in unique.values()),
     )
 
@@ -3862,24 +3953,40 @@ def _epoch_boundaries(crosswalk: Crosswalk, data: bytes, cutoff: dt.date) -> Cro
     document = json.loads(data)
     if iso_date(document.get("calculation_cutoff_date")) != cutoff:
         raise InputError("epoch metadata cutoff differs from selected cutoff")
+
     def key(row: Assignment) -> tuple[str, str, str, str, str]:
-        return (row.account_id, row.provider, row.strategy_id,
-                _day(row.effective_start), _day(row.effective_end) if row.effective_end else "")
+        return (
+            row.account_id,
+            row.provider,
+            row.strategy_id,
+            _day(row.effective_start),
+            _day(row.effective_end) if row.effective_end else "",
+        )
+
     mapped = {key(row): row for row in crosswalk.rows}
     seen = set()
     for raw in document.get("rows", []):
         if raw.get("performance_closed_on") is None:
             continue
-        identity = (raw.get("account_id"), raw.get("provider"), raw.get("strategy_id"),
-                    raw.get("effective_start"), raw.get("effective_end") or "")
+        identity = (
+            raw.get("account_id"),
+            raw.get("provider"),
+            raw.get("strategy_id"),
+            raw.get("effective_start"),
+            raw.get("effective_end") or "",
+        )
         closed = iso_date(raw["performance_closed_on"])
         if identity not in mapped or identity in seen:
             raise InputError("closed epoch metadata lacks one exact crosswalk identity")
         seen.add(identity)
         row = mapped[identity]
-        if (closed is None or closed < row.effective_start or closed > cutoff
-                or (row.effective_end is not None and closed > row.effective_end)
-                or (row.funded_end is not None and row.funded_end != closed)):
+        if (
+            closed is None
+            or closed < row.effective_start
+            or closed > cutoff
+            or (row.effective_end is not None and closed > row.effective_end)
+            or (row.funded_end is not None and row.funded_end != closed)
+        ):
             raise InputError("conflicting or invalid funded_end metadata")
         mapped[identity] = replace(row, funded_end=closed)
     return replace(crosswalk, rows=tuple(mapped[key(row)] for row in crosswalk.rows))
@@ -3938,10 +4045,15 @@ def _derive(
         contract_bytes[relative] = repo_root.joinpath(*relative.split("/")).read_bytes()
         contract_paths[relative] = relative
     crosswalk = parse_crosswalk(files[CROSSWALK].data)
-    if (v3 and authority is not None and manifest is not None
-            and manifest.epoch_metadata is not None
-            and _outcome_calculation_contract(authority.contract, "INVESTED_CAPITAL", "epochs")
-                ["provider_custody_perimeter"].get("fund_scoped_providers")):
+    if (
+        v3
+        and authority is not None
+        and manifest is not None
+        and manifest.epoch_metadata is not None
+        and _outcome_calculation_contract(
+            authority.contract, "INVESTED_CAPITAL", "epochs"
+        )["provider_custody_perimeter"].get("fund_scoped_providers")
+    ):
         path, digest, size = manifest.epoch_metadata
         metadata = read_input(qe_root, path, {path: digest})
         if size is not None and metadata.size != size:
@@ -4039,8 +4151,11 @@ def _derive(
             "sha256": manifest.sha256,
             "bytes": manifest.size,
             "schema": manifest.schema,
-            "not_read": [p for p in manifest.ignored
-                         if p not in {item.path for item in files.values()}],
+            "not_read": [
+                p
+                for p in manifest.ignored
+                if p not in {item.path for item in files.values()}
+            ],
         }
     if v3 and authority is not None:
         document["authority"] = {
@@ -4180,15 +4295,19 @@ def _account_span(rows: Sequence[Assignment]) -> Segment | None:
 
     ordered = sorted(rows, key=lambda row: row.effective_start)
     for earlier, later in zip(ordered, ordered[1:]):
-        if earlier.funded_end is not None and earlier.funded_end < later.effective_start:
+        if (
+            earlier.funded_end is not None
+            and earlier.funded_end < later.effective_start
+        ):
             return None
         if earlier.effective_end is None or (
             later.effective_start != earlier.effective_end + dt.timedelta(days=1)
         ):
             return None
     return Segment(
-        ordered[0].account_id, ordered[0].effective_start,
-        ordered[-1].funded_end or ordered[-1].effective_end
+        ordered[0].account_id,
+        ordered[0].effective_start,
+        ordered[-1].funded_end or ordered[-1].effective_end,
     )
 
 
@@ -4227,29 +4346,40 @@ def _mapping_withheld(ledger: Ledger, account_id: str, cutoff: dt.date) -> bool:
     return bool(window) and "MAPPED" not in window
 
 
-def _post_liquidation_notes(source: AccountSource, closed: dt.date, cutoff: dt.date) -> list[str]:
+def _post_liquidation_notes(
+    source: AccountSource, closed: dt.date, cutoff: dt.date
+) -> list[str]:
     """Dated signed income, recomputed from value changes less cash transfers."""
     if closed not in source.values:
         raise NotDerivableError("funded_end has no exact source value observation")
-    if any(f.amount > ZERO and closed < f.effective_date <= cutoff for f in source.flows.flows):
+    if any(
+        f.amount > ZERO and closed < f.effective_date <= cutoff
+        for f in source.flows.flows
+    ):
         raise NotDerivableError("funding after funded_end requires a new funded epoch")
-    if any(u.effective_date is None or closed < u.effective_date <= cutoff
-           for u in source.flows.unusable):
+    if any(
+        u.effective_date is None or closed < u.effective_date <= cutoff
+        for u in source.flows.unusable
+    ):
         raise NotDerivableError("unusable post-liquidation flow evidence")
     previous = closed
     credits = []
     total = ZERO
     for day in sorted(d for d in source.values if closed < d <= cutoff):
-        flows = sum((f.amount for f in source.flows.flows if _within(f, previous, day)), ZERO)
+        flows = sum(
+            (f.amount for f in source.flows.flows if _within(f, previous, day)), ZERO
+        )
         income = source.values[day] - source.values[previous] - flows
         if income:
             credits.append(f"{_day(day)} {_money(income)}")
             total += income
         previous = day
-    return [f"performance closed at funded_end {_day(closed)}; post-liquidation income "
-            f"{_money(total)} ({', '.join(credits) or 'none'}), labelled separately; "
-            "not contributed capital or account-epoch TWR; full-window MWR includes held NAV and flows; later value "
-            "periods remain in strategy totals/returns, without adding income twice"]
+    return [
+        f"performance closed at funded_end {_day(closed)}; post-liquidation income "
+        f"{_money(total)} ({', '.join(credits) or 'none'}), labelled separately; "
+        "not contributed capital or account-epoch TWR; full-window MWR includes held NAV and flows; later value "
+        "periods remain in strategy totals/returns, without adding income twice"
+    ]
 
 
 def _derive_accounts(
@@ -4287,11 +4417,22 @@ def _derive_accounts(
                 try:
                     base_notes.extend(_post_liquidation_notes(source, closed, cutoff))
                 except NotDerivableError as exc:
-                    for metric_id in ("capital.account.cutoff", "date.source_last_observation",
-                                      "flows.account.net", "flows.account.count", "twr.account", "mwr.account"):
-                        output.missing(metric_id, account_id,
-                                       WINDOW if metric_id.startswith(("flows", "twr", "mwr")) else None,
-                                       str(exc))
+                    for metric_id in (
+                        "capital.account.cutoff",
+                        "date.source_last_observation",
+                        "flows.account.net",
+                        "flows.account.count",
+                        "twr.account",
+                        "mwr.account",
+                    ):
+                        output.missing(
+                            metric_id,
+                            account_id,
+                            WINDOW
+                            if metric_id.startswith(("flows", "twr", "mwr"))
+                            else None,
+                            str(exc),
+                        )
                     continue
         if last is None:
             reason = (
@@ -4407,11 +4548,21 @@ def _derive_accounts(
                 full_member, full_notes = build_member(source, full_span, cutoff)
                 full_notes.extend(base_notes)
             except NotDerivableError as exc:
-                for metric_id in ("flows.account.net", "flows.account.count", "mwr.account"):
+                for metric_id in (
+                    "flows.account.net",
+                    "flows.account.count",
+                    "mwr.account",
+                ):
                     output.missing(metric_id, account_id, WINDOW, str(exc))
-                _emit_returns(output, "account", account_id, [member],
-                              source.inputs + (CROSSWALK, MVP_CONTRACT), member_notes,
-                              mwr_members=[])
+                _emit_returns(
+                    output,
+                    "account",
+                    account_id,
+                    [member],
+                    source.inputs + (CROSSWALK, MVP_CONTRACT),
+                    member_notes,
+                    mwr_members=[],
+                )
                 continue
         flow_total = sum((amount for _, amount, _ in full_member.flows), ZERO)
         inputs = source.inputs + (CROSSWALK, MVP_CONTRACT)
@@ -4435,8 +4586,16 @@ def _derive_accounts(
             inputs,
             full_notes,
         )
-        _emit_returns(output, "account", account_id, [member], inputs, member_notes,
-                      mwr_members=[full_member], mwr_notes=full_notes)
+        _emit_returns(
+            output,
+            "account",
+            account_id,
+            [member],
+            inputs,
+            member_notes,
+            mwr_members=[full_member],
+            mwr_notes=full_notes,
+        )
 
 
 def _emit_returns(
@@ -4905,14 +5064,28 @@ def _derive_strategies_and_portfolio_v3(
                 output.missing(INVESTED_METRIC, strategy_id, None, custody_reason)
                 output.missing(COVERAGE_METRIC, coverage_entity, None, custody_reason)
             elif facts is not None and fund_scoped:
-                output.metric(INVESTED_METRIC, strategy_id, None, cutoff,
-                              _money(facts.invested), "USD", row_inputs, facts.notes)
-                reason = ("fund-scoped provider policy: no derived cash line; "
-                          "account funding and wallet conversion residuals are not "
-                          "strategy cash or capital")
+                output.metric(
+                    INVESTED_METRIC,
+                    strategy_id,
+                    None,
+                    cutoff,
+                    _money(facts.invested),
+                    "USD",
+                    row_inputs,
+                    facts.notes,
+                )
+                reason = (
+                    "fund-scoped provider policy: no derived cash line; "
+                    "account funding and wallet conversion residuals are not "
+                    "strategy cash or capital"
+                )
                 output.missing(CASH_METRIC, strategy_id, None, reason)
-                output.missing(COVERAGE_METRIC, coverage_entity, None,
-                               reason + "; cash coverage is inapplicable")
+                output.missing(
+                    COVERAGE_METRIC,
+                    coverage_entity,
+                    None,
+                    reason + "; cash coverage is inapplicable",
+                )
             elif facts is not None:
                 output.metric(
                     INVESTED_METRIC,
@@ -4990,11 +5163,15 @@ def _derive_strategies_and_portfolio_v3(
             if facts is not None:
                 systematic_inputs.update(facts.inputs)
                 systematic_inputs.add(CAPITAL_POLICY)
-                row_notes.extend(facts.notes if fund_scoped else (
-                    f"observed member NAV {_money(total)} plus separate owner "
-                    f"cash {_money(facts.cash)} (R8: the cash line earns no "
-                    "fund return)",
-                ))
+                row_notes.extend(
+                    facts.notes
+                    if fund_scoped
+                    else (
+                        f"observed member NAV {_money(total)} plus separate owner "
+                        f"cash {_money(facts.cash)} (R8: the cash line earns no "
+                        "fund return)",
+                    )
+                )
             stale_members.extend(
                 f"{strategy_id} {_day(day)}"
                 for day in sorted(set(days))
@@ -5164,7 +5341,11 @@ def _strategy_returns(
                 cutoff,
             )
             if row.funded_end is not None and row.funded_end < cutoff:
-                notes.extend(_post_liquidation_notes(sources[row.account_id], row.funded_end, cutoff))
+                notes.extend(
+                    _post_liquidation_notes(
+                        sources[row.account_id], row.funded_end, cutoff
+                    )
+                )
         except NotDerivableError as exc:
             for metric_id in ("twr.strategy", "mwr.strategy"):
                 output.missing(metric_id, strategy_id, WINDOW, str(exc))

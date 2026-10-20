@@ -787,7 +787,9 @@ def declared_epoch_closures(
     closures: dict[tuple[str, date], dict[str, object]] = {}
     for row in rows:
         if not isinstance(row, dict):
-            raise ManifestError("declared account-strategy manifest row is not an object")
+            raise ManifestError(
+                "declared account-strategy manifest row is not an object"
+            )
         key = epoch_key(
             row.get("account_id"),
             row.get("strategy_id"),
@@ -2530,8 +2532,7 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
                 or provider != provider.upper()
                 for provider in fund_scoped_providers_value
             )
-            or len(set(fund_scoped_providers_value))
-            != len(fund_scoped_providers_value)
+            or len(set(fund_scoped_providers_value)) != len(fund_scoped_providers_value)
             or not str(contract_policy["fund_scoped_treatment"]).strip()
             or not str(contract_policy["fund_scoped_effect"]).strip()
             or not str(contract_policy["amends_approval_evidence"]).strip()
@@ -3007,9 +3008,7 @@ def derive(
             "R6 v3: selected raw USDT/USD closes are admitted through the "
             "2026-09-17 cutoff; Matrixport owner flows use event-date FX."
         )
-    fund_scoped_providers = fund_scoped_providers_from_authority(
-        authority_family_paths
-    )
+    fund_scoped_providers = fund_scoped_providers_from_authority(authority_family_paths)
     if schema_v3 and fund_scoped_providers:
         convention_notes.append(
             "R8 as amended by the fund-scoped PROVIDER_CUSTODY_PERIMETER "
@@ -4105,8 +4104,7 @@ def derive(
             )
             if not epoch_window:
                 member_problem = (
-                    "a funded member epoch has no admitted observation in its "
-                    "interval"
+                    "a funded member epoch has no admitted observation in its interval"
                 )
                 break
             cash_flows, flow_count, flow_problem = classified_external_flows(
@@ -4123,8 +4121,12 @@ def derive(
                 count=flow_count,
             )
         if member_problem is not None:
-            add_not_derivable(output, "twr.strategy", strategy_id, member_problem, "ITD")
-            add_not_derivable(output, "mwr.strategy", strategy_id, member_problem, "ITD")
+            add_not_derivable(
+                output, "twr.strategy", strategy_id, member_problem, "ITD"
+            )
+            add_not_derivable(
+                output, "mwr.strategy", strategy_id, member_problem, "ITD"
+            )
             continue
         strategy_observations, strategy_flows = composite_series(
             member_windows,

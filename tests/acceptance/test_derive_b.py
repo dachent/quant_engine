@@ -2668,7 +2668,6 @@ def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
     derivation = load_derivation_module()
     policy = amended_custody_policy()
     authority_files = custody_authority_files(policy)
-    receipt = json.loads(authority_files["receipt-b.json"])
     base_rows = [
         {**included_row("volatis", "volatis-strategy"), "provider": "QUANTBASE"},
         {**included_row("robuxio", "robuxio-crypto"), "provider": "MATRIXPORT"},
@@ -3397,18 +3396,20 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
     assert values[("capital.strategy.cutoff", "volatis-strategy")] == "105.00"
     # The derived-cash metrics lose their meaning for a fund-scoped provider and
     # move to NOT-DERIVABLE with the policy reason, for both custody strategies.
-    cash_metric_ids = ("capital.strategy_cash.cutoff", "date.strategy_cash.coverage_end")
-    assert not [
-        row for row in output["metrics"] if row["metric_id"] in cash_metric_ids
-    ]
+    cash_metric_ids = (
+        "capital.strategy_cash.cutoff",
+        "date.strategy_cash.coverage_end",
+    )
+    assert not [row for row in output["metrics"] if row["metric_id"] in cash_metric_ids]
     cash_reasons = {
         (row["metric_id"], row["entity"]): row["reason"]
         for row in output["not_derivable"]
         if row["metric_id"] in cash_metric_ids
     }
-    assert "fund-scoped" in cash_reasons[
-        ("capital.strategy_cash.cutoff", "volatis-strategy")
-    ]
+    assert (
+        "fund-scoped"
+        in cash_reasons[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    )
     assert {
         entity
         for metric_id, entity in cash_reasons
@@ -3447,8 +3448,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         (row["metric_id"], row["entity"]) for row in missing_fx["not_derivable"]
     }
     missing_fx_values = {
-        (row["metric_id"], row["entity"]): row["value"]
-        for row in missing_fx["metrics"]
+        (row["metric_id"], row["entity"]): row["value"] for row in missing_fx["metrics"]
     }
     # The deposit's event-date FX row is gone, so the custody events fail closed...
     assert ("invested_capital.strategy.cutoff", "volatis-strategy") in missing_fx_ids
@@ -4698,9 +4698,7 @@ def test_oracle_v3_b_amended_decision_key_set_is_exact(tmp_path: Path):
 def test_oracle_v3_b_tampered_perimeter_fails_closed(tmp_path: Path):
     """Editing the scoped provider list without new owner evidence is refused."""
     derivation = load_derivation_module()
-    manifest, paths, entries = custody_v3_fixture(
-        tmp_path, amended_custody_policy()
-    )
+    manifest, paths, entries = custody_v3_fixture(tmp_path, amended_custody_policy())
 
     # Tamper with the policy file alone: it no longer matches the contract.
     policy_path = paths["policy.json"]
@@ -4747,9 +4745,7 @@ def test_oracle_v3_b_owner_receipt_a_must_bind_the_fund_scoped_body(tmp_path: Pa
         tmp_path, amended_custody_policy(), receipt_a_body=stale_body
     )
 
-    with pytest.raises(
-        derivation.ManifestError, match="receipt A does not bind"
-    ):
+    with pytest.raises(derivation.ManifestError, match="receipt A does not bind"):
         derivation.derive(tmp_path, manifest)
 
 
@@ -4876,9 +4872,7 @@ def write_closure_manifest_fixture(
     """A schema-2 selected-inputs fixture carrying a declared account manifest."""
     role_paths = write_manifest_role_fixtures(tmp_path)
     ledger.setdefault("as_of_date", "2026-09-17")
-    role_paths["provider-ledger.json"].write_text(
-        json.dumps(ledger), encoding="utf-8"
-    )
+    role_paths["provider-ledger.json"].write_text(json.dumps(ledger), encoding="utf-8")
     role_paths["account-strategy-current-epoch-crosswalk.json"].write_text(
         json.dumps(
             {
@@ -4891,9 +4885,7 @@ def write_closure_manifest_fixture(
     )
     declared_path = tmp_path / "declared-cutoff-manifest.json"
     declared_path.write_text(
-        json.dumps(
-            {"calculation_cutoff_date": "2026-09-17", "rows": declared_rows}
-        ),
+        json.dumps({"calculation_cutoff_date": "2026-09-17", "rows": declared_rows}),
         encoding="utf-8",
     )
     entries = [pinned_entry(path) for path in role_paths.values()]
@@ -5050,7 +5042,9 @@ def test_derive_closed_epoch_rejects_an_unreconciled_income_declaration(
         for row in output["not_derivable"]
     }
 
-    assert "does not reconcile" in not_derivable[("capital.account.cutoff", "account-c")]
+    assert (
+        "does not reconcile" in not_derivable[("capital.account.cutoff", "account-c")]
+    )
     assert "does not reconcile" in not_derivable[("twr.account", "account-c")]
     assert ("capital.strategy.cutoff", "tt-portfolio") in not_derivable
     # The source observation date is a raw fact and survives the distrusted closure.

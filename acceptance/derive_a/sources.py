@@ -513,8 +513,8 @@ def parse_quantbase_sleeve(
     coverage_end: dt.date | None = None
     dividends: list[tuple[dt.date, Decimal]] = []
     for row in rows:
-        for key in ("time", "created_at", "date", "filled_at", "completed_at"):
-            day = _utc_day(row.get(key, ""))
+        for stamp in ("time", "created_at", "date", "filled_at", "completed_at"):
+            day = _utc_day(row.get(stamp, ""))
             if day is not None and (coverage_end is None or day > coverage_end):
                 coverage_end = day
         if row.get("activity_type") == "dividend":
