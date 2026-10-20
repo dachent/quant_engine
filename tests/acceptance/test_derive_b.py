@@ -5097,3 +5097,60 @@ def test_epoch_window_problem_tiles_contiguous_epochs_only():
             (date(2026, 1, 5), None, "b"),
         ]
     )
+
+
+def _buy_row(row_id: str, amount: str = "96") -> dict[str, str]:
+    return {
+        "activity_type": "filled_txn",
+        "type": "BUY",
+        "fund": "107",
+        "id": row_id,
+        "amount": amount,
+        "time": "2026-09-01T13:00:00+00:00",
+    }
+
+
+def test_oracle_b_quantbase_repeated_buy_counts_once_and_conflict_refuses():
+    derivation = load_derivation_module()
+    FUND = frozenset({"volatis-strategy"})
+    fx = {"USDC": {}, "USDT": {}}
+    once = derivation.raw_custody_capital(
+        [_buy_row("b1")], [], [], fx, fund_scoped_strategies=FUND
+    )
+    twice = derivation.raw_custody_capital(
+        [_buy_row("b1"), _buy_row("b1")], [], [], fx, fund_scoped_strategies=FUND
+    )
+    assert (
+        once["volatis-strategy"]["allocation"]
+        == twice["volatis-strategy"]["allocation"]
+    )
+    with pytest.raises(ValueError, match="conflicting duplicate Quantbase BUY"):
+        derivation.raw_custody_capital(
+            [_buy_row("b1"), _buy_row("b1", "97")], [], [], fx
+        )
+
+
+def _post_close_flow(amount: str) -> dict[str, object]:
+    return {
+        "account_id": "acct",
+        "record_id": "r1",
+        "event_date": "2026-07-01",
+        "amount": {"status": "AVAILABLE", "currency": "USD", "value": amount},
+        "flow_type": "EXTERNAL_CONTRIBUTION",
+    }
+
+
+def test_oracle_b_funding_after_funded_end_requires_a_new_epoch():
+    derivation = load_derivation_module()
+    observations = [
+        (date(2026, 6, 21), Decimal("0")),
+        (date(2026, 9, 17), Decimal("5")),
+    ]
+    result = derivation.post_liquidation_income_from_raw(
+        observations, [_post_close_flow("5")], "acct", date(2026, 6, 21)
+    )
+    assert isinstance(result, str) and "new funded epoch" in result
+    ok = derivation.post_liquidation_income_from_raw(
+        observations, [_post_close_flow("-1")], "acct", date(2026, 6, 21)
+    )
+    assert isinstance(ok, tuple)

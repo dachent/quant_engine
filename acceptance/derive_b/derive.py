@@ -816,6 +816,13 @@ def declared_epoch_closures(
                 "declared account-strategy manifest carries an invalid "
                 f"post_liquidation_income: {error}"
             ) from error
+        raw_epoch_end = row.get("effective_end")
+        epoch_end = None if raw_epoch_end is None else parse_date(str(raw_epoch_end))
+        if epoch_end is not None and closed_on > epoch_end:
+            raise ManifestError(
+                "declared performance_closed_on is after the epoch's effective_end: "
+                f"{raw_closed!r}"
+            )
         if not epoch_start <= closed_on <= CUTOFF:
             raise ManifestError(
                 "declared performance_closed_on is outside the epoch or after "
@@ -863,6 +870,8 @@ def post_liquidation_income_from_raw(
     )
     if flow_problem is not None:
         return flow_problem
+    if any(amount > 0 for amount in flows.values()):
+        return "funding after the declared funded_end requires a new funded epoch"
     income = later[-1][1] - at_close[-1][1] - sum(flows.values(), Decimal("0"))
     return at_close[-1][1], income
 
@@ -1504,6 +1513,7 @@ def raw_custody_capital(
         return parsed.astimezone(timezone.utc).date()
 
     admitted_transfer_rows: dict[str, dict[str, str]] = {}
+    admitted_buy_rows: dict[str, dict[str, str]] = {}
     linked_provider_identity: str | None = None
     for row in quantbase_rows:
         if row.get("activity_type") == "transfer":
@@ -1581,6 +1591,14 @@ def raw_custody_capital(
         value = Decimal(str(amount))
         if row.get("activity_type") == "filled_txn" and row.get("fund") == "107":
             if row.get("type") == "BUY":
+                buy_id = str(row.get("id") or "").strip()
+                if buy_id:
+                    previous_buy = admitted_buy_rows.get(buy_id)
+                    if previous_buy is not None:
+                        if previous_buy != row:
+                            raise ValueError("conflicting duplicate Quantbase BUY id")
+                        continue
+                    admitted_buy_rows[buy_id] = dict(row)
                 add("volatis-strategy", occurred_on, "allocation", abs(value))
             elif row.get("type") == "SELL":
                 if str(row.get("created_to_cover_fees", "")).strip().lower() != "true":
