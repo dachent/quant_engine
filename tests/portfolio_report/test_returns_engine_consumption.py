@@ -1942,6 +1942,7 @@ _PRIVATE_DETAIL_FIELDS = (
     "performance_status",
     "performance_reason",
     "performance_opening_date",
+    "performance_closed_on",
 )
 _OWN_TRACE_MISSING = r"own trace path is missing for strategy-shared \(account-r\)"
 _DO_NOT_RECONCILE = (
@@ -2268,6 +2269,92 @@ def test_r3_reconcile_rejects_the_weighted_path_that_drops_the_zero_capital_inco
     with pytest.raises(
         reporter.ReportValidationError,
         match=f"{_DO_NOT_RECONCILE} for strategy-shared",
+    ):
+        _performance(catalog, details)
+
+
+def _closed_member_changes(*, tamper_income: str | None = None) -> dict[str, Any]:
+    """The zero-run member as a CLOSED traced member (#539).
+
+    The engine closes its epoch at the last funded day: the trace stops there, and what
+    follows (the 3.81 of income on a zero-capital sub-period) is post-liquidation income.
+    ``tamper_income`` changes the member's own by-value facts only.
+    """
+
+    from quant_engine.portfolio_ledger.returns import OpeningPoint, link_epoch
+
+    first = date.fromisoformat(R3_DAYS[0])
+    values = ("40", "0", "0", "0", "3.81", "3.81")
+    obs = _r3_observations(R3_DAYS, values)
+    epoch = link_epoch(
+        obs,
+        [_r3_leg("-40", R3_DAYS[1])],
+        OpeningPoint(first, obs[first], "LAST_OBSERVATION_BEFORE_START"),
+    )
+    assert epoch.status == "AVAILABLE" and epoch.closed_on is not None
+    member_values = values
+    if tamper_income is not None:
+        member_values = values[:4] + (tamper_income,) * 2
+    return {
+        "own_path_links": _manifest_trace_links(epoch),
+        "performance_status": "AVAILABLE",
+        "performance_reason": None,
+        "performance_closed_on": epoch.closed_on.isoformat(),
+        "by_value_source": _zero_run_source("account-r", R3_DAYS, member_values),
+    }
+
+
+def test_closed_member_post_liquidation_income_reconciles_to_the_strategy_composite() -> (
+    None
+):
+    """#539: a closed member's income after its last funded day is in the composite.
+
+    The ledger's strategy path keeps summing the member's values after the closing, so the
+    reconcile adds the same value periods.  Before, the member's trace alone (stopping at
+    the closing day) left the 3.81 of income out and the strategy refused to publish.
+    """
+
+    catalog, details, _epochs = _r3_world(r3_changes=_closed_member_changes())
+
+    rows = _performance(catalog, details)
+
+    assert rows["account-r"]["epoch_admission_status"] == "FUNDED"
+
+
+def test_member_closed_on_its_opening_date_has_no_trace_and_reconciles_by_value() -> (
+    None
+):
+    changes = _closed_member_changes()
+    changes["own_path_links"] = []
+    changes["performance_closed_on"] = R3_DAYS[0]
+    catalog, details, _epochs = _r3_world(r3_changes=changes)
+
+    rows = _performance(catalog, details)
+
+    assert rows["account-r"]["epoch_admission_status"] == "FUNDED"
+
+
+def test_closed_member_tampered_income_fails_the_1e_12_gate() -> None:
+    catalog, details, _epochs = _r3_world(
+        r3_changes=_closed_member_changes(tamper_income="3.82")
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=f"{_DO_NOT_RECONCILE} for strategy-shared",
+    ):
+        _performance(catalog, details)
+
+
+def test_closed_member_without_its_by_value_inputs_fails_closed() -> None:
+    changes = _closed_member_changes()
+    changes["by_value_source"] = None
+    catalog, details, _epochs = _r3_world(r3_changes=changes)
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match=r"closed multi-account member by-value source is missing "
+        r"for strategy-shared \(account-r\)",
     ):
         _performance(catalog, details)
 

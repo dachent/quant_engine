@@ -2472,6 +2472,36 @@ def _r3_member_value_periods(
     return periods
 
 
+def _closed_member_post_closing_periods(
+    strategy_id: str, account_id: str, detail: Mapping[str, Any]
+) -> tuple[ValuePeriod, ...]:
+    """Value periods of a closed member after its last funded day (#539).
+
+    A closed member's own trace stops at ``performance_closed_on``; what follows is dated
+    post-liquidation income, not time-weighted return.  The strategy composite the ledger
+    publishes keeps summing the member's values (a deferred credit on a zero-capital
+    sub-period is income of the strategy, never dropped), so the reconcile adds the same
+    value periods through the one return engine.  A closed member without its by-value
+    inputs, or whose closing day is not one of its observations, fails closed.
+    """
+
+    source = detail.get("by_value_source")
+    if not isinstance(source, Mapping):
+        raise ReportValidationError(
+            "closed multi-account member by-value source is missing "
+            f"for {strategy_id} ({account_id})"
+        )
+    try:
+        observations, legs = _r3_member_value_facts(account_id, source)
+        closed_on = _date(detail.get("performance_closed_on"), "performance_closed_on")
+        return value_periods(account_id, observations, legs, closed_on)
+    except (ReportValidationError, ReturnsError) as exc:
+        raise ReportValidationError(
+            "closed multi-account member by-value source is invalid "
+            f"for {strategy_id} ({account_id}): {exc}"
+        ) from exc
+
+
 def _reconcile_multi_account_strategy_composite(
     strategy_id: str,
     current_epoch_details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
@@ -2532,7 +2562,10 @@ def _reconcile_multi_account_strategy_composite(
                 )
                 continue
             links = detail.get("own_path_links")
-            if not isinstance(links, list) or not links:
+            # A member that closes on its performance opening date has no trace: its
+            # whole path is post-closing value periods (admitted below).
+            closed = detail.get("performance_closed_on") is not None
+            if not isinstance(links, list) or (not links and not closed):
                 raise ReportValidationError(
                     "multi-account member own trace path is missing "
                     f"for {strategy_id} ({account_id})"
@@ -2556,6 +2589,10 @@ def _reconcile_multi_account_strategy_composite(
                         beginning_capital
                         * _decimal(link.get("factor"), "trace link.factor"),
                     )
+                )
+            if detail.get("performance_closed_on") is not None:
+                periods.extend(
+                    _closed_member_post_closing_periods(strategy_id, account_id, detail)
                 )
         canonical = strategy_live.get(strategy_id)
         if canonical is None or len({item.member_id for item in periods}) < 2:
@@ -8248,6 +8285,7 @@ def _current_epoch_detail(
         "performance_status": verified.get("performance_status"),
         "performance_reason": verified.get("performance_reason"),
         "performance_opening_date": verified.get("performance_opening_date"),
+        "performance_closed_on": verified.get("performance_closed_on"),
         "by_value_source": verified.get("by_value_source"),
         "performance_payload": verified["performance_payload"],
     }
@@ -12291,6 +12329,7 @@ def _verified_epoch_authority_details(
             "performance_status": manifest_row.get("performance_status"),
             "performance_reason": manifest_row.get("performance_reason"),
             "performance_opening_date": manifest_row.get("performance_opening_date"),
+            "performance_closed_on": manifest_row.get("performance_closed_on"),
             "by_value_source": (
                 {
                     field: calculation_by_key[key].get(field)
@@ -12301,6 +12340,7 @@ def _verified_epoch_authority_details(
                     )
                 }
                 if _r3_zero_capital_member(manifest_row)
+                or manifest_row.get("performance_closed_on") is not None
                 else None
             ),
             "performance_payload": (
