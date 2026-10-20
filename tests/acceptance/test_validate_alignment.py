@@ -3441,21 +3441,14 @@ def _real_context() -> checks.Context:
 def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     """Guard: contract bytes == the baseline's authority pointer, and the qsi tuple."""
 
-    # #539: the owner funded the two TT predecessor epochs and ended the 4054
-    # epoch on 2026-06-21, so the census no longer is the one the expected
-    # baseline pins.  The validator must say so (it refuses a run against a
-    # baseline derived from other authority); the baseline is re-derived from
-    # the retained data at the governed release step.
+    # #539/R1: the baseline was re-derived against this contract (two independent
+    # derivations at the R1 inputs), so the census is the one it pins.
     state = checks.census_state(_real_context())
-    assert state.census is None
-    assert state.problem is not None
+    assert state.problem is None
+    assert state.census is not None
     assert (
-        "89c78abb39472da2fefed362f899bc7e119b35b5ea3a62d42654975f9615de16"
-        in state.problem
-    )
-    assert (
-        "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da"
-        in state.problem
+        state.census.sha256
+        == "89c78abb39472da2fefed362f899bc7e119b35b5ea3a62d42654975f9615de16"
     )
     census = json.loads(
         (

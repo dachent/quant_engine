@@ -1694,6 +1694,385 @@ def _v3_policy_digest(policy: dict[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _fund_policy() -> dict[str, Any]:
+    policy = _v3_policy()
+    policy.update(
+        amends_approval_evidence="https://example.invalid/issues/330#issuecomment-999",
+        fund_scoped_providers=["MATRIXPORT", "QUANTBASE"],
+        fund_scoped_treatment="GROSS_FUND_ALLOCATIONS; NO_DERIVED_CASH_LINE",
+        fund_scoped_effect="Gross allocations at fill dates; fees are costs, not capital.",
+    )
+    return policy
+
+
+def test_amended_fund_policy_uses_allocations_and_no_cash(tmp_path: Path) -> None:
+    manifest = _manifest_tree_v3(tmp_path, policy_document=_fund_policy())
+    document = _run_v3(tmp_path, manifest)
+    rows, missing = _index(document), _reasons(document)
+    for strategy, capital, nav in (
+        ("volatis-strategy", "96.00", "105.00"),
+        ("robuxio-crypto", "50.00", "55.00"),
+    ):
+        assert rows[("invested_capital.strategy.cutoff", strategy)]["value"] == capital
+        assert rows[("capital.strategy.cutoff", strategy)]["value"] == nav
+        assert "fund-scoped" in missing[("capital.strategy_cash.cutoff", strategy)]
+        assert any(
+            k[0] == "date.strategy_cash.coverage_end"
+            and k[1].startswith(strategy)
+            and "fund-scoped" in reason
+            for k, reason in missing.items()
+        )
+
+
+def test_amended_policy_tampering_cannot_reuse_owner_digest(tmp_path: Path) -> None:
+    policy = _fund_policy()
+    response = _v3_comment_b(_v3_policy_digest(policy))
+    policy["fund_scoped_providers"] = ["QUANTBASE"]
+    manifest = _manifest_tree_v3(
+        tmp_path, policy_document=policy, response_document=response
+    )
+    with pytest.raises(sources.InputError, match="does not bind"):
+        _run_v3(tmp_path, manifest)
+
+
+def test_crosswalk_funded_end_closes_performance_span() -> None:
+    raw = _crosswalk()
+    raw["rows"] = copy.deepcopy(raw["rows"][:1])
+    raw["rows"][0]["funded_end"] = "2026-01-06"
+    crosswalk = sources.parse_crosswalk(json.dumps(raw).encode())
+    assert derive._account_span(crosswalk.rows).end == day("2026-01-06")
+
+
+def test_current_epoch_crosswalk_manifest_alias(tmp_path: Path) -> None:
+    manifest = _manifest_tree_v3(tmp_path)
+    entry = next(
+        e
+        for e in manifest["inputs"]
+        if e["family"] == "account_strategy_map_and_active_universe"
+    )
+    entry["path"] = "inputs/current-epoch-crosswalk.json"
+    loaded = derive.load_inputs_manifest(json.dumps(manifest).encode(), "synthetic")
+    assert loaded.layout[derive.CROSSWALK] == entry["path"]
+
+
+def test_funded_boundary_metadata_is_identity_bound_and_not_a_financial_oracle() -> (
+    None
+):
+    raw = _crosswalk()
+    raw["rows"] = raw["rows"][:1]
+    crosswalk = sources.parse_crosswalk(json.dumps(raw).encode())
+    row = raw["rows"][0]
+    metadata = {
+        "calculation_cutoff_date": CUTOFF,
+        "rows": [
+            {
+                **row,
+                "performance_closed_on": "2026-01-06",
+                "current_value": "99999999",
+                "mwr_xirr": "9999",
+            }
+        ],
+    }
+    result = derive._epoch_boundaries(
+        crosswalk, json.dumps(metadata).encode(), day(CUTOFF)
+    )
+    assert result.rows[0].funded_end == day("2026-01-06")
+    metadata["rows"][0]["account_id"] = "unrelated"
+    with pytest.raises(sources.InputError, match="exact crosswalk"):
+        derive._epoch_boundaries(crosswalk, json.dumps(metadata).encode(), day(CUTOFF))
+
+
+@pytest.mark.parametrize("last_observation", ["2026-01-09", "2026-01-10"])
+def test_closed_epoch_closes_only_twr_and_retains_full_window_mwr_and_flows(
+    tmp_path: Path, last_observation: str
+) -> None:
+    rows = copy.deepcopy(V3_CROSSWALK_ROWS)
+    target = next(r for r in rows if r["strategy_id"] == "strat-one")
+    target["funded_end"] = "2026-01-05"
+    account = target["account_id"]
+    ledger = _ledger_v3()
+    ledger["nav_observations"] = [
+        row
+        for row in ledger["nav_observations"]
+        if row["account_id"] != account or row["as_of_date"] < last_observation
+    ]
+    # A later raw row must not displace the last observation within cutoff.
+    ledger["nav_observations"] += _nav(
+        account, "ibkr", {last_observation: "1320", "2026-01-11": "9000"}
+    )
+    # Post-close withdrawals remain real flows; later income stays in terminal NAV.
+    ledger["flows"].append(
+        {
+            "account_id": account,
+            "event_date": "2026-01-08",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-20"},
+            "record_id": "synthetic-post-close-withdrawal",
+        }
+    )
+    legacy_rows = copy.deepcopy(rows)
+    next(r for r in legacy_rows if r["account_id"] == account).pop("funded_end")
+    legacy = _index(
+        _run_v3(
+            tmp_path,
+            _manifest_tree_v3(
+                tmp_path, crosswalk_rows=legacy_rows, ledger_document=ledger
+            ),
+        )
+    )
+    document = _run_v3(
+        tmp_path,
+        _manifest_tree_v3(tmp_path, crosswalk_rows=rows, ledger_document=ledger),
+    )
+    indexed = _index(document)
+    assert indexed[("capital.account.cutoff", account)]["value"] == "1320.00"
+    for key, row in indexed.items():
+        if key[0] in {
+            "capital.strategy.cutoff",
+            "capital.portfolio.systematic.cutoff",
+            "weight.strategy.cutoff",
+            "twr.strategy",
+            "mwr.strategy",
+        }:
+            assert (row["value"], row["as_of"]) == (
+                legacy[key]["value"],
+                legacy[key]["as_of"],
+            ), key
+    source_date = indexed[("date.source_last_observation", account)]
+    assert (source_date["value"], source_date["as_of"]) == (
+        last_observation,
+        last_observation,
+    )
+    for metric in ("flows.account.net", "flows.account.count", "mwr.account"):
+        assert (
+            indexed[(metric, account)]["value"],
+            indexed[(metric, account)]["as_of"],
+        ) == (legacy[(metric, account)]["value"], last_observation)
+    assert indexed[("flows.account.net", account)]["value"] == "80.00"
+    assert indexed[("flows.account.count", account)]["value"] == "2"
+    assert indexed[("twr.account", account)]["as_of"] == "2026-01-05"
+    assert "post-liquidation" in indexed[("twr.account", account)]["notes"]
+
+
+def test_tt_predecessor_funded_epoch_enters_account_and_strategy_returns(
+    tmp_path: Path,
+) -> None:
+    # Synthetic TT-like predecessor: the contract now admits the first epoch.
+    sleeves = [
+        (*r[:4], "FUNDED_MEMBERSHIP") if r[4] == "ASSIGNMENT_ONLY" else r
+        for r in V3_SLEEVES
+    ]
+    indexed = _index(_run_v3(tmp_path, _manifest_tree_v3(tmp_path, sleeves=sleeves)))
+    assert indexed[("twr.account", "acct-sw")]["value"] == "0.210000000000"
+    assert indexed[("twr.strategy", "strat-one")]["value"] == "0.246666666667"
+    assert "ASSIGNMENT_ONLY" not in indexed[("twr.strategy", "strat-one")]["notes"]
+
+
+def test_fund_capital_gross_once_excludes_other_funds_sells_and_post_cutoff(
+    tmp_path: Path,
+) -> None:
+    activity = V3_ACTIVITY + "\n".join(V3_ACTIVITY.splitlines()[1:]) + "\n"
+    for ident, fund, amount, filled in [
+        ("extra-buy", "7", "7", "2026-01-07"),
+        ("ordinary-sell", "7", "-5", "2026-01-08"),
+        ("other-buy", "8", "1000", "2026-01-07"),
+        ("future-buy", "7", "9000", "2026-01-11"),
+    ]:
+        activity += _activity_row(
+            activity_type="filled_txn",
+            id=ident,
+            fund=fund,
+            fund_title="Demo Fund" if fund == "7" else "Other",
+            amount=amount,
+            type="SELL" if amount.startswith("-") else "BUY",
+            filled="Y",
+            time=filled + "T01:00:00Z",
+        )
+        activity += _activity_row(
+            activity_type="order",
+            id=ident + "-order",
+            fund=fund,
+            transaction=ident,
+            executed="Y",
+            filled_at=filled + "T12:00:00Z",
+        )
+    document = _run_v3(
+        tmp_path,
+        _manifest_tree_v3(tmp_path, policy_document=_fund_policy(), activity=activity),
+    )
+    assert (
+        _index(document)[("invested_capital.strategy.cutoff", "volatis-strategy")][
+            "value"
+        ]
+        == "103.00"
+    )
+
+
+def test_quantbase_labels_separate_dividends_cash_fees_and_fee_sells() -> None:
+    columns = [
+        "activity_type",
+        "id",
+        "fund",
+        "transaction",
+        "executed",
+        "filled_at",
+        "symbol",
+        "amount",
+        "date",
+        "completed_at",
+        "status",
+        "type",
+        "created_to_cover_fees",
+    ]
+    rows = [
+        dict(
+            activity_type="order",
+            id="o1",
+            fund="7",
+            transaction="s1",
+            executed="Y",
+            filled_at="2026-01-05",
+            symbol="SOLE",
+        ),
+        dict(
+            activity_type="order",
+            id="o2",
+            fund="7",
+            transaction="x",
+            executed="Y",
+            filled_at="2026-01-05",
+            symbol="SHARED",
+        ),
+        dict(
+            activity_type="order",
+            id="o3",
+            fund="8",
+            transaction="y",
+            executed="Y",
+            filled_at="2026-01-05",
+            symbol="SHARED",
+        ),
+        dict(
+            activity_type="dividend",
+            id="d1",
+            date="2026-01-06",
+            symbol="SOLE",
+            amount="4",
+        ),
+        dict(
+            activity_type="dividend",
+            id="d2",
+            date="2026-01-06",
+            symbol="SHARED",
+            amount="8",
+        ),
+        dict(
+            activity_type="dividend",
+            id="future",
+            date="2026-01-11",
+            symbol="SOLE",
+            amount="9000",
+        ),
+        dict(
+            activity_type="filled_txn",
+            id="s1",
+            fund="7",
+            amount="-1.975",
+            created_to_cover_fees="True",
+        ),
+        dict(
+            activity_type="journal",
+            id="j1",
+            type="PARTNER_SUB_FEE",
+            completed_at="2026-01-06",
+            status="COMPLETE",
+            amount="2",
+        ),
+        dict(
+            activity_type="journal",
+            id="j2",
+            type="PARTNER_SUB_FEE",
+            completed_at="2026-01-06",
+            status="COMPLETE",
+            amount="3",
+        ),
+        dict(
+            activity_type="journal",
+            id="j3",
+            type="AUM_FEE",
+            completed_at="2026-01-06",
+            status="COMPLETE",
+            amount="10",
+        ),
+    ]
+    data = (
+        ",".join(columns)
+        + "\n"
+        + "".join(",".join(row.get(k, "") for k in columns) + "\n" for row in rows)
+    ).encode()
+    notes = "; ".join(derive._quantbase_account_cash_labels(data, "7", day(CUTOFF)))
+    assert "NOT_IN_FUND_NAV 4.00" in notes
+    assert "shared-symbol account dividends 8.00" in notes
+    assert "IN_FUND_FEE_FUNDED_SELLS_COST -1.98" in notes
+    assert "FEES_PAID_FROM_ACCOUNT_CASH -3.00" in notes
+    assert "ACCOUNT_LEVEL_AUM_FEES -10.00" in notes
+
+
+def test_general_history_and_post_cutoff_values_do_not_enter_strategy_perimeter(
+    tmp_path: Path,
+) -> None:
+    base = _run_v3(tmp_path, _manifest_tree_v3(tmp_path))
+    ledger = _ledger_v3()
+    ledger["nav_observations"] += _nav("general-ib", "ibkr", {"2026-01-09": "900000"})
+    ledger["nav_observations"] += _nav(
+        "general-fidelity", "fidelity", {"2026-01-09": "800000"}
+    )
+    ledger["flows"].extend(
+        [
+            {
+                "account_id": a,
+                "event_date": "2026-01-03",
+                "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "700000"},
+                "record_id": a + "-deposit",
+            }
+            for a in ("general-ib", "general-fidelity")
+        ]
+    )
+    changed = _run_v3(tmp_path, _manifest_tree_v3(tmp_path, ledger_document=ledger))
+
+    def values(document: dict[str, Any]) -> list[tuple[Any, ...]]:
+        return [
+            (r["metric_id"], r["entity"], r["as_of"], r["value"])
+            for r in document["metrics"]
+        ]
+
+    assert values(changed) == values(base)
+
+
+def test_closed_epoch_refunding_requires_a_new_epoch() -> None:
+    source = derive.AccountSource(
+        "synthetic",
+        "SCHWAB",
+        {day("2026-01-01"): D("10"), day("2026-01-02"): D("20")},
+        sources.AccountFlows(
+            flows=[
+                sources.Flow(
+                    day("2026-01-02"),
+                    D("10"),
+                    day("2026-01-02"),
+                    "DEPOSIT",
+                    "synthetic",
+                )
+            ]
+        ),
+        (),
+        (),
+    )
+    with pytest.raises(derive.NotDerivableError, match="new funded epoch"):
+        derive._post_liquidation_notes(source, day("2026-01-01"), day(CUTOFF))
+
+
 def _v3_compiled_receipt(digest: str) -> dict[str, Any]:
     return {
         "decision_id": "PROVIDER_CUSTODY_PERIMETER",
@@ -2021,12 +2400,14 @@ def _manifest_tree_v3(root: Path, **overrides: Any) -> dict[str, Any]:
         "response",
         json.dumps(overrides.get("response_document") or _v3_comment_b(digest)),
     )
+    cutoff_data = json.dumps({"calculation_cutoff_date": CUTOFF, "rows": []}).encode()
+    _write_bytes(root, V3P["cutoff_manifest"], cutoff_data)
     entries: list[dict[str, Any]] = [
         {
             "family": "declared_cutoff_date",
             "path": V3P["cutoff_manifest"],
-            "sha256": "0" * 64,
-            "bytes": 1,
+            "sha256": hashlib.sha256(cutoff_data).hexdigest(),
+            "bytes": len(cutoff_data),
         }
     ]
     for key in (

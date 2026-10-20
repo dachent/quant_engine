@@ -69,6 +69,16 @@ INPUT_ROLE_BASENAMES = {
     "matrixport_bills": "wallet_bills.csv",
     "fx": "yfinance-history.json",
 }
+# A role whose file may be renamed on export is also resolved by its manifest
+# family when the basename is absent; both present and disagreeing is ambiguous.
+INPUT_ROLE_FAMILY_FALLBACK = {
+    "crosswalk": "account_strategy_map_and_active_universe",
+}
+# The declared account-strategy manifest (pipeline-authored by design) carries
+# the declared cutoff and, for closed funded epochs, the funded_end evidence
+# (performance_closed_on / post_liquidation_income).  It is optional so older
+# manifests stay readable, but when present it is bound to the crosswalk rows.
+ACCOUNT_MANIFEST_FAMILY = "declared_cutoff_date"
 V3_AUTHORITY_FAMILIES = frozenset(
     {
         "financial_source_contract",
@@ -81,6 +91,37 @@ V3_AUTHORITY_FAMILIES = frozenset(
         "provider_capital_owner_receipt_b",
         "provider_capital_owner_receipt_b_response",
     }
+)
+# The approved PROVIDER_CUSTODY_PERIMETER decision shape, mirroring the contract
+# validator: the eight base keys, plus the four fund-scoped amendment keys as an
+# all-or-none set (the 2026-10-16/17 owner amendments for #536/#568).
+POLICY_DECISION_KEYS = frozenset(
+    {
+        "approval_evidence",
+        "calculation_effect",
+        "decision_authority",
+        "decision_status",
+        "examples",
+        "plain_language",
+        "recommended_treatment",
+        "selected_treatment",
+    }
+)
+FUND_SCOPED_DECISION_KEYS = frozenset(
+    {
+        "amends_approval_evidence",
+        "fund_scoped_effect",
+        "fund_scoped_providers",
+        "fund_scoped_treatment",
+    }
+)
+# Phrases the owner approval comment must carry to bind the amended fund-scoped
+# custody policy body (the #568 Matrixport amendment of the #536 decision).
+RECEIPT_A_REQUIRED_PHRASES = (
+    "PROVIDER_CUSTODY_PERIMETER",
+    "product subscription",
+    "not the strategy's capital",
+    "no derived cash line",
 )
 NATIVE_MATRIXPORT_FAMILIES = frozenset(
     {
@@ -211,6 +252,7 @@ def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str
     if not isinstance(entries, list):
         raise ManifestError("inputs manifest inputs must be a list")
     paths_by_basename: dict[str, set[str]] = defaultdict(set)
+    paths_by_family: dict[str, set[str]] = defaultdict(set)
     for entry in entries:
         if not isinstance(entry, dict):
             raise ManifestError("inputs manifest entry is not a JSON object")
@@ -218,15 +260,35 @@ def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str
         if not isinstance(raw_path, str) or not raw_path:
             raise ManifestError("inputs manifest entry lacks a path")
         paths_by_basename[Path(raw_path).name].add(raw_path)
+        family = entry.get("family")
+        if isinstance(family, str):
+            paths_by_family[family].add(raw_path)
     resolved: dict[str, Path] = {}
     for role, basename in INPUT_ROLE_BASENAMES.items():
         candidates = paths_by_basename.get(basename, set())
+        family = INPUT_ROLE_FAMILY_FALLBACK.get(role)
+        family_candidates = paths_by_family.get(family, set()) if family else set()
+        if not candidates and family_candidates:
+            candidates = family_candidates
+        elif candidates and family_candidates and candidates != family_candidates:
+            raise ManifestError(
+                f"inputs manifest declares conflicting paths for role {role}: "
+                f"basename {sorted(candidates)} vs family {sorted(family_candidates)}"
+            )
         if len(candidates) != 1:
             raise ManifestError(
                 f"inputs manifest must declare exactly one distinct {basename} "
                 f"path for role {role}; found {len(candidates)}"
             )
         resolved[role] = Path(next(iter(candidates)))
+    account_manifest_candidates = paths_by_family.get(ACCOUNT_MANIFEST_FAMILY, set())
+    if len(account_manifest_candidates) > 1:
+        raise ManifestError(
+            f"inputs manifest must declare at most one {ACCOUNT_MANIFEST_FAMILY} "
+            f"entry; found {len(account_manifest_candidates)}"
+        )
+    if account_manifest_candidates:
+        resolved["account_manifest"] = Path(next(iter(account_manifest_candidates)))
     for entry in entries:
         raw_path = str(entry["path"])
         expected_sha256 = entry.get("sha256")
@@ -340,7 +402,19 @@ def file_sha256(path: Path) -> str:
 
 
 def code_commit() -> str:
-    """Read this checkout's commit without invoking repository tooling."""
+    """Read this checkout's commit without invoking repository tooling.
+
+    A distribution copy of the sources may carry no .git metadata at all; the
+    derivation must still run, so the provenance field then carries an explicit
+    sentinel instead of raising.
+    """
+    try:
+        return _read_code_commit()
+    except (OSError, ValueError):
+        return "unavailable:no-git-metadata"
+
+
+def _read_code_commit() -> str:
     dot_git = Path(__file__).resolve().parents[2] / ".git"
     git_dir = dot_git
     if dot_git.is_file():
@@ -601,6 +675,205 @@ def current_membership_starts(rows: list[dict[str, object]]) -> dict[str, date]:
             if account_id not in starts:
                 starts[account_id] = start
     return starts
+
+
+def included_epochs_by_account(
+    rows: list[dict[str, object]],
+) -> dict[str, list[tuple[date, date | None, str]]]:
+    """Map each account to every included funded-membership epoch, oldest first.
+
+    The crosswalk carries one row per funded product epoch; accounts reassigned
+    between strategies carry their predecessor epochs as further included rows
+    (the OWNER_539 TT predecessor ruling), and every included epoch is a funded
+    member epoch of its strategy.
+    """
+    epochs: dict[str, list[tuple[date, date | None, str]]] = defaultdict(list)
+    for row in rows:
+        if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH":
+            continue
+        start = parse_date(str(row["effective_start"]))
+        raw_end = row.get("effective_end")
+        epochs[str(row["account_id"])].append(
+            (
+                start,
+                None if raw_end is None else parse_date(str(raw_end)),
+                str(row["strategy_id"]),
+            )
+        )
+    return {
+        account_id: sorted(
+            account_epochs,
+            key=lambda epoch: (epoch[0], epoch[1] is None, epoch[1] or date.max),
+        )
+        for account_id, account_epochs in epochs.items()
+    }
+
+
+def epoch_window_problem(epochs: list[tuple[date, date | None, str]]) -> str | None:
+    """Fail closed unless the account's funded epochs tile one continuous interval."""
+    for previous, following in zip(epochs, epochs[1:]):
+        if previous[1] is None:
+            return "an open-ended included epoch is followed by another included epoch"
+        if following[0] <= previous[1]:
+            return "included epochs of the account overlap"
+        if following[0] > previous[1] + timedelta(days=1):
+            return "included epochs of the account leave an unfunded gap"
+    return None
+
+
+def strategy_member_epochs(
+    rows: list[dict[str, object]],
+) -> dict[str, list[tuple[str, date, date | None]]]:
+    """Map each strategy to every funded member epoch (account, start, end)."""
+    members: dict[str, list[tuple[str, date, date | None]]] = defaultdict(list)
+    for row in rows:
+        if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH":
+            continue
+        start = parse_date(str(row["effective_start"]))
+        if start > CUTOFF:
+            continue
+        raw_end = row.get("effective_end")
+        members[str(row["strategy_id"])].append(
+            (
+                str(row["account_id"]),
+                start,
+                None if raw_end is None else parse_date(str(raw_end)),
+            )
+        )
+    return {
+        strategy_id: sorted(
+            epochs, key=lambda epoch: (epoch[0], epoch[1], epoch[2] or date.max)
+        )
+        for strategy_id, epochs in members.items()
+    }
+
+
+def declared_epoch_closures(
+    account_manifest: dict[str, object], crosswalk_rows: list[dict[str, object]]
+) -> dict[tuple[str, date], dict[str, object]]:
+    """Bind the declared account-strategy manifest to the crosswalk epoch rows.
+
+    The declared manifest is pipeline-authored by design.  It must carry exactly
+    the crosswalk's included epoch rows; a row carrying ``performance_closed_on``
+    declares that epoch's funded_end (the last funded day), and its declared
+    ``post_liquidation_income`` is reconciled against the raw bytes by the
+    caller.  Returns ``(account_id, effective_start)`` -> closure evidence.
+    """
+    rows = account_manifest.get("rows")
+    if not isinstance(rows, list):
+        raise ManifestError("declared account-strategy manifest lacks rows")
+
+    def epoch_key(
+        account_id: object, strategy_id: object, start: object, end: object
+    ) -> tuple[str, str, str, str | None]:
+        return (
+            str(account_id),
+            str(strategy_id),
+            str(start),
+            None if end is None else str(end),
+        )
+
+    crosswalk_keys = {
+        epoch_key(
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row.get("effective_end"),
+        )
+        for row in crosswalk_rows
+        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+    }
+    declared_keys: set[tuple[str, str, str, str | None]] = set()
+    closures: dict[tuple[str, date], dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ManifestError(
+                "declared account-strategy manifest row is not an object"
+            )
+        key = epoch_key(
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        declared_keys.add(key)
+        raw_closed = row.get("performance_closed_on")
+        if raw_closed is None:
+            continue
+        try:
+            closed_on = parse_date(str(raw_closed))
+            epoch_start = parse_date(str(row.get("effective_start")))
+        except ValueError as error:
+            raise ManifestError(
+                "declared account-strategy manifest carries an invalid "
+                f"performance_closed_on: {error}"
+            ) from error
+        raw_income = row.get("post_liquidation_income")
+        try:
+            income = None if raw_income is None else Decimal(str(raw_income))
+        except DecimalException as error:
+            raise ManifestError(
+                "declared account-strategy manifest carries an invalid "
+                f"post_liquidation_income: {error}"
+            ) from error
+        raw_epoch_end = row.get("effective_end")
+        epoch_end = None if raw_epoch_end is None else parse_date(str(raw_epoch_end))
+        if epoch_end is not None and closed_on > epoch_end:
+            raise ManifestError(
+                "declared performance_closed_on is after the epoch's effective_end: "
+                f"{raw_closed!r}"
+            )
+        if not epoch_start <= closed_on <= CUTOFF:
+            raise ManifestError(
+                "declared performance_closed_on is outside the epoch or after "
+                f"the cutoff: {raw_closed!r}"
+            )
+        closure_key = (key[0], epoch_start)
+        if closure_key in closures:
+            raise ManifestError(
+                "declared account-strategy manifest repeats an epoch closure"
+            )
+        closures[closure_key] = {
+            "funded_end": closed_on,
+            "post_liquidation_income": income,
+        }
+    if declared_keys != crosswalk_keys:
+        raise ManifestError(
+            "declared account-strategy manifest rows do not match the crosswalk "
+            "included epochs"
+        )
+    return closures
+
+
+def post_liquidation_income_from_raw(
+    observations: list[tuple[date, Decimal]],
+    ledger_flows: list[dict[str, object]],
+    account_id: str,
+    funded_end: date,
+) -> tuple[Decimal, Decimal] | str:
+    """Recompute post-liquidation income from raw bytes after a funded_end.
+
+    Returns (value at funded_end, income through the cutoff) or a failure
+    reason: income is the residual value change after the last funded day that
+    no classified flow explains — labelled post-liquidation income (dated,
+    non-TWR, inside gain), never added a second time; the residual NAV it
+    accumulates into is really held money and stays cutoff capital.
+    """
+    at_close = [point for point in observations if point[0] == funded_end]
+    if not at_close:
+        return "no available USD observation on the declared funded_end"
+    later = [point for point in observations if funded_end < point[0] <= CUTOFF]
+    if not later:
+        return "no available USD observation after the declared funded_end"
+    flows, _, flow_problem = classified_external_flows(
+        ledger_flows, account_id, funded_end, CUTOFF
+    )
+    if flow_problem is not None:
+        return flow_problem
+    if any(amount > 0 for amount in flows.values()):
+        return "funding after the declared funded_end requires a new funded epoch"
+    income = later[-1][1] - at_close[-1][1] - sum(flows.values(), Decimal("0"))
+    return at_close[-1][1], income
 
 
 UNMAPPED_NAV_REASON = (
@@ -1205,6 +1478,7 @@ def raw_custody_capital(
     fx_rates: dict[str, dict[date, Decimal]],
     matrixport_subscription_rows: Iterable[dict[str, str]] | None = None,
     event_days: dict[str, dict[str, list[date]]] | None = None,
+    fund_scoped_strategies: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Decimal]]:
     """Derive R8 owner capital and unallocated cash from raw custody events.
 
@@ -1212,6 +1486,12 @@ def raw_custody_capital(
     Owner deposits and withdrawals change invested capital; sleeve buys and
     redemptions only change the derived cash line.  Events are aggregated by
     date before the strict-negative-cash check, so no intraday order is inferred.
+
+    For a fund-scoped strategy (amended PROVIDER_CUSTODY_PERIMETER) the account
+    deposits/withdrawals are not the strategy's capital and no derived cash
+    line exists, so the negative-cash check — a property of that line — is not
+    applied; the gross allocation sum is reported for the caller to use as the
+    strategy's invested capital.
     """
     events: dict[str, dict[date, dict[str, Decimal]]] = defaultdict(
         lambda: defaultdict(lambda: {"owner": Decimal("0"), "allocation": Decimal("0")})
@@ -1233,6 +1513,7 @@ def raw_custody_capital(
         return parsed.astimezone(timezone.utc).date()
 
     admitted_transfer_rows: dict[str, dict[str, str]] = {}
+    admitted_buy_rows: dict[str, dict[str, str]] = {}
     linked_provider_identity: str | None = None
     for row in quantbase_rows:
         if row.get("activity_type") == "transfer":
@@ -1310,6 +1591,14 @@ def raw_custody_capital(
         value = Decimal(str(amount))
         if row.get("activity_type") == "filled_txn" and row.get("fund") == "107":
             if row.get("type") == "BUY":
+                buy_id = str(row.get("id") or "").strip()
+                if buy_id:
+                    previous_buy = admitted_buy_rows.get(buy_id)
+                    if previous_buy is not None:
+                        if previous_buy != row:
+                            raise ValueError("conflicting duplicate Quantbase BUY id")
+                        continue
+                    admitted_buy_rows[buy_id] = dict(row)
                 add("volatis-strategy", occurred_on, "allocation", abs(value))
             elif row.get("type") == "SELL":
                 if str(row.get("created_to_cover_fees", "")).strip().lower() != "true":
@@ -1396,7 +1685,7 @@ def raw_custody_capital(
             invested += owner
             allocation += allocated
             cash += owner - allocated
-            if cash < 0:
+            if cash < 0 and strategy_id not in fund_scoped_strategies:
                 raise ValueError(
                     f"raw custody cash is negative for {strategy_id} on {occurred_on.isoformat()}"
                 )
@@ -1409,6 +1698,17 @@ def raw_custody_capital(
 
 
 COVERAGE_METRIC_ID = "date.strategy_cash.coverage_end"
+FUND_SCOPED_NO_CASH_LINE_REASON = (
+    "the amended PROVIDER_CUSTODY_PERIMETER decision lists this strategy's "
+    "provider as fund-scoped: invested capital is the gross fund/product "
+    "allocations at fill dates and account deposits/withdrawals are not the "
+    "strategy's capital, so no derived strategy cash line exists to measure"
+)
+FUND_SCOPED_NO_COVERAGE_REASON = (
+    "no derived strategy cash line exists for this fund-scoped provider, so a "
+    "strategy-cash coverage end has no meaning; the capital side is bound by "
+    "the raw fund allocation captures admitted through the cutoff"
+)
 # Terminals that end a list endpoint naturally.  A discovery terminal
 # (all_discovered_*_ids), single_response or catalog_disposition never carries a date.
 NATURAL_LIST_TERMINALS = frozenset(
@@ -1436,6 +1736,15 @@ CUSTODY_CAPTURE_PROVIDERS = {
     "volatis-strategy": "quantbase",
     "robuxio-crypto": "matrixport",
 }
+
+
+def fund_scoped_strategy_ids(providers: frozenset[str]) -> frozenset[str]:
+    """Custody-captured strategies whose provider the contract lists as fund-scoped."""
+    return frozenset(
+        strategy_id
+        for strategy_id, provider in CUSTODY_CAPTURE_PROVIDERS.items()
+        if provider.upper() in providers
+    )
 
 
 def coverage_entity(strategy_id: str, members: set[str]) -> str:
@@ -2217,6 +2526,38 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
     contract_receipt = calculation.get("owner_decision_receipts", {}).get(
         "PROVIDER_CUSTODY_PERIMETER"
     )
+    if not isinstance(contract_policy, dict):
+        raise ManifestError("v3 contract lacks the provider custody decision")
+    decision_keys = frozenset(contract_policy)
+    fund_scoped_keys = decision_keys & FUND_SCOPED_DECISION_KEYS
+    if fund_scoped_keys and fund_scoped_keys != FUND_SCOPED_DECISION_KEYS:
+        raise ManifestError(
+            "v3 provider custody decision carries an incomplete fund-scoped key set"
+        )
+    if decision_keys != POLICY_DECISION_KEYS | fund_scoped_keys:
+        raise ManifestError(
+            "v3 provider custody decision does not carry exactly the approved "
+            "decision key set"
+        )
+    if fund_scoped_keys:
+        fund_scoped_providers_value = contract_policy["fund_scoped_providers"]
+        if (
+            not isinstance(fund_scoped_providers_value, list)
+            or not fund_scoped_providers_value
+            or any(
+                not isinstance(provider, str)
+                or not provider
+                or provider != provider.upper()
+                for provider in fund_scoped_providers_value
+            )
+            or len(set(fund_scoped_providers_value)) != len(fund_scoped_providers_value)
+            or not str(contract_policy["fund_scoped_treatment"]).strip()
+            or not str(contract_policy["fund_scoped_effect"]).strip()
+            or not str(contract_policy["amends_approval_evidence"]).strip()
+        ):
+            raise ManifestError(
+                "v3 provider custody decision fund-scoped amendment is malformed"
+            )
     if contract_policy != policy:
         raise ManifestError("v3 provider custody policy differs from selected contract")
     if not isinstance(contract_receipt, dict) or any(
@@ -2278,11 +2619,8 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
             "v3 owner receipt B response does not bind the selected payload"
         )
     receipt_a_body = str(receipt_a.get("body", ""))
-    if (
-        str(receipt_a.get("id")) != str(contract_receipt["comment_id"])
-        or "PROVIDER_CUSTODY_PERIMETER" not in receipt_a_body
-        or "each deposit adds and each withdrawal subtracts" not in receipt_a_body
-        or "cash line below zero is an error" not in receipt_a_body
+    if str(receipt_a.get("id")) != str(contract_receipt["comment_id"]) or any(
+        phrase not in receipt_a_body for phrase in RECEIPT_A_REQUIRED_PHRASES
     ):
         raise ManifestError(
             "v3 owner receipt A does not bind the selected custody policy body"
@@ -2616,6 +2954,40 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
     return by_family
 
 
+def fund_scoped_providers_from_authority(
+    authority_family_paths: dict[str, Path],
+) -> frozenset[str]:
+    """The contract-declared fund-scoped provider list (policy, never code).
+
+    v3_authority_paths has already bound and digest-checked the decision body;
+    this re-reads the bound contract bytes.  An absent contract path (only
+    possible in tests that stub the authority layer) yields an empty set.
+    """
+    contract_path = authority_family_paths.get("financial_source_contract")
+    if contract_path is None:
+        return frozenset()
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    invested = next(
+        (
+            item
+            for item in contract.get("financial_outcomes", [])
+            if isinstance(item, dict) and item.get("outcome_id") == "INVESTED_CAPITAL"
+        ),
+        None,
+    )
+    if not isinstance(invested, dict):
+        return frozenset()
+    policy = invested.get("calculation_contract", {}).get(
+        "provider_custody_perimeter", {}
+    )
+    if not isinstance(policy, dict):
+        return frozenset()
+    providers = policy.get("fund_scoped_providers", [])
+    if not isinstance(providers, list):
+        return frozenset()
+    return frozenset(str(provider).upper() for provider in providers)
+
+
 def derive(
     qe_root: Path,
     inputs_manifest: dict[str, object] | None = None,
@@ -2629,7 +3001,7 @@ def derive(
         "TWR uses contracts/portfolio-performance-policy-v1.json:twr_cases[case_id=date_only_end_of_day]: (ending value - same-date external flow) / prior value, compounded and not annualized.",
         "MWR uses contracts/portfolio-performance-policy-v1.json:mwr_cases.day_count=ACTUAL_365 and an annualized XIRR; investor cash flows are the inverse of portfolio external flows.",
         "R4/R5: flows use nav_recognition_date when present; internal transfers remain account and strategy flows and net only at the portfolio aggregate.",
-        "R1/R2: account and strategy ITD uses only the current funded-membership crosswalk interval; historical predecessor assignments are excluded.",
+        "R1/R2 as amended by the OWNER_539 ruling: every included crosswalk row is a funded member epoch; an account ITD spans its tiled funded epochs (predecessor assignments included), a strategy ITD includes funded predecessor epochs as entering/exiting members, and a declared funded_end closes only the epoch's account-level TWR on its last funded day while the account flows and MWR keep the full window through the cutoff (later withdrawals and credits are real flows, never dropped) and later credits are labelled post-liquidation income (dated, non-TWR, inside gain; never added a second time); the closed account's remaining cutoff NAV stays cutoff capital at account, strategy and portfolio level, and the strategy ITD keeps linking the closed member's post-liquidation value periods.",
         "Strategy TWR uses a union of admitted member valuation dates with no source-date fill and treats entering/exiting member capital as a flow at its admitted boundary.",
         "Matrixport USDT values and flows use the selected raw USDT/USD Close series; the per-row fx_provenance note records its candidate-generation caveat.",
         "Reserve discovery inspects provider-ledger.json:capital_anchors only; no reserve/bucket identifier permits a reserve balance to be inferred.",
@@ -2654,7 +3026,21 @@ def derive(
             "R6 v3: selected raw USDT/USD closes are admitted through the "
             "2026-09-17 cutoff; Matrixport owner flows use event-date FX."
         )
+    fund_scoped_providers = fund_scoped_providers_from_authority(authority_family_paths)
+    if schema_v3 and fund_scoped_providers:
+        convention_notes.append(
+            "R8 as amended by the fund-scoped PROVIDER_CUSTODY_PERIMETER "
+            "decision: for the contract-listed fund-scoped providers a "
+            "strategy's invested capital is the gross sum of allocations to "
+            "its own fund/product at fill dates counted once, account "
+            "deposits and withdrawals are not the strategy's capital, no "
+            "derived cash line is built, and the stablecoin conversion "
+            "between deposit and subscription is a cost, not capital."
+        )
     paths = [input_paths["ledger"], input_paths["crosswalk"], *authority_paths]
+    account_manifest_path = input_paths.get("account_manifest")
+    if account_manifest_path is not None:
+        paths.append(account_manifest_path)
     absolute_paths = [qe_root / path for path in paths]
     for path in absolute_paths:
         if not path.is_file():
@@ -2663,12 +3049,27 @@ def derive(
     crosswalk = json.loads(
         (qe_root / input_paths["crosswalk"]).read_text(encoding="utf-8")
     )
+    account_manifest = None
+    if account_manifest_path is not None:
+        account_manifest = json.loads(
+            (qe_root / account_manifest_path).read_text(encoding="utf-8")
+        )
     cutoff_mismatches = [
         label
         for label, value in (
             ("ledger", ledger.get("as_of_date")),
             ("crosswalk", crosswalk.get("as_of_date")),
             ("crosswalk calculation", crosswalk.get("calculation_cutoff_date")),
+            *(
+                (
+                    (
+                        "declared account-strategy manifest calculation",
+                        account_manifest.get("calculation_cutoff_date"),
+                    ),
+                )
+                if account_manifest is not None
+                else ()
+            ),
         )
         if value != CUTOFF.isoformat()
     ]
@@ -2704,6 +3105,11 @@ def derive(
     excluded_accounts.update(excluded_account_ids(crosswalk["rows"]))
     membership_starts = current_membership_starts(crosswalk["rows"])
     active_strategy_ids = active_included_strategy_ids(crosswalk["rows"])
+    account_epochs = included_epochs_by_account(crosswalk["rows"])
+    member_epochs = strategy_member_epochs(crosswalk["rows"])
+    epoch_closures: dict[tuple[str, date], dict[str, object]] = {}
+    if account_manifest is not None:
+        epoch_closures = declared_epoch_closures(account_manifest, crosswalk["rows"])
     crosswalk_capital_failures = (
         set(
             active_included_strategy_ids(
@@ -2786,6 +3192,7 @@ def derive(
                 },
                 matrixport_subscriptions,
                 custody_event_days,
+                fund_scoped_strategy_ids(fund_scoped_providers),
             )
             if "matrixport_owner_flow_coverage" in input_paths:
                 with (qe_root / input_paths["matrixport_owner_flow_coverage"]).open(
@@ -2925,10 +3332,81 @@ def derive(
                     "ITD" if metric_id.startswith(("flows", "twr", "mwr")) else None,
                 )
             continue
-        account_observations = window_observations(
-            observations.get(account_id, []), membership_starts[account_id], None
+        epochs = account_epochs.get(account_id) or [
+            (membership_starts[account_id], None, account_strategies[account_id])
+        ]
+        epoch_problem = epoch_window_problem(epochs)
+        closure: dict[str, object] | None = None
+        for epoch_start, _epoch_end, _epoch_strategy in epochs:
+            candidate = epoch_closures.get((account_id, epoch_start))
+            if candidate is not None:
+                closure = candidate
+        performance_end = (
+            cast(date, closure["funded_end"]) if closure is not None else None
+        )
+        # The funded performance window spans every included epoch of the
+        # account (the OWNER_539 predecessor ruling). A declared funded_end
+        # closes only the epoch's account-level TWR on its last funded day;
+        # the account flows and MWR run the full window through the cutoff
+        # (later withdrawals and credits are real flows, never dropped), and
+        # cutoff capital uses the full observation window (a liquidated
+        # account's remaining NAV is really held money).
+        # A broken epoch tiling falls back to the current interval for the
+        # capital/date facts and fails the flow/return metrics closed below.
+        window_start = membership_starts[account_id] if epoch_problem else epochs[0][0]
+        all_observations = observations.get(account_id, [])
+        account_observations = window_observations(all_observations, window_start, None)
+        twr_observations = (
+            window_observations(all_observations, window_start, performance_end)
+            if performance_end is not None
+            else account_observations
         )
         account_window_observations[account_id] = account_observations
+        closure_failure: str | None = None
+        if closure is not None:
+            raw_closure = post_liquidation_income_from_raw(
+                observations.get(account_id, []),
+                ledger["flows"],
+                account_id,
+                cast(date, closure["funded_end"]),
+            )
+            if isinstance(raw_closure, str):
+                closure_failure = (
+                    "the declared funded_end closure cannot be reconciled to the "
+                    f"raw bytes: {raw_closure}"
+                )
+            else:
+                close_value, raw_income = raw_closure
+                declared_income = closure.get("post_liquidation_income")
+                if not isinstance(declared_income, Decimal) or declared_income.quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                ) != raw_income.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
+                    closure_failure = (
+                        "the declared post_liquidation_income "
+                        f"{declared_income} does not reconcile to the raw bytes "
+                        f"after the declared funded_end (derived {raw_income})"
+                    )
+                else:
+                    residual = (
+                        money(all_observations[-1][1]) if all_observations else "0.00"
+                    )
+                    note_parts.append(
+                        f"R1/#539: the funded epoch's account-level TWR closed "
+                        f"on its last funded day "
+                        f"{cast(date, closure['funded_end']).isoformat()} while "
+                        "the account flows and MWR keep the full window through "
+                        "the cutoff (later withdrawals and credits are real "
+                        f"flows, never dropped); the {money(raw_income)} of "
+                        "income credited after liquidation (reconciled to the "
+                        "declared post_liquidation_income) is labelled "
+                        "post-liquidation income (dated, non-TWR, inside gain), "
+                        f"never added a second time; the residual cutoff NAV "
+                        f"{residual} is really held money and stays cutoff "
+                        "capital at account, strategy and portfolio level, and "
+                        "the strategy ITD keeps linking this member's "
+                        "post-liquidation value periods."
+                    )
+                    account_notes = " ".join(note_parts)
         if not account_observations:
             for metric_id in (
                 "capital.account.cutoff",
@@ -2947,24 +3425,45 @@ def derive(
                 )
             continue
         end_date, end_value = account_observations[-1]
-        account_values[account_id] = end_value
         # USD-converted value rows are dated by the admitted value basis (the
         # last FX-converted/ledger-admitted observation), never the raw NAV
         # date past an FX boundary; only date.source_last_observation carries
         # the raw date.
-        account_value_dates[account_id] = end_date
-        source_date = raw_last_dates.get(account_id, end_date)
-        metrics.append(
-            metric(
-                "capital.account.cutoff",
-                account_id,
-                money(end_value),
-                "USD",
-                used_inputs,
-                end_date.isoformat(),
-                notes=account_notes,
-            )
+        if closure is not None and closure_failure is None:
+            # Liquidated before the cutoff: the account-level TWR window
+            # closed at funded_end, but the money is really held — the
+            # cutoff capital is the account's actual cutoff NAV (the labelled
+            # post-liquidation income is inside that NAV, never added twice).
+            cutoff_date, cutoff_value = all_observations[-1]
+            account_values[account_id] = cutoff_value
+            account_value_dates[account_id] = cutoff_date
+        else:
+            account_values[account_id] = end_value
+            account_value_dates[account_id] = end_date
+        source_date = raw_last_dates.get(
+            account_id,
+            all_observations[-1][0]
+            if closure is not None and all_observations
+            else end_date,
         )
+        if closure_failure is not None:
+            add_not_derivable(
+                output, "capital.account.cutoff", account_id, closure_failure
+            )
+            account_values.pop(account_id, None)
+            account_value_dates.pop(account_id, None)
+        else:
+            metrics.append(
+                metric(
+                    "capital.account.cutoff",
+                    account_id,
+                    money(account_values[account_id]),
+                    "USD",
+                    used_inputs,
+                    account_value_dates[account_id].isoformat(),
+                    notes=account_notes,
+                )
+            )
         metrics.append(
             metric(
                 "date.source_last_observation",
@@ -2976,6 +3475,26 @@ def derive(
                 notes=account_notes,
             )
         )
+        if closure_failure is not None:
+            account_flow_data[account_id] = None
+            for metric_id in (
+                "flows.account.net",
+                "flows.account.count",
+                "twr.account",
+                "mwr.account",
+            ):
+                add_not_derivable(output, metric_id, account_id, closure_failure, "ITD")
+            continue
+        if epoch_problem is not None:
+            account_flow_data[account_id] = None
+            for metric_id in (
+                "flows.account.net",
+                "flows.account.count",
+                "twr.account",
+                "mwr.account",
+            ):
+                add_not_derivable(output, metric_id, account_id, epoch_problem, "ITD")
+            continue
         if failure is not None and "flows.account.net" in failure["metrics"]:
             account_flow_data[account_id] = None
             for metric_id in failure["metrics"]:
@@ -3034,11 +3553,29 @@ def derive(
                 notes=account_notes,
             )
         )
+        # A declared funded_end closes only the TWR window: the return stops
+        # on the last funded day while the flows above and the MWR below keep
+        # the full window through the cutoff.
+        twr_as_of = end_date
+        twr_end_flows = flow_data.twr_end_flows
+        twr_beginning_flows = flow_data.twr_beginning_flows
+        if performance_end is not None:
+            twr_as_of = twr_observations[-1][0]
+            twr_end_flows = {
+                occurred_on: amount
+                for occurred_on, amount in flow_data.twr_end_flows.items()
+                if occurred_on <= twr_as_of
+            }
+            twr_beginning_flows = {
+                occurred_on: amount
+                for occurred_on, amount in flow_data.twr_beginning_flows.items()
+                if occurred_on <= twr_as_of
+            }
         try:
             twr = time_weighted_return(
-                account_observations,
-                flow_data.twr_end_flows,
-                flow_data.twr_beginning_flows,
+                twr_observations,
+                twr_end_flows,
+                twr_beginning_flows,
             )
         except ValueError as error:
             add_not_derivable(output, "twr.account", account_id, str(error), "ITD")
@@ -3050,7 +3587,7 @@ def derive(
                     ratio(twr),
                     "ratio",
                     used_inputs,
-                    end_date.isoformat(),
+                    twr_as_of.isoformat(),
                     window="ITD",
                     notes=account_notes,
                 )
@@ -3198,6 +3735,7 @@ def derive(
     )
     missing_included = set(account_strategies).difference(account_values)
     custody_failures: set[str] = set()
+    fund_scoped = fund_scoped_strategy_ids(fund_scoped_providers)
     if schema_v3:
         for strategy_id in ("volatis-strategy", "robuxio-crypto"):
             members = {
@@ -3213,21 +3751,74 @@ def derive(
                 or len(members) != 1
                 or members.intersection(missing_included)
             ):
-                custody_failures.add(strategy_id)
                 reason = custody_capital_error or (
                     "R8 raw custody funding is missing or the provider account mapping is ambiguous"
                 )
-                for metric_id in (
-                    "invested_capital.strategy.cutoff",
+                add_not_derivable(
+                    output, "invested_capital.strategy.cutoff", strategy_id, reason
+                )
+                if strategy_id in fund_scoped:
+                    # The strategy's capital is its fund NAV; a custody-event
+                    # failure does not touch it, and the cash-line metrics are
+                    # already meaningless under the fund-scoped treatment.
+                    add_not_derivable(
+                        output,
+                        "capital.strategy_cash.cutoff",
+                        strategy_id,
+                        FUND_SCOPED_NO_CASH_LINE_REASON,
+                    )
+                    add_not_derivable(
+                        output,
+                        COVERAGE_METRIC_ID,
+                        coverage_entity(strategy_id, members),
+                        FUND_SCOPED_NO_COVERAGE_REASON,
+                    )
+                else:
+                    custody_failures.add(strategy_id)
+                    for metric_id in (
+                        "capital.strategy_cash.cutoff",
+                        "capital.strategy.cutoff",
+                    ):
+                        add_not_derivable(output, metric_id, strategy_id, reason)
+                    add_not_derivable(
+                        output,
+                        COVERAGE_METRIC_ID,
+                        coverage_entity(strategy_id, members),
+                        reason,
+                    )
+                continue
+            if strategy_id in fund_scoped:
+                # Amended PROVIDER_CUSTODY_PERIMETER (fund_scoped_providers):
+                # invested capital is the gross fund/product allocations at
+                # fill dates, each counted once; account deposits/withdrawals
+                # are not the strategy's capital; no derived cash line exists.
+                metrics.append(
+                    metric(
+                        "invested_capital.strategy.cutoff",
+                        strategy_id,
+                        money(custody["allocation"]),
+                        "USD",
+                        used_inputs,
+                        notes=(
+                            "R8 fund-scoped (amended PROVIDER_CUSTODY_PERIMETER): "
+                            "gross allocations to the strategy's own fund/product "
+                            "at fill dates, each counted once, at event-date FX; "
+                            "provider account deposits and withdrawals are not "
+                            "the strategy's capital."
+                        ),
+                    )
+                )
+                add_not_derivable(
+                    output,
                     "capital.strategy_cash.cutoff",
-                    "capital.strategy.cutoff",
-                ):
-                    add_not_derivable(output, metric_id, strategy_id, reason)
+                    strategy_id,
+                    FUND_SCOPED_NO_CASH_LINE_REASON,
+                )
                 add_not_derivable(
                     output,
                     COVERAGE_METRIC_ID,
                     coverage_entity(strategy_id, members),
-                    reason,
+                    FUND_SCOPED_NO_COVERAGE_REASON,
                 )
                 continue
             aggregate["strategies"][strategy_id] += custody["cash"]
@@ -3442,7 +4033,8 @@ def derive(
             for account_id, assigned in account_strategies.items()
             if assigned == strategy_id
         )
-        if not members:
+        epochs = member_epochs.get(strategy_id, [])
+        if not members or not epochs:
             add_not_derivable(
                 output,
                 "twr.strategy",
@@ -3490,21 +4082,80 @@ def derive(
                 "ITD",
             )
             continue
+        # Every funded member epoch enters the strategy series: current
+        # memberships and funded predecessor epochs alike, each bounded by its
+        # own crosswalk interval. A declared funded_end closes only the
+        # account-level TWR window; the strategy still holds the
+        # closed member's value, so the member's post-liquidation value
+        # periods stay linked into the strategy series (the strategy-ledger
+        # path's standing rule).
+        member_windows: dict[tuple[str, date], list[tuple[date, Decimal]]] = {}
+        member_flow_data: dict[tuple[str, date], FlowData] = {}
+        member_problem: str | None = None
+        for account_id, epoch_start, epoch_end in epochs:
+            if account_id in crosswalk_problems:
+                member_problem = (
+                    "a funded member epoch belongs to an account with an "
+                    "ambiguous crosswalk mapping"
+                )
+                break
+            end_cap = CUTOFF
+            if epoch_end is not None and epoch_end < end_cap:
+                end_cap = epoch_end
+            member_key = (account_id, epoch_start)
+            if account_id in raw_flow_data:
+                # R6 raw-capture accounts carry exactly one epoch; the account
+                # window and raw flow data are the epoch window and flows.
+                if len(account_epochs.get(account_id, [])) != 1:
+                    member_problem = (
+                        "an R6 raw-capture account carries more than one funded "
+                        "epoch; per-epoch raw flow slicing is not defined"
+                    )
+                    break
+                member_windows[member_key] = account_window_observations[account_id]
+                member_flow_data[member_key] = cast(
+                    FlowData, account_flow_data[account_id]
+                )
+                continue
+            epoch_window = window_observations(
+                observations.get(account_id, []), epoch_start, end_cap
+            )
+            if not epoch_window:
+                member_problem = (
+                    "a funded member epoch has no admitted observation in its interval"
+                )
+                break
+            cash_flows, flow_count, flow_problem = classified_external_flows(
+                ledger["flows"], account_id, epoch_window[0][0], epoch_window[-1][0]
+            )
+            if flow_problem is not None:
+                member_problem = flow_problem
+                break
+            member_windows[member_key] = epoch_window
+            member_flow_data[member_key] = FlowData(
+                cash_flows=cash_flows,
+                twr_end_flows=cash_flows,
+                twr_beginning_flows={},
+                count=flow_count,
+            )
+        if member_problem is not None:
+            add_not_derivable(
+                output, "twr.strategy", strategy_id, member_problem, "ITD"
+            )
+            add_not_derivable(
+                output, "mwr.strategy", strategy_id, member_problem, "ITD"
+            )
+            continue
         strategy_observations, strategy_flows = composite_series(
+            member_windows,
             {
-                account_id: account_window_observations[account_id]
-                for account_id in members
-            },
-            {
-                account_id: account_flow_data[account_id].twr_end_flows
-                for account_id in members
+                member_key: flow_data.twr_end_flows
+                for member_key, flow_data in member_flow_data.items()
             },
         )
         strategy_beginning_flows: dict[date, Decimal] = defaultdict(Decimal)
-        for account_id in members:
-            for occurred_on, amount in account_flow_data[
-                account_id
-            ].twr_beginning_flows.items():
+        for flow_data in member_flow_data.values():
+            for occurred_on, amount in flow_data.twr_beginning_flows.items():
                 strategy_beginning_flows[occurred_on] += amount
         if len(strategy_observations) < 2:
             add_not_derivable(
@@ -3538,15 +4189,15 @@ def derive(
                     output, "twr.strategy", strategy_id, str(error), "ITD"
                 )
         mwr_flows: list[tuple[date, Decimal]] = []
-        for account_id in members:
-            account_observations = account_window_observations[account_id]
-            flow_data = account_flow_data[account_id]
-            mwr_flows.append((account_observations[0][0], -account_observations[0][1]))
+        for member_key in member_windows:
+            epoch_window = member_windows[member_key]
+            flow_data = member_flow_data[member_key]
+            mwr_flows.append((epoch_window[0][0], -epoch_window[0][1]))
             mwr_flows.extend(
                 (occurred_on, -amount)
                 for occurred_on, amount in flow_data.cash_flows.items()
             )
-            mwr_flows.append((account_observations[-1][0], account_observations[-1][1]))
+            mwr_flows.append((epoch_window[-1][0], epoch_window[-1][1]))
         mwr = xirr(mwr_flows)
         if mwr is None:
             add_not_derivable(

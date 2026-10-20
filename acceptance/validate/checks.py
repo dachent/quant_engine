@@ -8930,7 +8930,9 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         f"report:twr_mwr.twr[{label}]",
                         row.get("twr"),
                         start,
-                        end,
+                        # a closed epoch's TWR ends at its funded_end (#539), not at
+                        # the end of the product window
+                        to_date(row.get("performance_closed_on")) or end,
                         None,
                         REPORT,
                         f"$.twr_mwr[{position}].twr",
@@ -8942,7 +8944,8 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"panel:account_manifest.observation_linked_return[{label}]",
                             matched[1].get("observation_linked_return"),
                             to_date(matched[1].get("start")),
-                            to_date(matched[1].get("end")),
+                            to_date(matched[1].get("performance_closed_on"))
+                            or to_date(matched[1].get("end")),
                             None,
                             PANEL,
                             f"$.account_manifest.rows[{matched[0]}].observation_linked_return",
