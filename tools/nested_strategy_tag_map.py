@@ -136,17 +136,33 @@ def _strict(value: object, keys: set[str], name: str) -> Mapping[str, Any]:
     return value
 
 
+def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise TagMapError(f"duplicate JSON member: {key}")
+        result[key] = value
+    return result
+
+
 def validate_tag_map(raw: bytes) -> TagMap:
     """Parse the tag map bytes, refuse anything ambiguous, return the model."""
 
     try:
-        payload = json.loads(raw)
+        payload = json.loads(raw, object_pairs_hook=_reject_duplicate_members)
+    except TagMapError:
+        raise
     except ValueError as exc:
         raise TagMapError("tag map is not JSON") from exc
     top = _strict(
         payload, {"schema_version", "artifact_id", "as_of_date", "parents"}, "tag map"
     )
-    if top["schema_version"] != 1 or top["artifact_id"] != "nested-strategy-tag-map":
+    version = top["schema_version"]
+    if (
+        type(version) is not int
+        or version != 1
+        or top["artifact_id"] != "nested-strategy-tag-map"
+    ):
         raise TagMapError("tag map identity is invalid")
     as_of = _date(top["as_of_date"], "as_of_date")
     parents_raw = top["parents"]
@@ -180,7 +196,7 @@ def validate_tag_map(raw: bytes) -> TagMap:
             raise TagMapError(f"duplicate parent account: {parent_id}")
         seen_parents.add(parent_id)
         tag_field = parent["tag_field"]
-        if not isinstance(tag_field, str) or not tag_field:
+        if not isinstance(tag_field, str) or not tag_field or len(tag_field) > 64:
             raise TagMapError(f"parent {index} tag_field is invalid")
         normalization = parent["tag_normalization"]
         if normalization not in _NORMALIZATIONS:

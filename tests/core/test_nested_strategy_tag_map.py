@@ -156,6 +156,26 @@ def test_invalid_maps_are_refused(mutate: Any, message: str) -> None:
     assert not isinstance(payload, bytes)
 
 
+def test_duplicate_json_members_are_refused_not_last_one_wins() -> None:
+    raw = json.dumps(_payload()).replace(
+        '"pattern": "FirstBook"', '"pattern": "FirstBook", "pattern": "Other"'
+    )
+    assert raw.count('"pattern": "Other"') == 1
+    with pytest.raises(TagMapError, match="duplicate JSON member"):
+        validate_tag_map(raw.encode("utf-8"))
+
+
+def test_the_loader_enforces_the_schema_limits_too() -> None:
+    long_field = _payload()
+    long_field["parents"][0]["tag_field"] = "x" * 65
+    with pytest.raises(TagMapError, match="tag_field"):
+        validate_tag_map(_bytes(long_field))
+    boolean_version = _payload()
+    boolean_version["schema_version"] = True
+    with pytest.raises(TagMapError, match="identity"):
+        validate_tag_map(_bytes(boolean_version))
+
+
 def test_an_unknown_sleeve_has_no_derived_account() -> None:
     parent = validate_tag_map(_bytes(_payload())).parent("account-parent")
     with pytest.raises(TagMapError, match="unknown sleeve"):
