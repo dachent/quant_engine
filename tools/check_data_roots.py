@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 import sys
 
-from quant_engine.core import read_current, read_generation
+from quant_engine.core import CoverageStatus, read_current, read_generation
 
 # Single-pointer data roots. dataPortfolio is excluded: its stores sit one level
 # down and are bound by the coordinated release instead.
@@ -101,10 +101,33 @@ def check_evidence_root(root: Path, reason: str) -> tuple[bool, str]:
     )
 
 
+def _holds_complete_generation(root: Path) -> bool:
+    """True when any retained generation claims COMPLETE coverage.
+
+    A PARTIAL generation is evidence and ``read_current`` refuses it; a COMPLETE one is
+    consumer authority. The root's status is derived from the generations it holds, never
+    from whether its pointer still resolves: a root that published a COMPLETE generation
+    and later lost or corrupted ``CURRENT.json`` must fail as a published root, not fall
+    back to the evidence-only pass.
+    """
+
+    generations = root / "generations"
+    if not generations.is_dir():
+        return False
+    for item in generations.iterdir():
+        try:
+            manifest = read_generation(root, item.name)
+        except Exception:  # noqa: BLE001 - an unreadable manifest claims nothing
+            continue
+        if manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+            return True
+    return False
+
+
 def check_root(root: Path) -> tuple[bool, str]:
     """Return (ok, message) for one data root."""
 
-    if root.name in EVIDENCE_ONLY_ROOTS:
+    if root.name in EVIDENCE_ONLY_ROOTS and not _holds_complete_generation(root):
         # Taken whether or not generations/ exists: an evidence-only root that lost its
         # retained evidence must fail, not pass as an empty root.
         return check_evidence_root(root, EVIDENCE_ONLY_ROOTS[root.name])
