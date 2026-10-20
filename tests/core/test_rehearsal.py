@@ -477,3 +477,27 @@ def test_recovery_rehearsal_publishes_a_healthy_predecessor_that_has_artifacts(
 
     assert result["status"] == "PASS"
     assert result["boundary_rehearsal"]["source_unchanged"] is True
+
+
+def test_healthy_predecessor_requires_the_recorded_manifest_and_inventory(
+    tmp_path: Path,
+) -> None:
+    from quant_engine.core.rehearsal import _healthy_predecessor
+
+    root = tmp_path / "root"
+    manifest = _manifest("healthy", date(2026, 7, 30))
+    staged = stage_generation(root, manifest)
+    artifact = staged.parent / "artifact.bin"
+    artifact.write_bytes(b"payload")
+    pointer = publish_generation(root, manifest.generation_id)
+    assert _healthy_predecessor(root, pointer)
+    artifact.write_bytes(b"changed after publication")
+    assert not _healthy_predecessor(root, pointer)
+    artifact.write_bytes(b"payload")
+    staged.write_bytes(staged.read_bytes() + b" ")
+    assert not _healthy_predecessor(root, pointer)
+    legacy = CurrentPointer(
+        generation_id=manifest.generation_id,
+        manifest_sha256=pointer.manifest_sha256,
+    )
+    assert not _healthy_predecessor(root, legacy)

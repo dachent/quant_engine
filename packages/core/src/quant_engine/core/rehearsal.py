@@ -20,6 +20,8 @@ from quant_engine.core.contracts import (
 from quant_engine.core.pipeline import PipelineSpec
 from quant_engine.core.publication import (
     CurrentPointer,
+    GenerationConflictError,
+    generation_inventory_sha256,
     publish_generation,
     read_current,
     stage_generation,
@@ -142,14 +144,28 @@ def _source_state(
 
 
 def _healthy_predecessor(source_root: Path, pointer: CurrentPointer) -> bool:
-    """A current-schema predecessor whose generation manifest still exists."""
+    """A current-schema predecessor that still verifies against its recorded hashes.
 
-    return (
-        pointer.pointer_schema_version != 1
-        and (
-            source_root / "generations" / pointer.generation_id / "generation.json"
-        ).is_file()
-    )
+    The generation manifest must exist and hash to the pointer's manifest digest, and the
+    recorded artifact inventory (when the pointer carries one) must still match the
+    generation directory; anything else is an unusable predecessor and is reproduced
+    verbatim by the caller.
+    """
+
+    if pointer.pointer_schema_version == 1:
+        return False
+    manifest = source_root / "generations" / pointer.generation_id / "generation.json"
+    if not manifest.is_file() or manifest.is_symlink():
+        return False
+    if hashlib.sha256(manifest.read_bytes()).hexdigest() != pointer.manifest_sha256:
+        return False
+    if pointer.artifact_inventory_sha256 is None:
+        return True
+    try:
+        actual = generation_inventory_sha256(source_root, pointer.generation_id)
+    except GenerationConflictError:
+        return False
+    return actual == pointer.artifact_inventory_sha256
 
 
 def _copy_manifest(source_root: Path, generation_id: str, target_root: Path) -> None:
