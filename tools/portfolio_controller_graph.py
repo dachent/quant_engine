@@ -133,6 +133,10 @@ _PATH_STAGES = {
     "tools/check_repository_boundary.py": [],
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
+    # The nested-strategy tag map (#567 stage 1): policy validation and tag
+    # resolution only; no producer imports it yet, so a change affects no stage.
+    "tools/nested_strategy_tag_map.py": [],
+    "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
     # real delivery artifact); no producer imports it.

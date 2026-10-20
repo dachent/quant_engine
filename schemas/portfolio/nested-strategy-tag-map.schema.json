@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/nested-strategy-tag-map.schema.json",
+  "title": "Nested strategy tag map",
+  "description": "Owner policy that names the strategies nested inside one provider account. A provider tag on each execution (an order reference, a fund title) is resolved to a sleeve, and each sleeve is its own derived account with its own strategy, epoch, NAV and flows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifact_id", "as_of_date", "parents"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_id": {"const": "nested-strategy-tag-map"},
+    "as_of_date": {"$ref": "#/$defs/date"},
+    "parents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/parent"}
+    }
+  },
+  "$defs": {
+    "date": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"},
+    "internal_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "sleeve_id": {"type": "string", "pattern": "^[a-z][a-z0-9]{0,15}$"},
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_account_id", "provider_id", "tag_field", "tag_normalization", "sleeves", "unmatched"],
+      "properties": {
+        "parent_account_id": {"$ref": "#/$defs/internal_id"},
+        "provider_id": {"$ref": "#/$defs/internal_id"},
+        "tag_field": {"type": "string", "minLength": 1, "maxLength": 64},
+        "tag_normalization": {"enum": ["NONE", "STRIP_LEADING_DIGITS_AND_DASH"]},
+        "sleeves": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sleeve"}},
+        "unmatched": {"$ref": "#/$defs/unmatched"}
+      }
+    },
+    "sleeve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sleeve_id", "strategy_id", "label", "effective_start", "effective_end", "tags"],
+      "properties": {
+        "sleeve_id": {"$ref": "#/$defs/sleeve_id"},
+        "strategy_id": {"$ref": "#/$defs/internal_id"},
+        "label": {"type": "string", "minLength": 1},
+        "effective_start": {"$ref": "#/$defs/date"},
+        "effective_end": {"oneOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "tags": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/tag"}}
+      }
+    },
+    "tag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["match", "pattern"],
+      "properties": {
+        "match": {"enum": ["exact", "startswith", "contains"]},
+        "pattern": {"type": "string", "minLength": 1}
+      }
+    },
+    "unmatched": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {"mode": {"const": "BLOCK"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "fallback_sleeve_id"],
+          "properties": {
+            "mode": {"const": "ASSIGN_BY_HOLDING_SYMBOL"},
+            "fallback_sleeve_id": {"$ref": "#/$defs/sleeve_id"}
+          }
+        }
+      ]
+    }
+  }
+}
