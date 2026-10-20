@@ -10134,6 +10134,7 @@ def test_execution_costs_and_time_granularity_are_admitted_to_ledger_rows() -> N
             "event_date": "2026-01-05",
             "executed_time": "09:30:15",
             "kind": "TRADE:ExchTrade:BUY",
+            "order_reference": "1234567-BasedonSomeBookLive",
             "record_id": "ibkr-trade-1",
             "timing_granularity": "DATETIME",
         },
@@ -10162,8 +10163,10 @@ def test_execution_costs_and_time_granularity_are_admitted_to_ledger_rows() -> N
         "value": "-1.05",
     }
     assert timed["executed_time"] == "09:30:15"
+    assert timed["order_reference"] == "1234567-BasedonSomeBookLive"
     assert timed["timing_granularity"] == "DATETIME"
     assert "commission" not in date_only and "executed_time" not in date_only
+    assert "order_reference" not in date_only
     assert date_only["timing_granularity"] == "DATE_ONLY"
 
     account_id = "account-schwab-fees"
