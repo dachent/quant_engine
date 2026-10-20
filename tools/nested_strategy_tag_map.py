@@ -18,8 +18,6 @@ from pathlib import Path
 import re
 from typing import Any, Final, Mapping, Sequence
 
-from quant_engine.core.contracts import canonical_json_bytes
-
 
 class TagMapError(ValueError):
     """The nested-strategy tag map is invalid or a tag cannot be resolved."""
@@ -287,7 +285,11 @@ def validate_tag_map(raw: bytes) -> TagMap:
     return TagMap(
         as_of_date=as_of,
         parents=tuple(parents),
-        sha256=hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+        sha256=hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        ).hexdigest(),
     )
 
 
