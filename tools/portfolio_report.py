@@ -2562,7 +2562,10 @@ def _reconcile_multi_account_strategy_composite(
                 )
                 continue
             links = detail.get("own_path_links")
-            if not isinstance(links, list) or not links:
+            # A member that closes on its performance opening date has no trace: its
+            # whole path is post-closing value periods (admitted below).
+            closed = detail.get("performance_closed_on") is not None
+            if not isinstance(links, list) or (not links and not closed):
                 raise ReportValidationError(
                     "multi-account member own trace path is missing "
                     f"for {strategy_id} ({account_id})"

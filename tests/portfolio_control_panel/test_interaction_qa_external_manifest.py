@@ -205,7 +205,7 @@ def test_external_manifest_behavioral_binding_and_last_four_guard(
             row.get("observed_max_drawdown"),
         ]
         cells.extend(
-            f"<td>{em_dash if row['status'] != 'OK' else (f'{float(v):,.2f}' if i < 5 else (f'{float(v) * 100:.2f}%' if i in (5, 6, 7, 9) else f'{float(v):,.2f}'))}</td>"
+            f"<td>{em_dash if row['status'] != 'OK' else (f'{float(v):,.2f}' if i < 5 else (f'{float(v) * 100:.2f}%' if i in (5, 6, 7) else (f'{-abs(float(v)) * 100:.2f}%' if i == 9 and float(v) else f'{float(v) * 100:.2f}%' if i == 9 else f'{float(v):,.2f}')))}</td>"
             for i, v in enumerate(values)
         )
         rows.append(

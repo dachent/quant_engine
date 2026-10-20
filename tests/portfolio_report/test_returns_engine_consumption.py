@@ -2321,6 +2321,19 @@ def test_closed_member_post_liquidation_income_reconciles_to_the_strategy_compos
     assert rows["account-r"]["epoch_admission_status"] == "FUNDED"
 
 
+def test_member_closed_on_its_opening_date_has_no_trace_and_reconciles_by_value() -> (
+    None
+):
+    changes = _closed_member_changes()
+    changes["own_path_links"] = []
+    changes["performance_closed_on"] = R3_DAYS[0]
+    catalog, details, _epochs = _r3_world(r3_changes=changes)
+
+    rows = _performance(catalog, details)
+
+    assert rows["account-r"]["epoch_admission_status"] == "FUNDED"
+
+
 def test_closed_member_tampered_income_fails_the_1e_12_gate() -> None:
     catalog, details, _epochs = _r3_world(
         r3_changes=_closed_member_changes(tamper_income="3.82")
