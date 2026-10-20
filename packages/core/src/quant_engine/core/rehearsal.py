@@ -141,6 +141,17 @@ def _source_state(
     }, manifest
 
 
+def _healthy_predecessor(source_root: Path, pointer: CurrentPointer) -> bool:
+    """A current-schema predecessor whose generation manifest still exists."""
+
+    return (
+        pointer.pointer_schema_version != 1
+        and (
+            source_root / "generations" / pointer.generation_id / "generation.json"
+        ).is_file()
+    )
+
+
 def _copy_manifest(source_root: Path, generation_id: str, target_root: Path) -> None:
     source = source_root / "generations" / generation_id / "generation.json"
     manifest = GenerationManifest.from_json_bytes(source.read_bytes())
@@ -313,9 +324,17 @@ def rehearse_release_boundaries(
             rehearsal_root = scenario / "r" / target.root_id
             roots[target.root_id] = rehearsal_root
             _copy_manifest(source_root, target.proposed_generation_id, rehearsal_root)
-            if target.previous_pointer is not None and recovery:
+            if (
+                target.previous_pointer is not None
+                and recovery
+                and not _healthy_predecessor(source_root, target.previous_pointer)
+            ):
                 # An unusable predecessor is reproduced as the exact bytes the
-                # release recorded, never re-published.
+                # release recorded, never re-published. A healthy v2 predecessor
+                # (current pointer schema, manifest present) cannot be reproduced
+                # verbatim in a manifest-only rehearsal root: its recorded artifact
+                # inventory covers files the compact root does not carry, so it is
+                # published locally below like in a non-recovery release.
                 previous_dir = (
                     source_root / "generations" / target.previous_pointer.generation_id
                 )
