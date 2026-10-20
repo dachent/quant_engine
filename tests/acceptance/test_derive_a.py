@@ -1731,7 +1731,7 @@ def test_amended_policy_tampering_cannot_reuse_owner_digest(tmp_path: Path) -> N
 
 def test_crosswalk_funded_end_closes_performance_span() -> None:
     raw = _crosswalk()
-    raw["rows"] = raw["rows"][:1]
+    raw["rows"] = copy.deepcopy(raw["rows"][:1])
     raw["rows"][0]["funded_end"] = "2026-01-06"
     crosswalk = sources.parse_crosswalk(json.dumps(raw).encode())
     assert derive._account_span(crosswalk.rows).end == day("2026-01-06")

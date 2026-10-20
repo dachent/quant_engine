@@ -33,43 +33,29 @@ HISTORICAL_FC9A_SHA256 = (
 HISTORICAL_FC9A_PATH = (
     REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-fc9a-1584761a.json"
 )
-CURRENT_SUCCESSOR_HEAD = "49df41d22f53d55f2493a976f546a1df6bed9341"
-CURRENT_AGREE_COUNT = 103
-CURRENT_NOT_DERIVABLE_COUNT = 15
+HISTORICAL_V3_PATH = (
+    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v3-49df41d2.json"
+)
+HISTORICAL_V3_SHA256 = (
+    "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
+)
+CURRENT_SUCCESSOR_HEAD = "6b9719c8dcce51000e0852624856e0a39062ef51"
+CURRENT_AGREE_COUNT = 100
+CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "c03c5803c0ed0629f6ca84e831500f835ac264e486ca6e95136396a8af6c83df",
-    "b": "4ae7231426698fe36a48a9fa70979062439efcf89eb29aecb5ae55c9433491b0",
+    "a": "58e63c32236ef726130d4665c159588c178612bc0c3e65d6c754fedf04e240c5",
+    "b": "a9fd8b0c5a380b3d8150b1073b93035e2282172854e1393032e865689a45b9ef",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # A runs the r1 manifest (derive_a rejects the PR526 base families by
-    # design); B runs r2 with the 0903 base-run pins.
-    "a": "7909bc528c71327f6c03b81254f5a9e954fbe7e737a6c56b2a181b6ddc2ffc3b",
-    "b": "9254fdf79b69d9497aa5c5ea1a9fbdbde5abfe0a3255567c4d8b0a8d963d62db",
+    # R1: each deriver ran its own copy of the same inputs (separate contract path).
+    "a": "f4e11cdc6e534e12c772b424ddc3edd2d143419a8c069b533a9156c4f5ba64c0",
+    "b": "f7bc9a3743ca947c33951a2c342e13fbaf9f4c742dbc3c8fc9b6d3c092c37ce4",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "1ec587cdafd4dae62d77bd0ccf2abcca3c29257086d2ef50c5e231d9ab7329da",
+    "89c78abb39472da2fefed362f899bc7e119b35b5ea3a62d42654975f9615de16",
 )
-CURRENT_AUDIT_AUTHORITY_POINTERS = frozenset(
-    {
-        (
-            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/A-response.json",
-            "e5b5dc6acd5304b1bdc797c23168f2ad0c23cb38e75ae7cc7872e53db5d07683",
-        ),
-        (
-            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/B-response.json",
-            "84b84c3d22b33f7e03c92f3f8ff731d17f3a62c976f3560d196e1203a87edf7c",
-        ),
-        (
-            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/actual-sixth-receipt.json",
-            "773259022e297b06e6133c661a937e7cf7a331d58c6955a39ce22112fe93ddcb",
-        ),
-        (
-            "audit/coding/2026-09-26_quant_engine_corrective_program/state/build/codex-cr2-owner-post-20261002/approved-policy-decision.json",
-            "9b99fe3c7a60fdf2975b05981f64e06b099d6dc8cfa73141536d5c15a55313db",
-        ),
-    }
-)
+CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
 TOLERANCE_UNITS = {"USD", "ratio"}
 EXACT_UNITS = {"count", "date", "list", "status"}
@@ -103,6 +89,13 @@ def test_historical_09f6_baseline_is_byte_exact() -> None:
     raw = HISTORICAL_09F6_PATH.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == HISTORICAL_09F6_SHA256
     _load(HISTORICAL_09F6_PATH)
+
+
+def test_historical_v3_baseline_is_byte_exact() -> None:
+    assert HISTORICAL_V3_PATH.is_file(), f"missing {HISTORICAL_V3_PATH}"
+    raw = HISTORICAL_V3_PATH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HISTORICAL_V3_SHA256
+    _load(HISTORICAL_V3_PATH)
 
 
 def test_historical_fc9a_baseline_is_byte_exact() -> None:
@@ -312,13 +305,13 @@ def test_current_successor_identity_and_authority_coverage() -> None:
     rows = _rows(doc)
     assert doc["head"] == CURRENT_SUCCESSOR_HEAD
     assert doc["inventory_sha256"] == (
-        "f8d9d72b7c1a8780b5a6505151f464a292d480aa17015d267e97ba86347d748f"
+        "2593811724ce4c2bf52d1039d7edabdee72b590b53d326bfe2a4167bd313c74d"
     )
     assert doc["pointer_map_sha256"] == (
-        "641cb4cff0e287c1824b7604659a633cb107e9095f146d68b809df4eeafba2a5"
+        "fca86572166ee4b422d104587c3397b48757250f5a629e44d584b2a3e1d8de8a"
     )
     assert doc["admission_decision_sha256"] == (
-        "5688face907c55d439eae9eb9d03342f4f4a7935707ac3a5666aef08929a97c5"
+        "7c43d6740c8d077d2d7d13330439699115cc1f84555f967574cd4f0526547278"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
