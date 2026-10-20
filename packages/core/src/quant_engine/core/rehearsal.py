@@ -20,6 +20,8 @@ from quant_engine.core.contracts import (
 from quant_engine.core.pipeline import PipelineSpec
 from quant_engine.core.publication import (
     CurrentPointer,
+    GenerationConflictError,
+    generation_inventory_sha256,
     publish_generation,
     read_current,
     stage_generation,
@@ -139,6 +141,31 @@ def _source_state(
         "journal_state": journal.state.value,
         "targets": targets,
     }, manifest
+
+
+def _healthy_predecessor(source_root: Path, pointer: CurrentPointer) -> bool:
+    """A current-schema predecessor that still verifies against its recorded hashes.
+
+    The generation manifest must exist and hash to the pointer's manifest digest, and the
+    recorded artifact inventory (when the pointer carries one) must still match the
+    generation directory; anything else is an unusable predecessor and is reproduced
+    verbatim by the caller.
+    """
+
+    if pointer.pointer_schema_version == 1:
+        return False
+    manifest = source_root / "generations" / pointer.generation_id / "generation.json"
+    if not manifest.is_file() or manifest.is_symlink():
+        return False
+    if hashlib.sha256(manifest.read_bytes()).hexdigest() != pointer.manifest_sha256:
+        return False
+    if pointer.artifact_inventory_sha256 is None:
+        return True
+    try:
+        actual = generation_inventory_sha256(source_root, pointer.generation_id)
+    except GenerationConflictError:
+        return False
+    return actual == pointer.artifact_inventory_sha256
 
 
 def _copy_manifest(source_root: Path, generation_id: str, target_root: Path) -> None:
@@ -313,9 +340,17 @@ def rehearse_release_boundaries(
             rehearsal_root = scenario / "r" / target.root_id
             roots[target.root_id] = rehearsal_root
             _copy_manifest(source_root, target.proposed_generation_id, rehearsal_root)
-            if target.previous_pointer is not None and recovery:
+            if (
+                target.previous_pointer is not None
+                and recovery
+                and not _healthy_predecessor(source_root, target.previous_pointer)
+            ):
                 # An unusable predecessor is reproduced as the exact bytes the
-                # release recorded, never re-published.
+                # release recorded, never re-published. A healthy v2 predecessor
+                # (current pointer schema, manifest present) cannot be reproduced
+                # verbatim in a manifest-only rehearsal root: its recorded artifact
+                # inventory covers files the compact root does not carry, so it is
+                # published locally below like in a non-recovery release.
                 previous_dir = (
                     source_root / "generations" / target.previous_pointer.generation_id
                 )

@@ -385,3 +385,119 @@ def test_recovery_rehearsal_supports_a_release_that_recovered_unusable_pointers(
 
     assert result["status"] == "PASS"
     assert result["boundary_rehearsal"]["source_unchanged"] is True
+
+
+def test_recovery_rehearsal_publishes_a_healthy_predecessor_that_has_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A recovered release with a healthy v2 predecessor whose inventory has more than its manifest.
+
+    A manifest-only rehearsal root cannot reproduce that pointer verbatim: its recorded artifact
+    inventory covers files the compact root does not carry. The healthy predecessor is published
+    locally; the unusable (schema-v1) one is still reproduced verbatim.
+    """
+
+    roots = {"excel": tmp_path / "excel", "panel": tmp_path / "panel"}
+    proposed = {
+        root_id: _manifest(f"{root_id}-proposed", date(2026, 7, 31))
+        for root_id in roots
+    }
+    for root_id in roots:
+        stage_generation(roots[root_id], proposed[root_id])
+    # excel: a healthy v2 predecessor whose generation directory carries an artifact file
+    healthy = _manifest("excel-healthy", date(2026, 7, 30))
+    staged = stage_generation(roots["excel"], healthy)
+    (staged.parent / "artifact.bin").write_bytes(
+        b"payload bytes the compact root lacks"
+    )
+    publish_generation(roots["excel"], healthy.generation_id)
+    # panel: a schema-v1 pointer at a generation that is present
+    old = _manifest("panel-old", date(2026, 7, 30))
+    stage_generation(roots["panel"], old)
+    (roots["panel"] / "CURRENT.json").write_bytes(
+        CurrentPointer(
+            generation_id=old.generation_id,
+            manifest_sha256=hashlib.sha256(old.to_json_bytes()).hexdigest(),
+        ).to_json_bytes()
+    )
+    launcher = tmp_path / "proposed-launcher.html"
+    launcher.write_bytes(b"proposed launcher\n")
+    coordination = tmp_path / "coordination"
+    release = prepare_release(
+        coordination_root=coordination,
+        roots=roots,
+        proposed_generations={r: m.generation_id for r, m in proposed.items()},
+        code_commit="a" * 40,
+        created_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        gates=(
+            GateEvidence("test", "b" * 64),
+            GateEvidence("predecessor-pointer-recovery", "c" * 64),
+        ),
+        companions=(
+            CompanionInput(
+                "panel-launcher", "panel", "index.html", launcher.read_bytes()
+            ),
+        ),
+        allow_unusable_predecessor_pointers=True,
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=release.release_id,
+        roots=roots,
+        companion_contents={"panel-launcher": launcher.read_bytes()},
+        skip_release_validation=True,
+    )
+    spec = PipelineSpec(
+        pipeline_id="recovered-healthy-test-release",
+        as_of_date=date(2026, 7, 31),
+        code_commit="a" * 40,
+        created_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        coordination_root=coordination,
+        state_root=tmp_path / "state",
+        roots=roots,
+        nodes=(),
+        gates=(),
+        companions=(
+            PipelineCompanion(
+                "panel-launcher",
+                "panel",
+                "index.html",
+                launcher,
+                hashlib.sha256(launcher.read_bytes()).hexdigest(),
+            ),
+        ),
+    )
+
+    result = run_recovery_rehearsal(
+        spec=spec,
+        release_id=release.release_id,
+        output_root=tmp_path / "healthy-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["boundary_rehearsal"]["source_unchanged"] is True
+
+
+def test_healthy_predecessor_requires_the_recorded_manifest_and_inventory(
+    tmp_path: Path,
+) -> None:
+    from quant_engine.core.rehearsal import _healthy_predecessor
+
+    root = tmp_path / "root"
+    manifest = _manifest("healthy", date(2026, 7, 30))
+    staged = stage_generation(root, manifest)
+    artifact = staged.parent / "artifact.bin"
+    artifact.write_bytes(b"payload")
+    pointer = publish_generation(root, manifest.generation_id)
+    assert _healthy_predecessor(root, pointer)
+    artifact.write_bytes(b"changed after publication")
+    assert not _healthy_predecessor(root, pointer)
+    artifact.write_bytes(b"payload")
+    staged.write_bytes(staged.read_bytes() + b" ")
+    assert not _healthy_predecessor(root, pointer)
+    legacy = CurrentPointer(
+        generation_id=manifest.generation_id,
+        manifest_sha256=pointer.manifest_sha256,
+    )
+    assert not _healthy_predecessor(root, legacy)
