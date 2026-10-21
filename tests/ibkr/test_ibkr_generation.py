@@ -1205,7 +1205,7 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     second, second_manifest, second_bytes = build_generation(spec_path)
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
-    assert first["catalog_schema_version"] == 5
+    assert first["catalog_schema_version"] == 6
     assert {row["value_basis"] for row in first["nav_observations"]} == {
         "ACCOUNT_TOTAL"
     }
@@ -2777,6 +2777,35 @@ def test_trade_commission_and_time_of_day_reach_the_catalog(
         for row in catalog["flows"]
         if "event_time" in row
     )
+
+
+def test_trade_order_reference_reaches_the_catalog_as_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#567: the provider tag a nested strategy resolves from is kept verbatim."""
+
+    import sys
+
+    original = _xml
+
+    def with_reference(*args: Any, **kwargs: Any) -> str:
+        return original(*args, **kwargs).replace(
+            'netCash="-10" ',
+            'netCash="-10" orderReference="1234567-BasedonSomeBookLive" ',
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", with_reference)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    tagged = [row for row in catalog["transactions"] if "order_reference" in row]
+    assert tagged
+    assert {row["order_reference"] for row in tagged} == {"1234567-BasedonSomeBookLive"}
+
+
+def test_trade_without_an_order_reference_adds_no_key(tmp_path: Path) -> None:
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    assert all("order_reference" not in row for row in catalog["transactions"])
 
 
 def test_trade_without_commission_or_time_stays_date_only(tmp_path: Path) -> None:
