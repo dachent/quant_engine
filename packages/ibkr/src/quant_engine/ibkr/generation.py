@@ -48,7 +48,7 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 5
+CATALOG_SCHEMA_VERSION = 6
 ADAPTER_VERSION = "0.4.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1199,6 +1199,10 @@ def _normalize(
             }
             if trade.executed_time is not None:
                 payload["executed_time"] = trade.executed_time
+            if trade.order_reference is not None:
+                # The provider tag a nested strategy is resolved from (#567),
+                # kept exactly as Flex reports it.
+                payload["order_reference"] = trade.order_reference
             if trade.commission is not None:
                 # ibCommission, exactly as Flex signs it (a cost is negative).
                 payload["commission"] = {

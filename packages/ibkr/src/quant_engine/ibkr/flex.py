@@ -196,6 +196,8 @@ class FlexTrade:
     reported_account_matches_statement: bool
     commission_currency: str | None = None
     executed_time: str | None = None
+    # The provider tag a nested strategy is resolved from (#567).
+    order_reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -415,6 +417,7 @@ def _trade(element: ET.Element, raw_account_id: str) -> FlexTrade:
         reported_account_matches_statement=_account_matches(element, raw_account_id),
         commission_currency=_optional(element.attrib.get("ibCommissionCurrency")),
         executed_time=_time_of_day(element.attrib.get("dateTime")),
+        order_reference=_optional(element.attrib.get("orderReference")),
     )
 
 
