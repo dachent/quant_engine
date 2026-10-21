@@ -4767,6 +4767,7 @@ def _project_account_facts(
                     "event_time",
                     "executed_time",
                     "fees_and_commission",
+                    "mark_price",
                     "order_reference",
                     "timing_granularity",
                 ):

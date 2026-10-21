@@ -10122,6 +10122,93 @@ def test_matrixport_anchors_keep_their_own_window_without_a_captured_boundary() 
     assert by_fact["capital_anchors"].effective_end == date(2025, 12, 5)
 
 
+def test_projected_ibkr_rows_feed_the_sleeve_inputs_adapter() -> None:
+    """#567: the rows the ledger projects are exactly what the adapter reads."""
+
+    import json
+
+    import nested_strategy_tag_map as tags
+    import sleeve_inputs
+
+    ibkr_catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
+    ibkr_catalog["transactions"] = [
+        {
+            "account_id": _IBKR_ACCOUNT,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "40"},
+            "commission": {"currency": "USD", "status": "AVAILABLE", "value": "-1"},
+            "event_date": "2026-01-05",
+            "execution_price": "10",
+            "executed_time": "09:30:15",
+            "kind": "TRADE:ExchTrade:SELL",
+            "order_reference": "1-BookOne",
+            "quantity": "-4",
+            "record_id": "ibkr-sell",
+            "security_id": "sec-a",
+            "timing_granularity": "DATETIME",
+        }
+    ]
+    ibkr_catalog["positions"] = [
+        {
+            "account_id": _IBKR_ACCOUNT,
+            "as_of_date": "2026-01-05",
+            "mark_price": "10.5",
+            "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "21"},
+            "quantity": "2",
+            "record_id": "ibkr-position",
+            "security_id": "sec-a",
+        }
+    ]
+    projected, _findings = ledger._project_account_facts(
+        "ibkr",
+        "generation-ibkr",
+        ibkr_catalog,
+        {_IBKR_ACCOUNT},
+        {"p123-eu"},
+        _IBKR_ASSIGNMENTS,
+    )
+    parent = tags.validate_tag_map(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": "nested-strategy-tag-map",
+                "as_of_date": "2026-01-05",
+                "parents": [
+                    {
+                        "parent_account_id": "account-parent",
+                        "provider_id": "provider-a",
+                        "tag_field": "orderReference",
+                        "tag_normalization": "STRIP_LEADING_DIGITS_AND_DASH",
+                        "sleeves": [
+                            {
+                                "sleeve_id": "s1",
+                                "strategy_id": "strategy-s1",
+                                "label": "s1",
+                                "effective_start": "2026-01-01",
+                                "effective_end": None,
+                                "tags": [{"match": "startswith", "pattern": "BookOne"}],
+                            }
+                        ],
+                        "unmatched": {"mode": "BLOCK"},
+                    }
+                ],
+            }
+        ).encode()
+    ).parent("account-parent")
+
+    inputs = sleeve_inputs.sleeve_inputs(
+        projected["transactions"], projected["positions"], parent
+    )
+
+    (trade,) = inputs.trades
+    assert (trade.quantity, trade.price, trade.commission) == (
+        Decimal("-4"),
+        Decimal("10"),
+        Decimal("-1"),
+    )
+    assert inputs.resolve(trade.tag, trade.day) == "s1"
+    assert inputs.marks == {"2026-01-05": {"sec-a": Decimal("10.5")}}
+
+
 def test_execution_costs_and_time_granularity_are_admitted_to_ledger_rows() -> None:
     """#535: a catalog commission, fee or time of day is never dropped at admission."""
 
