@@ -270,6 +270,9 @@ def _rederive_ledger(
                 "net_trade": net,
                 "gross_traded": gross,
                 "commission": commission,
+                "symbol_count": Fraction(
+                    sum(1 for amount in held[sleeve].values() if abs(amount) > _EPS)
+                ),
                 "dividend": share_out.get(sleeve, _ZERO),
                 "unallocated": share_out.get("UNALLOCATED", _ZERO)
                 if sleeve == residual
@@ -294,6 +297,7 @@ def _rederive_nav(
             continue
         first = min(events)
         nav_before = _ZERO
+        cash = _ZERO
         ended = False
         for day in days:
             if day < first or ended:
@@ -320,7 +324,25 @@ def _rederive_nav(
             elif kind == "SWEEP":
                 flow_out = item["value"] - pre
             nav_end = _ZERO if kind == "EXIT" else pre + flow_out
+            cash += (
+                -item["net_trade"]
+                + item["commission"]
+                + item["dividend"]
+                + (flow_in if kind == "IN" else _ZERO)
+                + (flow_out if kind == "OUT" else _ZERO)
+            )
+            if kind in ("EXIT", "SWEEP"):
+                cash = _ZERO
             rows[(day, sleeve)] = {
+                "event": kind,
+                "event_evidence": events.get(day, {}).get("evidence", ""),
+                "value": _ZERO if kind == "EXIT" else item["value"],
+                "cash": cash,
+                "valuation_residual": resid,
+                "commission": item["commission"],
+                "dividend": item["dividend"],
+                "net_trade": item["net_trade"],
+                "gross_traded": item["gross_traded"],
                 "exposure": exposure,
                 "nav_prev": nav_before,
                 "flow_in": flow_in,
@@ -349,6 +371,9 @@ def _rederive_nav(
             row = rows[(day, sleeve)]
             share = row["exposure"] / whole if whole > 0 else _ZERO
             row["exposure_share"] = share
+            row["alloc_interest"] = _q(figures["interest"]) * share
+            row["alloc_fees"] = _q(figures["fees"]) * share
+            row["alloc_dividend_accrual"] = _q(figures["dividend_accrual"]) * share
             row["alloc_total"] = costs * share
             row["r_alloc"] = (
                 (row["own_pnl"] + row["alloc_total"]) / row["base"]
@@ -413,6 +438,11 @@ def verify_sleeve_ledger(
     seen_ledger: set[tuple[str, str]] = set()
     for row in published.get("ledger_rows", ()):
         key = (str(row["day"]), str(row["sleeve_id"]))
+        if key in seen_ledger:
+            mismatches.append(
+                Mismatch("ledger", "/".join(key), "row", "duplicated", "once")
+            )
+            continue
         seen_ledger.add(key)
         if key not in ledger:
             mismatches.append(
@@ -428,6 +458,7 @@ def verify_sleeve_ledger(
             "gross_traded",
             "commission",
             "dividend",
+            "symbol_count",
         ):
             check("ledger", "/".join(key), name, row[name], ledger[key][name])
     for key in ledger:
@@ -438,6 +469,11 @@ def verify_sleeve_ledger(
     seen_nav: set[tuple[str, str]] = set()
     for row in published.get("nav_rows", ()):
         key = (str(row["day"]), str(row["sleeve_id"]))
+        if key in seen_nav:
+            mismatches.append(
+                Mismatch("nav", "/".join(key), "row", "duplicated", "once")
+            )
+            continue
         seen_nav.add(key)
         if key not in nav:
             mismatches.append(
@@ -449,16 +485,34 @@ def verify_sleeve_ledger(
             "nav_prev",
             "flow_in",
             "flow_out",
+            "value",
+            "cash",
             "nav_end",
             "price_pnl",
+            "valuation_residual",
+            "commission",
+            "dividend",
             "own_pnl",
             "base",
             "r_own",
+            "net_trade",
+            "gross_traded",
             "exposure_share",
+            "alloc_interest",
+            "alloc_fees",
+            "alloc_dividend_accrual",
             "alloc_total",
             "r_alloc",
         ):
             check("nav", "/".join(key), name, row[name], nav[key][name])
+        for name in ("event", "event_evidence"):
+            compared += 1
+            if str(row[name]) != nav[key][name]:
+                mismatches.append(
+                    Mismatch(
+                        "nav", "/".join(key), name, str(row[name]), str(nav[key][name])
+                    )
+                )
     for key in nav:
         if key not in seen_nav:
             mismatches.append(
@@ -467,6 +521,9 @@ def verify_sleeve_ledger(
     seen_days: set[str] = set()
     for row in published.get("closure", ()):
         day = str(row["day"])
+        if day in seen_days:
+            mismatches.append(Mismatch("closure", day, "row", "duplicated", "once"))
+            continue
         seen_days.add(day)
         if day not in closure:
             mismatches.append(Mismatch("closure", day, "row", "present", "absent"))

@@ -247,6 +247,12 @@ def test_the_verifier_agrees_with_the_builders_on_a_rich_scenario() -> None:
         ("nav_rows", 2, "nav_end"),
         ("nav_rows", 1, "alloc_total"),
         ("closure", 2, "unexplained"),
+        ("nav_rows", 1, "value"),
+        ("nav_rows", 1, "cash"),
+        ("nav_rows", 1, "valuation_residual"),
+        ("nav_rows", 1, "alloc_interest"),
+        ("nav_rows", 1, "net_trade"),
+        ("ledger_rows", 3, "symbol_count"),
     ],
 )
 def test_a_changed_published_figure_is_a_mismatch(
@@ -319,3 +325,26 @@ def test_the_verifier_shares_no_code_with_the_builders() -> None:
         if isinstance(node, ast.ImportFrom)
     }
     assert not imported & {"sleeve_ledger", "sleeve_nav", "nested_strategy_tag_map"}
+
+
+def test_a_changed_event_label_is_a_mismatch() -> None:
+    inputs = _inputs()
+    published = _publish(inputs)
+    exit_row = next(r for r in published["nav_rows"] if r["event"] == "EXIT")
+    exit_row["event"] = "SWEEP"
+    exit_row["event_evidence"] = "DERIVED"
+    fields = {
+        m.field for m in verifier.verify_sleeve_ledger(inputs, published).mismatches
+    }
+    assert {"event", "event_evidence"} <= fields
+
+
+@pytest.mark.parametrize("table", ["ledger_rows", "nav_rows", "closure"])
+def test_a_duplicated_published_row_is_a_mismatch(table: str) -> None:
+    inputs = _inputs()
+    published = _publish(inputs)
+    published[table].append(dict(published[table][0]))
+    report = verifier.verify_sleeve_ledger(inputs, published)
+    assert any(
+        m.field == "row" and m.published == "duplicated" for m in report.mismatches
+    )
