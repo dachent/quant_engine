@@ -48,7 +48,7 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 6
+CATALOG_SCHEMA_VERSION = 7
 ADAPTER_VERSION = "0.4.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1203,6 +1203,19 @@ def _normalize(
                 # The provider tag a nested strategy is resolved from (#567),
                 # kept exactly as Flex reports it.
                 payload["order_reference"] = trade.order_reference
+            # Signed shares of the execution, so a nested strategy's holdings
+            # can be rebuilt from the catalog.  Direction comes from buySell,
+            # never from the sign Flex happens to give the magnitude; any other
+            # buySell value states no direction and so no quantity.
+            if trade.buy_sell in ("BUY", "SELL"):
+                shares = abs(trade.quantity)
+                payload["quantity"] = decimal_text(
+                    -shares if trade.buy_sell == "SELL" else shares
+                )
+            if trade.trade_price is not None:
+                payload["execution_price"] = decimal_text(trade.trade_price)
+            if trade.close_price is not None:
+                payload["close_price"] = decimal_text(trade.close_price)
             if trade.commission is not None:
                 # ibCommission, exactly as Flex signs it (a cost is negative).
                 payload["commission"] = {

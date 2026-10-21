@@ -1205,7 +1205,7 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     second, second_manifest, second_bytes = build_generation(spec_path)
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
-    assert first["catalog_schema_version"] == 6
+    assert first["catalog_schema_version"] == 7
     assert {row["value_basis"] for row in first["nav_observations"]} == {
         "ACCOUNT_TOTAL"
     }
@@ -2800,6 +2800,74 @@ def test_trade_order_reference_reaches_the_catalog_as_reported(
     tagged = [row for row in catalog["transactions"] if "order_reference" in row]
     assert tagged
     assert {row["order_reference"] for row in tagged} == {"1234567-BasedonSomeBookLive"}
+
+
+def test_trade_quantity_and_prices_reach_the_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#567: a trade's signed shares, execution price and close price are kept."""
+
+    import sys
+
+    original = _xml
+
+    def with_prices(*args: Any, **kwargs: Any) -> str:
+        return original(*args, **kwargs).replace(
+            'netCash="-10" ',
+            'netCash="-10" tradePrice="10.25" closePrice="10.5" ',
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", with_prices)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    trades = [row for row in catalog["transactions"] if row["kind"].startswith("TRADE")]
+    assert trades
+    assert {row["quantity"] for row in trades} == {"1"}
+    assert {row["execution_price"] for row in trades} == {"10.25"}
+    assert {row["close_price"] for row in trades} == {"10.5"}
+
+
+@pytest.mark.parametrize(
+    "buy_sell, reported, signed",
+    [
+        ("SELL", "10", "-10"),
+        ("SELL", "-10", "-10"),
+        ("BUY", "10", "10"),
+        ("BUY", "-10", "10"),
+    ],
+)
+def test_trade_quantity_sign_follows_buy_sell_not_the_reported_sign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    buy_sell: str,
+    reported: str,
+    signed: str,
+) -> None:
+    import re
+    import sys
+
+    original = _xml
+
+    def with_side(*args: Any, **kwargs: Any) -> str:
+        text = original(*args, **kwargs)
+        text = re.sub(r'quantity="1" netCash', f'quantity="{reported}" netCash', text)
+        return re.sub(r'buySell="[A-Z]+"', f'buySell="{buy_sell}"', text)
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", with_side)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    trades = [row for row in catalog["transactions"] if row["kind"].startswith("TRADE")]
+    assert trades and {row["quantity"] for row in trades} == {signed}
+
+
+def test_trade_without_prices_adds_no_price_keys(tmp_path: Path) -> None:
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    trades = [row for row in catalog["transactions"] if row["kind"].startswith("TRADE")]
+    assert all("quantity" in row for row in trades)
+    assert all(
+        "execution_price" not in row and "close_price" not in row for row in trades
+    )
 
 
 def test_trade_without_an_order_reference_adds_no_key(tmp_path: Path) -> None:

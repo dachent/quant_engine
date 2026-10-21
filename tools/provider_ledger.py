@@ -83,7 +83,7 @@ REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
-    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5, 6})),
+    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5, 6, 7})),
     "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
@@ -4762,6 +4762,7 @@ def _project_account_facts(
                 # when the source states them, so a catalog fact is never
                 # dropped here.  A ``None`` is no fact and adds no key.
                 for field in (
+                    "close_price",
                     "commission",
                     "event_time",
                     "executed_time",
