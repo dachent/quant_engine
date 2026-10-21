@@ -138,6 +138,7 @@ _PATH_STAGES = {
     "tools/nested_strategy_tag_map.py": [],
     "tools/sleeve_ledger.py": [],
     "tools/sleeve_nav.py": [],
+    "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
