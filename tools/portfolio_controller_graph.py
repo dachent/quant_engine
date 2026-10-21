@@ -137,6 +137,7 @@ _PATH_STAGES = {
     # resolution only; no producer imports it yet, so a change affects no stage.
     "tools/nested_strategy_tag_map.py": [],
     "tools/sleeve_ledger.py": [],
+    "tools/sleeve_nav.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
