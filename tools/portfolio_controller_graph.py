@@ -136,6 +136,7 @@ _PATH_STAGES = {
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
     # resolution only; no producer imports it yet, so a change affects no stage.
     "tools/nested_strategy_tag_map.py": [],
+    "tools/sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
