@@ -48,7 +48,7 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 6
+CATALOG_SCHEMA_VERSION = 7
 ADAPTER_VERSION = "0.4.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1188,6 +1188,9 @@ def _normalize(
                 "provider_execution_id_sha256": hashlib.sha256(
                     trade.execution_id.encode()
                 ).hexdigest(),
+                # Signed shares of the execution (a sale is negative), so a
+                # nested strategy's holdings can be rebuilt from the catalog.
+                "quantity": decimal_text(trade.quantity),
                 "security_id": security_id,
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
@@ -1203,6 +1206,10 @@ def _normalize(
                 # The provider tag a nested strategy is resolved from (#567),
                 # kept exactly as Flex reports it.
                 payload["order_reference"] = trade.order_reference
+            if trade.trade_price is not None:
+                payload["execution_price"] = decimal_text(trade.trade_price)
+            if trade.close_price is not None:
+                payload["close_price"] = decimal_text(trade.close_price)
             if trade.commission is not None:
                 # ibCommission, exactly as Flex signs it (a cost is negative).
                 payload["commission"] = {

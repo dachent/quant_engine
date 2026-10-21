@@ -198,6 +198,10 @@ class FlexTrade:
     executed_time: str | None = None
     # The provider tag a nested strategy is resolved from (#567).
     order_reference: str | None = None
+    # The execution price and that day's close the sleeve ledger prices a
+    # trade against (#567); Flex tradePrice / closePrice.
+    trade_price: Decimal | None = None
+    close_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -418,6 +422,12 @@ def _trade(element: ET.Element, raw_account_id: str) -> FlexTrade:
         commission_currency=_optional(element.attrib.get("ibCommissionCurrency")),
         executed_time=_time_of_day(element.attrib.get("dateTime")),
         order_reference=_optional(element.attrib.get("orderReference")),
+        trade_price=_optional_decimal(
+            element.attrib.get("tradePrice"), "trade.tradePrice"
+        ),
+        close_price=_optional_decimal(
+            element.attrib.get("closePrice"), "trade.closePrice"
+        ),
     )
 
 
