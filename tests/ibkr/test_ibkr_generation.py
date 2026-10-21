@@ -2827,6 +2827,39 @@ def test_trade_quantity_and_prices_reach_the_catalog(
     assert {row["close_price"] for row in trades} == {"10.5"}
 
 
+@pytest.mark.parametrize(
+    "buy_sell, reported, signed",
+    [
+        ("SELL", "10", "-10"),
+        ("SELL", "-10", "-10"),
+        ("BUY", "10", "10"),
+        ("BUY", "-10", "10"),
+    ],
+)
+def test_trade_quantity_sign_follows_buy_sell_not_the_reported_sign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    buy_sell: str,
+    reported: str,
+    signed: str,
+) -> None:
+    import re
+    import sys
+
+    original = _xml
+
+    def with_side(*args: Any, **kwargs: Any) -> str:
+        text = original(*args, **kwargs)
+        text = re.sub(r'quantity="1" netCash', f'quantity="{reported}" netCash', text)
+        return re.sub(r'buySell="[A-Z]+"', f'buySell="{buy_sell}"', text)
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", with_side)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    trades = [row for row in catalog["transactions"] if row["kind"].startswith("TRADE")]
+    assert trades and {row["quantity"] for row in trades} == {signed}
+
+
 def test_trade_without_prices_adds_no_price_keys(tmp_path: Path) -> None:
     catalog, _manifest, _payload = build_generation(_spec(tmp_path))
 
