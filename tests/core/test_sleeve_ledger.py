@@ -290,3 +290,74 @@ def test_inconsistent_inputs_are_refused() -> None:
             lambda tag, day: "s9",
             _POLICY,
         )
+
+
+def test_the_residual_sleeve_books_its_executions_like_a_real_sleeve() -> None:
+    """An untagged unheld purchase at the mark is no gain (#579 review)."""
+    positions, marks = _book({"d1": ({"B": "2"}, {"B": "10"})})
+    ledger = sl.derive_sleeve_ledger(
+        [_trade("d1", "B", "2", "10", None)], positions, marks, [], _resolve, _POLICY
+    )
+    residual = _row(ledger, "d1", "other")
+    assert residual.value == D("20")
+    assert residual.price_pnl == D("0")
+    assert (residual.buys, residual.net_trade, residual.gross_traded) == (
+        D("20"),
+        D("20"),
+        D("20"),
+    )
+
+
+def test_a_held_position_without_a_mark_is_refused_not_priced_at_zero() -> None:
+    positions, marks = _book({"d1": ({"A": "1", "B": "1"}, {"A": "10", "B": "10"})})
+    del marks["d1"]["B"]
+    with pytest.raises(SleeveLedgerError, match="without a mark"):
+        sl.derive_sleeve_ledger([], positions, marks, [], _resolve, _POLICY)
+
+
+def test_a_zero_mark_is_a_real_mark_for_an_execution_leg() -> None:
+    """A worthless security closes at zero: the full loss is booked."""
+    positions, marks = _book({"d1": ({"W": "10"}, {"W": "0"})})
+    ledger = sl.derive_sleeve_ledger(
+        [_trade("d1", "W", "10", "10", "t1", close="0")],
+        positions,
+        marks,
+        [],
+        _resolve,
+        _POLICY,
+    )
+    assert _row(ledger, "d1", "s1").price_pnl == D("-100")
+    assert _row(ledger, "d1", "s1").value == D("0")
+
+
+def test_an_execution_outside_the_ledger_days_is_refused_not_dropped() -> None:
+    positions, marks = _book({"d1": ({"A": "1"}, {"A": "10"})})
+    with pytest.raises(SleeveLedgerError, match="outside the ledger days"):
+        sl.derive_sleeve_ledger(
+            [_trade("d0", "A", "1", "10", "t1")],
+            positions,
+            marks,
+            [],
+            _resolve,
+            _POLICY,
+        )
+
+
+def test_offsetting_fractions_with_no_account_position_are_closed_and_reported() -> (
+    None
+):
+    """Sleeves that net to the account's nothing are not positions."""
+    positions, marks = _book({"d1": ({}, {"X": "10"}), "d2": ({}, {"X": "11"})})
+    ledger = sl.derive_sleeve_ledger(
+        [_trade("d1", "X", "1", "10", "t1"), _trade("d1", "X", "-1", "10", "t2")],
+        positions,
+        marks,
+        [],
+        _resolve,
+        _POLICY,
+    )
+    assert ledger.offsetting_residues == (
+        ("d1", "X", (("s1", D("1")), ("s2", D("-1")))),
+    )
+    assert _row(ledger, "d2", "s1").value == 0 and _row(ledger, "d2", "s2").value == 0
+    assert _row(ledger, "d1", "s1").value == D("0")

@@ -88,6 +88,8 @@ class SleeveLedger:
     manual_assignments: tuple[tuple[str, str, Decimal, str, str], ...]
     reconciliation_gaps: tuple[tuple[str, str, Decimal, Decimal], ...]
     reconciliation_scalings: tuple[tuple[str, str, Decimal], ...]
+    # Offsetting fractions closed because the account holds nothing.
+    offsetting_residues: tuple[tuple[str, str, tuple[tuple[str, Decimal], ...]], ...]
 
 
 Resolver = Callable[[str | None, str], str | None]
@@ -120,8 +122,22 @@ def derive_sleeve_ledger(
             raise SleeveLedgerError("fallback names an unknown sleeve")
     every = (*real, residual)
     days = sorted(positions)
+    for day in days:
+        missing = sorted(
+            symbol
+            for symbol, amount in positions[day].items()
+            if amount != 0 and symbol not in marks[day]
+        )
+        if missing:
+            raise SleeveLedgerError(
+                f"held positions without a mark on {day}: {', '.join(missing)}"
+            )
     by_day: dict[str, list[TaggedTrade]] = {}
     for trade in trades:
+        if trade.day not in positions:
+            raise SleeveLedgerError(
+                f"execution on a day outside the ledger days: {trade.day}"
+            )
         by_day.setdefault(trade.day, []).append(trade)
     dividends_by_day: dict[str, list[Dividend]] = {}
     for dividend in dividends:
@@ -134,6 +150,7 @@ def derive_sleeve_ledger(
     manual: list[tuple[str, str, Decimal, str, str]] = []
     gaps: list[tuple[str, str, Decimal, Decimal]] = []
     scalings: list[tuple[str, str, Decimal]] = []
+    offsets: list[tuple[str, str, tuple[tuple[str, Decimal], ...]]] = []
 
     for index, day in enumerate(days):
         previous_day = days[index - 1] if index else None
@@ -205,6 +222,26 @@ def derive_sleeve_ledger(
             )
             actual = account_positions.get(symbol, _ZERO)
             if abs(total - actual) <= _RECONCILE_TOLERANCE:
+                if actual == 0 and any(
+                    abs(quantity[sleeve].get(symbol, _ZERO)) > _EPSILON
+                    for sleeve in every
+                ):
+                    # The sleeves net to the account's nothing but carry
+                    # offsetting fractions (a pro-rata split artefact): close
+                    # them and say so; none of it is a position.
+                    offsets.append(
+                        (
+                            day,
+                            symbol,
+                            tuple(
+                                (sleeve, quantity[sleeve][symbol])
+                                for sleeve in every
+                                if abs(quantity[sleeve].get(symbol, _ZERO)) > _EPSILON
+                            ),
+                        )
+                    )
+                    for sleeve in every:
+                        quantity[sleeve].pop(symbol, None)
                 continue
             gaps.append((day, symbol, total, actual))
             if abs(total) > _EPSILON and abs(actual) > _EPSILON and total * actual > 0:
@@ -244,58 +281,71 @@ def derive_sleeve_ledger(
 
         day_marks = marks[day]
         for sleeve in every:
-            value = sum(
-                (
-                    amount * day_marks.get(symbol, _ZERO)
-                    for symbol, amount in quantity[sleeve].items()
-                ),
-                _ZERO,
-            )
+            value = _ZERO
+            for symbol, amount in quantity[sleeve].items():
+                if abs(amount) <= _EPSILON:
+                    continue
+                if symbol not in day_marks:
+                    if abs(amount) <= _RECONCILE_TOLERANCE:
+                        continue  # reconciliation dust, worth nothing
+                    raise SleeveLedgerError(
+                        f"sleeve {sleeve} holds {symbol} without a mark on {day}"
+                    )
+                value += amount * day_marks[symbol]
             previous_value = _ZERO
             if previous_day is not None:
                 previous_marks = marks[previous_day]
                 for symbol, amount in previous_quantity[sleeve].items():
-                    mark = previous_marks.get(symbol) or previous_marks.get(
-                        inverse_alias.get(symbol, ""), _ZERO
-                    )
-                    previous_value += amount * (mark or _ZERO)
-            pnl = buys = commission = net = gross = _ZERO
-            if sleeve == residual:
-                pnl = value - previous_value
-                commission = sum((leg[3] for leg in legs if leg[0] == sleeve), _ZERO)
-            else:
-                for symbol, amount in previous_quantity[sleeve].items():
-                    first = marks[previous_day].get(symbol) if previous_day else None
-                    if first is None and symbol in policy.aliases.values():
-                        first = (
-                            marks[previous_day].get(inverse_alias[symbol])
-                            if previous_day
-                            else None
+                    mark = previous_marks.get(symbol)
+                    if mark is None:
+                        mark = previous_marks.get(inverse_alias.get(symbol, ""))
+                    if mark is None:
+                        if abs(amount) <= _RECONCILE_TOLERANCE:
+                            continue  # reconciliation dust, worth nothing
+                        raise SleeveLedgerError(
+                            f"sleeve {sleeve} held {symbol} without a mark on {previous_day}"
                         )
-                    last = day_marks.get(symbol)
-                    if last is None:
-                        closes = [
-                            leg[1].close_price
-                            for leg in legs
-                            if leg[1].symbol == symbol and leg[1].close_price
-                        ]
-                        last = closes[0] if closes else first
-                    if first is None or last is None:
-                        continue
-                    factor = scale.get(symbol, Decimal(1))
-                    pnl += amount * factor * (last - first / factor)
-                for leg_sleeve, trade, leg_quantity, leg_commission in legs:
-                    if leg_sleeve != sleeve:
-                        continue
-                    mark = (
-                        day_marks.get(trade.symbol) or trade.close_price or trade.price
+                    previous_value += amount * mark
+            pnl = buys = commission = net = gross = _ZERO
+            # The residual sleeve books its own executions exactly like a real
+            # sleeve; what only the reconciliation moved stays in the value
+            # change, not in price P&L.
+            for symbol, amount in previous_quantity[sleeve].items():
+                first = marks[previous_day].get(symbol) if previous_day else None
+                if first is None and symbol in policy.aliases.values():
+                    first = (
+                        marks[previous_day].get(inverse_alias[symbol])
+                        if previous_day
+                        else None
                     )
-                    pnl += leg_quantity * (mark - trade.price)
-                    commission += leg_commission
-                    net += leg_quantity * trade.price
-                    gross += abs(leg_quantity * trade.price)
-                    if leg_quantity > 0:
-                        buys += leg_quantity * trade.price
+                last = day_marks.get(symbol)
+                if last is None:
+                    closes = [
+                        leg[1].close_price
+                        for leg in legs
+                        if leg[1].symbol == symbol and leg[1].close_price is not None
+                    ]
+                    last = closes[0] if closes else first
+                if first is None or last is None:
+                    continue
+                factor = scale.get(symbol, Decimal(1))
+                pnl += amount * factor * (last - first / factor)
+            for leg_sleeve, trade, leg_quantity, leg_commission in legs:
+                if leg_sleeve != sleeve:
+                    continue
+                mark = day_marks.get(trade.symbol)
+                if mark is None:
+                    mark = (
+                        trade.close_price
+                        if trade.close_price is not None
+                        else trade.price
+                    )
+                pnl += leg_quantity * (mark - trade.price)
+                commission += leg_commission
+                net += leg_quantity * trade.price
+                gross += abs(leg_quantity * trade.price)
+                if leg_quantity > 0:
+                    buys += leg_quantity * trade.price
             rows.append(
                 SleeveDay(
                     day=day,
@@ -321,6 +371,7 @@ def derive_sleeve_ledger(
         manual_assignments=tuple(manual),
         reconciliation_gaps=tuple(gaps),
         reconciliation_scalings=tuple(scalings),
+        offsetting_residues=tuple(offsets),
     )
 
 
