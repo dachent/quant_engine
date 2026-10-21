@@ -283,3 +283,78 @@ def test_invalid_declarations_and_missing_inputs_are_refused() -> None:
         )
     with pytest.raises(SleeveNavError, match="no rows"):
         sn.sleeve_metrics([])
+
+
+def test_a_short_sleeve_carries_gross_exposure_not_a_negative_share() -> None:
+    funding = {
+        "s1": {"d1": FundingEvent("IN", "DERIVED")},
+        "s2": {"d1": FundingEvent("IN", "DERIVED")},
+    }
+    ledger = _ledger(
+        ("d1", "d2"),
+        [
+            _day("d1", "s1", "200", "0", "0", "200"),
+            _day("d1", "s2", "-100", "0", "0", "-100"),
+            _day("d2", "s1", "200", "200", "0", "0"),
+            _day("d2", "s2", "-100", "-100", "0", "0"),
+        ],
+    )
+    result = sn.derive_sleeve_nav(
+        ledger,
+        funding,
+        _account(("d1", "d2"), ["0", "-3"], fees="-3"),
+        ("d1", "d2"),
+        _REAL,
+        "other",
+    )
+    shares = {r.sleeve_id: r.exposure_share for r in result.rows if r.day == "d2"}
+    assert shares["s1"] > 0 and shares["s2"] > 0
+    assert round(sum(shares.values()), 12) == 1
+
+
+def test_omitted_ledger_days_must_be_inert_and_lifecycles_must_open_with_an_in() -> (
+    None
+):
+    days = ("d1", "d3")
+    quiet = _ledger(
+        ("d1", "d2", "d3"),
+        [
+            _day("d1", "s1", "1000", "0", "0", "1000"),
+            _day("d2", "s1", "1000", "1000", "0", "0"),
+            _day("d3", "s1", "1000", "1000", "0", "0"),
+        ],
+    )
+    funding = {"s1": {"d1": FundingEvent("IN", "DERIVED")}}
+    sn.derive_sleeve_nav(
+        quiet, funding, _account(days, ["0", "0"]), days, _REAL, "other"
+    )
+    busy = _ledger(
+        ("d1", "d2", "d3"),
+        [
+            _day("d1", "s1", "1000", "0", "0", "1000"),
+            _day("d2", "s1", "1010", "1000", "10", "0"),
+            _day("d3", "s1", "1010", "1010", "0", "0"),
+        ],
+    )
+    with pytest.raises(SleeveNavError, match="not a NAV day"):
+        sn.derive_sleeve_nav(
+            busy, funding, _account(days, ["0", "10"]), days, _REAL, "other"
+        )
+    with pytest.raises(SleeveNavError, match="does not open with an IN"):
+        sn.derive_sleeve_nav(
+            quiet,
+            {"s1": {"d1": FundingEvent("EXIT", "DERIVED")}},
+            _account(days, ["0", "0"]),
+            days,
+            _REAL,
+            "other",
+        )
+    with pytest.raises(SleeveNavError, match="opens outside the NAV days"):
+        sn.derive_sleeve_nav(
+            quiet,
+            {"s1": {"d2": FundingEvent("IN", "DERIVED")}},
+            _account(days, ["0", "0"]),
+            days,
+            _REAL,
+            "other",
+        )

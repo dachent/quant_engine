@@ -394,6 +394,11 @@
       1
     ],
     [
+      "sleeve_nav",
+      "sleeve_ledger",
+      1
+    ],
+    [
       "validate_release_targets",
       "validate_generation",
       1

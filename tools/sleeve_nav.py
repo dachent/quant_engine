@@ -136,6 +136,9 @@ def _validate_events(
         for day, event in events.items():
             if event.kind not in KINDS or event.evidence not in EVIDENCE:
                 raise SleeveNavError(f"invalid funding event: {sleeve} {day}")
+        opening = events[min(events)]
+        if opening.kind != "IN":
+            raise SleeveNavError(f"sleeve {sleeve} does not open with an IN event")
 
 
 def derive_sleeve_nav(
@@ -157,6 +160,24 @@ def derive_sleeve_nav(
     by_key: dict[tuple[str, str], SleeveDay] = {
         (row.day, row.sleeve_id): row for row in ledger.rows
     }
+    selected = set(days)
+    if days:
+        low, high = min(days), max(days)
+        for ledger_row in ledger.rows:
+            if low <= ledger_row.day <= high and ledger_row.day not in selected:
+                if (
+                    ledger_row.price_pnl
+                    or ledger_row.net_trade
+                    or ledger_row.commission
+                    or ledger_row.dividend
+                    or ledger_row.value != ledger_row.prev_value
+                ):
+                    raise SleeveNavError(
+                        f"ledger day {ledger_row.day} carries activity but is not a NAV day"
+                    )
+    for declared_sleeve, declared in funding.items():
+        if declared and min(declared) not in selected:
+            raise SleeveNavError(f"sleeve {declared_sleeve} opens outside the NAV days")
     account_by_day = {item.day: item for item in account}
     for day in days:
         if day not in account_by_day:
@@ -186,7 +207,8 @@ def derive_sleeve_nav(
             event = events.get(day)
             kind = event.kind if event else ""
             flow_in = item.net_trade if kind == "IN" else _ZERO
-            exposure = item.prev_value + max(item.net_trade, _ZERO)
+            # Gross: a short sleeve carries exposure too, never a negative share.
+            exposure = abs(item.prev_value) + max(item.net_trade, _ZERO)
             base = nav_previous + flow_in
             own_pnl = price_pnl + item.commission + item.dividend
             nav_pre = nav_previous + flow_in + own_pnl
