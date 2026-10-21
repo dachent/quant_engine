@@ -129,6 +129,53 @@ def test_a_funded_sleeve_carries_its_nav_through_exit_and_keeps_the_identity() -
     assert metrics.unresolved_events == 1
 
 
+def test_a_reallocation_to_unallocated_account_cash_is_not_an_external_flow() -> None:
+    bucket = sn.UNALLOCATED_ACCOUNT_CASH
+    funding = {
+        "s1": {
+            "d1": FundingEvent("IN", "DERIVED"),
+            "d2": FundingEvent("OUT", "EVIDENCED", counterparty=bucket),
+            "d3": FundingEvent("IN", "EVIDENCED", counterparty=bucket),
+        }
+    }
+    ledger = _ledger(
+        _DAYS,
+        [
+            _day("d1", "s1", "1000", "0", "0", "1000"),
+            _day("d2", "s1", "700", "1000", "0", "-300"),
+            _day("d3", "s1", "850", "700", "0", "150"),
+        ],
+    )
+    result = sn.derive_sleeve_nav(
+        ledger, funding, _account(_DAYS, ["0", "0", "0"]), _DAYS, _REAL, "other"
+    )
+    rows = [r for r in result.rows if r.sleeve_id == "s1"]
+    assert [(r.event, r.event_evidence, r.counterparty) for r in rows[1:]] == [
+        ("OUT", "EVIDENCED", bucket),
+        ("IN", "EVIDENCED", bucket),
+    ]
+    # The bucket receives what the sleeve gives up and gives back what it takes.
+    assert [c.unallocated_cash_flow for c in result.closure] == [
+        D("0"),
+        D("300"),
+        D("-150"),
+    ]
+    assert sn.sleeve_metrics(rows[:2]).unresolved_events == 0
+
+
+def test_an_unknown_counterparty_is_refused() -> None:
+    ledger = _ledger(_DAYS, [_day("d1", "s1", "1000", "0", "0", "1000")])
+    with pytest.raises(sn.SleeveNavError, match="counterparty"):
+        sn.derive_sleeve_nav(
+            ledger,
+            {"s1": {"d1": FundingEvent("IN", "DERIVED", counterparty="elsewhere")}},
+            _account(_DAYS, ["0", "0", "0"]),
+            _DAYS,
+            _REAL,
+            "other",
+        )
+
+
 def test_an_outflow_and_a_sweep_are_distinct_closes() -> None:
     funding = {
         "s1": {
