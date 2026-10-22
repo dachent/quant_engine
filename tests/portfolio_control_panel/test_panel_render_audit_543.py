@@ -983,7 +983,7 @@ def test_F12_the_manifest_footer_shows_the_consolidated_net_invested_and_never_s
         "Rows are not additive in Capital in and Withdrawn: internal transfers appear in both"
         in plain
     )
-    assert "Total" in plain and "Sum of the rows above" in plain
+    assert "Total" in plain and "open at the cutoff" in plain
     without = _manifest_payload()
     without["invested_capital"] = None
     bare = html(

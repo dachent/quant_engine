@@ -1126,7 +1126,9 @@
     // The MWR is an XIRR, annualised by construction.  Below one year the annualised rate is not the
     // result of the window, so the cell says so and shows the window-equivalent (derived here).
     const mwrBasisNote = (row) => {
-      const days = Number(row.mwr_day_count);
+      const opened = Date.parse(row.mwr_opening_date);
+      const closed = Date.parse(row.mwr_terminal_date);
+      const days = Math.round((closed - opened) / 86400000);
       const rate = number(row.mwr_xirr);
       if (!(days > 0 && days < 365) || rate == null) return "";
       const windowEquivalent = Math.pow(1 + Number(rate), days / 365) - 1;
@@ -1241,30 +1243,33 @@
     const digits = (negative ? -value : value).toString().padStart(9, "0");
     return `${negative ? "-" : ""}${digits.slice(0, -8)}.${digits.slice(-8)}`;
   };
-  // Net capital, Current and Gain add across epochs (an internal transfer nets to zero between
-  // rows); Capital in and Withdrawn do not, so they carry no total.  Only rows whose status is
-  // OK are counted.
-  const manifestTotals = (rows) => {
+  // A closed epoch's closing value becomes its successor's opening capital, so Current and Net
+  // capital cannot be summed over every row (the same dollars would count twice).  Gain is earned
+  // profit and does add across all epochs.  Totals therefore are: Current = the epochs open at the
+  // calculation cutoff; Gain = every epoch; Net capital = Current - Gain (the money identity).
+  // Capital in and Withdrawn carry no total.  Only rows whose status is OK are counted.
+  const manifestTotals = (rows, cutoff) => {
     const counted = rows.filter((row) => row.status === "OK");
-    const sum = (field) => counted.reduce((acc, row) => {
+    const sum = (list, field) => list.reduce((acc, row) => {
       const part = manifestScaled(row[field]);
       return acc == null || part == null ? null : acc + part;
     }, 0n);
-    const net = sum("net_capital");
-    const gain = sum("gain");
-    const current = sum("current_value");
+    const open = counted.filter((row) => row.end === cutoff);
+    const gain = sum(counted, "gain");
+    const current = sum(open, "current_value");
+    const net = gain == null || current == null ? null : current - gain;
     const ronc = net != null && gain != null && net !== 0n ? Number(gain) / Number(net) : null;
-    return { count: counted.length, of: rows.length, net, gain, current, ronc };
+    return { count: counted.length, open: open.length, of: rows.length, net, gain, current, ronc };
   };
   const manifestFooter = (rows = []) => {
     const aggregate = data.invested_capital?.current_aggregate_usd;
-    const totals = manifestTotals(rows);
+    const totals = manifestTotals(rows, data.account_manifest?.calculation_cutoff_date);
     const money = (value) => (value == null ? "—" : manifestMoney(manifestUnscaled(value)));
     const totalRow = totals.count
-      ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Sum of the rows above</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
+      ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Gain: all epochs · Current: ${totals.open} open at the cutoff · Net capital = Current − Gain</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric cell-left" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
-    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Net capital, Current and Gain are sums of the rows shown; the governed invested-capital aggregate can differ from that sum.</span></td></tr>`;
+    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Closed epochs hand their closing value to the successor epoch, so the totals count Current only for epochs open at the cutoff and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
   };
 
   function renderAccountManifest() {
