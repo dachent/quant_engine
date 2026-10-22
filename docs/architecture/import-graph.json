@@ -394,6 +394,16 @@
       1
     ],
     [
+      "sleeve_inputs",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "sleeve_inputs",
+      "sleeve_ledger",
+      1
+    ],
+    [
       "sleeve_nav",
       "sleeve_ledger",
       1
