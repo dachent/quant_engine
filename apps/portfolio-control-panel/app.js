@@ -1121,6 +1121,15 @@
     const historicalGaps = Array.isArray(data.attribution_dispositions)
       ? data.attribution_dispositions.filter((row) => matchesContext(row) && row.period === "HISTORICAL" && row.disposition !== "RESERVE_NOT_APPLICABLE")
       : contextualPerformance.filter((row) => !row.strategy_name && row.strategy_mapping_disposition !== "RESERVE_NOT_APPLICABLE" && row.pool_id !== "reserve-capital");
+    // The MWR is an XIRR, annualised by construction.  Below one year the annualised rate is not the
+    // result of the window, so the cell says so and shows the window-equivalent (derived here).
+    const mwrBasisNote = (row) => {
+      const days = Number(row.mwr_day_count);
+      const rate = number(row.mwr_xirr);
+      if (!(days > 0 && days < 365) || rate == null) return "";
+      const windowEquivalent = Math.pow(1 + Number(rate), days / 365) - 1;
+      return `<span class="cell-secondary">annualised from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
+    };
     const rows = mappedPerformance.map((row) => {
       if (performanceLineageMismatch) {
         const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
@@ -1135,7 +1144,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -1253,7 +1262,7 @@
       ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Sum of the rows above</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
-    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Net capital, Current and Gain are sums of the rows shown; Net invested (consolidated) is the governed aggregate and can differ from that sum.</span></td></tr>`;
+    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Net capital, Current and Gain are sums of the rows shown; the governed invested-capital aggregate can differ from that sum.</span></td></tr>`;
   };
 
   function renderAccountManifest() {
