@@ -131,6 +131,7 @@
   }
 
   const STATUS_LABELS = {
+    AVAILABLE_WITH_INFERRED_FLOW_TIMING: "Available · estimated timing",
     UNAVAILABLE_UNKNOWN_TARGET_SERIES: "No accepted return series",
     UNAVAILABLE_INSUFFICIENT_HISTORY: "Insufficient accepted history",
     UNAVAILABLE_MAPPING_MISSING: "Implementation mapping not recorded",
@@ -1022,7 +1023,7 @@
     const last = path[path.length - 1];
     const range = pointDate(path[0]) && pointDate(last) ? ` ${safe(pointDate(path[0]))}..${safe(pointDate(last))}` : "";
     const at = (point) => (pointDate(point) ? ` on ${safe(pointDate(point))}` : "");
-    return `${integer.format(path.length)} daily points${range}; last ${safe(last.index)}${at(last)}; high-water point ${safe(high.index)}${at(high)}; lowest point ${safe(low.index)}${at(low)}`;
+    return `${integer.format(path.length)} daily points${range}; last ${decimal(last.index, 2)}${at(last)}; high-water point ${decimal(high.index, 2)}${at(high)}; lowest point ${decimal(low.index, 2)}${at(low)}`;
   };
   // F08: how old the calculation is against the age the policy allows.
   const hwmAgeText = (proof) => {
@@ -1105,9 +1106,9 @@
     const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${hwmObservationSummary(row)}`).join(" · ");
     const portableProof = data.hwm_portable_proof;
     const portableProofContext = data.advisory.hwm_numerical_status === "AVAILABLE" ? "The governed financial HWM remains independently available; these portable values do not replace it." : "The governed financial HWM remains unavailable; these portable values do not replace or populate it.";
-    const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable ${safe(portableProof.policy_id || "HWM")} proof only: ${hwmPathSummary(portableProof)}; index ${safe(portableProof.current_index)}, HWM ${safe(portableProof.current_hwm)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDateHtml(portableProof.complete_through)}, evaluated ${formatDateHtml(portableProof.evaluated_on)} (${hwmAgeText(portableProof)}; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
+    const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable ${safe(portableProof.policy_id || "HWM")} proof only: ${hwmPathSummary(portableProof)}; index ${decimal(portableProof.current_index, 2)}, HWM ${decimal(portableProof.current_hwm, 2)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDateHtml(portableProof.complete_through)}, evaluated ${formatDateHtml(portableProof.evaluated_on)} (${hwmAgeText(portableProof)}; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
     const governedProof = data.hwm_governed_proof;
-    const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — PENDING OWNER ACCEPTANCE</strong><br>${hwmCandidate ? `${safe(hwmNotAccepted)}. Candidate result` : `Governed ${safe(governedProof.policy_id || "HWM")} result (${safe(humanStatus(governedProof.financial_acceptance || "UNSPECIFIED"))})`}: ${hwmPathSummary(governedProof)}; index ${safe(governedProof.current_index)}, HWM ${safe(governedProof.current_hwm)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDateHtml(governedProof.complete_through)}, evaluated ${formatDateHtml(governedProof.evaluated_on)} (${hwmAgeText(governedProof)}; ${statusText(governedProof.age_status)}). Basis ${safe(humanStatus(governedProof.return_basis || "UNAVAILABLE"))}. ${safe(hwmPolicyText(governedProof, hwmCandidate))} ${safe(perimeterStartText(governedProof))} Receipt ${safe(String(governedProof.receipt_sha256 || "").slice(0, 12))}….</div>` : "";
+    const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — PENDING OWNER ACCEPTANCE</strong><br>${hwmCandidate ? `${safe(hwmNotAccepted)}. Candidate result` : `Governed ${safe(governedProof.policy_id || "HWM")} result (${safe(humanStatus(governedProof.financial_acceptance || "UNSPECIFIED"))})`}: ${hwmPathSummary(governedProof)}; index ${decimal(governedProof.current_index, 2)}, HWM ${decimal(governedProof.current_hwm, 2)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDateHtml(governedProof.complete_through)}, evaluated ${formatDateHtml(governedProof.evaluated_on)} (${hwmAgeText(governedProof)}; ${statusText(governedProof.age_status)}). Basis ${safe(humanStatus(governedProof.return_basis || "UNAVAILABLE"))}. ${safe(hwmPolicyText(governedProof, hwmCandidate))} ${safe(perimeterStartText(governedProof))} Receipt ${safe(String(governedProof.receipt_sha256 || "").slice(0, 12))}….</div>` : "";
     $("#hwm-status").innerHTML = performanceLineageMismatch
       ? `<div class="validation-card"><div><strong>Report performance withheld</strong><span>— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span></div><div class="validation-score">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</div></div><div class="callout callout-neutral">Report-derived return, MWR, observation-count, return-path, and HWM qualification evidence is withheld until the source-lineage identity matches.</div>`
       : `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? (hwmCandidate ? "The numerical full-systematic HWM is not accepted while any included sleeve is unqualified." : "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified.") : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
@@ -1138,8 +1139,11 @@
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
-      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Accepted return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]];
-    $("#performance-table").innerHTML = tableMarkup(performanceHeaders, rows);
+      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualised. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualised)", "numeric", "Money-weighted return (annualised internal rate of return on the cash flows). Annualised even for windows under one year."], ["MWR status"]];
+    const performanceFooter = !performanceLineageMismatch && mappedPerformance.length
+      ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">Portfolio-level TWR and MWR are not published in this snapshot. Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
+      : "";
+    $("#performance-table").innerHTML = tableMarkup(performanceHeaders, rows, null, performanceFooter);
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
     const historicalRows = historicalGaps.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td><code>${safe(row.assignment_id || row.authority || "—")}</code></td><td>${safe(row.effective_start || "Open/unknown")}<span class="cell-secondary">${safe(row.effective_end || "Open/unknown")}</span></td><td>${statusText(row.disposition || row.twr_status)}</td><td>${safe(row.disposition === "POOL_ONLY_UNALLOCATED" || row.strategy_mapping_disposition === "HISTORICAL_POOL_ONLY" ? "Systematic-pool interval requires historical strategy adjudication" : "Assignment requires adjudication")}</td></tr>`);
     $("#historical-gap-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective interval"], ["Historical attribution"], ["Required disposition"]], historicalRows.length ? historicalRows : [emptyRow(5, "No unresolved historical assignment intervals")]);
@@ -1213,10 +1217,43 @@
   // F12: the manifest rows are not additive (an internal transfer is capital in on one row and
   // withdrawn on another), so no column is summed.  The consolidated figure is the governed
   // invested-capital result's own aggregate.
-  const manifestFooter = () => {
+  const manifestScaled = (value) => {
+    const source = manifestDecimal(value);
+    if (source == null) return null;
+    const negative = source.startsWith("-");
+    const [whole, fraction = ""] = (negative ? source.slice(1) : source).split(".");
+    const scaled = BigInt(`${whole}${fraction.padEnd(8, "0").slice(0, 8)}`);
+    return negative ? -scaled : scaled;
+  };
+  const manifestUnscaled = (value) => {
+    const negative = value < 0n;
+    const digits = (negative ? -value : value).toString().padStart(9, "0");
+    return `${negative ? "-" : ""}${digits.slice(0, -8)}.${digits.slice(-8)}`;
+  };
+  // Net capital, Current and Gain add across epochs (an internal transfer nets to zero between
+  // rows); Capital in and Withdrawn do not, so they carry no total.  Only rows whose status is
+  // OK are counted.
+  const manifestTotals = (rows) => {
+    const counted = rows.filter((row) => row.status === "OK");
+    const sum = (field) => counted.reduce((acc, row) => {
+      const part = manifestScaled(row[field]);
+      return acc == null || part == null ? null : acc + part;
+    }, 0n);
+    const net = sum("net_capital");
+    const gain = sum("gain");
+    const current = sum("current_value");
+    const ronc = net != null && gain != null && net !== 0n ? Number(gain) / Number(net) : null;
+    return { count: counted.length, of: rows.length, net, gain, current, ronc };
+  };
+  const manifestFooter = (rows = []) => {
     const aggregate = data.invested_capital?.current_aggregate_usd;
+    const totals = manifestTotals(rows);
+    const money = (value) => (value == null ? "—" : manifestMoney(manifestUnscaled(value)));
+    const totalRow = totals.count
+      ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Sum of the rows above</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
+      : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
-    return `${total}<tr><td colspan="13" class="cell-secondary">Rows are not additive: internal transfers appear in both capital in and withdrawn, so the epoch columns are not summed.</td></tr>`;
+    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Net capital, Current and Gain are sums of the rows shown; Net invested (consolidated) is the governed aggregate and can differ from that sum.</span></td></tr>`;
   };
 
   function renderAccountManifest() {
@@ -1283,7 +1320,7 @@
       ["Current", "numeric"], ["Gain", "numeric", sleeveHeader],
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM (index, base 100)", "numeric"], ["Observed Max DD (signed)", "numeric"],
-    ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`, manifestFooter());
+    ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`, manifestFooter(manifest.rows));
     legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Capital in = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Capital in − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Capital in, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. ${governedCapitalSupplied ? "Governed invested capital (the deposits) and the strategy cash line are reported separately." : "Governed invested capital was not supplied to this build: on these rows Capital in is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;

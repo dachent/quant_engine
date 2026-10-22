@@ -980,9 +980,10 @@ def test_F12_the_manifest_footer_shows_the_consolidated_net_invested_and_never_s
     plain = re.sub(r"<[^>]+>", " ", footer[1])
     assert "Net invested (consolidated)" in plain and "$378,083.13" in plain
     assert (
-        "Rows are not additive: internal transfers appear in both capital in and withdrawn"
+        "Rows are not additive in Capital in and Withdrawn: internal transfers appear in both"
         in plain
     )
+    assert "Total" in plain and "Sum of the rows above" in plain
     without = _manifest_payload()
     without["invested_capital"] = None
     bare = html(
@@ -1016,7 +1017,7 @@ def test_F13_the_twr_status_follows_the_rows_own_flow_timing(tmp_path: Path) -> 
     rows = [row for row in table.split("<tr data-account-id=")[1:]]
     assert "inferred flow timing" not in rows[0].lower()
     assert "Available" in rows[0]
-    assert "Available with inferred flow timing" in rows[1]
+    assert "Available · estimated timing" in rows[1]
     assert "Date only end of day inferred timing" in rows[1]
 
 
