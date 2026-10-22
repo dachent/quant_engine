@@ -122,6 +122,8 @@
     if (Object.hasOwn(STATUS_TONES, String(status))) return STATUS_TONES[String(status)];
     const text = String(status).toUpperCase();
     if (/NOT_COMPLETENESS_PROOF$/.test(text)) return "neutral";
+    // Date-only flow timing is a method note, not a defect: informational tone.
+    if (/_INFERRED_FLOW_TIMING$/.test(text)) return "neutral";
     if (/(^|_)NOT_VALIDATED$/.test(text)) return STATUS_TONES.NOT_VALIDATED;
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE|NO_ACCEPTED_FACT_PATH/.test(text)) return "danger";
     if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC|NOT_READY|UPPER_BOUND/.test(text)) return "warning";
@@ -1261,7 +1263,7 @@
     const totalRow = totals.count
       ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Sum of the rows above</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
-    const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
+    const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric cell-left" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
     return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Net capital, Current and Gain are sums of the rows shown; the governed invested-capital aggregate can differ from that sum.</span></td></tr>`;
   };
 
