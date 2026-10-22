@@ -349,6 +349,14 @@ def test_a_changed_counterparty_is_a_mismatch() -> None:
     assert "counterparty" in fields
 
 
+def test_an_unknown_counterparty_is_refused_not_verified() -> None:
+    inputs = _inputs()
+    published = _publish(inputs)
+    inputs["funding"]["s1"]["d4"]["counterparty"] = "elsewhere"
+    with pytest.raises(verifier.SleeveVerificationError, match="counterparty"):
+        verifier.verify_sleeve_ledger(inputs, published)
+
+
 def test_a_changed_event_label_is_a_mismatch() -> None:
     inputs = _inputs()
     published = _publish(inputs)

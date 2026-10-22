@@ -312,6 +312,10 @@ def _rederive_nav(
             price = item["price_pnl"] + resid
             kind = events.get(day, {}).get("kind", "")
             counterparty: Any = events.get(day, {}).get("counterparty") or ""
+            if counterparty not in ("", "UNALLOCATED_ACCOUNT_CASH"):
+                raise SleeveVerificationError(
+                    f"unknown counterparty {counterparty!r} on {sleeve} {day}"
+                )
             flow_in = item["net_trade"] if kind == "IN" else _ZERO
             exposure = abs(item["prev_value"]) + max(item["net_trade"], _ZERO)
             base = nav_before + flow_in
