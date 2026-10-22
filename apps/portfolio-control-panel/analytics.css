@@ -1068,6 +1068,14 @@ section[data-view="capital"] .callout-neutral {
   min-width: 760px;
 }
 
+#allocation-table th:nth-child(1) { min-width: 190px; }
+#allocation-table th:nth-child(9) { min-width: 190px; }
+#allocation-table th:nth-child(10) { min-width: 380px; }
+#allocation-table th:nth-child(3), #allocation-table th:nth-child(5) { min-width: 120px; }
+.capital-chart-wrap { margin: 4px 0 12px; }
+#provider-bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 28px; }
+.capital-chart { width: 100%; height: auto; color: var(--text-soft); }
+.capital-chart .chart-label { font-size: 11px; fill: currentColor; }
 .cell-note { display: table-cell; }
 .cell-note > .cell-secondary { display: block; position: sticky; left: 12px; max-width: min(900px, 90vw); white-space: normal; }
 td.cell-left { text-align: left; }
