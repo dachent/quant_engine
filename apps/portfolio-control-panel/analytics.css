@@ -1075,7 +1075,8 @@ section[data-view="capital"] .callout-neutral {
 .capital-chart-wrap { margin: 4px 0 12px; }
 #provider-bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 28px; }
 .capital-chart { width: 100%; height: auto; color: var(--text-soft); }
-.capital-chart .chart-label { font-size: 11px; fill: currentColor; }
+.capital-chart .chart-label { font-size: 11px; }
+.capital-chart .axis-label { fill: currentColor; }
 .cell-note { display: table-cell; }
 .cell-note > .cell-secondary { display: block; position: sticky; left: 12px; max-width: min(900px, 90vw); white-space: normal; }
 td.cell-left { text-align: left; }

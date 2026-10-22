@@ -897,11 +897,11 @@
         const placed = Math.max(item.y, previous + 13);
         previous = placed;
         const last = series.get(item.id)[series.get(item.id).length - 1][1];
-        return `<text class="chart-label" x="${width - right + 8}" y="${(placed + 4).toFixed(1)}" fill="${CAPITAL_LINE_COLORS[item.index % CAPITAL_LINE_COLORS.length]}">${safe(strategyNameById(item.id))} ${currency(last)}</text>`;
+        return `<text class="chart-label" x="${width - right + 8}" y="${(placed + 4).toFixed(1)}" style="fill:${CAPITAL_LINE_COLORS[item.index % CAPITAL_LINE_COLORS.length]}">${safe(strategyNameById(item.id))} ${currency(last)}</text>`;
       }).join("");
-    const grid = [0, 0.5, 1].map((fraction) => `<line x1="${left}" x2="${width - right}" y1="${y(ceiling * fraction).toFixed(1)}" y2="${y(ceiling * fraction).toFixed(1)}" stroke="currentColor" stroke-opacity=".18"></line><text class="chart-label" x="2" y="${(y(ceiling * fraction) + 4).toFixed(1)}">${currency(ceiling * fraction)}</text>`).join("");
-    const edges = `<text class="chart-label" x="${left}" y="${height - 6}">${safe(formatDate(dates[0]))}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 6}">${safe(formatDate(dates[dates.length - 1]))}</text>`;
-    return `<svg class="capital-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Invested capital per strategy from ${safe(formatDate(dates[0]))} to ${safe(formatDate(dates[dates.length - 1]))}">${grid}${lines}${labels}${edges}</svg>`;
+    const grid = [0, 0.5, 1].map((fraction) => `<line x1="${left}" x2="${width - right}" y1="${y(ceiling * fraction).toFixed(1)}" y2="${y(ceiling * fraction).toFixed(1)}" stroke="currentColor" stroke-opacity=".18"></line><text class="chart-label axis-label" x="2" y="${(y(ceiling * fraction) + 4).toFixed(1)}">${currency(ceiling * fraction)}</text>`).join("");
+    const edges = `<text class="chart-label axis-label" x="${left}" y="${height - 6}">${safe(formatDate(dates[0]))}</text><text class="chart-label axis-label" text-anchor="end" x="${width - right}" y="${height - 6}">${safe(formatDate(dates[dates.length - 1]))}</text>`;
+    return `<svg class="capital-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Invested capital per strategy from ${formatDate(dates[0])} to ${formatDate(dates[dates.length - 1])}. Latest values: ${ids.map((id) => `${strategyNameById(id)} ${currency(series.get(id)[series.get(id).length - 1][1])}`).join("; ")}. The same figures are in the table below.`)}">${grid}${lines}${labels}${edges}</svg>`;
   }
 
   function renderInvestedCapital() {
