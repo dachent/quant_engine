@@ -818,13 +818,45 @@
     const query = positionSearch.toLowerCase();
     const accepted = currentPositionRows().filter((row) => matchesContext(row)
       && (!query || `${row.strategy_name || ""} ${row.symbol || ""} ${row.security_id || ""} ${accountLabel(row.account_id)}`.toLowerCase().includes(query)));
+    // Largest positions first (the order the producer emits is by identifier hash, which says nothing).
+    accepted.sort((a, b) => (number(b.market_value_usd) ?? -Infinity) - (number(a.market_value_usd) ?? -Infinity));
     const pageCount = Math.max(1, Math.ceil(accepted.length / positionPageSize));
     positionPage = Math.min(positionPage, pageCount - 1);
     const visible = accepted.slice(positionPage * positionPageSize, (positionPage + 1) * positionPageSize);
     const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td>${symbolCell(row)}</td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDateHtml(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
     positionTable.dataset.visibleRows = String(accepted.length);
-    positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity (units)", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)]);
+    const pricedValues = accepted.map((row) => number(row.market_value_usd)).filter((value) => value != null);
+    const positionFooter = accepted.length
+      ? `<tr class="total-row"><th scope="row" colspan="4">Total · ${integer.format(accepted.length)} position${accepted.length === 1 ? "" : "s"}, all pages</th><td class="numeric">${pricedValues.length ? currency(pricedValues.reduce((sum, value) => sum + value, 0)) : "—"}${pricedValues.length < accepted.length ? `<span class="cell-secondary">${integer.format(accepted.length - pricedValues.length)} without a value</span>` : ""}</td><td colspan="2"></td></tr>`
+      : "";
+    positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity (units)", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)], null, positionFooter);
+    // One notice instead of one warning per row: the missing symbols are a data gap that is the same for every
+    // affected row, so it is said once, with the producer's own reason.
+    const pending = accepted.filter((row) => row.symbol_status === "NOT_READY");
+    const symbolNotice = $("#position-symbol-notice");
+    if (symbolNotice) {
+      const reason = pending.map((row) => row.symbol_reason).find((text) => typeof text === "string" && text);
+      symbolNotice.textContent = pending.length
+        ? `Ticker symbols are not yet resolved for ${integer.format(pending.length)} of ${integer.format(accepted.length)} positions, so those securities are shown by identifier. This is a data gap, not a mapping error.${reason ? ` Source reason: ${reason}` : ""}`
+        : "";
+      symbolNotice.hidden = pending.length === 0;
+    }
+    const strategyTotals = $("#position-strategy-totals");
+    if (strategyTotals) {
+      const byStrategy = new Map();
+      for (const row of accepted) {
+        const key = row.strategy_name || "Unmapped";
+        const entry = byStrategy.get(key) || { count: 0, value: 0 };
+        entry.count += 1;
+        entry.value += number(row.market_value_usd) ?? 0;
+        byStrategy.set(key, entry);
+      }
+      strategyTotals.textContent = byStrategy.size > 1 || accepted.length
+        ? [...byStrategy.entries()].sort((a, b) => b[1].value - a[1].value).map(([name, entry]) => `${name}: ${integer.format(entry.count)} · ${currency(entry.value)}`).join("   |   ")
+        : "";
+      strategyTotals.hidden = accepted.length === 0;
+    }
     $("#position-summary").textContent = `${integer.format(accepted.length)} matching`;
     const historyNote = positionHistoryNote();
     $("#position-history-note").textContent = historyNote;
