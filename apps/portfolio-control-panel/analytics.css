@@ -1068,6 +1068,30 @@ section[data-view="capital"] .callout-neutral {
   min-width: 760px;
 }
 
+.cell-note { display: table-cell; }
+.cell-note > .cell-secondary { display: block; position: sticky; left: 12px; max-width: min(900px, 90vw); white-space: normal; }
+td.cell-left { text-align: left; }
+.total-row th, .total-row td { border-top: 2px solid var(--border); background: #0e1b28; font-weight: 800; }
+.legend-chip { display: inline-flex; gap: 5px; align-items: center; border: 1px solid currentColor; border-radius: 99px; padding: 1px 9px; font-size: 11px; font-weight: 850; }
+.legend-chip::before { font-size: 10px; font-weight: 900; }
+.legend-chip.positive { color: var(--positive); }
+.legend-chip.warning { color: var(--warning); }
+.legend-chip.danger { color: var(--danger); }
+.legend-chip.neutral { color: var(--neutral); }
+.legend-chip.positive::before { content: "✓"; }
+.legend-chip.warning::before { content: "▲"; }
+.legend-chip.danger::before { content: "■"; }
+.legend-chip.neutral::before { content: "i"; }
+table .status-text { white-space: nowrap; display: inline-flex; gap: 5px; align-items: center; border: 1px solid currentColor; border-radius: 99px; padding: 1px 9px; line-height: 1.35; }
+table .status-text::before { font-size: 10px; font-weight: 900; }
+table .status-text.positive::before { content: "✓"; }
+table .status-text.warning::before { content: "▲"; }
+table .status-text.danger::before { content: "■"; }
+table .status-text.neutral::before, table .status-text.reserve::before { content: "i"; }
+.return-glossary { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.return-glossary > div { background: #0e1b28; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; color: var(--text-soft); }
+.return-glossary b { display: block; color: var(--text); margin-bottom: 2px; }
+.status-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 12px; font-size: 12px; color: var(--text-soft); }
 #account-manifest-table {
   min-width: 1320px;
 }

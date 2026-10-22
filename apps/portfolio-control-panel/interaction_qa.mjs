@@ -1134,7 +1134,7 @@ checks.push(check(
     row
     && (
       (row.includes("account NAV observations")
-        && (row.includes("Available with inferred flow timing") || /Available(?! with)/.test(row)))
+        && (row.includes("Available · estimated timing") || /Available(?! with)/.test(row)))
       || (row.includes("canonical account-live returns")
         && row.includes("Available account-live return path"))
     )
