@@ -28,7 +28,14 @@ _ONE = Decimal(1)
 _NAV_FLOOR = Decimal(1)  # below this a base or exposure is "nothing held"
 
 KINDS = ("IN", "OUT", "SWEEP", "EXIT")
-EVIDENCE = ("DERIVED", "DECLARED_UNRESOLVED")
+# EVIDENCED: stated by two independent sources (the provider's own cash and
+# executions, plus the model platform's value series) rather than inferred.
+EVIDENCE = ("DERIVED", "EVIDENCED", "DECLARED_UNRESOLVED")
+# The provider holds one cash balance per account.  Cash no sleeve owns sits in
+# this bucket, which is the counterparty of a reallocation between a sleeve and
+# the rest of the account (never an external flow).
+UNALLOCATED_ACCOUNT_CASH = "UNALLOCATED_ACCOUNT_CASH"
+COUNTERPARTIES = (UNALLOCATED_ACCOUNT_CASH,)
 
 
 class SleeveNavError(ValueError):
@@ -42,6 +49,7 @@ class FundingEvent:
     kind: str
     evidence: str
     note: str | None = None
+    counterparty: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,7 @@ class SleeveNavDay:
     sleeve_id: str
     event: str
     event_evidence: str
+    counterparty: str
     exposure: Decimal
     nav_prev: Decimal
     flow_in: Decimal
@@ -94,6 +103,8 @@ class ClosureDay:
     sleeves_own_plus_alloc: Decimal
     residual_and_post_exit: Decimal
     unexplained: Decimal
+    # Cash that moved between sleeves and the account's unallocated cash.
+    unallocated_cash_flow: Decimal
 
 
 @dataclass(frozen=True)
@@ -136,6 +147,10 @@ def _validate_events(
         for day, event in events.items():
             if event.kind not in KINDS or event.evidence not in EVIDENCE:
                 raise SleeveNavError(f"invalid funding event: {sleeve} {day}")
+            if event.counterparty is not None and event.counterparty not in (
+                COUNTERPARTIES
+            ):
+                raise SleeveNavError(f"unknown counterparty: {sleeve} {day}")
         opening = events[min(events)]
         if opening.kind != "IN":
             raise SleeveNavError(f"sleeve {sleeve} does not open with an IN event")
@@ -240,6 +255,7 @@ def derive_sleeve_nav(
                     sleeve_id=sleeve,
                     event=kind,
                     event_evidence=event.evidence if event else "",
+                    counterparty=(event.counterparty or "") if event else "",
                     exposure=exposure,
                     nav_prev=nav_previous,
                     flow_in=flow_in,
@@ -344,6 +360,15 @@ def derive_sleeve_nav(
                 sleeves_own_plus_alloc=own_alloc[day],
                 residual_and_post_exit=other,
                 unexplained=account_pnl - own_alloc[day] - other,
+                unallocated_cash_flow=sum(
+                    (
+                        -nav_row.flow_in - nav_row.flow_out
+                        for nav_row in out
+                        if nav_row.day == day
+                        and nav_row.counterparty == UNALLOCATED_ACCOUNT_CASH
+                    ),
+                    _ZERO,
+                ),
             )
         )
     return SleeveNav(rows=tuple(out), closure=tuple(closure))
