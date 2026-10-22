@@ -311,6 +311,11 @@ def _rederive_nav(
             )
             price = item["price_pnl"] + resid
             kind = events.get(day, {}).get("kind", "")
+            counterparty: Any = events.get(day, {}).get("counterparty") or ""
+            if counterparty not in ("", "UNALLOCATED_ACCOUNT_CASH"):
+                raise SleeveVerificationError(
+                    f"unknown counterparty {counterparty!r} on {sleeve} {day}"
+                )
             flow_in = item["net_trade"] if kind == "IN" else _ZERO
             exposure = abs(item["prev_value"]) + max(item["net_trade"], _ZERO)
             base = nav_before + flow_in
@@ -336,6 +341,7 @@ def _rederive_nav(
             rows[(day, sleeve)] = {
                 "event": kind,
                 "event_evidence": events.get(day, {}).get("evidence", ""),
+                "counterparty": counterparty,
                 "value": _ZERO if kind == "EXIT" else item["value"],
                 "cash": cash,
                 "valuation_residual": resid,
@@ -408,6 +414,14 @@ def _rederive_nav(
             "sleeves_own_plus_alloc": own_alloc,
             "residual_and_post_exit": other,
             "unexplained": pnl - own_alloc - other,
+            "unallocated_cash_flow": sum(
+                (
+                    -rows[(day, s)]["flow_in"] - rows[(day, s)]["flow_out"]
+                    for s in order.get(day, ())
+                    if rows[(day, s)]["counterparty"] == "UNALLOCATED_ACCOUNT_CASH"
+                ),
+                _ZERO,
+            ),
         }
     return rows, closure
 
@@ -505,7 +519,7 @@ def verify_sleeve_ledger(
             "r_alloc",
         ):
             check("nav", "/".join(key), name, row[name], nav[key][name])
-        for name in ("event", "event_evidence"):
+        for name in ("event", "event_evidence", "counterparty"):
             compared += 1
             if str(row[name]) != nav[key][name]:
                 mismatches.append(
@@ -533,6 +547,7 @@ def verify_sleeve_ledger(
             "sleeves_own_plus_alloc",
             "residual_and_post_exit",
             "unexplained",
+            "unallocated_cash_flow",
         ):
             check("closure", day, name, row[name], closure[day][name])
     for day in closure:

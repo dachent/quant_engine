@@ -94,7 +94,11 @@ def _inputs() -> dict[str, Any]:
         "funding": {
             "s1": {
                 "d1": {"kind": "IN", "evidence": "DERIVED"},
-                "d4": {"kind": "EXIT", "evidence": "DECLARED_UNRESOLVED"},
+                "d4": {
+                    "kind": "EXIT",
+                    "evidence": "EVIDENCED",
+                    "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+                },
             },
             "s2": {"d1": {"kind": "IN", "evidence": "DERIVED"}},
         },
@@ -199,7 +203,12 @@ def _publish(inputs: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
         sl.SleevePolicy(("s1", "s2"), "other"),
     )
     funding = {
-        s: {d: sn.FundingEvent(e["kind"], e["evidence"]) for d, e in events.items()}
+        s: {
+            d: sn.FundingEvent(
+                e["kind"], e["evidence"], counterparty=e.get("counterparty")
+            )
+            for d, e in events.items()
+        }
         for s, events in inputs["funding"].items()
     }
     account = [
@@ -247,6 +256,7 @@ def test_the_verifier_agrees_with_the_builders_on_a_rich_scenario() -> None:
         ("nav_rows", 2, "nav_end"),
         ("nav_rows", 1, "alloc_total"),
         ("closure", 2, "unexplained"),
+        ("closure", 3, "unallocated_cash_flow"),
         ("nav_rows", 1, "value"),
         ("nav_rows", 1, "cash"),
         ("nav_rows", 1, "valuation_residual"),
@@ -325,6 +335,26 @@ def test_the_verifier_shares_no_code_with_the_builders() -> None:
         if isinstance(node, ast.ImportFrom)
     }
     assert not imported & {"sleeve_ledger", "sleeve_nav", "nested_strategy_tag_map"}
+
+
+def test_a_changed_counterparty_is_a_mismatch() -> None:
+    inputs = _inputs()
+    published = _publish(inputs)
+    exit_row = next(r for r in published["nav_rows"] if r["event"] == "EXIT")
+    assert exit_row["counterparty"] == "UNALLOCATED_ACCOUNT_CASH"
+    exit_row["counterparty"] = ""
+    fields = {
+        m.field for m in verifier.verify_sleeve_ledger(inputs, published).mismatches
+    }
+    assert "counterparty" in fields
+
+
+def test_an_unknown_counterparty_is_refused_not_verified() -> None:
+    inputs = _inputs()
+    published = _publish(inputs)
+    inputs["funding"]["s1"]["d4"]["counterparty"] = "elsewhere"
+    with pytest.raises(verifier.SleeveVerificationError, match="counterparty"):
+        verifier.verify_sleeve_ledger(inputs, published)
 
 
 def test_a_changed_event_label_is_a_mismatch() -> None:
