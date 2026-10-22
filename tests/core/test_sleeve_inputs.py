@@ -111,9 +111,25 @@ def _rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return transactions, positions
 
 
+_DAYS = ["2026-01-01", "2026-01-02", "2026-01-03"]
+
+
+def _build(
+    transactions: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    parent: Any = None,
+    **kwargs: Any,
+) -> adapter.SleeveInputs:
+    options: dict[str, Any] = {"base_currency": "USD", "days": _DAYS}
+    options.update(kwargs)
+    return adapter.sleeve_inputs(
+        transactions, positions, parent or _parent(), **options
+    )
+
+
 def test_rows_become_inputs_the_ledger_and_the_verifier_agree_on() -> None:
     transactions, positions = _rows()
-    inputs = adapter.sleeve_inputs(transactions, positions, _parent())
+    inputs = _build(transactions, positions)
 
     assert [t.quantity for t in inputs.trades] == [
         Decimal(10),
@@ -126,7 +142,9 @@ def test_rows_become_inputs_the_ledger_and_the_verifier_agree_on() -> None:
         ("2026-01-03", "sec-a", Decimal(3))
     ]
 
-    policy = sl.SleevePolicy(("s1", "s2"), "other")
+    policy = inputs.policy("other")
+    assert policy.sleeve_ids == ("s1", "s2")
+    assert dict(policy.unheld_fallback) == {"sec-a": "s1"}
     result = sl.derive_sleeve_ledger(
         inputs.trades,
         inputs.positions,
@@ -155,7 +173,7 @@ def test_rows_become_inputs_the_ledger_and_the_verifier_agree_on() -> None:
         "closure": [plain(r) for r in nav.closure],
     }
     verifier_inputs = inputs.verifier_inputs(
-        {"sleeve_ids": ["s1", "s2"], "residual_id": "other"},
+        policy,
         {"s1": {"2026-01-01": {"kind": "IN", "evidence": "DERIVED"}}},
         [
             {
@@ -189,31 +207,102 @@ def test_a_trade_missing_a_figure_is_refused_with_its_count(
     transactions, positions = _rows()
     del transactions[0][field]
     with pytest.raises(adapter.SleeveInputError, match=expected):
-        adapter.sleeve_inputs(transactions, positions, _parent())
+        _build(transactions, positions)
 
 
 def test_a_held_position_without_a_mark_price_is_refused() -> None:
     transactions, positions = _rows()
     del positions[1]["mark_price"]
     with pytest.raises(adapter.SleeveInputError, match="no mark price"):
-        adapter.sleeve_inputs(transactions, positions, _parent())
+        _build(transactions, positions)
 
 
 def test_a_flat_position_needs_no_mark_and_a_duplicate_is_refused() -> None:
     transactions, positions = _rows()
     flat = {**positions[1], "quantity": "0"}
     del flat["mark_price"]
-    ok = adapter.sleeve_inputs(transactions, [positions[0], flat], _parent())
+    ok = _build(transactions, [positions[0], flat])
     assert ok.positions["2026-01-02"] == {"sec-a": Decimal(0)}
     with pytest.raises(adapter.SleeveInputError, match="twice"):
-        adapter.sleeve_inputs(transactions, [*positions, positions[0]], _parent())
+        _build(transactions, [*positions, positions[0]])
 
 
 def test_block_policy_refuses_an_unassigned_trade_and_assign_policy_does_not() -> None:
     transactions, positions = _rows()
     with pytest.raises(adapter.SleeveInputError, match="unassigned"):
-        adapter.sleeve_inputs(transactions, positions, _parent({"mode": "BLOCK"}))
-    assert adapter.sleeve_inputs(transactions, positions, _parent())
+        _build(transactions, positions, _parent({"mode": "BLOCK"}))
+    assert _build(transactions, positions)
+
+
+def test_a_closing_trade_on_a_day_with_no_open_position_rows_is_an_empty_book() -> None:
+    transactions, positions = _rows()
+    sell = _trade("2026-01-03", "-15", "11", "BookOne", close_price="11")
+    inputs = _build([*transactions, sell], positions[:2])
+    assert inputs.positions["2026-01-03"] == {}
+    assert inputs.marks["2026-01-03"] == {}
+    assert inputs.trades[-1].day == "2026-01-03"
+
+
+def test_rows_on_an_undeclared_day_are_refused() -> None:
+    transactions, positions = _rows()
+    with pytest.raises(adapter.SleeveInputError, match="not a declared"):
+        _build(transactions, positions, days=_DAYS[:2])
+    with pytest.raises(adapter.SleeveInputError, match="no observation days"):
+        _build(transactions, positions, days=[])
+
+
+@pytest.mark.parametrize("where", ["commission", "amount"])
+def test_a_foreign_currency_figure_is_refused(where: str) -> None:
+    transactions, positions = _rows()
+    transactions[0][where] = {
+        "currency": "EUR",
+        "status": "AVAILABLE",
+        "value": "-1",
+    }
+    with pytest.raises(adapter.SleeveInputError, match="EUR"):
+        _build(transactions, positions)
+
+
+def test_a_foreign_dividend_is_refused() -> None:
+    transactions, positions = _rows()
+    transactions[3]["amount"] = {"currency": "GBP", "status": "AVAILABLE", "value": "3"}
+    with pytest.raises(adapter.SleeveInputError, match="GBP"):
+        _build(transactions, positions)
+
+
+def test_a_contract_multiplier_or_non_share_security_is_refused() -> None:
+    transactions, positions = _rows()
+    held = [{**positions[0], "multiplier": "100"}, *positions[1:]]
+    with pytest.raises(adapter.SleeveInputError, match="cannot use"):
+        _build(transactions, held)
+    option = [{**p, "asset_category": "OPT"} for p in positions[:0]]
+    flat_option = [{**positions[0], "asset_category": "OPT", "quantity": "0"}]
+    with pytest.raises(adapter.SleeveInputError, match="cannot use"):
+        _build(transactions, [*option, *flat_option, *positions[1:]])
+    live = [{**positions[0], "asset_category": "OPT"}, *positions[1:]]
+    with pytest.raises(adapter.SleeveInputError, match="plain share"):
+        _build([], live)
+
+
+def test_the_maps_fallback_sleeve_reaches_the_policy_for_unmatched_trades() -> None:
+    transactions, positions = _rows()
+    document = _parent({"mode": "ASSIGN_BY_HOLDING_SYMBOL", "fallback_sleeve_id": "s2"})
+    inputs = _build(transactions, positions, document)
+    assert dict(inputs.policy("other").unheld_fallback) == {"sec-a": "s2"}
+
+
+def test_unassigned_trades_beside_an_untimed_execution_are_refused() -> None:
+    transactions, positions = _rows()
+    untimed = _trade("2026-01-02", "1", "11", "BookTwo", close_price="11")
+    del untimed["executed_time"]
+    # the untagged 01-02 sale is unassigned; an untimed execution shares its day
+    with pytest.raises(adapter.SleeveInputError, match="no time of day"):
+        _build([*transactions, untimed], positions)
+    # an untimed execution alone, with every trade assigned, is order-free
+    assigned = [
+        t for t in transactions if t.get("order_reference") or "TRADE" not in t["kind"]
+    ]
+    assert _build([*assigned, untimed], positions)
 
 
 def test_the_adapter_does_not_import_the_verifier_or_the_nav_builder() -> None:

@@ -10196,7 +10196,11 @@ def test_projected_ibkr_rows_feed_the_sleeve_inputs_adapter() -> None:
     ).parent("account-parent")
 
     inputs = sleeve_inputs.sleeve_inputs(
-        projected["transactions"], projected["positions"], parent
+        projected["transactions"],
+        projected["positions"],
+        parent,
+        base_currency="USD",
+        days=["2026-01-05"],
     )
 
     (trade,) = inputs.trades
