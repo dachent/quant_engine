@@ -2319,6 +2319,27 @@
     $("#limitations-list").innerHTML = data.limitations.map((item) => `<li>${safe(item)}</li>`).join("");
   }
 
+  // Coverage rows that need attention (a warning or blocking status) are shown by default; every row stays in
+  // the table and the filter only hides the rest, so the remediation links can always reach their row.
+  let coverageFilter = "attention";
+  const coverageNeedsAttention = (row) => ["warning", "danger"].includes(toneForStatus(row.status));
+  function applyCoverageFilter() {
+    const rows = Array.isArray(data.coverage) ? data.coverage : [];
+    const attention = rows.filter(coverageNeedsAttention);
+    const summary = $("#coverage-summary");
+    if (summary) {
+      const clear = rows.length - attention.length;
+      summary.innerHTML = `<span><strong>${integer.format(attention.length)}</strong> need attention · ${integer.format(clear)} complete, fresh or observed-only</span><span class="segmented" aria-label="Coverage filter"><button type="button" class="segment ${coverageFilter === "attention" ? "is-active" : ""}" data-coverage-filter="attention" aria-pressed="${coverageFilter === "attention"}">Needs attention (${integer.format(attention.length)})</button><button type="button" class="segment ${coverageFilter === "all" ? "is-active" : ""}" data-coverage-filter="all" aria-pressed="${coverageFilter === "all"}">All (${integer.format(rows.length)})</button></span>`;
+      summary.querySelectorAll("[data-coverage-filter]").forEach((button) => {
+        button.onclick = () => { coverageFilter = button.dataset.coverageFilter; applyCoverageFilter(); };
+      });
+    }
+    const flagged = new Set(attention.map((row) => row.item));
+    $$("#coverage-table tbody tr[data-coverage-item]").forEach((rowElement) => {
+      rowElement.hidden = coverageFilter === "attention" && !flagged.has(rowElement.dataset.coverageItem);
+    });
+  }
+
   function renderData() {
     const factRows = data.coverage.filter((row) => row.category === "FACT_COVERAGE");
     const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
@@ -2351,6 +2372,7 @@
     ]);
     const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status / escalation"], ["Observation window / Freshness evaluated"], ["TTL / reconciled"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
+    applyCoverageFilter();
     renderFactScopeTables();
     $("#input-bindings").innerHTML = `<div class="binding-card"><div><strong>Portfolio report</strong><span>generation ${safe(data.meta.report_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.report_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Factor / alpha</strong><span>generation ${safe(data.meta.decomposition_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.decomposition_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Dependence</strong><span>generation ${safe(data.meta.correlation_generation_id.slice(0, 12))}… · sha256 ${safe(data.meta.correlation_sha256.slice(0, 12))}…</span></div><div class="binding-note">stage input, hash-bound at build</div></div><div class="binding-card"><div><strong>Candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · sha256 ${safe(data.candidate_appendix.source_sha256.slice(0, 12))}…</span></div><div class="binding-note">${statusText(data.candidate_appendix.status)}</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals. Each input was read from its stage's current pointer and refused unless its generation was verified and complete. This panel was sealed before release and records no release state.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
@@ -2489,8 +2511,13 @@
       const coverageItem = button.dataset.focusCoverage;
       if (!coverageItem) return;
       window.requestAnimationFrame(() => {
-        const target = $(`[data-coverage-item="${CSS.escape(coverageItem)}"]`);
+        let target = $(`[data-coverage-item="${CSS.escape(coverageItem)}"]`);
         if (!target) return;
+        if (target.hidden) {
+          coverageFilter = "all";
+          applyCoverageFilter();
+          target = $(`[data-coverage-item="${CSS.escape(coverageItem)}"]`);
+        }
         target.classList.add("is-remediation-focus");
         target.focus({ preventScroll: true });
         target.scrollIntoView({ block: "center", behavior: "auto" });
