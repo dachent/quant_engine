@@ -342,3 +342,21 @@ def test_real_panel_payload_renders_readable_notes_and_explicit_symbol_status(
     table = _flat(dom, "#position-table")
     assert "SYNTH" in table
     assert "Symbol not ready" in table
+
+
+def test_holdings_subtotal_never_treats_an_unavailable_value_as_zero(
+    tmp_path: Path,
+) -> None:
+    payload = _positions_payload()
+    priced = _symbol_row("NOT_READY", "no symbol", None, "a1")
+    unpriced = _symbol_row("NOT_READY", "no symbol", None, "a2")
+    unpriced["market_value_usd"] = None
+    payload["positions"] = [priced, unpriced]
+    dom = _run(tmp_path, payload, "renderPositionTable")
+
+    totals = dom["#position-strategy-totals"]["textContent"]
+    assert "$100 (partial" in totals
+    assert "partial: 1 without a value" in totals
+    assert "$0 " not in totals and "$0 (" not in totals
+    assert "1 without a value" in _flat(dom, "#position-table")
+    assert "2 of 2 positions" in dom["#position-symbol-notice"]["textContent"]
