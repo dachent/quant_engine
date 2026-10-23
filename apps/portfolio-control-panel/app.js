@@ -868,6 +868,42 @@
     renderLeverageDisclosures();
   }
 
+  // One line per strategy over the verified daily history, labelled at the line end (no legend to decode).
+  const CAPITAL_LINE_COLORS = ["#5eead4", "#7cb7ff", "#fbbf24", "#ff8a80", "#c4b5fd", "#86efac", "#f9a8d4"];
+  function investedCapitalChart(capital) {
+    const series = new Map();
+    for (const row of Array.isArray(capital.daily_by_strategy) ? capital.daily_by_strategy : []) {
+      const value = Number(row.invested_capital_usd);
+      if (!Number.isFinite(value)) continue;
+      if (!series.has(row.strategy_id)) series.set(row.strategy_id, []);
+      series.get(row.strategy_id).push([row.date, value]);
+    }
+    if (!series.size) return "";
+    const width = 900, height = 280, left = 46, right = 250, top = 12, bottom = 26;
+    const dates = [...new Set([...series.values()].flatMap((points) => points.map((point) => point[0])))].sort();
+    const dateIndex = new Map(dates.map((date, index) => [date, index]));
+    const peak = Math.max(...[...series.values()].flatMap((points) => points.map((point) => point[1])));
+    const step = Math.pow(10, Math.max(0, Math.floor(Math.log10(peak || 1))));
+    const ceiling = Math.max(step, Math.ceil(peak * 1.05 / step) * step);
+    const x = (date) => left + (dateIndex.get(date) / Math.max(1, dates.length - 1)) * (width - left - right);
+    const y = (value) => height - bottom - (value / ceiling) * (height - top - bottom);
+    const ids = [...series.keys()];
+    const lines = ids.map((id, index) => `<polyline fill="none" stroke="${CAPITAL_LINE_COLORS[index % CAPITAL_LINE_COLORS.length]}" stroke-width="2" points="${series.get(id).map(([date, value]) => `${x(date).toFixed(1)},${y(value).toFixed(1)}`).join(" ")}"></polyline>`).join("");
+    let previous = -Infinity;
+    const labels = ids
+      .map((id, index) => ({ id, index, y: y(series.get(id)[series.get(id).length - 1][1]) }))
+      .sort((a, b) => a.y - b.y)
+      .map((item) => {
+        const placed = Math.max(item.y, previous + 13);
+        previous = placed;
+        const last = series.get(item.id)[series.get(item.id).length - 1][1];
+        return `<text class="chart-label" x="${width - right + 8}" y="${(placed + 4).toFixed(1)}" style="fill:${CAPITAL_LINE_COLORS[item.index % CAPITAL_LINE_COLORS.length]}">${safe(strategyNameById(item.id))} ${currency(last)}</text>`;
+      }).join("");
+    const grid = [0, 0.5, 1].map((fraction) => `<line x1="${left}" x2="${width - right}" y1="${y(ceiling * fraction).toFixed(1)}" y2="${y(ceiling * fraction).toFixed(1)}" stroke="currentColor" stroke-opacity=".18"></line><text class="chart-label axis-label" x="2" y="${(y(ceiling * fraction) + 4).toFixed(1)}">${currency(ceiling * fraction)}</text>`).join("");
+    const edges = `<text class="chart-label axis-label" x="${left}" y="${height - 6}">${safe(formatDate(dates[0]))}</text><text class="chart-label axis-label" text-anchor="end" x="${width - right}" y="${height - 6}">${safe(formatDate(dates[dates.length - 1]))}</text>`;
+    return `<svg class="capital-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Invested capital per strategy from ${formatDate(dates[0])} to ${formatDate(dates[dates.length - 1])}. Latest values: ${ids.map((id) => `${strategyNameById(id)} ${currency(series.get(id)[series.get(id).length - 1][1])}`).join("; ")}. The same figures are in the table below.`)}">${grid}${lines}${labels}${edges}</svg>`;
+  }
+
   function renderInvestedCapital() {
     const capital = data.invested_capital;
     if (!capital) {
@@ -888,6 +924,8 @@
       `<tr><td><strong>Portfolio total</strong></td><td class="numeric"><strong>${currency(capital.current_aggregate_usd)}</strong></td></tr>`,
     ];
     $("#invested-capital-current-table").innerHTML = tableMarkup([["Strategy"], ["Invested capital", "numeric"]], currentRows);
+    const chartHost = $("#invested-capital-chart");
+    if (chartHost) chartHost.innerHTML = investedCapitalChart(capital);
     const selectedStrategyId = selectedContextStrategy === "ALL"
       ? null
       : (strategyByName(selectedContextStrategy)?.strategy_id ?? selectedContextStrategy);
