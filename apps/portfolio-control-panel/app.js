@@ -2322,7 +2322,12 @@
   // Coverage rows that need attention (a warning or blocking status) are shown by default; every row stays in
   // the table and the filter only hides the rest, so the remediation links can always reach their row.
   let coverageFilter = "attention";
-  const coverageNeedsAttention = (row) => ["warning", "danger"].includes(toneForStatus(row.status));
+  // LATE and STALE freshness rows carry escalation_required (STALE also blocks_current_consumers) but their bare
+  // tokens have no tone of their own, so the explicit flags and tokens count as needing attention as well.
+  const coverageNeedsAttention = (row) => ["warning", "danger"].includes(toneForStatus(row.status))
+    || row.escalation_required === true
+    || row.blocks_current_consumers === true
+    || ["LATE", "STALE"].includes(String(row.status).toUpperCase());
   function applyCoverageFilter() {
     const rows = Array.isArray(data.coverage) ? data.coverage : [];
     const attention = rows.filter(coverageNeedsAttention);
