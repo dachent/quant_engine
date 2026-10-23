@@ -2457,10 +2457,63 @@
   const renderedViews = new Set();
   const dirtyViews = new Set();
 
+  // The densest evidence tables hold paragraphs of provenance inside narrow cells, which made rows 350 px tall.
+  // After a render, every cell of those columns keeps its first two parts visible and moves the rest into a
+  // closed disclosure.  Nothing is removed or reworded: the text stays in the cell (and in textContent).
+  const DENSE_CELL_COLUMNS = {
+    "implementation-table": [1, 4, 5, 6],
+    "underwriting-table": [1, 2, 3, 4, 5, 6],
+    "factor-model-table": [1, 6, 7, 11],
+    "observation-windows-table": [4, 5],
+  };
+  function compactDenseCells() {
+    if (typeof document.getElementById !== "function") return;
+    for (const [id, columns] of Object.entries(DENSE_CELL_COLUMNS)) {
+      const table = document.getElementById(id);
+      const body = table && table.tBodies ? table.tBodies[0] : null;
+      if (!body) continue;
+      for (const row of body.rows) {
+        for (const index of columns) {
+          const cell = row.cells[index];
+          if (!cell || cell.querySelector(":scope > details.cell-details")) continue;
+          const parts = [...cell.children];
+          if (cell.querySelector(":scope > .cell-clamp")) continue;
+          if (parts.length < 3 && cell.textContent.length >= 240) {
+            // Text-only or single-element cell: keep it whole but clamp it to a few lines with a toggle.
+            const clamp = document.createElement("div");
+            clamp.className = "cell-clamp";
+            clamp.append(...cell.childNodes);
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "cell-more";
+            toggle.textContent = "Show more";
+            toggle.setAttribute("aria-expanded", "false");
+            toggle.onclick = () => {
+              const open = clamp.classList.toggle("is-open");
+              toggle.textContent = open ? "Show less" : "Show more";
+              toggle.setAttribute("aria-expanded", String(open));
+            };
+            cell.append(clamp, toggle);
+            continue;
+          }
+          if (parts.length < 3 || cell.textContent.length < 160) continue;
+          const rest = parts.slice(2);
+          const details = document.createElement("details");
+          details.className = "cell-details";
+          const summary = document.createElement("summary");
+          summary.textContent = `More (${rest.length})`;
+          details.append(summary, ...rest);
+          cell.append(details);
+        }
+      }
+    }
+  }
+
   function renderView(name) {
     const renderer = viewRenderers[name];
     if (!renderer || (renderedViews.has(name) && !dirtyViews.has(name))) return;
     renderer();
+    compactDenseCells();
     // F47: tables built by a render (not only at load) are keyboard-reachable regions too.
     prepareScrollableTableRegions();
     renderedViews.add(name);
@@ -2719,8 +2772,21 @@
     }));
   }
 
+  // A mode, lens or filter change re-renders a table inside its view (not through renderView), which drops the
+  // disclosures; compact again whenever the page content changes.  compactDenseCells is idempotent.
+  function watchDenseCells() {
+    if (typeof MutationObserver !== "function" || !document.body || typeof document.body.nodeType !== "number") return;
+    let scheduled = false;
+    new MutationObserver(() => {
+      if (scheduled) return;
+      scheduled = true;
+      window.requestAnimationFrame(() => { scheduled = false; compactDenseCells(); });
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
   function init() {
     try {
+      watchDenseCells();
       if (!data || ![21, 22, 23, 24, 25].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
       renderLimitations();
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
