@@ -2477,6 +2477,25 @@
           const cell = row.cells[index];
           if (!cell || cell.querySelector(":scope > details.cell-details")) continue;
           const parts = [...cell.children];
+          if (cell.querySelector(":scope > .cell-clamp")) continue;
+          if (parts.length < 3 && cell.textContent.length >= 240) {
+            // Text-only or single-element cell: keep it whole but clamp it to a few lines with a toggle.
+            const clamp = document.createElement("div");
+            clamp.className = "cell-clamp";
+            clamp.append(...cell.childNodes);
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "cell-more";
+            toggle.textContent = "Show more";
+            toggle.setAttribute("aria-expanded", "false");
+            toggle.onclick = () => {
+              const open = clamp.classList.toggle("is-open");
+              toggle.textContent = open ? "Show less" : "Show more";
+              toggle.setAttribute("aria-expanded", String(open));
+            };
+            cell.append(clamp, toggle);
+            continue;
+          }
           if (parts.length < 3 || cell.textContent.length < 160) continue;
           const rest = parts.slice(2);
           const details = document.createElement("details");
@@ -2753,8 +2772,21 @@
     }));
   }
 
+  // A mode, lens or filter change re-renders a table inside its view (not through renderView), which drops the
+  // disclosures; compact again whenever the page content changes.  compactDenseCells is idempotent.
+  function watchDenseCells() {
+    if (typeof MutationObserver !== "function" || !document.body || typeof document.body.nodeType !== "number") return;
+    let scheduled = false;
+    new MutationObserver(() => {
+      if (scheduled) return;
+      scheduled = true;
+      window.requestAnimationFrame(() => { scheduled = false; compactDenseCells(); });
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
   function init() {
     try {
+      watchDenseCells();
       if (!data || ![21, 22, 23, 24, 25].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
       renderLimitations();
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
