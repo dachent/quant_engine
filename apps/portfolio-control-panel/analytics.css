@@ -1076,6 +1076,9 @@ section[data-view="capital"] .callout-neutral {
 .coverage-summary .segment-count { color: var(--text-soft); font-size: 12px; }
 #coverage-table th:first-child { min-width: 240px; max-width: 320px; }
 #coverage-table th:nth-child(n+2) { min-width: 170px; }
+.cell-details { margin-top: 6px; }
+.cell-details > summary { cursor: pointer; color: var(--accent, #5eead4); font-size: 11px; font-weight: 700; }
+.cell-details[open] > summary { margin-bottom: 4px; }
 .capital-chart-wrap { margin: 4px 0 12px; }
 #provider-bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 28px; }
 .capital-chart { width: 100%; height: auto; color: var(--text-soft); }

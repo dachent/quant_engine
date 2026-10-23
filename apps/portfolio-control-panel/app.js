@@ -2457,10 +2457,44 @@
   const renderedViews = new Set();
   const dirtyViews = new Set();
 
+  // The densest evidence tables hold paragraphs of provenance inside narrow cells, which made rows 350 px tall.
+  // After a render, every cell of those columns keeps its first two parts visible and moves the rest into a
+  // closed disclosure.  Nothing is removed or reworded: the text stays in the cell (and in textContent).
+  const DENSE_CELL_COLUMNS = {
+    "implementation-table": [1, 4, 5, 6],
+    "underwriting-table": [1, 2, 3, 4, 5, 6],
+    "factor-model-table": [1, 6, 7, 11],
+    "observation-windows-table": [4, 5],
+  };
+  function compactDenseCells() {
+    if (typeof document.getElementById !== "function") return;
+    for (const [id, columns] of Object.entries(DENSE_CELL_COLUMNS)) {
+      const table = document.getElementById(id);
+      const body = table && table.tBodies ? table.tBodies[0] : null;
+      if (!body) continue;
+      for (const row of body.rows) {
+        for (const index of columns) {
+          const cell = row.cells[index];
+          if (!cell || cell.querySelector(":scope > details.cell-details")) continue;
+          const parts = [...cell.children];
+          if (parts.length < 3 || cell.textContent.length < 160) continue;
+          const rest = parts.slice(2);
+          const details = document.createElement("details");
+          details.className = "cell-details";
+          const summary = document.createElement("summary");
+          summary.textContent = `More (${rest.length})`;
+          details.append(summary, ...rest);
+          cell.append(details);
+        }
+      }
+    }
+  }
+
   function renderView(name) {
     const renderer = viewRenderers[name];
     if (!renderer || (renderedViews.has(name) && !dirtyViews.has(name))) return;
     renderer();
+    compactDenseCells();
     // F47: tables built by a render (not only at load) are keyboard-reachable regions too.
     prepareScrollableTableRegions();
     renderedViews.add(name);
