@@ -1145,8 +1145,9 @@ table .status-text.neutral::before, table .status-text.reserve::before { content
 }
 
 .symbol-not-ready {
-  color: var(--warning);
-  font-style: italic;
+  color: var(--text-soft);
+  font-style: normal;
+  font-weight: 600;
 }
 
 .is-hatched {
