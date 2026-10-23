@@ -847,13 +847,15 @@
       const byStrategy = new Map();
       for (const row of accepted) {
         const key = row.strategy_name || "Unmapped";
-        const entry = byStrategy.get(key) || { count: 0, value: 0 };
+        const entry = byStrategy.get(key) || { count: 0, value: 0, unpriced: 0 };
         entry.count += 1;
-        entry.value += number(row.market_value_usd) ?? 0;
+        const marketValue = number(row.market_value_usd);
+        if (marketValue == null) entry.unpriced += 1;
+        else entry.value += marketValue;
         byStrategy.set(key, entry);
       }
       strategyTotals.textContent = byStrategy.size > 1 || accepted.length
-        ? [...byStrategy.entries()].sort((a, b) => b[1].value - a[1].value).map(([name, entry]) => `${name}: ${integer.format(entry.count)} · ${currency(entry.value)}`).join("   |   ")
+        ? [...byStrategy.entries()].sort((a, b) => b[1].value - a[1].value).map(([name, entry]) => `${name}: ${integer.format(entry.count)} · ${entry.unpriced === entry.count ? "no value available" : currency(entry.value)}${entry.unpriced && entry.unpriced < entry.count ? ` (partial: ${integer.format(entry.unpriced)} without a value)` : ""}`).join("   |   ")
         : "";
       strategyTotals.hidden = accepted.length === 0;
     }
