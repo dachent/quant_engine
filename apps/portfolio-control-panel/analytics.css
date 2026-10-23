@@ -1072,6 +1072,10 @@ section[data-view="capital"] .callout-neutral {
 #allocation-table th:nth-child(9) { min-width: 190px; }
 #allocation-table th:nth-child(10) { min-width: 380px; }
 #allocation-table th:nth-child(3), #allocation-table th:nth-child(5) { min-width: 120px; }
+.coverage-summary { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 4px 0 12px; }
+.coverage-summary .segment-count { color: var(--text-soft); font-size: 12px; }
+#coverage-table th:first-child { min-width: 240px; max-width: 320px; }
+#coverage-table th:nth-child(n+2) { min-width: 170px; }
 .capital-chart-wrap { margin: 4px 0 12px; }
 #provider-bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 28px; }
 .capital-chart { width: 100%; height: auto; color: var(--text-soft); }
