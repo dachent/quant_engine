@@ -1202,4 +1202,4 @@ tfoot td {
   .badge { white-space: normal; max-width: 100%; }
   .panel-heading { flex-wrap: wrap; }
 }
-@media (max-width: 1100px) { .exposure-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) 96px; } }
+@media (min-width: 761px) and (max-width: 1100px) { .exposure-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) 96px; } }
