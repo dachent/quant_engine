@@ -2342,10 +2342,13 @@
     const windowBar = (row) => {
       const start = windowDay(row.observed_start);
       const end = windowDay(row.observed_end);
-      if (start == null || end == null || axisStart == null || axisEnd == null || axisEnd <= axisStart) return "";
-      const left = (start - axisStart) / (axisEnd - axisStart) * 100;
-      const width = Math.max(1.5, (end - start) / (axisEnd - axisStart) * 100);
-      return `<span class="window-bar" aria-hidden="true"><i style="left:${left.toFixed(1)}%;width:${Math.min(width, 100 - left).toFixed(1)}%"></i></span>`;
+      if (start == null || end == null || axisStart == null || axisEnd == null) return "";
+      // A point-in-time window (or an axis of one date) still gets a visible marker: the minimum width is kept
+      // by moving the bar left of the axis end instead of clipping it to nothing.
+      const span = axisEnd - axisStart;
+      const width = span > 0 ? Math.max(1.5, (end - start) / span * 100) : 100;
+      const left = span > 0 ? Math.min((start - axisStart) / span * 100, 100 - width) : 0;
+      return `<span class="window-bar" aria-hidden="true"><i style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%"></i></span>`;
     };
     const windowRows = (data.observation_windows || []).map((row) => {
       if (row.window_type === "PROVIDER_SOURCE") {
