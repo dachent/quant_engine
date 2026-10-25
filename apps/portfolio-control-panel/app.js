@@ -2332,15 +2332,33 @@
 
     // A6: a PROVIDER_SOURCE window names its provider and carries its boundary text; it has
     // no fact type, boundary basis or record count, so none is shown as unknown or zero.
+    // One shared time axis for every window: the bar shows where each fact's observed records sit, so a short or
+    // late window is visible at a glance.  The dates stay as text beside it.
+    const windowDay = (value) => { const parsed = Date.parse(String(value || "").slice(0, 10)); return Number.isFinite(parsed) ? parsed : null; };
+    const windowStarts = (data.observation_windows || []).map((row) => windowDay(row.observed_start)).filter((value) => value != null);
+    const windowEnds = (data.observation_windows || []).map((row) => windowDay(row.observed_end)).filter((value) => value != null);
+    const axisStart = windowStarts.length ? Math.min(...windowStarts) : null;
+    const axisEnd = windowEnds.length ? Math.max(...windowEnds) : null;
+    const windowBar = (row) => {
+      const start = windowDay(row.observed_start);
+      const end = windowDay(row.observed_end);
+      if (start == null || end == null || axisStart == null || axisEnd == null) return "";
+      // A point-in-time window (or an axis of one date) still gets a visible marker: the minimum width is kept
+      // by moving the bar left of the axis end instead of clipping it to nothing.
+      const span = axisEnd - axisStart;
+      const width = span > 0 ? Math.max(1.5, (end - start) / span * 100) : 100;
+      const left = span > 0 ? Math.min((start - axisStart) / span * 100, 100 - width) : 0;
+      return `<span class="window-bar" aria-hidden="true"><i style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%"></i></span>`;
+    };
     const windowRows = (data.observation_windows || []).map((row) => {
       if (row.window_type === "PROVIDER_SOURCE") {
-        return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(providerName(row.provider_id))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}</td><td class="numeric" data-label="Records">—</td><td data-label="Boundary basis">${safe(row.boundary || "Boundary text not recorded")}</td></tr>`;
+        return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(providerName(row.provider_id))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}${windowBar(row)}</td><td class="numeric" data-label="Records">—</td><td data-label="Boundary basis">${safe(row.boundary || "Boundary text not recorded")}</td></tr>`;
       }
       const accounting = row.fact_type === "positions" ? positionTotalAccounting(row.record_count, row.observed_end) : "";
       const recordNote = row.fact_type === "positions"
         ? `<span class="cell-secondary">all accepted snapshot rows${accounting ? `: ${safe(accounting)}` : ""}</span>`
         : "";
-      return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))} · ${safe(row.cadence || "Cadence unavailable")}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}</td><td class="numeric" data-label="Records">${integer.format(row.record_count || 0)}${recordNote}</td><td data-label="Boundary basis">${safe(row.boundary_basis || "Boundary basis unavailable")}</td></tr>`;
+      return `<tr><th scope="row" data-label="Fact / window"><span class="cell-primary">${safe(humanStatus(row.fact_type))}</span><span class="cell-secondary">${safe(humanStatus(row.window_type))} · ${safe(row.cadence || "Cadence unavailable")}</span></th><td data-label="Status">${statusText(row.status)}</td><td data-label="Declared">${formatDateHtml(row.declared_start)}–${formatDateHtml(row.declared_end)}</td><td data-label="Observed">${formatDateHtml(row.observed_start)}–${formatDateHtml(row.observed_end)}${windowBar(row)}</td><td class="numeric" data-label="Records">${integer.format(row.record_count || 0)}${recordNote}</td><td data-label="Boundary basis">${safe(row.boundary_basis || "Boundary basis unavailable")}</td></tr>`;
     });
     $("#observation-windows-table").innerHTML = tableMarkup([["Fact / window"], ["Status"], ["Declared"], ["Observed"], ["Records (count)", "numeric"], ["Boundary basis"]], windowRows.length ? windowRows : [emptyRow(6, "No observation-window contract")]);
 
