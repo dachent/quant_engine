@@ -1948,6 +1948,18 @@
       const coverageText = factorCoverageText(row);
       return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td><span class="cell-primary">${safe(row.coverage?.observed_start || "—")}–${safe(row.coverage?.observed_end || "—")}</span><span class="cell-secondary">${safe(coverageText)}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
     });
+    // The same rows as the table below, one card per strategy: state, the four numbers that decide acceptance, the betas.
+    const modelCards = $("#factor-model-cards");
+    if (modelCards) {
+      modelCards.innerHTML = analysis.series.map((row) => {
+        const holdout = row.diagnostics?.holdout;
+        const decision = row.model_quality?.decision_status || row.status;
+        const betas = row.exposures.map((item) => `<span>${safe(item.factor_id)} β ${decimal(item.beta ?? item.exposure)}</span>`).join("");
+        const window = row.coverage ? `${safe(row.coverage.observed_start || "—")} to ${safe(row.coverage.observed_end || "—")}` : "";
+        const gate = row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
+        return `<div class="model-card"><div class="model-card-head"><strong>${safe(row.series_id)}</strong>${statusText(modelState(row))}</div><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")} · ${safe(row.source_label || "—")} · ${safe(humanStatus(row.estimator || "UNAVAILABLE"))}</span><div class="model-tiles"><div><span>Aligned observations</span><b>${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</b><small>${window}</small></div><div><span>Sealed holdout R²</span><b>${pct(holdout?.predicted_r_squared)}</b></div><div><span>Accepted net alpha, annualised</span><b>${pct(row.alpha?.net_annualized)}</b></div><div><span>Alpha gate</span>${statusText(gate)}<small>${statusText(decision)}</small></div></div><div class="model-betas">${betas || "<span>No betas</span>"}</div></div>`;
+      }).join("");
+    }
     $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Aligned / source intervals"], ["Aligned (observations)", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : row.status === "DIAGNOSTIC_ONLY" ? "is-diagnostic" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
