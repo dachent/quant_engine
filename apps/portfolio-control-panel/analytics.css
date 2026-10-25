@@ -1076,6 +1076,11 @@ section[data-view="capital"] .callout-neutral {
 .coverage-summary .segment-count { color: var(--text-soft); font-size: 12px; }
 #coverage-table th:first-child { min-width: 240px; max-width: 320px; }
 #coverage-table th:nth-child(n+2) { min-width: 170px; }
+.window-bar { display: block; position: relative; height: 8px; min-width: 220px; margin-top: 6px; background: #1d2a3d; border-radius: 3px; }
+.window-bar > i { position: absolute; top: 0; bottom: 0; background: var(--info, #7cb7ff); border-radius: 3px; }
+#observation-windows-table td:nth-child(4) { min-width: 240px; }
+#observation-windows-table td:nth-child(5) { max-width: 260px; }
+#observation-windows-table th:nth-child(6) { min-width: 300px; max-width: 480px; }
 .cell-clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .cell-clamp.is-open { display: block; overflow: visible; }
 .cell-more { margin-top: 4px; background: none; border: 0; padding: 0; cursor: pointer; color: var(--accent, #5eead4); font-size: 11px; font-weight: 700; }
