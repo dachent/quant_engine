@@ -21,6 +21,7 @@ class ControllerGraphError(ValueError):
     """The static projection is stale, incomplete, or internally inconsistent."""
 
 
+_DIRECTORY_IDENTITY = "packages/core/src/quant_engine/core/directory_identity.py"
 _CORE = "packages/core/src/quant_engine/core/pipeline.py"
 _MATERIALIZER = "tools/portfolio_pipeline_materialize.py"
 _RELEASE = "tools/portfolio_release_builder.py"
@@ -107,6 +108,9 @@ _PATH_STAGES = {
     # change to either genuinely can affect every stage's delivery -- declared
     # with real stage impact, not `[]`, unlike the audit/guard tools below.
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
+    # The one framing of every directory-inventory identity (panel, materializer,
+    # release builder, attended preparation): a change moves receipts of every stage.
+    _DIRECTORY_IDENTITY: list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
@@ -741,6 +745,7 @@ def _required_paths(
         _PANEL,
         _SOURCE_CONTRACT,
         _SOURCE_SCHEMA,
+        _DIRECTORY_IDENTITY,
     ]
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)
