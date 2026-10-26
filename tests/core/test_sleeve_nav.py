@@ -405,3 +405,27 @@ def test_omitted_ledger_days_must_be_inert_and_lifecycles_must_open_with_an_in()
             _REAL,
             "other",
         )
+
+
+def test_an_unresolved_funding_step_on_a_live_sleeve_is_refused_with_the_pull() -> None:
+    days = ["2026-01-01", "2026-01-02"]
+    ledger = _ledger(days, [])
+    zero = D("0")
+    account = [AccountDay(day, zero, zero, zero, zero, zero, zero) for day in days]
+
+    def derive(live: bool) -> sn.SleeveNav:
+        funding = {
+            "s1": {
+                days[0]: FundingEvent(
+                    "IN", "DECLARED_UNRESOLVED", evidence_ref="note-1", live=live
+                )
+            }
+        }
+        return sn.derive_sleeve_nav(
+            ledger, funding, account, days, _REAL, "other", account_label="acct-x"
+        )
+
+    assert derive(False).rows
+    with pytest.raises(SleeveNavError, match="Flex cash transactions and trades") as e:
+        derive(True)
+    assert "account acct-x, window 2026-01-01..2026-01-02" in str(e.value)

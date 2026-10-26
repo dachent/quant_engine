@@ -63,6 +63,7 @@ class SleeveInputs:
         *,
         aliases: Mapping[str, str] | None = None,
         alias_from_day: str | None = None,
+        alias_days: Mapping[str, str] | None = None,
     ) -> SleevePolicy:
         """The ledger policy: the map's sleeves, its fallback, the declared extras."""
 
@@ -71,6 +72,7 @@ class SleeveInputs:
             residual_id=residual_id,
             aliases=dict(aliases or {}),
             alias_from_day=alias_from_day,
+            alias_days=dict(alias_days or {}),
             unheld_fallback=dict(self.unheld_fallback),
         )
 
@@ -107,6 +109,7 @@ class SleeveInputs:
                 "residual_id": policy.residual_id,
                 "aliases": dict(policy.aliases),
                 "alias_from_day": policy.alias_from_day,
+                "alias_days": dict(policy.alias_days),
                 "unheld_fallback": dict(policy.unheld_fallback),
             },
             "funding": dict(funding),
