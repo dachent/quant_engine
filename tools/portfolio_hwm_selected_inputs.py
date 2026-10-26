@@ -1711,7 +1711,11 @@ def _selected_hwm_source_rows(
             raise SelectedHwmInputError(
                 f"account-manifest generation lacks {artifact_id}"
             )
-        if (artifact.schema_name, artifact.schema_version) != schema:
+        if (artifact.schema_name, artifact.schema_version) != schema and not (
+            artifact_id == "outputs/account-strategy-manifest.json"
+            and artifact.schema_name == schema[0]
+            and artifact.schema_version == "10"
+        ):
             raise SelectedHwmInputError(
                 f"account-manifest artifact schema differs for {artifact_id}"
             )
@@ -1737,7 +1741,9 @@ def _selected_hwm_source_rows(
         epoch_schema = _mapping(
             epoch_artifact.get("schema"), "epoch source artifact schema"
         )
-        if epoch_schema.get("version") != "9" or "crosswalk" not in epoch_source:
+        if epoch_schema.get("version") not in {"9", "10"} or (
+            "crosswalk" not in epoch_source
+        ):
             raise SelectedHwmInputError(
                 "HWM requires an exact verified v9 epoch manifest and crosswalk"
             )
