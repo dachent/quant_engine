@@ -29,6 +29,7 @@ from test_account_manifest_generation import (  # noqa: F401
     _mixed_crosswalk_selected_inputs,
     _mixed_membership_census_snapshot,
     _mixed_verifier_inputs,
+    ACCOUNT_STRATEGY_SCHEMA_PATH,
     VERIFIER_SCHEMA_PATH,
     _selected_input_kwargs,
     perimeter_module,
@@ -431,6 +432,10 @@ def test_liquidate_and_reallocate_builds_verifies_and_pairs(
     assert len(rows) == 13 - 1 + 2
     assert report["numeric_verification"]["discrepancy_count"] == 0
     assert report["numeric_verification"]["candidate_count"] == 2
+    # the manifest output (schema 10, with the period-return fields) is valid
+    Draft202012Validator(
+        json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
+    ).validate(json.loads(payloads["outputs/account-strategy-manifest.json"]))
     # the facts are an identity of the verification report and its schema
     Draft202012Validator(
         json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
