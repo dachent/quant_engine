@@ -89,7 +89,7 @@ from lifecycle_fields import (
     parent_assignment_id,
     strategy_lifecycle,
 )
-from nested_strategy_tag_map import TagMap, TagMapError, load_tag_map
+from nested_strategy_tag_map import TagMap, TagMapError, validate_tag_map
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -255,6 +255,9 @@ WORKBOOK_DELIVERY_EVIDENCE_VERSION: Final = 1
 EPOCH_MANIFEST_WORKBOOK_NAME: Final = "account-strategy-manifest.json"
 EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME: Final = "epoch-manifest-source.json"
 EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk.json"
+# The nested-strategy tag map a candidate was built with (#592), kept beside the
+# report so verification and publication rebuild from the same bytes.
+NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -8268,9 +8271,10 @@ def _crosswalk_epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str, str | N
     )
 
 
-def _load_nested_tag_map(path: Path) -> TagMap:
+def _load_nested_tag_map(path: Path) -> tuple[TagMap, bytes]:
     try:
-        return load_tag_map(path)
+        raw = path.read_bytes()
+        return validate_tag_map(raw), raw
     except (OSError, TagMapError) as exc:
         raise ReportValidationError(
             f"nested strategy tag map is invalid: {exc}"
@@ -8705,10 +8709,17 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_crosswalk_rows: list[dict[str, Any]] = []
+    epoch_verified_details: Mapping[
+        tuple[str, str, str, str | None], Mapping[str, Any]
+    ] = {}
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
     _require_epoch_generation_root(epoch_supplied, epoch_manifest_generation_root)
+    if nested_tag_map_path is not None and not epoch_supplied:
+        raise ReportValidationError(
+            "nested strategy tag map requires the current epoch evidence"
+        )
     if (
         _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
         and not epoch_supplied
@@ -8757,6 +8768,7 @@ def build_report_data(
         crosswalk_payload = json.loads(_crosswalk_bytes.decode("utf-8"))
         calculation_cutoff_date = crosswalk_payload["calculation_cutoff_date"]
         epoch_crosswalk_rows = list(crosswalk_payload["rows"])
+        epoch_verified_details = verified_epoch_details
         current_epoch_tuples = {
             (
                 row["account_id"],
@@ -9464,11 +9476,18 @@ def build_report_data(
         # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
         # close and the tag map only.  A report built without a current-epoch
         # crosswalk keeps the previous schema: no marker, no fields.
-        tag_map = (
-            None
-            if nested_tag_map_path is None
-            else _load_nested_tag_map(nested_tag_map_path)
-        )
+        tag_map: TagMap | None = None
+        if nested_tag_map_path is not None:
+            tag_map, tag_map_bytes = _load_nested_tag_map(nested_tag_map_path)
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "nested-strategy-tag-map",
+                    "as_of_date": tag_map.as_of_date.isoformat(),
+                    "schema": "nested-strategy-tag-map/1",
+                    "sha256": hashlib.sha256(tag_map_bytes).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -9486,7 +9505,7 @@ def build_report_data(
                 strategy_summary,
                 controls=strategy_product_controls,
                 crosswalk_rows=epoch_crosswalk_rows,
-                details=current_epoch_details,
+                details=epoch_verified_details,
                 sleeves_by_strategy=sleeves_by_strategy,
                 strategy_names={
                     _text(item.get("strategy_id"), "strategy.strategy_id"): _text(
@@ -10378,6 +10397,7 @@ def build_candidate(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     include_workbook: bool = False,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -10409,6 +10429,7 @@ def build_candidate(
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
+        nested_tag_map_path=nested_tag_map_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -10417,6 +10438,11 @@ def build_candidate(
     excel_input_path = candidate / "excel-input" / WORKBOOK_NAME
     excel_path = candidate / "excel" / WORKBOOK_NAME
     _write_exact(data_path, report_bytes)
+    if nested_tag_map_path is not None:
+        _write_exact(
+            candidate / NESTED_TAG_MAP_EVIDENCE_NAME,
+            _regular_file_bytes(nested_tag_map_path, "nested strategy tag map"),
+        )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         capital_result_bytes = (
@@ -11382,6 +11408,13 @@ def _workbook_evidence_binding_from_snapshots(
         binding[f"{name}_sha256"] = hashlib.sha256(content).hexdigest()
         binding[f"{name}_size_bytes"] = len(content)
     return binding
+
+
+def _candidate_nested_tag_map(candidate_dir: Path) -> Path | None:
+    """The tag map a candidate was built with, when it carries one (#592)."""
+
+    path = candidate_dir / NESTED_TAG_MAP_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
 
 
 def _epoch_manifest_workbook_snapshots(
@@ -13491,6 +13524,7 @@ def verify_candidate(
         attribution_generation_id=attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -14538,6 +14572,7 @@ def publish_report(
         attribution_generation_id=snapshot_attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -14962,6 +14997,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--epoch-manifest-source", type=Path)
     build.add_argument("--epoch-crosswalk", type=Path)
     build.add_argument("--epoch-manifest-generation-root", type=Path)
+    build.add_argument("--nested-tag-map", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -15118,6 +15154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 source_clock_path=args.source_clock,
+                nested_tag_map_path=args.nested_tag_map,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

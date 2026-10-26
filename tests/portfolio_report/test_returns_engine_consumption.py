@@ -2822,3 +2822,116 @@ def test_report_adds_nested_sleeves_as_retained_history_only_records(
     assert inactive["lifecycle_state"] == "INACTIVE"
     assert inactive["retired_on"] is None
     assert inactive["effective_end"] is None
+
+
+def test_report_binds_the_tag_map_identity_and_refuses_it_without_epoch_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#592 review: the tag map is bound by digest, never read without epochs."""
+
+    tag_map_path = tmp_path / "tag-map.json"
+    tag_map_path.write_bytes(_lifecycle_tag_map_bytes("account-a"))
+    report, _links, _manifest_rows = _build_single_link_sole_account_report(
+        tmp_path, monkeypatch, nested_tag_map_path=tag_map_path
+    )
+    bound = [
+        row
+        for row in report["provenance"]
+        if row["artifact"] == "nested-strategy-tag-map"
+    ]
+    assert bound == [
+        {
+            "artifact": "nested-strategy-tag-map",
+            "as_of_date": "2026-09-17",
+            "schema": "nested-strategy-tag-map/1",
+            "sha256": hashlib.sha256(tag_map_path.read_bytes()).hexdigest(),
+        }
+    ]
+    full = _full_report_fixture()
+    baseline_root = full._published_baseline(
+        tmp_path / "plain", full._baseline_catalog()
+    )
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="requires the current epoch evidence",
+    ):
+        full.reporter.build_report_data(baseline_root, nested_tag_map_path=tag_map_path)
+
+
+def test_candidate_helper_finds_the_tag_map_only_when_the_candidate_carries_it(
+    tmp_path: Path,
+) -> None:
+    assert reporter._candidate_nested_tag_map(tmp_path) is None
+    (tmp_path / reporter.NESTED_TAG_MAP_EVIDENCE_NAME).write_bytes(b"{}")
+    assert (
+        reporter._candidate_nested_tag_map(tmp_path)
+        == tmp_path / reporter.NESTED_TAG_MAP_EVIDENCE_NAME
+    )
+
+
+def test_retained_strategy_close_comes_from_the_full_verified_details() -> None:
+    """#592 review: an excluded epoch's own close makes the retained record CLOSED."""
+
+    key = ("account-x", "strategy-x", "2025-01-01", "2025-06-30")
+    crosswalk_row = {
+        "account_id": key[0],
+        "strategy_id": key[1],
+        "effective_start": key[2],
+        "effective_end": key[3],
+    }
+    _current, retained = reporter._lifecycle_strategy_rows(
+        [],
+        controls={},
+        crosswalk_rows=[crosswalk_row],
+        details={key: {"performance_closed_on": "2025-06-27"}},
+        sleeves_by_strategy={},
+        strategy_names={"strategy-x": "Strategy X"},
+    )
+    (record,) = retained
+    assert record["lifecycle_state"] == "CLOSED"
+    assert record["closed_on"] == "2025-06-27"
+    assert record["retired_on"] == "2025-06-30"
+
+
+def test_report_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
+    """#592 review: marker without fields, or fields without marker, is invalid."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+
+    def lifecycle_errors(document: dict[str, Any]) -> list[str]:
+        return [
+            error.message
+            for error in validator.iter_errors(document)
+            if any(
+                name in f"{error.message} {list(error.absolute_path)}"
+                for name in (*_LIFECYCLE_FIELDS, "retained_strategies", "lifecycle")
+            )
+        ]
+
+    row = {"strategy_id": "s"}
+    fields = {
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+    legacy = {"strategy_summary": [row] * 7, "twr_mwr": [row]}
+    assert lifecycle_errors(legacy) == []
+    assert lifecycle_errors({**legacy, "lifecycle_schema_version": 1}) != []
+    assert (
+        lifecycle_errors({**legacy, "strategy_summary": [{**row, **fields}] * 7}) != []
+    )
+    assert lifecycle_errors({**legacy, "retained_strategies": []}) != []
+    current = {
+        "lifecycle_schema_version": 1,
+        "retained_strategies": [],
+        "strategy_summary": [{**row, **fields}] * 7,
+        "twr_mwr": [{**row, **fields}],
+    }
+    assert lifecycle_errors(current) == []

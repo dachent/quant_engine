@@ -15663,3 +15663,43 @@ def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
     assert "lifecycle_schema_version" not in data
     assert len(data["strategies"]) == data["counts"]["strategies"]
     assert not any("lifecycle_state" in row for row in data["strategies"])
+
+
+def test_panel_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
+    """#592 review: marker without fields, or fields without marker, is invalid."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+    names = (*_LIFECYCLE_ACTIVE, "lifecycle_schema_version")
+
+    def lifecycle_errors(document: dict[str, Any]) -> list[str]:
+        return [
+            error.message
+            for error in validator.iter_errors(document)
+            if any(
+                name in f"{error.message} {list(error.absolute_path)}" for name in names
+            )
+            and "too short" not in error.message
+        ]
+
+    row = {"strategy_id": "s"}
+    legacy = {"strategies": [row] * 7, "performance": [row] * 13}
+    assert lifecycle_errors(legacy) == []
+    assert lifecycle_errors({**legacy, "lifecycle_schema_version": 1}) != []
+    assert (
+        lifecycle_errors({**legacy, "strategies": [{**row, **_LIFECYCLE_ACTIVE}] * 7})
+        != []
+    )
+    current = {
+        "lifecycle_schema_version": 1,
+        "strategies": [{**row, **_LIFECYCLE_ACTIVE}] * 7,
+        "performance": [{**row, **_LIFECYCLE_ACTIVE}] * 13,
+    }
+    assert lifecycle_errors(current) == []

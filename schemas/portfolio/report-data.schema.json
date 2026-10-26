@@ -1801,6 +1801,11 @@
   },
   "allOf": [
     {
+      "if": {"required": ["lifecycle_schema_version"]},
+      "then": {"required": ["retained_strategies"], "properties": {"strategy_summary": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}, "twr_mwr": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}}},
+      "else": {"not": {"required": ["retained_strategies"]}, "properties": {"strategy_summary": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}, "twr_mwr": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}}}
+    },
+    {
       "if": {
         "properties": {
           "provenance": {
