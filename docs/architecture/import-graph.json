@@ -370,6 +370,11 @@
     ],
     [
       "portfolio_report",
+      "holdings_identity",
+      1
+    ],
+    [
+      "portfolio_report",
       "portfolio_attended_preparation",
       1
     ],
@@ -406,6 +411,11 @@
     [
       "portfolio_report",
       "provider_ledger",
+      1
+    ],
+    [
+      "portfolio_report",
+      "verify_holdings_identity",
       1
     ],
     [
