@@ -30,7 +30,7 @@ from quant_engine.core import (
     read_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.directory_identity import inventory_identity
+from quant_engine.core import inventory_identity
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,

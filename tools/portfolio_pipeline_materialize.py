@@ -28,7 +28,7 @@ from quant_engine.core import (
 )
 from quant_engine.core import run_storage
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.directory_identity import inventory_identity
+from quant_engine.core import inventory_identity
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     validate_admit_or_declare_receipt,

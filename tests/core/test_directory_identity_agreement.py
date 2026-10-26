@@ -122,7 +122,7 @@ GOLDEN_SAMPLE_SHA256 = (
 def test_every_producer_still_matches_the_pre_consolidation_golden_digest(
     sample: Path,
 ) -> None:
-    from quant_engine.core.directory_identity import inventory_identity
+    from quant_engine.core import inventory_identity
 
     for name, compute in {
         "materialize": lambda: _load(

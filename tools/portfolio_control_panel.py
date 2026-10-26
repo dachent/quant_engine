@@ -45,7 +45,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.directory_identity import inventory_identity
+from quant_engine.core import inventory_identity
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
