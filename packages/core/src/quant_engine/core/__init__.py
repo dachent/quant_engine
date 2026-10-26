@@ -103,6 +103,7 @@ from quant_engine.core.release import (
     recover_release,
     rollback_release,
 )
+from quant_engine.core.directory_identity import inventory_identity
 from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
@@ -120,6 +121,7 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "inventory_identity",
     "AdapterCapabilities",
     "ProviderCapability",
     "ProviderContractError",

@@ -1,0 +1,1259 @@
+{
+ "change_in_nav_observations": [
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-02",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-2"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "1798",
+   "opening_nav": "1800"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-03",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-2"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "1861.0",
+   "opening_nav": "1798"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-04",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-1"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "1899.0",
+   "opening_nav": "1861.0"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-05",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-1"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "1896.0",
+   "opening_nav": "1899.0"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-06",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "1000"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.0128"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-2"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "2911.9872",
+   "opening_nav": "1896.0"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-09",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.0644"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-1"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "2943.9228",
+   "opening_nav": "2911.9872"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-10",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.0627"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-3"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "2921.8601",
+   "opening_nav": "2943.9228"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-11",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.1138"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-1"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "2957.6463",
+   "opening_nav": "2921.8601"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-12",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.0696"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "-1"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-3"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "2961.5267",
+   "opening_nav": "2957.6463"
+  },
+  {
+   "account_id": "account-synthetic",
+   "accounting_date": "2026-03-13",
+   "components": [
+    {
+     "source_component_key": "depositsWithdrawals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "internalCashTransfers",
+     "value": "0"
+    },
+    {
+     "source_component_key": "interest",
+     "value": "-0.0697"
+    },
+    {
+     "source_component_key": "changeInInterestAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "brokerFees",
+     "value": "0"
+    },
+    {
+     "source_component_key": "otherIncome",
+     "value": "0"
+    },
+    {
+     "source_component_key": "other",
+     "value": "0"
+    },
+    {
+     "source_component_key": "transactionTax",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInBrokerFeeAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "changeInDividendAccruals",
+     "value": "0"
+    },
+    {
+     "source_component_key": "commissions",
+     "value": "-0"
+    }
+   ],
+   "currency": "USD",
+   "ending_nav": "3002.4570",
+   "opening_nav": "2961.5267"
+  }
+ ],
+ "positions": [
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-02",
+   "asset_category": "STK",
+   "mark_price": "10",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-02",
+   "asset_category": "STK",
+   "mark_price": "20",
+   "multiplier": "1",
+   "quantity": "40",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-03",
+   "asset_category": "STK",
+   "mark_price": "10.5",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-03",
+   "asset_category": "STK",
+   "mark_price": "21",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-03",
+   "asset_category": "STK",
+   "mark_price": "5.1",
+   "multiplier": "1",
+   "quantity": "100",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-04",
+   "asset_category": "STK",
+   "mark_price": "11",
+   "multiplier": "1",
+   "quantity": "40",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-04",
+   "asset_category": "STK",
+   "mark_price": "21.2",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-04",
+   "asset_category": "STK",
+   "mark_price": "5.2",
+   "multiplier": "1",
+   "quantity": "100",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-05",
+   "asset_category": "STK",
+   "mark_price": "11",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-05",
+   "asset_category": "STK",
+   "mark_price": "21.1",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-05",
+   "asset_category": "STK",
+   "mark_price": "5.2",
+   "multiplier": "1",
+   "quantity": "100",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-06",
+   "asset_category": "STK",
+   "mark_price": "11.2",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-06",
+   "asset_category": "STK",
+   "mark_price": "21",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-06",
+   "asset_category": "STK",
+   "mark_price": "5.3",
+   "multiplier": "1",
+   "quantity": "200",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-06",
+   "asset_category": "STK",
+   "mark_price": "10",
+   "multiplier": "1",
+   "quantity": "100",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-09",
+   "asset_category": "STK",
+   "mark_price": "11.1",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-09",
+   "asset_category": "STK",
+   "mark_price": "21.4",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-09",
+   "asset_category": "STK",
+   "mark_price": "5.3",
+   "multiplier": "1",
+   "quantity": "200",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-09",
+   "asset_category": "STK",
+   "mark_price": "10.3",
+   "multiplier": "1",
+   "quantity": "150",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-10",
+   "asset_category": "STK",
+   "mark_price": "11.4",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-10",
+   "asset_category": "STK",
+   "mark_price": "21.2",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-10",
+   "asset_category": "STK",
+   "mark_price": "52",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-c2"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-10",
+   "asset_category": "STK",
+   "mark_price": "10.2",
+   "multiplier": "1",
+   "quantity": "49.5",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-10",
+   "asset_category": "STK",
+   "mark_price": "10.1",
+   "multiplier": "1",
+   "quantity": "100",
+   "security_id": "security-synthetic-e"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-11",
+   "asset_category": "STK",
+   "mark_price": "11.5",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-11",
+   "asset_category": "STK",
+   "mark_price": "21.3",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-11",
+   "asset_category": "STK",
+   "mark_price": "52.5",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-c2"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-11",
+   "asset_category": "STK",
+   "mark_price": "10.4",
+   "multiplier": "1",
+   "quantity": "49.5",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-11",
+   "asset_category": "STK",
+   "mark_price": "10.2",
+   "multiplier": "1",
+   "quantity": "150",
+   "security_id": "security-synthetic-e"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-12",
+   "asset_category": "STK",
+   "mark_price": "11.3",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-12",
+   "asset_category": "STK",
+   "mark_price": "21.5",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-12",
+   "asset_category": "STK",
+   "mark_price": "52.2",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-c2"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-12",
+   "asset_category": "STK",
+   "mark_price": "8.1",
+   "multiplier": "1",
+   "quantity": "200",
+   "security_id": "security-synthetic-f"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-13",
+   "asset_category": "STK",
+   "mark_price": "11.6",
+   "multiplier": "1",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-13",
+   "asset_category": "STK",
+   "mark_price": "21.6",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-13",
+   "asset_category": "STK",
+   "mark_price": "52.4",
+   "multiplier": "1",
+   "quantity": "20",
+   "security_id": "security-synthetic-c2"
+  },
+  {
+   "account_id": "account-synthetic",
+   "as_of_date": "2026-03-13",
+   "asset_category": "STK",
+   "mark_price": "8.2",
+   "multiplier": "1",
+   "quantity": "200",
+   "security_id": "security-synthetic-f"
+  }
+ ],
+ "transactions": [
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-500"
+   },
+   "close_price": "10",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-02",
+   "executed_time": "09:30:00",
+   "execution_price": "10",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "101-BookAlpha",
+   "quantity": "50",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-800"
+   },
+   "close_price": "20",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-02",
+   "executed_time": "09:30:01",
+   "execution_price": "20",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "101-BookAlpha",
+   "quantity": "40",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "420"
+   },
+   "close_price": "21",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-03",
+   "executed_time": "09:30:00",
+   "execution_price": "21",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": "102-BookAlpha",
+   "quantity": "-20",
+   "security_id": "security-synthetic-b"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-510.0"
+   },
+   "close_price": "5.1",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-03",
+   "executed_time": "09:31:00",
+   "execution_price": "5.1",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "103-BookBeta",
+   "quantity": "100",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "110"
+   },
+   "close_price": "11",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-04",
+   "executed_time": "09:30:00",
+   "execution_price": "11",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": "104-BookAlpha",
+   "quantity": "-10",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-110"
+   },
+   "close_price": "11",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-05",
+   "executed_time": "09:30:00",
+   "execution_price": "11",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "105-BookAlpha",
+   "quantity": "10",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-530.0"
+   },
+   "close_price": "5.3",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-06",
+   "executed_time": "09:30:00",
+   "execution_price": "5.3",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "106-BookBeta",
+   "quantity": "100",
+   "security_id": "security-synthetic-c"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1000"
+   },
+   "close_price": "10",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-06",
+   "executed_time": "09:31:00",
+   "execution_price": "10",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "107-BookGamma",
+   "quantity": "100",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-515.0"
+   },
+   "close_price": "10.3",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-09",
+   "executed_time": "09:30:00",
+   "execution_price": "10.3",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "108-BookDelta",
+   "quantity": "50",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "1020.0"
+   },
+   "close_price": "10.2",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-10",
+   "executed_time": "09:30:00",
+   "execution_price": "10.2",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": "109-BookGamma",
+   "quantity": "-100",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "5.10"
+   },
+   "close_price": "10.2",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-10",
+   "executed_time": "09:30:00",
+   "execution_price": "10.2",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": null,
+   "quantity": "-0.5",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1010.0"
+   },
+   "close_price": "10.1",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-10",
+   "executed_time": "09:30:01",
+   "execution_price": "10.1",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "110-BookEpsilonOne",
+   "quantity": "100",
+   "security_id": "security-synthetic-e"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "5.0"
+   },
+   "event_date": "2026-03-10",
+   "kind": "CASH_ACTIVITY:Dividends",
+   "nav_recognition_date": "2026-03-10",
+   "security_id": "security-synthetic-a"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-510.0"
+   },
+   "close_price": "10.2",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-11",
+   "executed_time": "09:30:00",
+   "execution_price": "10.2",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "111-BookEpsilonTwo",
+   "quantity": "50",
+   "security_id": "security-synthetic-e"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "519.75"
+   },
+   "close_price": "10.5",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-12",
+   "executed_time": "09:30:00",
+   "execution_price": "10.5",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": "55555",
+   "quantity": "-49.5",
+   "security_id": "security-synthetic-d"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "1545.0"
+   },
+   "close_price": "10.3",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-12",
+   "executed_time": "09:30:01",
+   "execution_price": "10.3",
+   "kind": "TRADE:ExchTrade:SELL",
+   "order_reference": "55555",
+   "quantity": "-150",
+   "security_id": "security-synthetic-e"
+  },
+  {
+   "account_id": "account-synthetic",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1620.0"
+   },
+   "close_price": "8.1",
+   "commission": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "-1"
+   },
+   "event_date": "2026-03-12",
+   "executed_time": "09:31:00",
+   "execution_price": "8.1",
+   "kind": "TRADE:ExchTrade:BUY",
+   "order_reference": "112-BookBeta",
+   "quantity": "200",
+   "security_id": "security-synthetic-f"
+  }
+ ]
+}

@@ -82,6 +82,11 @@ from quant_engine.portfolio_ledger.returns import (
     value_periods,
 )
 from portfolio_private_stage import validate_private_stage_target
+from holdings_identity import build_holdings_identity
+from verify_holdings_identity import (
+    HoldingsIdentityError,
+    verify_holdings_identity,
+)
 from portfolio_invested_capital import (
     CapitalValidationError,
     governed_hwm_input_policy,
@@ -9519,6 +9524,11 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    # Present only when an accepted position source exists: the placeholder row of an
+    # empty source names no instrument, so it has no identity to state.
+    holdings_identity = build_holdings_identity(report["positions"], catalog)
+    if holdings_identity["rows"]:
+        report["holdings_identity"] = holdings_identity
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
@@ -13437,6 +13447,21 @@ def _verification_from_snapshots(
     return verification
 
 
+def _verify_candidate_holdings_identity(
+    candidate_report_bytes: bytes, baseline_catalog_path: Path
+) -> dict[str, Any]:
+    """Re-derive the holdings sidecar independently from the retained catalog."""
+
+    try:
+        candidate_report = json.loads(candidate_report_bytes)
+        retained_catalog = json.loads(
+            _regular_file_bytes(baseline_catalog_path, "baseline catalog")
+        )
+        return verify_holdings_identity(candidate_report, retained_catalog)
+    except (ValueError, HoldingsIdentityError) as exc:
+        raise ReportValidationError(f"holdings identity sidecar: {exc}") from exc
+
+
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
@@ -13498,7 +13523,7 @@ def verify_candidate(
         if epoch_snapshots
         else epoch_crosswalk_path
     )
-    report, report_bytes, _ = build_report_data(
+    report, report_bytes, baseline_catalog_path = build_report_data(
         baseline_root,
         freshness_health_path,
         provider_ledger_root,
@@ -13531,6 +13556,9 @@ def verify_candidate(
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
+    holdings_identity_receipt = _verify_candidate_holdings_identity(
+        candidate_report_bytes, baseline_catalog_path
+    )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         expected_result_bytes = (
@@ -13569,6 +13597,7 @@ def verify_candidate(
         excel_workbook,
         workbook_bytes,
     )
+    verification.update(holdings_identity_receipt)
     if epoch_snapshots:
         verification.update(
             {

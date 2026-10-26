@@ -45,6 +45,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import inventory_identity
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -447,14 +448,7 @@ def _authorization_directory_identity(path: Path, field_name: str) -> dict[str, 
                     "size_bytes": len(content),
                 }
             )
-    content = (
-        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-    return {
-        "file_count": len(rows),
-        "inventory_sha256": hashlib.sha256(content).hexdigest(),
-    }
+    return inventory_identity(rows)
 
 
 def _validated_coordinated_release_receipt(

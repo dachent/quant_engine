@@ -69,6 +69,26 @@
   ],
   "tools_edges": [
     [
+      "build_sleeve_account_facts",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "build_sleeve_account_facts",
+      "sleeve_inputs",
+      1
+    ],
+    [
+      "build_sleeve_account_facts",
+      "sleeve_ledger",
+      1
+    ],
+    [
+      "build_sleeve_account_facts",
+      "sleeve_nav",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "check_retained_authority_pins",
       1
@@ -350,6 +370,11 @@
     ],
     [
       "portfolio_report",
+      "holdings_identity",
+      1
+    ],
+    [
+      "portfolio_report",
       "portfolio_attended_preparation",
       1
     ],
@@ -386,6 +411,11 @@
     [
       "portfolio_report",
       "provider_ledger",
+      1
+    ],
+    [
+      "portfolio_report",
+      "verify_holdings_identity",
       1
     ],
     [
