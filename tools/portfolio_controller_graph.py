@@ -123,6 +123,9 @@ _PATH_STAGES = {
     "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # The Performance tab producer: builds one additive panel block from the weekly
+    # returns, account manifest and governed HWM proof the panel already holds.
+    "tools/portfolio_performance_tab.py": ["panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
     # none writes a delivery artifact, so a change to any of them affects no
     # stage. They are declared rather than omitted because an omitted `tools/`
