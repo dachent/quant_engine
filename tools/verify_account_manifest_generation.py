@@ -72,9 +72,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "2a022a459d3e83dbdc2497b7c24b5a9d7b5074449912bf26cae4b22d82ae3159"
+    "40d8f1773ae91935b0b2b5a8e9070e6bd7363b07de784b8d81047e7f2f6d3840"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30007
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 34784
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(

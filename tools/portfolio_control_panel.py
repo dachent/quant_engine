@@ -1112,7 +1112,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3, 4}:
+    ) not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1194,7 +1194,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3, 4}:
+    ) not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -3256,7 +3256,10 @@ def _performance_lineage(
 ) -> dict[str, Any]:
     """Compare the report/baseline ledger with the manifest calculation ledger."""
 
-    if account_manifest is None or account_manifest.get("schema_version") not in {9, 10}:
+    if account_manifest is None or account_manifest.get("schema_version") not in {
+        9,
+        10,
+    }:
         return {"status": "NOT_APPLICABLE"}
     baseline_candidates = [
         row
@@ -8687,6 +8690,8 @@ def _strategy_underwriting(
                     "hybrid_net_alpha": factor_value(
                         hybrid_factor, "alpha", "net_annualized"
                     ),
+                    "live_net_alpha_window": _alpha_window(live_factor),
+                    "hybrid_net_alpha_window": _alpha_window(hybrid_factor),
                     "live_holdout_predicted_r_squared": factor_value(
                         live_factor,
                         "model_quality",
@@ -8907,10 +8912,38 @@ def _position_symbol_status_and_reason(
     return "NOT_APPLICABLE", None
 
 
+def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The aligned window and training count one annualised alpha stands on."""
+
+    coverage = None if row is None else row.get("coverage")
+    if not isinstance(coverage, Mapping):
+        return None
+    start, end = coverage.get("observed_start"), coverage.get("observed_end")
+    days = (
+        (date.fromisoformat(end) - date.fromisoformat(start)).days
+        if isinstance(start, str) and isinstance(end, str)
+        else None
+    )
+    return {
+        "start": start,
+        "end": end,
+        "days": days,
+        "aligned_observations": coverage.get("aligned_observations"),
+        "train_observations": coverage.get("train_observations"),
+        "annualisation_basis": (
+            None
+            if days is None
+            else "ANNUALISED_FROM_DAYS"
+            if days < 365
+            else "ANNUALISED"
+        ),
+    }
+
+
 def _panel_schema_version_for(report_schema_version: object) -> int:
     """The panel version a report version selects: custody coverage reports are 25."""
 
-    if report_schema_version in {3, 4}:
+    if report_schema_version in {3, 4, 5}:
         return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
     return PANEL_SCHEMA_VERSION
 
@@ -14187,7 +14220,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2, 3, 4}:
+    ) or retained_report_schema_version not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )

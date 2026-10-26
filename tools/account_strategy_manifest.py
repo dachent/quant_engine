@@ -4275,9 +4275,7 @@ def _period_return_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         mwr_days: int | None = None
         mwr_equivalent: Decimal | None = None
         if isinstance(mwr_open, str) and isinstance(mwr_end, str):
-            mwr_days = (
-                date.fromisoformat(mwr_end) - date.fromisoformat(mwr_open)
-            ).days
+            mwr_days = (date.fromisoformat(mwr_end) - date.fromisoformat(mwr_open)).days
             if mwr is not None and mwr_days > 0 and mwr > Decimal(-1):
                 mwr_equivalent = (Decimal(1) + mwr) ** (
                     Decimal(mwr_days) / Decimal(365)

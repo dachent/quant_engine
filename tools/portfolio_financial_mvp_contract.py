@@ -520,10 +520,9 @@ def _validate_v9_epoch_release_controls(
     generation_as_of_date: date,
 ) -> None:
     manifest = _epoch_payload_json(manifest_payload, "artifact")
-    if (
-        type(manifest.get("schema_version")) is not int
-        or manifest.get("schema_version") not in {9, 10}
-    ):
+    if type(manifest.get("schema_version")) is not int or manifest.get(
+        "schema_version"
+    ) not in {9, 10}:
         raise FinancialMvpContractError(
             "epoch manifest source artifact schema v9 differs"
         )
