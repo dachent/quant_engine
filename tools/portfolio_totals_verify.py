@@ -285,7 +285,7 @@ def _check_mwr(
         open_current = sum(
             (_d(r["current_value"]) for r in rows if r["end"] == cutoff), Decimal(0)
         )
-        if terminal != open_current:
+        if abs(terminal - open_current) > Decimal("1e-18"):
             raise _fail(
                 "portfolio_mwr_annualised is available but the perimeter value differs"
             )

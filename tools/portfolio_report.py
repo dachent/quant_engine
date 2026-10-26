@@ -8569,8 +8569,11 @@ def build_report_data(
                 }
         epoch_manifest_rows = [
             row
-            for row in _objects(_manifest.get("rows"), "epoch manifest rows")
-            if (
+            for row in (
+                _manifest.get("rows") if isinstance(_manifest.get("rows"), list) else []
+            )
+            if isinstance(row, Mapping)
+            and (
                 row.get("account_id"),
                 row.get("strategy_id"),
                 row.get("effective_start"),

@@ -37,17 +37,18 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Final
 
-from quant_engine.portfolio_ledger import decimal_text
-from quant_engine.portfolio_ledger.returns import (
+from quant_engine.portfolio_ledger import (
     ReturnsError,
     ValuePeriod,
     classify_xirr,
+    decimal_text,
     splice_spans,
     summed_value_composite,
 )
 
 TOTALS_SCHEMA_VERSION: Final = 1
 DECIMAL_PRECISION: Final = 100
+PERIMETER_TOLERANCE: Final = Decimal("1e-18")
 ANNUALISATION_MINIMUM_DAYS: Final = 365
 TWR_BASIS: Final = "GOVERNED_HWM_INDEX"
 OPEN_RULE: Final = "CURRENT_OF_EPOCHS_OPEN_AT_CUTOFF_MINUS_GAIN_OF_ALL_EPOCHS"
@@ -571,18 +572,22 @@ def build_portfolio_totals(
         return {}
     terminal: Decimal | None = None
     perimeter = (hwm_summary or {}).get("governed_perimeter_value_usd")
-    open_current = sum(
-        (
-            _decimal(row.get("current_value"), "current_value")
-            for row in rows
-            if row.get("status") == "OK" and row.get("end") == calculation_cutoff_date
-        ),
-        Decimal(0),
-    )
-    if perimeter is not None:
-        terminal = _decimal(perimeter, "governed_perimeter_value_usd")
-        if terminal != open_current:
-            terminal = None
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        open_current = sum(
+            (
+                _decimal(row.get("current_value"), "current_value")
+                for row in rows
+                if row.get("status") == "OK"
+                and row.get("end") == calculation_cutoff_date
+            ),
+            Decimal(0),
+        )
+        if perimeter is not None:
+            # The summary rounds the perimeter value to 28 digits.
+            terminal = _decimal(perimeter, "governed_perimeter_value_usd")
+            if abs(terminal - open_current) > PERIMETER_TOLERANCE:
+                terminal = None
     return {
         "portfolio_twr_cumulative": build_portfolio_twr(governed_hwm_proof, rows),
         "portfolio_mwr_annualised": build_portfolio_mwr(
