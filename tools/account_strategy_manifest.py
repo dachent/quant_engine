@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -115,6 +115,7 @@ _FLOW_COVERAGE_AUTHORITY_KINDS = frozenset(
     {
         "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2",
         "STATIC_SNAPSHOT_COVERAGE_V1",
+        "DERIVED_SLEEVE_COVERAGE_V1",
         "NONE",
     }
 )
@@ -626,6 +627,7 @@ def _validate_flow_coverage_payload(
     mapped_assignments: list[dict[str, Any]],
     receipt_validator: Any,
     ledger_payload: Mapping[str, Any] | None = None,
+    derived_rows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[tuple[Mapping[str, object], ...], dict[str, object]]:
     """Validate coverage facts without constructing numeric-row authority.
 
@@ -715,17 +717,41 @@ def _validate_flow_coverage_payload(
     complete_receipt_ids: set[str] = set()
     actual_keys: set[tuple[str, str, str, str | None]] = set()
     seen_intervals: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    base_row_keys = {
+        "assignment",
+        "requested_start",
+        "requested_end",
+        "status",
+        "authority_kind",
+        "receipt_artifact_id",
+        "blocker_code",
+        "blocker_detail",
+    }
+    derived_by_key = {
+        (
+            str(item["assignment"]["account_id"]),
+            str(item["assignment"]["strategy_id"]),
+            str(item["assignment"]["effective_start"]),
+            item["assignment"]["effective_end"],
+        ): item
+        for item in derived_rows
+        if (
+            str(item["assignment"]["account_id"]),
+            str(item["assignment"]["strategy_id"]),
+            str(item["assignment"]["effective_start"]),
+            item["assignment"]["effective_end"],
+        )
+        in expected_keys
+    }
+    derived_seen: set[tuple[str, str, str, str | None]] = set()
     for index, value in enumerate(rows_payload):
-        if not isinstance(value, Mapping) or set(value) != {
-            "assignment",
-            "requested_start",
-            "requested_end",
-            "status",
-            "authority_kind",
-            "receipt_artifact_id",
-            "blocker_code",
-            "blocker_detail",
-        }:
+        is_derived_row = (
+            isinstance(value, Mapping)
+            and value.get("authority_kind") == DERIVED_SLEEVE_COVERAGE_KIND
+        )
+        if not isinstance(value, Mapping) or set(value) != (
+            base_row_keys | {"derivation"} if is_derived_row else base_row_keys
+        ):
             raise ManifestError(f"flow coverage row {index} keys are invalid")
         assignment = value["assignment"]
         if not isinstance(assignment, Mapping) or set(assignment) != {
@@ -809,7 +835,63 @@ def _validate_flow_coverage_payload(
         receipt_id = value["receipt_artifact_id"]
         blocker = value["blocker_code"]
         detail = value["blocker_detail"]
-        if status == "COMPLETE":
+        if authority_kind == DERIVED_SLEEVE_COVERAGE_KIND:
+            expected_row = derived_by_key.get(assignment_key)
+            if (
+                expected_row is None
+                or status != "COMPLETE"
+                or blocker is not None
+                or detail is not None
+                or assignment_key in derived_seen
+            ):
+                raise ManifestError(
+                    f"flow coverage row {index} derived sleeve coverage is invalid"
+                )
+            derived_seen.add(assignment_key)
+            if (
+                requested_start != expected_row["requested_start"]
+                or requested_end != expected_row["requested_end"]
+                or value["derivation"]
+                != {
+                    "parent_account_id": expected_row["parent_account_id"],
+                    "sleeve_facts_sha256": expected_row["sleeve_facts_sha256"],
+                }
+                or not isinstance(receipt_id, str)
+                or receipt_id not in receipt_snapshots
+            ):
+                raise ManifestError(
+                    f"flow coverage row {index} derived sleeve coverage differs "
+                    "from the sleeve facts"
+                )
+            parent_receipt = receipt_snapshots[receipt_id].json_object(
+                f"retrieval receipt {receipt_id}"
+            )
+            receipt_start = _iso_date(
+                parent_receipt.get("requested_start"), "parent receipt requested_start"
+            )
+            receipt_end = _iso_date(
+                parent_receipt.get("requested_end"), "parent receipt requested_end"
+            )
+            if (
+                parent_receipt.get("account_id") != expected_row["parent_account_id"]
+                or receipt_start > requested_start
+                or receipt_end < requested_end
+            ):
+                raise ManifestError(
+                    f"flow coverage row {index} derived sleeve window "
+                    f"{requested_start}..{requested_end} is not inside the parent "
+                    f"receipt window {receipt_start}..{receipt_end}"
+                )
+            receipt_validator(
+                parent_receipt,
+                receipt_id,
+                str(expected_row["parent_account_id"]),
+                receipt_start,
+                receipt_end,
+                coverage_as_of_date,
+            )
+            complete_receipt_ids.add(receipt_id)
+        elif status == "COMPLETE":
             if (
                 authority_kind
                 not in {
@@ -880,6 +962,10 @@ def _validate_flow_coverage_payload(
     if actual_keys != expected_keys:
         raise ManifestError(
             "flow coverage assignment set differs from mapped assignments"
+        )
+    if derived_seen != set(derived_by_key):
+        raise ManifestError(
+            "flow coverage lacks derived sleeve coverage for a derived epoch"
         )
     if complete_receipt_ids != declared_ids:
         raise ManifestError("flow coverage receipt references differ from declared set")
@@ -996,6 +1082,7 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
         receipt_snapshots: Mapping[str, InputSnapshot],
         mapped_assignments: list[dict[str, Any]],
         receipt_authority_snapshot: InputSnapshot | None = None,
+        sleeve_rows: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[object, dict[str, object]]:
         """Load coverage against one selected immutable receipt authority."""
         if type(coverage_snapshot) is not InputSnapshot:
@@ -1045,6 +1132,8 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
             receipt_snapshots,
             mapped_assignments,
             validate_selected_receipt,
+            None,
+            sleeve_rows,
         )
         return (
             _CoverageIndex(
@@ -2635,6 +2724,659 @@ def _assignment_identity(assignments: list[dict[str, Any]]) -> tuple[str, int]:
     return _canonical_digest(normalized), len(normalized)
 
 
+# --- Derived nested-strategy sleeves (#567, stage 5) ----------------------------
+#
+# A hash-bound sleeve-facts artifact (``build_sleeve_account_facts`` for the
+# IBKR account, ``build_quantbase_fund_facts`` for the retired Quantbase funds)
+# names derived accounts ``<parent>-<sleeve>`` and a perimeter pseudo-account
+# ``<parent>-unallocated``.  The manifest treats each derived sleeve as an
+# ordinary one-strategy account: own epoch, NAV observations, INTERNAL_IN /
+# INTERNAL_OUT flows (``TRANSFER:INTERNAL:SLEEVE``, no new flow class), TWR and
+# MWR through the existing returns engine.  Everything below is a pure function
+# of the artifact bytes; the generation builder and the independent verifier
+# each re-derive it and must agree.
+#
+# Conventions (stated here once, mirrored in the verifier):
+#
+# * A residual parent (``sleeve-account-facts``: the IBKR account whose NAV the
+#   sleeves partition) stops being a strategy account: its STRATEGY_MAPPED rows
+#   become HISTORICAL_POOL_ONLY rows with the same dates, so no fact is counted
+#   twice.  A live parent (``quantbase-fund-facts``: the account's own live fund
+#   keeps its strategy) is unchanged; the retired funds are added beside it.
+# * NAV is the sleeve value after allocated costs (``nav_end_after_alloc``) for
+#   an IBKR sleeve and the dashboard value (``nav_end``) for a Quantbase fund.
+#   The first NAV is the epoch opening (that day's own P&L is inside it).
+# * An IBKR sleeve that exits settles the allocated costs it carried: the
+#   exit-day cash legs of the artifact are real cash, while the sleeve NAV
+#   already carries the cumulative allocated cost, so one extra paired leg
+#   against the perimeter pseudo-account of exactly that cumulative amount makes
+#   the exit-day flows equal the pre-exit NAV.
+# * A Quantbase leg marked PARENT_LEDGER_REFERENCE is the live fund's own flow,
+#   already in the parent ledger.  It is pairing evidence, never a second flow.
+SLEEVE_FLOW_TYPE = "TRANSFER:INTERNAL:SLEEVE"
+DERIVED_SLEEVE_COVERAGE_KIND = "DERIVED_SLEEVE_COVERAGE_V1"
+SLEEVE_NAV_VALUE_BASIS = "STRATEGY_NAV"
+_SLEEVE_FACTS_ROLES = MappingProxyType(
+    {
+        "sleeve-account-facts": "RESIDUAL_PARENT",
+        "quantbase-fund-facts": "LIVE_PARENT",
+    }
+)
+_SLEEVE_ACCOUNT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_SLEEVE_DECIMAL = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+
+
+@dataclass(frozen=True)
+class SleeveManifestFacts:
+    """Everything the manifest derives from the selected sleeve-facts artifacts."""
+
+    accounts: tuple[dict[str, Any], ...]
+    assignments: tuple[dict[str, Any], ...]
+    residual_parents: frozenset[str]
+    sleeve_accounts: frozenset[str]
+    perimeter_accounts: frozenset[str]
+    navs: tuple[dict[str, Any], ...]
+    flows: tuple[dict[str, Any], ...]
+    references: tuple[dict[str, Any], ...]
+    admissions: tuple[dict[str, Any], ...]
+    coverage: tuple[dict[str, Any], ...]
+    identities: tuple[dict[str, Any], ...]
+    reconciliations: tuple[dict[str, Any], ...]
+
+
+def _sleeve_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ManifestError(f"sleeve facts {field} must be a non-empty string")
+    return value
+
+
+def _sleeve_account(value: object, field: str) -> str:
+    text = _sleeve_text(value, field)
+    if _SLEEVE_ACCOUNT_ID.fullmatch(text) is None:
+        raise ManifestError(f"sleeve facts {field} is not an account id: {text!r}")
+    return text
+
+
+def _sleeve_day(value: object, field: str) -> str:
+    try:
+        return _iso_date(value, f"sleeve facts {field}")
+    except ManifestError:
+        raise
+    except ValueError as exc:  # pragma: no cover - _iso_date raises ManifestError
+        raise ManifestError(f"sleeve facts {field} must be an ISO date") from exc
+
+
+def _sleeve_decimal(value: object, field: str) -> Decimal:
+    if not isinstance(value, str) or _SLEEVE_DECIMAL.fullmatch(value) is None:
+        raise ManifestError(f"sleeve facts {field} must be canonical decimal text")
+    if value.startswith("-") and Decimal(value) == 0:
+        raise ManifestError(f"sleeve facts {field} must be canonical decimal text")
+    return Decimal(value)
+
+
+def _sleeve_decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _sleeve_object(value: object, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ManifestError(f"sleeve facts {field} must be an object")
+    return value
+
+
+def _sleeve_list(value: object, field: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ManifestError(f"sleeve facts {field} must be a list")
+    return value
+
+
+def derive_sleeve_manifest_facts(
+    snapshots: Sequence[InputSnapshot],
+    *,
+    account_providers: Mapping[str, str],
+) -> SleeveManifestFacts:
+    """Derive the manifest facts of every selected sleeve-facts artifact.
+
+    ``account_providers`` maps each baseline account to its provider; a derived
+    account inherits its parent's provider.  Fails closed on anything the
+    artifacts do not state exactly.
+    """
+
+    if not snapshots:
+        raise ManifestError("sleeve facts selection is empty")
+    accounts: list[dict[str, Any]] = []
+    assignments: list[dict[str, Any]] = []
+    navs: list[dict[str, Any]] = []
+    flows: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
+    admissions: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+    identities: list[dict[str, Any]] = []
+    reconciliations: list[dict[str, Any]] = []
+    residual: set[str] = set()
+    sleeve_accounts: set[str] = set()
+    perimeter_accounts: set[str] = set()
+    seen_accounts: set[str] = set()
+    seen_parents: set[str] = set()
+    seen_digests: set[str] = set()
+    for snapshot in snapshots:
+        if type(snapshot) is not InputSnapshot:
+            raise ManifestError("sleeve facts must be InputSnapshots")
+        if snapshot.sha256 in seen_digests:
+            raise ManifestError("sleeve facts selection repeats an artifact")
+        seen_digests.add(snapshot.sha256)
+        payload = snapshot.json_object("sleeve facts")
+        artifact_id = payload.get("artifact_id")
+        role = _SLEEVE_FACTS_ROLES.get(str(artifact_id))
+        if role is None or payload.get("schema_version") != 1:
+            raise ManifestError("sleeve facts artifact identity is invalid")
+        parent = _sleeve_account(payload.get("parent_account_id"), "parent_account_id")
+        if parent in seen_parents:
+            raise ManifestError(f"two sleeve facts artifacts name parent {parent}")
+        seen_parents.add(parent)
+        provider = account_providers.get(parent)
+        if not provider:
+            raise ManifestError(
+                f"sleeve facts parent is not a baseline account: {parent}"
+            )
+        if payload.get("base_currency") != "USD":
+            raise ManifestError("sleeve facts base_currency must be USD")
+        currency = "USD"
+        window = _sleeve_object(payload.get("window"), "window")
+        window_first = _sleeve_day(window.get("first_day"), "window.first_day")
+        window_last = _sleeve_day(window.get("last_day"), "window.last_day")
+        if window_first > window_last:
+            raise ManifestError("sleeve facts window is reversed")
+        perimeter = _sleeve_object(
+            payload.get("perimeter_account"), "perimeter_account"
+        )
+        unallocated = _sleeve_account(perimeter.get("account_id"), "perimeter account")
+        if unallocated != f"{parent}-unallocated":
+            raise ManifestError(
+                "sleeve facts perimeter account is not <parent>-unallocated"
+            )
+        digest16 = snapshot.sha256[:16]
+        identities.append(
+            {
+                "artifact_id": artifact_id,
+                "sha256": snapshot.sha256,
+                "size_bytes": snapshot.size_bytes,
+                "parent_account_id": parent,
+                "role": role,
+            }
+        )
+        if role == "RESIDUAL_PARENT":
+            residual.add(parent)
+        perimeter_accounts.add(unallocated)
+        for account in (unallocated,):
+            if account in seen_accounts:
+                raise ManifestError(f"sleeve facts repeat account {account}")
+            seen_accounts.add(account)
+        accounts.append(
+            {
+                "account_id": unallocated,
+                "base_currency": currency,
+                "provider": provider,
+                "role": "INVESTMENT",
+            }
+        )
+        assignments.append(
+            {
+                "assignment_id": f"sleeve-assignment:{digest16}:{unallocated}",
+                "account_id": unallocated,
+                "strategy_id": None,
+                "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+                "effective_start": window_first,
+                "effective_end": None,
+            }
+        )
+        after_key = "nav_end_after_alloc" if role == "RESIDUAL_PARENT" else "nav_end"
+        cumulative_by_account: dict[str, Decimal] = {}
+        sleeve_ids: set[str] = set()
+        sleeve_account_set: set[str] = set()
+        by_account_nav: dict[str, dict[str, Decimal]] = {}
+        settlement_legs: list[dict[str, Any]] = []
+        for sleeve in _sleeve_list(payload.get("sleeves"), "sleeves"):
+            sleeve = _sleeve_object(sleeve, "sleeve")
+            sleeve_id = _sleeve_text(sleeve.get("sleeve_id"), "sleeve_id")
+            account_id = _sleeve_account(sleeve.get("account_id"), "sleeve account_id")
+            strategy_id = _sleeve_account(
+                sleeve.get("strategy_id"), "sleeve strategy_id"
+            )
+            if account_id != f"{parent}-{sleeve_id}" or sleeve_id in sleeve_ids:
+                raise ManifestError(
+                    f"sleeve account is not <parent>-<sleeve>: {account_id}"
+                )
+            sleeve_ids.add(sleeve_id)
+            if account_id in seen_accounts:
+                raise ManifestError(f"sleeve facts repeat account {account_id}")
+            seen_accounts.add(account_id)
+            sleeve_account_set.add(account_id)
+            sleeve_accounts.add(account_id)
+            rows = _sleeve_list(sleeve.get("days"), f"{account_id} days")
+            if not rows:
+                raise ManifestError(f"sleeve {account_id} has no days")
+            first_day = _sleeve_day(sleeve.get("first_day"), "sleeve first_day")
+            last_day = _sleeve_day(sleeve.get("last_day"), "sleeve last_day")
+            previous_day = ""
+            nav_by_day: dict[str, Decimal] = {}
+            cumulative = Decimal(0)
+            exit_day: str | None = None
+            for index, raw_day in enumerate(rows):
+                row = _sleeve_object(raw_day, f"{account_id} day")
+                day = _sleeve_day(row.get("day"), f"{account_id} day")
+                if day <= previous_day:
+                    raise ManifestError(f"sleeve {account_id} days are not increasing")
+                previous_day = day
+                value = _sleeve_decimal(row.get(after_key), f"{account_id} {after_key}")
+                if role == "RESIDUAL_PARENT":
+                    cumulative += _sleeve_decimal(
+                        row.get("alloc_total"), f"{account_id} alloc_total"
+                    )
+                if value < 0:
+                    raise ManifestError(
+                        f"sleeve {account_id} has a negative NAV on {day}"
+                    )
+                nav_by_day[day] = value
+                is_exit = role == "RESIDUAL_PARENT" and row.get("event") == "EXIT"
+                if is_exit:
+                    if index != len(rows) - 1 or value != 0:
+                        raise ManifestError(
+                            f"sleeve {account_id} exit is not its last zero-NAV day"
+                        )
+                    exit_day = day
+                navs.append(
+                    {
+                        "record_id": f"sleeve-nav:{digest16}:{account_id}:{day}",
+                        "account_id": account_id,
+                        "as_of_date": day,
+                        "value_basis": SLEEVE_NAV_VALUE_BASIS,
+                        "nav": {
+                            "currency": currency,
+                            "status": "AVAILABLE",
+                            "value": _sleeve_decimal_text(value),
+                        },
+                    }
+                )
+            if (rows[0]["day"], rows[-1]["day"]) != (first_day, last_day):
+                raise ManifestError(f"sleeve {account_id} window differs from its days")
+            if first_day < window_first or last_day > window_last:
+                raise ManifestError(
+                    f"sleeve {account_id} lies outside the facts window"
+                )
+            first_value = nav_by_day[first_day]
+            if first_value <= 0:
+                raise ManifestError(
+                    f"sleeve {account_id} does not open with a positive NAV"
+                )
+            if role == "LIVE_PARENT":
+                if nav_by_day[last_day] != 0:
+                    raise ManifestError(f"fund {account_id} does not end at zero NAV")
+                end: str | None = last_day
+            else:
+                end = exit_day
+            by_account_nav[account_id] = nav_by_day
+            cumulative_by_account[account_id] = cumulative
+            assignments.append(
+                {
+                    "assignment_id": f"sleeve-assignment:{digest16}:{account_id}",
+                    "account_id": account_id,
+                    "strategy_id": strategy_id,
+                    "strategy_mapping_disposition": "STRATEGY_MAPPED",
+                    "effective_start": first_day,
+                    "effective_end": end,
+                }
+            )
+            accounts.append(
+                {
+                    "account_id": account_id,
+                    "base_currency": currency,
+                    "provider": provider,
+                    "role": "INVESTMENT",
+                }
+            )
+            record = {
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+                "effective_start": first_day,
+                "effective_end": end,
+            }
+            admissions.append(
+                {
+                    **record,
+                    "status": "FUNDED",
+                    "continuity_to_successor": False,
+                    "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "funded_nav_record_ids": [
+                        f"sleeve-nav:{digest16}:{account_id}:{first_day}"
+                    ],
+                }
+            )
+            coverage.append(
+                {
+                    "assignment": record,
+                    "requested_start": first_day,
+                    "requested_end": end or window_last,
+                    "parent_account_id": parent,
+                    "sleeve_facts_sha256": snapshot.sha256,
+                }
+            )
+            if exit_day is not None and cumulative != 0:
+                # Settle the allocated cost the sleeve carried (see the header).
+                settlement_legs.append(
+                    {
+                        "pair_id": f"{exit_day}:settle-{sleeve_id}",
+                        "account_id": account_id,
+                        "class": "INTERNAL_OUT" if cumulative > 0 else "INTERNAL_IN",
+                        "event_date": exit_day,
+                        "nav_recognition_date": exit_day,
+                        "amount": _sleeve_decimal_text(abs(cumulative)),
+                    }
+                )
+                settlement_legs.append(
+                    {
+                        "pair_id": f"{exit_day}:settle-{sleeve_id}",
+                        "account_id": unallocated,
+                        "class": "INTERNAL_IN" if cumulative > 0 else "INTERNAL_OUT",
+                        "event_date": exit_day,
+                        "nav_recognition_date": exit_day,
+                        "amount": _sleeve_decimal_text(abs(cumulative)),
+                    }
+                )
+        if not sleeve_account_set:
+            raise ManifestError(f"sleeve facts for {parent} name no sleeve")
+        legs = [
+            *(
+                _sleeve_object(item, "flow")
+                for item in _sleeve_list(payload.get("flows"), "flows")
+            ),
+            *settlement_legs,
+        ]
+        pair_totals: dict[str, Decimal] = {}
+        pair_members: dict[str, int] = {}
+        for leg in legs:
+            account_id = _sleeve_account(leg.get("account_id"), "flow account_id")
+            flow_class = leg.get("class")
+            if flow_class not in {"INTERNAL_IN", "INTERNAL_OUT"}:
+                raise ManifestError("sleeve facts flow class is not INTERNAL_IN/OUT")
+            if leg.get("flow_type", SLEEVE_FLOW_TYPE) != SLEEVE_FLOW_TYPE:
+                raise ManifestError(f"sleeve facts flow_type is not {SLEEVE_FLOW_TYPE}")
+            if account_id not in sleeve_account_set and account_id != unallocated:
+                if leg.get("leg_source") != "PARENT_LEDGER_REFERENCE":
+                    raise ManifestError(
+                        f"sleeve facts flow names a foreign account: {account_id}"
+                    )
+            amount = _sleeve_decimal(leg.get("amount"), "flow amount")
+            if amount <= 0:
+                raise ManifestError("sleeve facts flow amount must be positive")
+            event_day = _sleeve_day(leg.get("event_date"), "flow event_date")
+            recognition = _sleeve_day(
+                leg.get("nav_recognition_date"), "flow nav_recognition_date"
+            )
+            if recognition < event_day:
+                raise ManifestError("sleeve facts flow recognition precedes its event")
+            pair_id = _sleeve_text(leg.get("pair_id"), "flow pair_id")
+            signed = amount if flow_class == "INTERNAL_IN" else -amount
+            pair_totals[pair_id] = pair_totals.get(pair_id, Decimal(0)) + signed
+            pair_members[pair_id] = pair_members.get(pair_id, 0) + 1
+            if leg.get("leg_source") == "PARENT_LEDGER_REFERENCE":
+                if role != "LIVE_PARENT":
+                    raise ManifestError(
+                        "only a Quantbase leg can reference the parent ledger"
+                    )
+                references.append(
+                    {
+                        "pair_id": pair_id,
+                        "account_id": account_id,
+                        "event_date": event_day,
+                        "class": flow_class,
+                        "amount": _sleeve_decimal_text(amount),
+                    }
+                )
+                continue
+            flows.append(
+                {
+                    "record_id": (
+                        f"sleeve-flow:{digest16}:{pair_id}:{account_id}:{flow_class}"
+                    ),
+                    "account_id": account_id,
+                    "event_date": event_day,
+                    "nav_recognition_date": recognition,
+                    "flow_type": SLEEVE_FLOW_TYPE,
+                    "amount": {
+                        "currency": currency,
+                        "status": "AVAILABLE",
+                        "value": _sleeve_decimal_text(signed),
+                    },
+                }
+            )
+        if any(
+            total != 0 or pair_members[pair] != 2 for pair, total in pair_totals.items()
+        ):
+            raise ManifestError(
+                "sleeve facts flows do not pair to exactly two equal legs"
+            )
+        if role == "RESIDUAL_PARENT":
+            perimeter_days = _sleeve_list(perimeter.get("days"), "perimeter days")
+            tolerance = _sleeve_decimal(
+                _sleeve_object(payload.get("closure_policy"), "closure_policy").get(
+                    "tolerance_per_day"
+                ),
+                "closure tolerance_per_day",
+            )
+            sleeve_sum: dict[str, Decimal] = {}
+            for account_id, series in by_account_nav.items():
+                for day, value in series.items():
+                    sleeve_sum[day] = sleeve_sum.get(day, Decimal(0)) + value
+            for item in perimeter_days:
+                item = _sleeve_object(item, "perimeter day")
+                day = _sleeve_day(item.get("day"), "perimeter day")
+                reconciliations.append(
+                    {
+                        "parent_account_id": parent,
+                        "day": day,
+                        "sleeves_nav": _sleeve_decimal_text(
+                            sleeve_sum.get(day, Decimal(0))
+                        ),
+                        "perimeter_nav": item.get("nav_end"),
+                        "tolerance": _sleeve_decimal_text(tolerance),
+                    }
+                )
+    return SleeveManifestFacts(
+        accounts=tuple(sorted(accounts, key=lambda row: str(row["account_id"]))),
+        assignments=tuple(
+            sorted(
+                assignments,
+                key=lambda row: (str(row["account_id"]), str(row["effective_start"])),
+            )
+        ),
+        residual_parents=frozenset(residual),
+        sleeve_accounts=frozenset(sleeve_accounts),
+        perimeter_accounts=frozenset(perimeter_accounts),
+        navs=tuple(sorted(navs, key=lambda row: str(row["record_id"]))),
+        flows=tuple(sorted(flows, key=lambda row: str(row["record_id"]))),
+        references=tuple(
+            sorted(
+                references,
+                key=lambda row: (str(row["pair_id"]), str(row["account_id"])),
+            )
+        ),
+        admissions=tuple(
+            sorted(
+                admissions,
+                key=lambda row: (str(row["account_id"]), str(row["effective_start"])),
+            )
+        ),
+        coverage=tuple(
+            sorted(
+                coverage,
+                key=lambda row: (
+                    str(row["assignment"]["account_id"]),
+                    str(row["assignment"]["effective_start"]),
+                ),
+            )
+        ),
+        identities=tuple(sorted(identities, key=lambda row: str(row["sha256"]))),
+        reconciliations=tuple(
+            sorted(
+                reconciliations,
+                key=lambda row: (str(row["parent_account_id"]), str(row["day"])),
+            )
+        ),
+    )
+
+
+def apply_sleeve_assignments(
+    assignments: Sequence[Mapping[str, Any]],
+    sleeve: SleeveManifestFacts,
+) -> list[dict[str, Any]]:
+    """The effective perimeter: residual parents go non-strategy, sleeves join.
+
+    A residual parent's STRATEGY_MAPPED row keeps its dates but is no longer a
+    strategy epoch.  If a HISTORICAL_POOL_ONLY predecessor shared its first day
+    (the one sanctioned overlap, which only exists before a MAPPED successor),
+    the converted row starts the next day.
+    """
+
+    result: list[dict[str, Any]] = []
+    for assignment in assignments:
+        row = dict(assignment)
+        if (
+            row.get("account_id") in sleeve.residual_parents
+            and row.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+        ):
+            row["strategy_mapping_disposition"] = "HISTORICAL_POOL_ONLY"
+            row["strategy_id"] = None
+            if "mapping_status" in row:
+                row["mapping_status"] = "UNMAPPED"
+            start = row.get("effective_start")
+            if any(
+                other.get("account_id") == row["account_id"]
+                and other.get("strategy_mapping_disposition") == "HISTORICAL_POOL_ONLY"
+                and other.get("effective_end") == start
+                for other in assignments
+            ):
+                row["effective_start"] = (
+                    date.fromisoformat(str(start)) + timedelta(days=1)
+                ).isoformat()
+        result.append(row)
+    known = {_sleeve_row_key(row) for row in result}
+    for row in sleeve.assignments:
+        if _sleeve_row_key(row) in known:
+            raise ManifestError("a derived sleeve assignment repeats a baseline row")
+        result.append(dict(row))
+    return result
+
+
+def _sleeve_row_key(row: Mapping[str, Any]) -> tuple[object, ...]:
+    return (
+        row.get("account_id"),
+        row.get("strategy_id"),
+        row.get("effective_start"),
+        row.get("effective_end"),
+    )
+
+
+def require_sleeve_ledger_facts(
+    ledger: Mapping[str, Any], sleeve: SleeveManifestFacts
+) -> None:
+    """A ledger may carry derived-account facts only as the artifact derives them."""
+
+    derived_accounts = sleeve.sleeve_accounts | sleeve.perimeter_accounts
+    for section, expected_rows in (
+        ("nav_observations", sleeve.navs),
+        ("flows", sleeve.flows),
+    ):
+        expected = {str(row["record_id"]): row for row in expected_rows}
+        rows = ledger.get(section)
+        if not isinstance(rows, list):
+            raise ManifestError(f"ledger missing list section '{section}'")
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            record_id = str(row.get("record_id"))
+            if record_id in expected:
+                if dict(row) != expected[record_id]:
+                    raise ManifestError(
+                        f"ledger {section} record differs from the sleeve facts: "
+                        f"{record_id}"
+                    )
+            elif row.get("account_id") in derived_accounts:
+                raise ManifestError(
+                    f"ledger {section} carries a fact of a derived account that "
+                    f"the sleeve facts do not derive: {record_id}"
+                )
+
+
+def require_sleeve_admissions(
+    admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    sleeve: SleeveManifestFacts,
+) -> None:
+    for row in sleeve.admissions:
+        key = (
+            str(row["account_id"]),
+            str(row["strategy_id"]),
+            str(row["effective_start"]),
+            row["effective_end"],
+        )
+        admission = admissions.get(key)
+        if admission is None or (
+            admission.get("status") != "FUNDED"
+            or admission.get("authority_kind") != row["authority_kind"]
+            or list(admission.get("funded_nav_record_ids", []))
+            != row["funded_nav_record_ids"]
+            or admission.get("continuity_to_successor") is not False
+            or admission.get("funded_end") is not None
+        ):
+            raise ManifestError(
+                "admission policy differs from the derived sleeve admission: "
+                f"{key[0]}/{key[1]}/{key[2]}/{key[3]}"
+            )
+
+
+def require_sleeve_census(
+    census: Mapping[tuple[str, str, str, str | None], Sequence[str]],
+    sleeve: SleeveManifestFacts,
+    providers: Mapping[str, str],
+) -> None:
+    """Each funded derived epoch needs its own census FUNDED_MEMBERSHIP sleeve.
+
+    The census is the contract's ``current_census.account_sleeves``; until the
+    contract lists the derived intervals this fails with the exact entries to
+    add, so the contract change is mechanical.
+    """
+
+    needed: dict[tuple[str, str, str, str | None], int] = defaultdict(int)
+    for row in sleeve.admissions:
+        provider = providers.get(str(row["account_id"]))
+        if not provider:
+            raise ManifestError(
+                f"derived sleeve provider is unknown: {row['account_id']}"
+            )
+        needed[
+            (
+                provider.upper(),
+                str(row["strategy_id"]),
+                str(row["effective_start"]),
+                row["effective_end"],
+            )
+        ] += 1
+    for key, count in sorted(needed.items(), key=lambda item: str(item[0])):
+        granted = sum(status == "FUNDED_MEMBERSHIP" for status in census.get(key, ()))
+        if granted < count:
+            raise ManifestError(
+                "membership census lacks a FUNDED_MEMBERSHIP sleeve for the "
+                f"derived epoch {key[0]}/{key[1]}/{key[2]}/{key[3]} "
+                f"(needs {count}, grants {granted}): add it to "
+                "current_census.account_sleeves in the financial MVP contract"
+            )
+
+
 _CENSUS_MEMBERSHIP_STATUSES = frozenset(
     {
         "ASSIGNMENT_ONLY",
@@ -3423,8 +4165,14 @@ def analyze_epoch(
     capital_allocation_legs: Mapping[object, Decimal] | None = None,
     pre_start_observation: tuple[str, Decimal | None] | None = None,
     funded_end: str | None = None,
+    derived_sleeve: bool = False,
 ) -> dict[str, Any] | None:
     """Account for one funded epoch: capital basis plus R1-R4 performance.
+
+    ``derived_sleeve`` marks a nested strategy derived from a sleeve-facts
+    artifact.  Its exit sweeps the sleeve's value out in one step whose proceeds
+    differ from the last NAV by the exit day's own P&L, so the liquidation run
+    needs only a net outflow, not an exact reconciliation of the prior NAV.
 
     ``funded_end`` (admission policy) is the epoch's last funded day when the
     account was later liquidated and transferred out: the time-weighted return
@@ -3527,7 +4275,11 @@ def analyze_epoch(
             Decimal(0),
         )
         zero_run_end = funded_days[zero_end]
-        if window_navs[last_positive_day] + transition_flow != 0 or any(
+        if (
+            transition_flow >= 0
+            if derived_sleeve
+            else window_navs[last_positive_day] + transition_flow != 0
+        ) or any(
             first_zero_day < recognition_day <= zero_run_end
             for recognition_day in net_flow_by_recognition
         ):
@@ -3901,6 +4653,7 @@ def _assemble_manifest_impl(
     manifest_schema_version: int = _MANIFEST_SCHEMA_VERSION,
     capital_anchors: list[dict[str, Any]] | None = None,
     tail_keys: Collection[tuple[str, str, str, str | None]] = (),
+    derived_sleeve_accounts: Collection[str] = (),
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unavailable_navs = unavailable_navs or {}
@@ -4020,7 +4773,11 @@ def _assemble_manifest_impl(
             # brokerage deposits/withdrawals share an account identifier but
             # do not cross this valuation perimeter; only reconciled fund
             # allocation anchors enter the strategy epoch.
-            strategy_nav_perimeter = provider == "quantbase"
+            # A derived sleeve is fund-scoped too, but its funding steps are
+            # the paired internal legs of its own artifact, so they count.
+            strategy_nav_perimeter = (
+                provider == "quantbase" and aid not in derived_sleeve_accounts
+            )
             local_external_in = (
                 {} if strategy_nav_perimeter else buckets["external_in"].get(aid, {})
             )
@@ -4077,6 +4834,7 @@ def _assemble_manifest_impl(
                 capital_allocation_legs=allocation_legs,
                 pre_start_observation=pre_start_observation,
                 funded_end=admission.get("funded_end"),
+                derived_sleeve=aid in derived_sleeve_accounts,
             )
             if stats is not None and stats.get("unavailable_status"):
                 unavailable_row = {
@@ -5538,6 +6296,7 @@ class ManifestCandidateSnapshots:
     receipt_authority: InputSnapshot | None = None
     selected_assignment_keys: tuple[tuple[str, str, str, str | None], ...] | None = None
     supporting_internal_counterparty_source_record_ids: tuple[str, ...] = ()
+    sleeve_facts: tuple[InputSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -5600,6 +6359,10 @@ class ManifestCandidateSnapshots:
         object.__setattr__(
             self, "supporting_internal_counterparty_source_record_ids", support_ids
         )
+        facts = tuple(self.sleeve_facts)
+        if any(type(item) is not InputSnapshot for item in facts):
+            raise ManifestError("sleeve_facts must be InputSnapshots")
+        object.__setattr__(self, "sleeve_facts", facts)
 
 
 def _build_manifest_candidate_from_snapshots_impl(
@@ -5648,6 +6411,24 @@ def _build_manifest_candidate_from_snapshots_impl(
             raise ManifestError(f"duplicate baseline account_id '{account_id}'")
         accounts_index[account_id] = account
     typed_assignments = [dict(assignment) for assignment in assignments]
+    sleeve: SleeveManifestFacts | None = None
+    if inputs.sleeve_facts:
+        sleeve = derive_sleeve_manifest_facts(
+            inputs.sleeve_facts,
+            account_providers={
+                account_id: str(account.get("provider") or "")
+                for account_id, account in accounts_index.items()
+            },
+        )
+        for derived_account in sleeve.accounts:
+            if derived_account["account_id"] in accounts_index:
+                raise ManifestError(
+                    "a derived sleeve account repeats a baseline account: "
+                    f"{derived_account['account_id']}"
+                )
+            accounts_index[str(derived_account["account_id"])] = dict(derived_account)
+        typed_assignments = apply_sleeve_assignments(typed_assignments, sleeve)
+        require_sleeve_ledger_facts(ledger, sleeve)
     perimeter = partition_assignments(typed_assignments)
     for account_id in perimeter.full_chains:
         if account_id not in accounts_index:
@@ -5688,20 +6469,44 @@ def _build_manifest_candidate_from_snapshots_impl(
         inputs.retrieval_receipts,
         mapped_assignments,
         inputs.receipt_authority,
+        () if sleeve is None else sleeve.coverage,
     )
+    census = load_membership_census(
+        inputs.membership_census.json_object("membership census")
+    )
+    providers = {
+        account_id: str(account.get("provider") or "")
+        for account_id, account in accounts_index.items()
+    }
+    if sleeve is not None:
+        selected_derived = {
+            _assignment_key(assignment) for assignment in mapped_assignments
+        }
+        derived_in_scope = replace(
+            sleeve,
+            admissions=tuple(
+                row
+                for row in sleeve.admissions
+                if (
+                    str(row["account_id"]),
+                    str(row["strategy_id"]),
+                    str(row["effective_start"]),
+                    row["effective_end"],
+                )
+                in selected_derived
+            ),
+        )
+        require_sleeve_census(census, derived_in_scope, providers)
     admissions, admission_policy_identity = load_admission_policy(
         admission_policy_snapshot.json_object("admission policy"),
         admission_policy_snapshot,
         mapped_assignments,
         ledger,
-        membership_census=load_membership_census(
-            inputs.membership_census.json_object("membership census")
-        ),
-        providers={
-            account_id: str(account.get("provider") or "")
-            for account_id, account in accounts_index.items()
-        },
+        membership_census=census,
+        providers=providers,
     )
+    if sleeve is not None:
+        require_sleeve_admissions(admissions, derived_in_scope)
     if inputs.receipt_authority is not None:
         contracts, _authority_artifact = _load_selected_receipt_authority(
             inputs.receipt_authority,
@@ -5832,6 +6637,9 @@ def _build_manifest_candidate_from_snapshots_impl(
         manifest_schema_version=manifest_schema_version,
         capital_anchors=capital_anchors,
         tail_keys=tail_keys,
+        derived_sleeve_accounts=(
+            frozenset() if sleeve is None else sleeve.sleeve_accounts
+        ),
     )
     if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
         _mwr_payloads_from_governed_inputs(

@@ -34,8 +34,12 @@ from quant_engine.core.contracts import (
 )
 from tools.account_strategy_manifest import (
     PERFORMANCE_ROW_FIELDS,
+    SLEEVE_FLOW_TYPE,
     ManifestCandidateSnapshots,
     ManifestError,
+    SleeveManifestFacts,
+    apply_sleeve_assignments,
+    derive_sleeve_manifest_facts,
     build_manifest_candidate_from_snapshots,
     json_ready,
     load_flow_classification_policy,
@@ -76,6 +80,7 @@ _CROSSWALK_DISPOSITIONS = frozenset(
     }
 )
 _CANONICAL_DECIMAL = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+DERIVED_SLEEVE_COVERAGE_KIND = "DERIVED_SLEEVE_COVERAGE_V1"
 _NINE_BLOCKED_PATHS = (
     "authority/selected-input-identities.json",
     "authority/account-assignment-perimeter.json",
@@ -601,6 +606,7 @@ class AccountManifestSelectedInputs:
     admission_policy: InputSnapshot | None = None
     manifest_schema: InputSnapshot | None = None
     membership_census: InputSnapshot | None = None
+    sleeve_facts: tuple[InputSnapshot, ...] = ()
     provider_ledger_generation_id: str = field(init=False)
     baseline_generation_id: str = field(init=False)
     generation_as_of_date: date = field(init=False)
@@ -664,6 +670,14 @@ class AccountManifestSelectedInputs:
             raise AccountAssignmentPerimeterError(
                 "retrieval_receipts must be a mapping"
             )
+        sleeve_facts = tuple(
+            _require_snapshot(item, "sleeve_facts") for item in self.sleeve_facts
+        )
+        if sleeve_facts and authority is None:
+            raise AccountAssignmentPerimeterError(
+                "sleeve_facts require the mixed current-product selection"
+            )
+        object.__setattr__(self, "sleeve_facts", sleeve_facts)
         receipts: dict[str, InputSnapshot] = {}
         for receipt_id, receipt in self.retrieval_receipts.items():
             canonical_receipt_id = _canonical_receipt_id(receipt_id)
@@ -783,6 +797,13 @@ def _selected_input_identities(
         payload["current_epoch_crosswalk"] = _snapshot_identity(
             selected_inputs.current_epoch_crosswalk
         )
+    if selected_inputs.sleeve_facts:
+        payload["sleeve_facts"] = [
+            _snapshot_identity(snapshot)
+            for snapshot in sorted(
+                selected_inputs.sleeve_facts, key=lambda item: item.sha256
+            )
+        ]
     return payload
 
 
@@ -918,6 +939,71 @@ def _baseline_payload(
             if account_id in assignment_account_ids
         },
         normalized_assignments,
+    )
+
+
+def _sleeve_manifest_facts(
+    selected_inputs: AccountManifestSelectedInputs,
+) -> SleeveManifestFacts | None:
+    """The manifest facts derived from the selected sleeve-facts artifacts."""
+
+    if not selected_inputs.sleeve_facts:
+        return None
+    _, providers, _ = _baseline_payload(selected_inputs.baseline)
+    try:
+        return derive_sleeve_manifest_facts(
+            selected_inputs.sleeve_facts, account_providers=providers
+        )
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError(str(exc)) from exc
+
+
+def _effective_perimeter(
+    selected_inputs: AccountManifestSelectedInputs,
+) -> tuple[
+    dict[str, object],
+    dict[str, str],
+    list[dict[str, object]],
+    SleeveManifestFacts | None,
+]:
+    """The baseline perimeter after the derived sleeves joined it.
+
+    A residual parent stops being a strategy account and every derived sleeve
+    (with the perimeter pseudo-account) appears as its own account.
+    """
+
+    baseline_payload, providers, assignments = _baseline_payload(
+        selected_inputs.baseline
+    )
+    sleeve = _sleeve_manifest_facts(selected_inputs)
+    if sleeve is None:
+        return baseline_payload, providers, assignments, None
+    try:
+        assignments = apply_sleeve_assignments(assignments, sleeve)
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError(str(exc)) from exc
+    payload = dict(baseline_payload)
+    accounts = payload.get("accounts")
+    if not isinstance(accounts, list):
+        raise AccountAssignmentPerimeterError("baseline accounts must be a list")
+    payload["accounts"] = [*accounts, *(dict(item) for item in sleeve.accounts)]
+    providers = {
+        **providers,
+        **{str(item["account_id"]): str(item["provider"]) for item in sleeve.accounts},
+    }
+    try:
+        perimeter = partition_assignments(assignments)
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError(str(exc)) from exc
+    return (
+        payload,
+        {
+            account_id: provider
+            for account_id, provider in providers.items()
+            if account_id in set(perimeter.full_chains)
+        },
+        assignments,
+        sleeve,
     )
 
 
@@ -1438,9 +1524,7 @@ def _expected_payload(
         raise AccountAssignmentPerimeterError(
             "selected_inputs must be an AccountManifestSelectedInputs"
         )
-    baseline_payload, providers, assignments = _baseline_payload(
-        selected_inputs.baseline
-    )
+    baseline_payload, providers, assignments, _ = _effective_perimeter(selected_inputs)
     ledger_as_of_date = _selected_top_level_date(selected_inputs.provider_ledger)
     try:
         selected_ledger = selected_inputs.provider_ledger.json_object(
@@ -1714,11 +1798,79 @@ def _c3_flow_scope_metadata(
     return metadata
 
 
+def _require_sleeve_reconciliation(
+    navs: Sequence[Mapping[str, object]], sleeve: SleeveManifestFacts
+) -> None:
+    """The sleeves and the perimeter residual add up to the parent account."""
+
+    parent_navs = {
+        (str(item["account_id"]), str(item["as_of_date"])): item["nav"] for item in navs
+    }
+    for row in sleeve.reconciliations:
+        parent, day = str(row["parent_account_id"]), str(row["day"])
+        nav = parent_navs.get((parent, day))
+        if not isinstance(nav, Mapping) or nav.get("status") != "AVAILABLE":
+            raise AccountAssignmentPerimeterError(
+                f"parent account {parent} has no AVAILABLE NAV on {day} to "
+                "reconcile its sleeves to"
+            )
+        try:
+            derived = Decimal(str(row["sleeves_nav"])) + Decimal(
+                str(row["perimeter_nav"])
+            )
+            difference = abs(Decimal(str(nav["value"])) - derived)
+            tolerance = Decimal(str(row["tolerance"]))
+        except (InvalidOperation, ValueError):
+            raise AccountAssignmentPerimeterError(
+                "sleeve reconciliation figures are invalid"
+            ) from None
+        if difference > tolerance:
+            raise AccountAssignmentPerimeterError(
+                f"sleeves and perimeter residual do not reconcile to parent "
+                f"{parent} on {day}: parent NAV {nav['value']}, sleeves "
+                f"{row['sleeves_nav']} + residual {row['perimeter_nav']} "
+                f"(difference {difference}, tolerance {tolerance})"
+            )
+
+
+def _require_sleeve_references(
+    flows: Sequence[Mapping[str, object]], sleeve: SleeveManifestFacts
+) -> None:
+    """A parent-ledger leg is pairing evidence: it must already be one ledger flow."""
+
+    for reference in sleeve.references:
+        sign = 1 if reference["class"] == "INTERNAL_IN" else -1
+        wanted = Decimal(str(reference["amount"])) * sign
+        matches = [
+            flow
+            for flow in flows
+            if flow["account_id"] == reference["account_id"]
+            and flow["event_date"] == reference["event_date"]
+            and isinstance(flow["amount"], Mapping)
+            and flow["amount"].get("status") == "AVAILABLE"
+            and Decimal(str(flow["amount"].get("value"))) == wanted
+        ]
+        if len(matches) != 1:
+            raise AccountAssignmentPerimeterError(
+                f"parent-ledger reference {reference['pair_id']} "
+                f"({reference['class']} {reference['amount']} on "
+                f"{reference['event_date']} for {reference['account_id']}) matches "
+                f"{len(matches)} ledger flows, not exactly one"
+            )
+        if not str(matches[0]["flow_type"]).startswith("TRANSFER:INTERNAL:"):
+            raise AccountAssignmentPerimeterError(
+                f"parent-ledger reference {reference['pair_id']} is ledger flow "
+                f"{matches[0]['record_id']} of type {matches[0]['flow_type']}, "
+                "which does not pair under the TRANSFER:INTERNAL: rule"
+            )
+
+
 def _c3_ledger(
     selected_inputs: AccountManifestSelectedInputs,
     *,
     enforce_global_accounting_currency: bool = True,
     allow_asset_flow_currency: bool = False,
+    sleeve: SleeveManifestFacts | None = None,
 ) -> tuple[
     dict[str, object],
     list[dict[str, object]],
@@ -1984,6 +2136,22 @@ def _c3_ledger(
         normalized_anchors.append(normalized)
     normalized_ledger = dict(ledger)
     normalized_ledger["capital_anchors"] = normalized_anchors
+    if sleeve is not None:
+        _require_sleeve_reconciliation(normalized_navs, sleeve)
+        _require_sleeve_references(normalized_flows, sleeve)
+        if (
+            {str(item["record_id"]) for item in sleeve.navs} & nav_ids
+            or {str(item["record_id"]) for item in sleeve.flows} & flow_ids
+            or any(
+                item["account_id"] in sleeve.sleeve_accounts | sleeve.perimeter_accounts
+                for item in (*normalized_navs, *normalized_flows)
+            )
+        ):
+            raise AccountAssignmentPerimeterError(
+                "the provider ledger already carries facts of a derived sleeve account"
+            )
+        normalized_navs = [*normalized_navs, *(dict(item) for item in sleeve.navs)]
+        normalized_flows = [*normalized_flows, *(dict(item) for item in sleeve.flows)]
     return normalized_ledger, normalized_navs, normalized_flows, accounting_currency
 
 
@@ -2036,7 +2204,7 @@ def _mixed_projection_accounting_currency(
 def _c3_mapped_assignments(
     selected_inputs: AccountManifestSelectedInputs,
 ) -> tuple[list[dict[str, object]], dict[str, str]]:
-    baseline, providers, assignments = _baseline_payload(selected_inputs.baseline)
+    baseline, providers, assignments, sleeve = _effective_perimeter(selected_inputs)
     for account_id in providers:
         _c3_account_id(account_id, "baseline account_id")
     for assignment in assignments:
@@ -2076,6 +2244,17 @@ def _c3_mapped_assignments(
             {key: value for key, value in assignment.items() if key != "assignment_id"}
             for assignment in mapped
         ]
+    if sleeve is not None:
+        # The crosswalk names baseline epochs only: a residual parent's epochs
+        # left the strategy set, the derived sleeves join it after them.
+        mapped = [
+            item for item in mapped if item["account_id"] not in sleeve.residual_parents
+        ]
+        mapped.extend(
+            {key: value for key, value in item.items() if key != "assignment_id"}
+            for item in sleeve.assignments
+            if item["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        )
     tails = _tail_assignment_keys(selected_inputs)
     for assignment in mapped:
         if _tail_key(assignment) in tails:
@@ -2802,6 +2981,7 @@ def _tail_assignment_keys(
 def _mixed_receipt_routes(
     selected_inputs: AccountManifestSelectedInputs,
     mapped: list[dict[str, object]],
+    residual_parents: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """Route every selected receipt to one distinct mapped interval."""
     _validate_mixed_receipt_cardinality(selected_inputs.retrieval_receipts)
@@ -2886,6 +3066,13 @@ def _mixed_receipt_routes(
                 )
             )
         ]
+        if not matches and account_id in residual_parents:
+            # A residual parent is no longer a strategy epoch: its receipt is the
+            # flow-completeness evidence its derived sleeves cite.
+            routes.append(
+                {"receipt_id": receipt_id, "receipt": payload, "assignment": None}
+            )
+            continue
         if len(matches) != 1:
             raise AccountAssignmentPerimeterError(
                 "selected receipt does not route to exactly one mapped assignment"
@@ -2906,6 +3093,115 @@ def _mixed_receipt_routes(
     return routes
 
 
+def _sleeve_display_by_epoch(
+    sleeve: SleeveManifestFacts,
+    display_by_epoch: Mapping[tuple[object, object, object, object], dict[str, object]],
+) -> dict[tuple[object, object, object, object], dict[str, object]]:
+    """Display fields of derived epochs: the parent's label plus the sleeve id."""
+
+    labels: dict[str, dict[str, object]] = {}
+    for key, value in display_by_epoch.items():
+        labels.setdefault(str(key[0]), value)
+    result: dict[tuple[object, object, object, object], dict[str, object]] = {}
+    for derived in sleeve.coverage:
+        record = derived["assignment"]
+        parent = str(derived["parent_account_id"])
+        parent_label = labels.get(parent)
+        if parent_label is None:
+            raise AccountAssignmentPerimeterError(
+                f"parent account {parent} has no crosswalk label for its sleeves"
+            )
+        suffix = str(record["account_id"]).removeprefix(f"{parent}-")
+        result[tuple(record.values())] = {
+            "account_label": f"{parent_label['account_label']} / {suffix}",
+            "last_four": parent_label["last_four"],
+        }
+    return result
+
+
+def _sleeve_parent_route(
+    derived: Mapping[str, object], routes: Sequence[Mapping[str, object]]
+) -> Mapping[str, object]:
+    """The one selected receipt of the parent that covers a derived epoch."""
+
+    matches = [
+        route
+        for route in routes
+        if route["receipt"].get("account_id") == derived["parent_account_id"]
+        and str(route["receipt"]["requested_start"]) <= str(derived["requested_start"])
+        and str(route["receipt"]["requested_end"]) >= str(derived["requested_end"])
+    ]
+    if len(matches) != 1:
+        record = derived["assignment"]
+        raise AccountAssignmentPerimeterError(
+            f"derived epoch {record['account_id']} "
+            f"{derived['requested_start']}..{derived['requested_end']} is covered "
+            f"by {len(matches)} selected receipts of parent "
+            f"{derived['parent_account_id']}, not exactly one"
+        )
+    return matches[0]
+
+
+def _sleeve_calculation_routes(
+    sleeve: SleeveManifestFacts | None,
+    mapped: Sequence[Mapping[str, object]],
+    routes: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Routes of the calculable epochs: receipt-routed ones plus derived sleeves."""
+
+    result: list[dict[str, object]] = [
+        dict(route) for route in routes if route["assignment"] is not None
+    ]
+    if sleeve is None:
+        return result
+    mapped_by_key = {
+        tuple(_c3_assignment_record(item).values()): item for item in mapped
+    }
+    for derived in sleeve.coverage:
+        assignment = mapped_by_key.get(tuple(derived["assignment"].values()))
+        if assignment is None:
+            continue
+        parent_route = _sleeve_parent_route(derived, routes)
+        result.append(
+            {
+                "receipt_id": parent_route["receipt_id"],
+                "receipt": {
+                    "requested_start": derived["requested_start"],
+                    "requested_end": derived["requested_end"],
+                },
+                "assignment": assignment,
+                "derived": True,
+            }
+        )
+    return result
+
+
+def _effective_admission_payload(
+    selected_inputs: AccountManifestSelectedInputs,
+    sleeve: SleeveManifestFacts | None,
+) -> dict[str, object]:
+    """The selected admission policy plus the derived sleeve admissions."""
+
+    assert selected_inputs.admission_policy is not None
+    payload = selected_inputs.admission_policy.json_object("selected admission policy")
+    if sleeve is None:
+        return payload
+    rows = payload.get("admissions")
+    if not isinstance(rows, list):
+        raise AccountAssignmentPerimeterError("selected admission policy is invalid")
+    kept = [
+        row
+        for row in rows
+        if not (
+            isinstance(row, Mapping)
+            and row.get("account_id") in sleeve.residual_parents
+        )
+    ]
+    payload = dict(payload)
+    payload["admissions"] = [*kept, *(dict(row) for row in sleeve.admissions)]
+    return payload
+
+
 def _mixed_coverage_payload(
     *,
     selected_inputs: AccountManifestSelectedInputs,
@@ -2914,6 +3210,7 @@ def _mixed_coverage_payload(
     classified_artifact: Mapping[str, object],
     assignment_identity: Mapping[str, object],
     routes: Sequence[Mapping[str, object]],
+    sleeve: SleeveManifestFacts | None = None,
 ) -> dict[str, object]:
     provider_ledger_date = _selected_top_level_date(
         selected_inputs.provider_ledger
@@ -2921,9 +3218,34 @@ def _mixed_coverage_payload(
     route_by_assignment = {
         tuple(_c3_assignment_record(route["assignment"]).values()): route
         for route in routes
+        if route["assignment"] is not None
+    }
+    derived_by_key = {
+        tuple(row["assignment"].values()): row
+        for row in ([] if sleeve is None else sleeve.coverage)
     }
     rows: list[dict[str, object]] = []
     for assignment in mapped:
+        derived = derived_by_key.get(tuple(_c3_assignment_record(assignment).values()))
+        if derived is not None:
+            parent_route = _sleeve_parent_route(derived, routes)
+            rows.append(
+                {
+                    "assignment": _c3_assignment_record(assignment),
+                    "requested_start": derived["requested_start"],
+                    "requested_end": derived["requested_end"],
+                    "status": "COMPLETE",
+                    "authority_kind": DERIVED_SLEEVE_COVERAGE_KIND,
+                    "receipt_artifact_id": parent_route["receipt_id"],
+                    "blocker_code": None,
+                    "blocker_detail": None,
+                    "derivation": {
+                        "parent_account_id": derived["parent_account_id"],
+                        "sleeve_facts_sha256": derived["sleeve_facts_sha256"],
+                    },
+                }
+            )
+            continue
         route = route_by_assignment.get(
             tuple(_c3_assignment_record(assignment).values())
         )
@@ -3365,14 +3687,13 @@ def _mixed_admitted_fact_projection(
 def _mixed_funded_assignments(
     selected_inputs: AccountManifestSelectedInputs,
     mapped: Sequence[Mapping[str, object]],
+    sleeve: SleeveManifestFacts | None = None,
 ) -> list[Mapping[str, object]]:
     """Read the funded subset needed to construct the producer projection."""
 
     assert selected_inputs.admission_policy is not None
     try:
-        policy = selected_inputs.admission_policy.json_object(
-            "selected admission policy"
-        )
+        policy = _effective_admission_payload(selected_inputs, sleeve)
     except ValueError:
         raise AccountAssignmentPerimeterError(
             "selected admission policy is invalid"
@@ -3417,10 +3738,12 @@ def _build_mixed_account_manifest_payloads(
     assert selected_inputs.receipt_authority is not None
     assert selected_inputs.admission_policy is not None
     assert selected_inputs.manifest_schema is not None
+    sleeve = _sleeve_manifest_facts(selected_inputs)
     normalized_ledger, navs, flows, _ = _c3_ledger(
         selected_inputs,
         enforce_global_accounting_currency=False,
         allow_asset_flow_currency=True,
+        sleeve=sleeve,
     )
     anchors = normalized_ledger["capital_anchors"]
     assert isinstance(anchors, list)
@@ -3534,7 +3857,11 @@ def _build_mixed_account_manifest_payloads(
         ]
     else:
         calculation_events = classified["events"]
-    routes = _mixed_receipt_routes(selected_inputs, mapped)
+    routes = _mixed_receipt_routes(
+        selected_inputs,
+        mapped,
+        frozenset() if sleeve is None else sleeve.residual_parents,
+    )
     fixed_mixed_paths = {
         *(path.casefold() for path in _NINE_BLOCKED_PATHS),
         _CROSSWALK_SUBJECT_PATH.casefold(),
@@ -3551,7 +3878,7 @@ def _build_mixed_account_manifest_payloads(
         _validate_mixed_receipt_provider_evidence(
             selected_inputs,
             route["receipt"],
-            providers[str(route["assignment"]["account_id"])],
+            providers[str(route["receipt"]["account_id"])],
         )
     coverage_payload = _mixed_coverage_payload(
         selected_inputs=selected_inputs,
@@ -3560,6 +3887,7 @@ def _build_mixed_account_manifest_payloads(
         classified_artifact=classified_artifact,
         assignment_identity=assignment_identity,
         routes=routes,
+        sleeve=sleeve,
     )
     coverage_snapshot = InputSnapshot.from_bytes(
         "mixed C3 coverage", canonical_json_bytes(coverage_payload)
@@ -3572,6 +3900,7 @@ def _build_mixed_account_manifest_payloads(
             selected_inputs.retrieval_receipts,
             mapped,
             selected_inputs.receipt_authority,
+            () if sleeve is None else sleeve.coverage,
         )
     except ManifestError as exc:
         raise AccountAssignmentPerimeterError(
@@ -3584,11 +3913,12 @@ def _build_mixed_account_manifest_payloads(
         _selected_top_level_date(selected_inputs.provider_ledger).isoformat(),
         "2",
     )
-    funded_assignments = _mixed_funded_assignments(selected_inputs, mapped)
+    funded_assignments = _mixed_funded_assignments(selected_inputs, mapped, sleeve)
+    calculation_routes = _sleeve_calculation_routes(sleeve, mapped, routes)
     projected_navs, projected_flows, projected_events, projected_anchors, projection = (
         _mixed_admitted_fact_projection(
             funded_assignments=funded_assignments,
-            routes=routes,
+            routes=calculation_routes,
             navs=navs,
             flows=flows,
             events=calculation_events,
@@ -3698,6 +4028,7 @@ def _build_mixed_account_manifest_payloads(
         classified_artifact=calculation_classified_artifact,
         assignment_identity=assignment_identity,
         routes=routes,
+        sleeve=sleeve,
     )
     calculation_coverage_snapshot = InputSnapshot.from_bytes(
         "calculation coverage", canonical_json_bytes(calculation_coverage_payload)
@@ -3759,9 +4090,7 @@ def _build_mixed_account_manifest_payloads(
         selected_inputs.generation_as_of_date.isoformat(),
         "4",
     )
-    admission_payload = selected_inputs.admission_policy.json_object(
-        "selected admission policy"
-    )
+    admission_payload = _effective_admission_payload(selected_inputs, sleeve)
     selected_keys = {
         tuple(_c3_assignment_record(assignment).values()) for assignment in mapped
     }
@@ -3822,6 +4151,7 @@ def _build_mixed_account_manifest_payloads(
             supporting_internal_counterparty_source_record_ids=tuple(
                 projection["supporting_internal_counterparty_source_record_ids"]
             ),
+            sleeve_facts=selected_inputs.sleeve_facts,
         )
     )
     candidate_rows = candidate.get("rows")
@@ -4021,7 +4351,7 @@ def _build_mixed_account_manifest_payloads(
     }
     expected_calculated_keys = {
         tuple(_c3_assignment_record(route["assignment"]).values())
-        for route in routes
+        for route in calculation_routes
         if tuple(_c3_assignment_record(route["assignment"]).values()) in funded_keys
     }
     actual_calculated_keys = (
@@ -4050,6 +4380,8 @@ def _build_mixed_account_manifest_payloads(
         display_by_epoch = _crosswalk_display_by_epoch(
             selected_inputs.current_epoch_crosswalk
         )
+        if sleeve is not None:
+            display_by_epoch.update(_sleeve_display_by_epoch(sleeve, display_by_epoch))
         rows = [
             {
                 **dict(row),
@@ -4493,6 +4825,11 @@ def stage_account_manifest_generation(
             )
         ),
         current_epoch_crosswalk=selected_inputs.current_epoch_crosswalk,
+        **(
+            {"sleeve_facts": selected_inputs.sleeve_facts}
+            if selected_inputs.sleeve_facts
+            else {}
+        ),
     )
     report = verifier_type().verify(verifier_inputs, subjects)
     if type(report) is not bytes:

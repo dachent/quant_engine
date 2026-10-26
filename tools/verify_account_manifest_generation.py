@@ -478,6 +478,7 @@ class IndependentVerifierInputs:
     admission_policy: InputSnapshot | None = None
     manifest_schema: InputSnapshot | None = None
     membership_census: InputSnapshot | None = None
+    sleeve_facts: tuple[InputSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         for snapshot in _snapshot_roles(self):
@@ -488,6 +489,10 @@ class IndependentVerifierInputs:
             _require_snapshot(self.current_epoch_crosswalk)
         normalized = _validate_receipt_ids(self.retrieval_receipts)
         object.__setattr__(self, "retrieval_receipts", MappingProxyType(normalized))
+        facts = tuple(_require_snapshot(item) for item in self.sleeve_facts)
+        if facts and self.receipt_authority is None:
+            _fail()
+        object.__setattr__(self, "sleeve_facts", facts)
         optional = (
             self.receipt_authority,
             self.admission_policy,
@@ -1164,6 +1169,9 @@ class _IndependentEpochFacts:
     # The epoch's last funded day when ``end`` carries the account's later
     # observations (the tail of a liquidated account); ``None`` otherwise.
     funded_end: date | None = None
+    # A derived sleeve exits in one sweep whose proceeds differ from the last
+    # NAV by that day's own P&L, so its liquidation run needs a net outflow.
+    derived_sleeve: bool = False
 
 
 @dataclass(frozen=True)
@@ -1657,9 +1665,13 @@ def _derive_independent_epoch(
                     zero_end + 1 < len(funded_navs)
                     and funded_navs[zero_end + 1].value < 0
                 )
-                or prior_positive.value
-                + signed_flow(prior_positive.as_of_date, first_zero.as_of_date)
-                != 0
+                or (
+                    signed_flow(prior_positive.as_of_date, first_zero.as_of_date) >= 0
+                    if facts.derived_sleeve
+                    else prior_positive.value
+                    + signed_flow(prior_positive.as_of_date, first_zero.as_of_date)
+                    != 0
+                )
                 or any(
                     first_zero.as_of_date
                     < flow.recognition
@@ -2835,6 +2847,11 @@ def _selected_identity(
         result["current_epoch_crosswalk"] = _snapshot_identity(
             selected.current_epoch_crosswalk
         )
+    if selected.sleeve_facts:
+        result["sleeve_facts"] = [
+            _snapshot_identity(snapshot)
+            for snapshot in sorted(selected.sleeve_facts, key=lambda item: item.sha256)
+        ]
     return result
 
 
@@ -3024,14 +3041,32 @@ def _selected_current_epoch_rows(
         mapped_by_key[key] = row
     result: list[dict[str, object]] = []
     included_keys: set[tuple[object, ...]] = set()
+    view = _independent_sleeve_view(selected)
+    left_strategy_set = 0
     for row in included:
         key = tuple(row.get(field) for field in fields)
+        if (
+            view is not None
+            and row.get("account_id") in view.residual
+            and key not in mapped_by_key
+        ):
+            # A residual parent's epoch became a non-strategy row.
+            left_strategy_set += 1
+            continue
         if key in included_keys or key not in mapped_by_key:
             _fail()
         included_keys.add(key)
         result.append(mapped_by_key[key])
-    if len(result) != len(included):
+    if len(result) + left_strategy_set != len(included):
         _fail()
+    if view is not None:
+        derived = [
+            row for row in mapped if row.get("account_id") in view.sleeve_accounts
+        ]
+        derived.sort(
+            key=lambda row: (str(row["account_id"]), str(row["effective_start"]))
+        )
+        result.extend(derived)
     return result
 
 
@@ -3082,6 +3117,7 @@ def _perimeter_identity(
     assignments = baseline.get("assignments")
     if not isinstance(accounts, list) or not isinstance(assignments, list):
         _fail()
+    accounts, assignments = _effective_perimeter_lists(selected, accounts, assignments)
     account_by_id = _baseline_account_providers(accounts)
     rows: list[dict[str, object]] = []
     intervals: dict[str, list[tuple[date | None, date | None, int, str]]] = {}
@@ -3196,11 +3232,9 @@ def _perimeter_identity(
             values, key=lambda value: (value[0] is not None, value[0] or date.min)
         )
         ordered_intervals[account] = tuple(ordered)
-    nav_facts = _strict_object(selected.provider_ledger.contents).get(
-        "nav_observations"
-    )
-    raw_flows = _strict_object(selected.provider_ledger.contents).get("flows")
-    ledger = _strict_object(selected.provider_ledger.contents)
+    ledger = _ledger_with_derived(selected)
+    nav_facts = ledger.get("nav_observations")
+    raw_flows = ledger.get("flows")
     ledger_as_of_date = _validate_provider_ledger_date_authority(selected, ledger)
     events = classified.get("events")
     if (
@@ -3746,7 +3780,7 @@ def _normalize_provider_navs(
     *,
     enforce_global_accounting_currency: bool = True,
 ) -> tuple[list[dict[str, object]], str | None]:
-    ledger = _strict_object(selected.provider_ledger.contents)
+    ledger = _ledger_with_derived(selected)
     ledger_as_of_date = _validate_provider_ledger_date_authority(selected, ledger)
     navs = ledger.get("nav_observations")
     flows = ledger.get("flows")
@@ -4296,7 +4330,7 @@ def _derive_independent_population_counts(
 ) -> dict[str, int]:
     """Derive report population arithmetic from selected and subject bytes."""
 
-    ledger = _strict_object(selected.provider_ledger.contents)
+    ledger = _ledger_with_derived(selected)
     navs = ledger.get("nav_observations")
     flows = ledger.get("flows")
     classified = _strict_object(subject_payloads["authority/classified-flows.json"])
@@ -4580,6 +4614,54 @@ def _sorted_mixed_output_assignments(
     return ordered
 
 
+def _parent_receipt_route(
+    derived: Mapping[str, object], routes: list[Mapping[str, object]]
+) -> Mapping[str, object]:
+    """The one selected receipt of the parent covering a derived epoch."""
+
+    found = [
+        route
+        for route in routes
+        if _sleeve_obj(route["receipt"]).get("account_id")
+        == derived["parent_account_id"]
+        and str(route["receipt"]["requested_start"]) <= str(derived["requested_start"])
+        and str(route["receipt"]["requested_end"]) >= str(derived["requested_end"])
+    ]
+    if len(found) != 1:
+        _fail()
+    return found[0]
+
+
+def _independent_calculation_routes(
+    selected: IndependentVerifierInputs,
+    mapped: list[dict[str, object]],
+    routes: list[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Receipt-routed calculable epochs plus the derived sleeve epochs."""
+
+    result = [route for route in routes if route["selected_assignment"] is not None]
+    view = _independent_sleeve_view(selected)
+    if view is None:
+        return result
+    by_key = {tuple(_assignment_record(row).values()): row for row in mapped}
+    for derived in view.coverage:
+        assignment = by_key.get(tuple(_sleeve_obj(derived["assignment"]).values()))
+        if assignment is None:
+            continue
+        covering = _parent_receipt_route(derived, routes)
+        result.append(
+            {
+                "receipt_id": covering["receipt_id"],
+                "receipt": {
+                    "requested_start": derived["requested_start"],
+                    "requested_end": derived["requested_end"],
+                },
+                "selected_assignment": assignment,
+            }
+        )
+    return result
+
+
 def _mixed_coverage_payload(
     *,
     selected: IndependentVerifierInputs,
@@ -4593,9 +4675,35 @@ def _mixed_coverage_payload(
     route_by_assignment = {
         tuple(_assignment_record(route["selected_assignment"]).values()): route
         for route in routes
+        if route["selected_assignment"] is not None
+    }
+    view = _independent_sleeve_view(selected)
+    derived_by_key = {
+        tuple(_sleeve_obj(item["assignment"]).values()): item
+        for item in ([] if view is None else view.coverage)
     }
     rows: list[dict[str, object]] = []
     for assignment in mapped:
+        derived = derived_by_key.get(tuple(_assignment_record(assignment).values()))
+        if derived is not None:
+            covering = _parent_receipt_route(derived, routes)
+            rows.append(
+                {
+                    "assignment": _assignment_record(assignment),
+                    "requested_start": derived["requested_start"],
+                    "requested_end": derived["requested_end"],
+                    "status": "COMPLETE",
+                    "authority_kind": _DERIVED_COVERAGE_KIND,
+                    "receipt_artifact_id": covering["receipt_id"],
+                    "blocker_code": None,
+                    "blocker_detail": None,
+                    "derivation": {
+                        "parent_account_id": derived["parent_account_id"],
+                        "sleeve_facts_sha256": derived["sleeve_facts_sha256"],
+                    },
+                }
+            )
+            continue
         route = route_by_assignment.get(tuple(_assignment_record(assignment).values()))
         complete = route is not None
         rows.append(
@@ -4778,6 +4886,8 @@ def _verify_mixed_authority_and_coverage_many(
     """Independently route every selected receipt and reconstruct coverage."""
 
     tail_keys = _independent_tail_keys(selected)
+    sleeve_view = _independent_sleeve_view(selected)
+    residual_parents = frozenset() if sleeve_view is None else sleeve_view.residual
     authority_snapshot = _require_snapshot(selected.receipt_authority)
     if normalized[_MIXED_AUTHORITY_PATH] != authority_snapshot.contents:
         _fail()
@@ -5031,6 +5141,16 @@ def _verify_mixed_authority_and_coverage_many(
                     or assignment["effective_end"] == requested_end.isoformat()
                 )
             ]
+            if not routed and account_id in residual_parents:
+                routes.append(
+                    {
+                        "receipt_id": receipt_id,
+                        "receipt_snapshot": receipt_snapshot,
+                        "receipt": receipt,
+                        "selected_assignment": None,
+                    }
+                )
+                continue
             if len(routed) != 1:
                 _fail()
             route_key = tuple(_assignment_record(routed[0]).values())
@@ -5193,6 +5313,16 @@ def _verify_mixed_authority_and_coverage_many(
                 )
             )
         ]
+        if not routed and account_id in residual_parents:
+            routes.append(
+                {
+                    "receipt_id": receipt_id,
+                    "receipt_snapshot": receipt_snapshot,
+                    "receipt": receipt,
+                    "selected_assignment": None,
+                }
+            )
+            continue
         if len(routed) != 1:
             _fail()
         route_key = tuple(_assignment_record(routed[0]).values())
@@ -5261,6 +5391,540 @@ def _retained_flow_scope_metadata(raw: Mapping[str, object]) -> dict[str, object
     return metadata
 
 
+@dataclass(frozen=True)
+class _SleeveView:
+    """What the selected sleeve-facts artifacts imply, derived independently.
+
+    This is the verifier's own reading of the artifacts; it shares no code with
+    the epoch producer or the generation builder.  See the producer's
+    "Derived nested-strategy sleeves" header for the conventions it must agree
+    with.
+    """
+
+    accounts: tuple[dict[str, object], ...]
+    assignments: tuple[dict[str, object], ...]
+    residual: frozenset[str]
+    sleeve_accounts: frozenset[str]
+    perimeter_accounts: frozenset[str]
+    navs: tuple[dict[str, object], ...]
+    flows: tuple[dict[str, object], ...]
+    references: tuple[dict[str, object], ...]
+    admissions: tuple[dict[str, object], ...]
+    coverage: tuple[dict[str, object], ...]
+    reconciliations: tuple[dict[str, object], ...]
+
+
+_SLEEVE_ROLES: Final[Mapping[str, str]] = MappingProxyType(
+    {"sleeve-account-facts": "RESIDUAL", "quantbase-fund-facts": "LIVE"}
+)
+_SLEEVE_FLOW_TYPE: Final[str] = "TRANSFER:INTERNAL:SLEEVE"
+_DERIVED_COVERAGE_KIND: Final[str] = "DERIVED_SLEEVE_COVERAGE_V1"
+
+
+def _sleeve_obj(value: object) -> dict[str, object]:
+    if type(value) is not dict:
+        _fail()
+    return value
+
+
+def _sleeve_seq(value: object) -> list[object]:
+    if type(value) is not list:
+        _fail()
+    return value
+
+
+def _sleeve_money(value: object) -> Decimal:
+    if type(value) is not str or _CANONICAL_NUMERIC.fullmatch(value) is None:
+        _fail()
+    return _parse_retained_source_decimal(value)
+
+
+def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView | None:
+    """Re-derive every derived account, epoch, fact and coverage row."""
+
+    if not selected.sleeve_facts:
+        return None
+    baseline = _strict_object(selected.baseline.contents)
+    providers = _baseline_account_providers(baseline.get("accounts"))
+    accounts: list[dict[str, object]] = []
+    assignments: list[dict[str, object]] = []
+    navs: list[dict[str, object]] = []
+    flows: list[dict[str, object]] = []
+    references: list[dict[str, object]] = []
+    admissions: list[dict[str, object]] = []
+    coverage: list[dict[str, object]] = []
+    reconciliations: list[dict[str, object]] = []
+    residual: set[str] = set()
+    sleeve_accounts: set[str] = set()
+    perimeter_accounts: set[str] = set()
+    used_accounts: set[str] = set()
+    used_parents: set[str] = set()
+    used_digests: set[str] = set()
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        for snapshot in selected.sleeve_facts:
+            if snapshot.sha256 in used_digests:
+                _fail()
+            used_digests.add(snapshot.sha256)
+            payload = _strict_object(snapshot.contents)
+            role = _SLEEVE_ROLES.get(str(payload.get("artifact_id")))
+            if role is None or payload.get("schema_version") != 1:
+                _fail()
+            parent = _internal_id(payload.get("parent_account_id"))
+            if parent is None or parent in used_parents or parent not in providers:
+                _fail()
+            used_parents.add(parent)
+            if payload.get("base_currency") != "USD":
+                _fail()
+            window = _sleeve_obj(payload.get("window"))
+            window_first = _date_value(window.get("first_day")).isoformat()
+            window_last = _date_value(window.get("last_day")).isoformat()
+            if window_first > window_last:
+                _fail()
+            perimeter = _sleeve_obj(payload.get("perimeter_account"))
+            pool = _internal_id(perimeter.get("account_id"))
+            if pool != f"{parent}-unallocated" or pool in used_accounts:
+                _fail()
+            used_accounts.add(pool)
+            perimeter_accounts.add(pool)
+            tag = snapshot.sha256[:16]
+            if role == "RESIDUAL":
+                residual.add(parent)
+            accounts.append(
+                {
+                    "account_id": pool,
+                    "base_currency": "USD",
+                    "provider": providers[parent],
+                    "role": "INVESTMENT",
+                }
+            )
+            assignments.append(
+                {
+                    "assignment_id": f"sleeve-assignment:{tag}:{pool}",
+                    "account_id": pool,
+                    "strategy_id": None,
+                    "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+                    "effective_start": window_first,
+                    "effective_end": None,
+                }
+            )
+            value_key = "nav_end_after_alloc" if role == "RESIDUAL" else "nav_end"
+            mine: set[str] = set()
+            nav_totals: dict[str, Decimal] = {}
+            extra_legs: list[dict[str, object]] = []
+            for raw_sleeve in _sleeve_seq(payload.get("sleeves")):
+                sleeve = _sleeve_obj(raw_sleeve)
+                sleeve_id = sleeve.get("sleeve_id")
+                account = _internal_id(sleeve.get("account_id"))
+                strategy = _internal_id(sleeve.get("strategy_id"))
+                if (
+                    type(sleeve_id) is not str
+                    or not sleeve_id
+                    or account != f"{parent}-{sleeve_id}"
+                    or account in used_accounts
+                    or strategy is None
+                ):
+                    _fail()
+                used_accounts.add(account)
+                mine.add(account)
+                sleeve_accounts.add(account)
+                days = _sleeve_seq(sleeve.get("days"))
+                if not days:
+                    _fail()
+                previous = ""
+                carried = Decimal(0)
+                exit_day: str | None = None
+                values: dict[str, Decimal] = {}
+                for position, raw_day in enumerate(days):
+                    row = _sleeve_obj(raw_day)
+                    day = _date_value(row.get("day")).isoformat()
+                    if day <= previous:
+                        _fail()
+                    previous = day
+                    value = _sleeve_money(row.get(value_key))
+                    if role == "RESIDUAL":
+                        carried += _sleeve_money(row.get("alloc_total"))
+                    if value < 0:
+                        _fail()
+                    values[day] = value
+                    if role == "RESIDUAL" and row.get("event") == "EXIT":
+                        if position != len(days) - 1 or value != 0:
+                            _fail()
+                        exit_day = day
+                    navs.append(
+                        {
+                            "record_id": f"sleeve-nav:{tag}:{account}:{day}",
+                            "account_id": account,
+                            "as_of_date": day,
+                            "value_basis": "STRATEGY_NAV",
+                            "nav": {
+                                "currency": "USD",
+                                "status": "AVAILABLE",
+                                "value": _format_decimal(value),
+                            },
+                        }
+                    )
+                first_day = _date_value(sleeve.get("first_day")).isoformat()
+                last_day = _date_value(sleeve.get("last_day")).isoformat()
+                if (
+                    _sleeve_obj(days[0]).get("day") != first_day
+                    or _sleeve_obj(days[-1]).get("day") != last_day
+                    or first_day < window_first
+                    or last_day > window_last
+                    or values[first_day] <= 0
+                ):
+                    _fail()
+                if role == "LIVE":
+                    if values[last_day] != 0:
+                        _fail()
+                    end: str | None = last_day
+                else:
+                    end = exit_day
+                for day, value in values.items():
+                    nav_totals[day] = nav_totals.get(day, Decimal(0)) + value
+                assignments.append(
+                    {
+                        "assignment_id": f"sleeve-assignment:{tag}:{account}",
+                        "account_id": account,
+                        "strategy_id": strategy,
+                        "strategy_mapping_disposition": "STRATEGY_MAPPED",
+                        "effective_start": first_day,
+                        "effective_end": end,
+                    }
+                )
+                accounts.append(
+                    {
+                        "account_id": account,
+                        "base_currency": "USD",
+                        "provider": providers[parent],
+                        "role": "INVESTMENT",
+                    }
+                )
+                epoch = {
+                    "account_id": account,
+                    "strategy_id": strategy,
+                    "effective_start": first_day,
+                    "effective_end": end,
+                }
+                admissions.append(
+                    {
+                        **epoch,
+                        "status": "FUNDED",
+                        "continuity_to_successor": False,
+                        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                        "funded_nav_record_ids": [
+                            f"sleeve-nav:{tag}:{account}:{first_day}"
+                        ],
+                    }
+                )
+                coverage.append(
+                    {
+                        "assignment": epoch,
+                        "requested_start": first_day,
+                        "requested_end": end or window_last,
+                        "parent_account_id": parent,
+                        "sleeve_facts_sha256": snapshot.sha256,
+                    }
+                )
+                if exit_day is not None and carried != 0:
+                    pair = f"{exit_day}:settle-{sleeve_id}"
+                    for leg_account, leg_class in (
+                        (account, "INTERNAL_OUT" if carried > 0 else "INTERNAL_IN"),
+                        (pool, "INTERNAL_IN" if carried > 0 else "INTERNAL_OUT"),
+                    ):
+                        extra_legs.append(
+                            {
+                                "pair_id": pair,
+                                "account_id": leg_account,
+                                "class": leg_class,
+                                "event_date": exit_day,
+                                "nav_recognition_date": exit_day,
+                                "amount": _format_decimal(abs(carried)),
+                            }
+                        )
+            if not mine:
+                _fail()
+            totals: dict[str, Decimal] = {}
+            sizes: dict[str, int] = {}
+            for raw_leg in (*_sleeve_seq(payload.get("flows")), *extra_legs):
+                leg = _sleeve_obj(raw_leg)
+                account = _internal_id(leg.get("account_id"))
+                flow_class = leg.get("class")
+                if flow_class not in {"INTERNAL_IN", "INTERNAL_OUT"}:
+                    _fail()
+                if leg.get("flow_type", _SLEEVE_FLOW_TYPE) != _SLEEVE_FLOW_TYPE:
+                    _fail()
+                referenced = leg.get("leg_source") == "PARENT_LEDGER_REFERENCE"
+                if account not in mine and account != pool and not referenced:
+                    _fail()
+                amount = _sleeve_money(leg.get("amount"))
+                event_day = _date_value(leg.get("event_date")).isoformat()
+                recognition = _date_value(leg.get("nav_recognition_date")).isoformat()
+                pair_id = leg.get("pair_id")
+                if amount <= 0 or recognition < event_day or type(pair_id) is not str:
+                    _fail()
+                if not pair_id:
+                    _fail()
+                signed = amount if flow_class == "INTERNAL_IN" else -amount
+                totals[pair_id] = totals.get(pair_id, Decimal(0)) + signed
+                sizes[pair_id] = sizes.get(pair_id, 0) + 1
+                if referenced:
+                    if role != "LIVE":
+                        _fail()
+                    references.append(
+                        {
+                            "pair_id": pair_id,
+                            "account_id": account,
+                            "event_date": event_day,
+                            "class": flow_class,
+                            "amount": _format_decimal(amount),
+                        }
+                    )
+                    continue
+                flows.append(
+                    {
+                        "record_id": f"sleeve-flow:{tag}:{pair_id}:{account}:{flow_class}",
+                        "account_id": account,
+                        "event_date": event_day,
+                        "nav_recognition_date": recognition,
+                        "flow_type": _SLEEVE_FLOW_TYPE,
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": _format_decimal(signed),
+                        },
+                    }
+                )
+            if any(totals[key] != 0 or sizes[key] != 2 for key in totals):
+                _fail()
+            if role == "RESIDUAL":
+                tolerance = _sleeve_money(
+                    _sleeve_obj(payload.get("closure_policy")).get("tolerance_per_day")
+                )
+                for raw_day in _sleeve_seq(perimeter.get("days")):
+                    row = _sleeve_obj(raw_day)
+                    day = _date_value(row.get("day")).isoformat()
+                    reconciliations.append(
+                        {
+                            "parent_account_id": parent,
+                            "day": day,
+                            "sleeves_nav": _format_decimal(
+                                nav_totals.get(day, Decimal(0))
+                            ),
+                            "perimeter_nav": row.get("nav_end"),
+                            "tolerance": _format_decimal(tolerance),
+                        }
+                    )
+    return _SleeveView(
+        accounts=tuple(sorted(accounts, key=lambda row: str(row["account_id"]))),
+        assignments=tuple(
+            sorted(
+                assignments,
+                key=lambda row: (str(row["account_id"]), str(row["effective_start"])),
+            )
+        ),
+        residual=frozenset(residual),
+        sleeve_accounts=frozenset(sleeve_accounts),
+        perimeter_accounts=frozenset(perimeter_accounts),
+        navs=tuple(sorted(navs, key=lambda row: str(row["record_id"]))),
+        flows=tuple(sorted(flows, key=lambda row: str(row["record_id"]))),
+        references=tuple(
+            sorted(
+                references,
+                key=lambda row: (str(row["pair_id"]), str(row["account_id"])),
+            )
+        ),
+        admissions=tuple(
+            sorted(
+                admissions,
+                key=lambda row: (str(row["account_id"]), str(row["effective_start"])),
+            )
+        ),
+        coverage=tuple(
+            sorted(
+                coverage,
+                key=lambda row: (
+                    str(_sleeve_obj(row["assignment"])["account_id"]),
+                    str(_sleeve_obj(row["assignment"])["effective_start"]),
+                ),
+            )
+        ),
+        reconciliations=tuple(
+            sorted(
+                reconciliations,
+                key=lambda row: (str(row["parent_account_id"]), str(row["day"])),
+            )
+        ),
+    )
+
+
+def _effective_perimeter_lists(
+    selected: IndependentVerifierInputs,
+    accounts: list[object],
+    assignments: list[object],
+) -> tuple[list[object], list[object]]:
+    """Baseline accounts and assignments after the derived sleeves joined."""
+
+    view = _independent_sleeve_view(selected)
+    if view is None:
+        return accounts, assignments
+    effective: list[object] = []
+    for raw in assignments:
+        if not isinstance(raw, dict):
+            _fail()
+        row = dict(raw)
+        if (
+            row.get("account_id") in view.residual
+            and row.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+        ):
+            row["strategy_mapping_disposition"] = "HISTORICAL_POOL_ONLY"
+            row["strategy_id"] = None
+            if "mapping_status" in row:
+                row["mapping_status"] = "UNMAPPED"
+            if any(
+                isinstance(other, dict)
+                and other.get("account_id") == row["account_id"]
+                and other.get("strategy_mapping_disposition") == "HISTORICAL_POOL_ONLY"
+                and other.get("effective_end") == row.get("effective_start")
+                for other in assignments
+            ):
+                row["effective_start"] = (
+                    _date_value(row["effective_start"]) + timedelta(days=1)
+                ).isoformat()
+        effective.append(row)
+    existing = {
+        (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        for row in effective
+        if isinstance(row, dict)
+    }
+    for derived in view.assignments:
+        key = (
+            derived["account_id"],
+            derived["strategy_id"],
+            derived["effective_start"],
+            derived["effective_end"],
+        )
+        if key in existing:
+            _fail()
+        effective.append(dict(derived))
+    return [*accounts, *(dict(item) for item in view.accounts)], effective
+
+
+def _ledger_with_derived(selected: IndependentVerifierInputs) -> dict[str, object]:
+    """The provider ledger plus the derived sleeve facts, after the checks the
+    derivation owes: sleeves reconcile to the parent and a parent-ledger
+    reference is exactly one existing ledger flow."""
+
+    ledger = _strict_object(selected.provider_ledger.contents)
+    view = _independent_sleeve_view(selected)
+    if view is None:
+        return ledger
+    navs = ledger.get("nav_observations")
+    flows = ledger.get("flows")
+    if not isinstance(navs, list) or not isinstance(flows, list):
+        _fail()
+    derived_accounts = view.sleeve_accounts | view.perimeter_accounts
+    own_ids = {str(row["record_id"]) for row in (*view.navs, *view.flows)}
+    for row in (*navs, *flows):
+        if not isinstance(row, dict) or (
+            row.get("account_id") in derived_accounts
+            or str(row.get("record_id")) in own_ids
+        ):
+            _fail()
+    nav_by_key: dict[tuple[object, object], object] = {}
+    for row in navs:
+        if isinstance(row, dict):
+            nav_by_key[(row.get("account_id"), row.get("as_of_date"))] = row.get("nav")
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        for item in view.reconciliations:
+            nav = nav_by_key.get((item["parent_account_id"], item["day"]))
+            if (
+                not isinstance(nav, dict)
+                or nav.get("status") != "AVAILABLE"
+                or abs(
+                    _parse_retained_source_decimal(nav.get("value"))
+                    - (
+                        _parse_retained_source_decimal(item["sleeves_nav"])
+                        + _parse_retained_source_decimal(item["perimeter_nav"])
+                    )
+                )
+                > _parse_retained_source_decimal(item["tolerance"])
+            ):
+                _fail()
+        for reference in view.references:
+            wanted = _parse_retained_source_decimal(reference["amount"]) * (
+                1 if reference["class"] == "INTERNAL_IN" else -1
+            )
+            found = [
+                row
+                for row in flows
+                if isinstance(row, dict)
+                and row.get("account_id") == reference["account_id"]
+                and row.get("event_date") == reference["event_date"]
+                and isinstance(row.get("amount"), dict)
+                and row["amount"].get("status") == "AVAILABLE"
+                and _parse_retained_source_decimal(row["amount"].get("value")) == wanted
+            ]
+            if len(found) != 1 or not str(found[0].get("flow_type")).startswith(
+                "TRANSFER:INTERNAL:"
+            ):
+                _fail()
+    merged = dict(ledger)
+    merged["nav_observations"] = [*navs, *view.navs]
+    merged["flows"] = [*flows, *view.flows]
+    return merged
+
+
+def _effective_admission_policy(
+    selected: IndependentVerifierInputs, policy: dict[str, object]
+) -> dict[str, object]:
+    view = _independent_sleeve_view(selected)
+    if view is None:
+        return policy
+    rows = policy.get("admissions")
+    if not isinstance(rows, list):
+        _fail()
+    merged = dict(policy)
+    merged["admissions"] = [
+        *(
+            row
+            for row in rows
+            if not (isinstance(row, dict) and row.get("account_id") in view.residual)
+        ),
+        *(dict(row) for row in view.admissions),
+    ]
+    return merged
+
+
+def _sleeve_display(
+    selected: IndependentVerifierInputs,
+    display: Mapping[tuple[object, ...], dict[str, object]],
+) -> dict[tuple[object, ...], dict[str, object]]:
+    view = _independent_sleeve_view(selected)
+    result = dict(display)
+    if view is None:
+        return result
+    labels: dict[object, dict[str, object]] = {}
+    for key, value in display.items():
+        labels.setdefault(key[0], value)
+    for item in view.coverage:
+        epoch = _sleeve_obj(item["assignment"])
+        parent = item["parent_account_id"]
+        label = labels.get(parent)
+        if label is None:
+            _fail()
+        suffix = str(epoch["account_id"]).removeprefix(f"{parent}-")
+        result[tuple(epoch.values())] = {
+            "account_label": f"{label['account_label']} / {suffix}",
+            "last_four": label["last_four"],
+        }
+    return result
+
+
 def _mixed_normalized_facts(
     selected: IndependentVerifierInputs,
 ) -> tuple[
@@ -5271,7 +5935,7 @@ def _mixed_normalized_facts(
     navs, _ = _normalize_provider_navs(
         selected, enforce_global_accounting_currency=False
     )
-    ledger = _strict_object(selected.provider_ledger.contents)
+    ledger = _ledger_with_derived(selected)
     raw_flows = ledger.get("flows")
     raw_anchors = ledger.get("capital_anchors")
     if not isinstance(raw_flows, list) or not isinstance(raw_anchors, list):
@@ -5770,7 +6434,9 @@ def _verify_mixed_calculation_bridge(
         projection,
     ) = _mixed_admitted_fact_projection(
         funded_assignments=admission["funded_assignments"],
-        routes=authority_state["routes"],
+        routes=_independent_calculation_routes(
+            selected, mapped, authority_state["routes"]
+        ),
         navs=navs,
         flows=flows,
         events=events,
@@ -5957,7 +6623,9 @@ def _selected_mixed_admission_bytes(
 ) -> tuple[bytes, dict[str, object]]:
     """Independently project admission authority to the crosswalk subject set."""
 
-    source = _strict_object(_require_snapshot(selected.admission_policy).contents)
+    source = _effective_admission_policy(
+        selected, _strict_object(_require_snapshot(selected.admission_policy).contents)
+    )
     selected_keys = {
         tuple(_assignment_record(assignment).values()) for assignment in mapped
     }
@@ -6210,7 +6878,13 @@ def _verify_mixed_admission(
         _require_snapshot(selected.membership_census).contents
     )
     census = _independent_membership_census(census_payload)
-    census_providers = _baseline_account_providers(baseline.get("accounts"))
+    census_providers = _baseline_account_providers(
+        _effective_perimeter_lists(
+            selected,
+            _sleeve_seq(baseline.get("accounts")),
+            _sleeve_seq(baseline.get("assignments")),
+        )[0]
+    )
     funded_counts: dict[tuple[str, str, str, str | None], int] = {}
     for key, policy_row in admission_by_key.items():
         if policy_row.get("status") != "FUNDED":
@@ -6508,6 +7182,7 @@ def _mixed_numeric_facts(
     combined_flows = tuple(
         sorted((*facts.flows, *allocation_facts), key=_IndependentFlowFact.order_key)
     )
+    sleeve_view = _independent_sleeve_view(selected)
     return _IndependentEpochFacts(
         facts.account_id,
         facts.start,
@@ -6518,6 +7193,8 @@ def _mixed_numeric_facts(
         facts.dual_date_trace,
         facts.pre_start_nav,
         funded_end,
+        sleeve_view is not None
+        and str(assignment["account_id"]) in sleeve_view.sleeve_accounts,
     )
 
 
@@ -6560,7 +7237,10 @@ def _verify_mixed_output_and_state(
     display_by_key = (
         {}
         if selected.current_epoch_crosswalk is None
-        else _independent_crosswalk_display_by_epoch(selected.current_epoch_crosswalk)
+        else _sleeve_display(
+            selected,
+            _independent_crosswalk_display_by_epoch(selected.current_epoch_crosswalk),
+        )
     )
     admission_by_key = admission["by_key"]
     coverage_rows = authority_state["coverage"]["rows"]
@@ -7007,6 +7687,7 @@ def _verify_mixed_output_and_state(
     assignments = baseline.get("assignments")
     if not isinstance(accounts, list) or not isinstance(assignments, list):
         _fail()
+    accounts, assignments = _effective_perimeter_lists(selected, accounts, assignments)
     disposition_counts = {
         disposition: sum(
             isinstance(row, dict)
@@ -7090,7 +7771,12 @@ def _verify_mixed_semantics_normalized(
     )
     mapped = _selected_current_epoch_rows(selected, perimeter.get("rows"))
     baseline = _strict_object(selected.baseline.contents)
-    providers = _baseline_account_providers(baseline.get("accounts"))
+    effective_accounts, _ = _effective_perimeter_lists(
+        selected,
+        _sleeve_seq(baseline.get("accounts")),
+        _sleeve_seq(baseline.get("assignments")),
+    )
+    providers = _baseline_account_providers(effective_accounts)
     mapped_identity = b1_state["mapped_assignments_identity"]
     authority_state = _verify_mixed_authority_and_coverage_many(
         selected, normalized, mapped, providers, mapped_identity
@@ -7704,7 +8390,7 @@ def _verify_c4b2_policy_and_flows(
     )
     if policy_projection != policy:
         _fail()
-    ledger = _strict_object(selected.provider_ledger.contents)
+    ledger = _ledger_with_derived(selected)
     raw_flows = ledger.get("flows")
     if not isinstance(raw_flows, list):
         _fail()
@@ -8068,16 +8754,24 @@ def encode_verification_request(
         {"path": path, "contents_base64": _canonical_base64(normalized_subjects[path])}
         for path in subject_paths
     ]
-    return canonical_json_bytes(
-        {
-            "schema_version": _REQUEST_VERSION
-            if layout == "legacy"
-            else _CROSSWALK_REQUEST_VERSION,
-            "selected_snapshots": selected,
-            "retrieval_receipts": receipts,
-            "subjects": subjects,
-        }
-    )
+    request: dict[str, object] = {
+        "schema_version": _REQUEST_VERSION
+        if layout == "legacy"
+        else _CROSSWALK_REQUEST_VERSION,
+        "selected_snapshots": selected,
+        "retrieval_receipts": receipts,
+        "subjects": subjects,
+    }
+    if selected_snapshots.sleeve_facts:
+        if layout != "mixed":
+            _fail()
+        request["sleeve_facts"] = [
+            {"contents_base64": _canonical_base64(snapshot.contents)}
+            for snapshot in sorted(
+                selected_snapshots.sleeve_facts, key=lambda item: item.sha256
+            )
+        ]
+    return canonical_json_bytes(request)
 
 
 def decode_verification_request(
@@ -8094,12 +8788,13 @@ def decode_verification_request(
     if canonical_json_bytes(parsed) != request_bytes:  # type: ignore[arg-type]
         _fail()
     root = _transport_object(parsed)
-    if set(root) != {
+    required_root = {
         "schema_version",
         "selected_snapshots",
         "retrieval_receipts",
         "subjects",
-    }:
+    }
+    if set(root) != required_root and set(root) != required_root | {"sleeve_facts"}:
         _fail()
     request_version = root["schema_version"]
     if isinstance(request_version, bool) or request_version not in {
@@ -8167,6 +8862,27 @@ def decode_verification_request(
             "current epoch crosswalk",
             _decode_base64(selected["current_epoch_crosswalk_base64"]),
         )
+    if "sleeve_facts" in root:
+        if request_version != _CROSSWALK_REQUEST_VERSION:
+            _fail()
+        raw_facts = root["sleeve_facts"]
+        if not isinstance(raw_facts, list) or not raw_facts:
+            _fail()
+        decoded_facts: list[InputSnapshot] = []
+        for raw_entry in raw_facts:
+            entry = _transport_object(raw_entry)
+            if set(entry) != {"contents_base64"}:
+                _fail()
+            decoded_facts.append(
+                InputSnapshot.from_bytes(
+                    "sleeve facts", _decode_base64(entry["contents_base64"])
+                )
+            )
+        if [item.sha256 for item in decoded_facts] != sorted(
+            item.sha256 for item in decoded_facts
+        ):
+            _fail()
+        kwargs["sleeve_facts"] = tuple(decoded_facts)
     selected_inputs = IndependentVerifierInputs(
         **kwargs,
         retrieval_receipts=receipts,
