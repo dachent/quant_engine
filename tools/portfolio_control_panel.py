@@ -3035,7 +3035,7 @@ def _validate_current_product_epoch_surface(
     """Require exact current account-strategy identities across two surfaces."""
 
     crosswalk_tuples: set[tuple[object, object, object, object]] | None = None
-    if account_manifest.get("schema_version") == 9:
+    if account_manifest.get("schema_version") in {9, 10}:
         if current_epoch_crosswalk is None:
             raise ControlPanelValidationError(
                 "current manifest and performance identities differ"
@@ -3109,7 +3109,7 @@ def _validate_current_product_epoch_surface(
 
     boundary_text = as_of_date or "2026-08-13"
     if (
-        account_manifest.get("schema_version") == 9
+        account_manifest.get("schema_version") in {9, 10}
         and current_epoch_crosswalk is not None
     ):
         boundary_text = _text(
@@ -3256,7 +3256,7 @@ def _performance_lineage(
 ) -> dict[str, Any]:
     """Compare the report/baseline ledger with the manifest calculation ledger."""
 
-    if account_manifest is None or account_manifest.get("schema_version") != 9:
+    if account_manifest is None or account_manifest.get("schema_version") not in {9, 10}:
         return {"status": "NOT_APPLICABLE"}
     baseline_candidates = [
         row
@@ -10383,7 +10383,7 @@ _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH: Final = (
 _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH: Final = (
     "authority/account-assignment-crosswalk.json"
 )
-_SUPPORTED_EPOCH_MANIFEST_SCHEMA_VERSIONS: Final = frozenset({8, 9})
+_SUPPORTED_EPOCH_MANIFEST_SCHEMA_VERSIONS: Final = frozenset({8, 9, 10})
 
 
 def _epoch_manifest_source_from_bundle(
@@ -10491,7 +10491,7 @@ def _epoch_manifest_source_from_bundle(
             for entry in bundle.manifest.artifacts
             if entry.artifact_id == _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH
         )
-        if schema_version == 9
+        if schema_version in {9, 10}
         else ()
     )
     if len(crosswalk_matches) == 1:
@@ -10568,7 +10568,7 @@ def _epoch_manifest_report_attestation(
     report_artifact = report_artifacts[0]
     data_as_of = (
         _panel_date(manifest.get("calculation_cutoff_date"), "account manifest cutoff")
-        if manifest.get("schema_version") == 9
+        if manifest.get("schema_version") in {9, 10}
         else bundle.manifest.as_of_date
     )
     if (
@@ -10654,7 +10654,7 @@ def _epoch_manifest_report_attestation(
             *_EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS,
             _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH,
         )
-        if manifest.get("schema_version") == 9:
+        if manifest.get("schema_version") in {9, 10}:
             fixed_paths += (_EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH,)
         receipt_paths = tuple(
             sorted(actual_subject_paths - set(fixed_paths), key=str.casefold)
@@ -10969,7 +10969,7 @@ def _verified_bundle_account_manifest(
         staged_bytes,
     )
     current_epoch_crosswalk = None
-    if value.get("schema_version") == 9:
+    if value.get("schema_version") in {9, 10}:
         crosswalk_bytes = bundle.payloads.get(
             _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH
         )

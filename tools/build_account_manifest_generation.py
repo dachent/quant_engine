@@ -4160,7 +4160,7 @@ def _build_mixed_account_manifest_payloads(
         ),
     )
     output = {
-        "schema_version": 9,
+        "schema_version": 10,
         "artifact": "account-strategy-manifest",
         "accounting_currency": currency,
         "authority_readiness": {

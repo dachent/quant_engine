@@ -2669,6 +2669,190 @@ def _derive_independent_mwr_projection(
     }
 
 
+_PERIOD_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "return_window_start",
+        "return_close_date",
+        "window_days",
+        "twr_annualised",
+        "ytd_twr",
+        "ytd_window",
+        "calendar_year_twr",
+        "calendar_year_windows",
+        "periods_per_year",
+        "periods_per_year_basis",
+        "mwr_window_equivalent",
+        "annualisation_basis",
+    }
+)
+_PERIOD_YEAR_DAYS: Final[int] = 365
+
+
+def _period_dec(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    return value if type(value) is Decimal else Decimal(str(value))
+
+
+def _period_fmt(value: Decimal | None) -> str | None:
+    return None if value is None else _format_decimal(value)
+
+
+def _period_ppy(days: list[date]) -> tuple[int | None, str]:
+    """Series cadence from its own dates: weekend share, then median gap."""
+
+    if len(days) < 2:
+        return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
+    if 5 * len([d for d in days if d.isoweekday() > 5]) >= len(days):
+        return 365, "DAILY_CALENDAR"
+    gaps = [(days[i + 1] - days[i]).days for i in range(len(days) - 1)]
+    gaps.sort()
+    middle = gaps[len(gaps) // 2]
+    if middle < 4:
+        return 252, "DAILY_TRADING"
+    if 5 <= middle <= 9:
+        return 52, "WEEKLY"
+    return None, "UNCLASSIFIED_CADENCE"
+
+
+def _independent_period_fields(
+    numeric: Mapping[str, object], mwr: Mapping[str, object]
+) -> dict[str, object]:
+    """Derive the schema-10 period-return fields from the daily link path."""
+
+    with localcontext(Context(prec=34, rounding=ROUND_HALF_EVEN)):
+        trace = numeric.get("observation_trace")
+        links = trace["links"] if isinstance(trace, dict) else []
+        if type(links) is not list:
+            _fail()
+        wealth_by_year: dict[int, Decimal] = {}
+        first_by_year: dict[int, date] = {}
+        last_by_year: dict[int, date] = {}
+        ends: list[date] = []
+        for link in links:
+            opened = _parse_canonical_date(link["start_date"])
+            closed = _parse_canonical_date(link["end_date"])
+            ends.append(closed)
+            first_by_year.setdefault(closed.year, opened)
+            last_by_year[closed.year] = closed
+            wealth_by_year[closed.year] = wealth_by_year.get(
+                closed.year, Decimal(1)
+            ) * Decimal(str(link["factor"]))
+        start = _parse_canonical_date(links[0]["start_date"]) if links else None
+        close = ends[-1] if ends else None
+        days = None if start is None or close is None else (close - start).days
+        twr = _period_dec(numeric.get("observation_linked_return"))
+        annualised = None
+        if (
+            twr is not None
+            and days is not None
+            and days >= _PERIOD_YEAR_DAYS
+            and twr + 1 > 0
+        ):
+            annualised = (twr + 1) ** (Decimal(_PERIOD_YEAR_DAYS) / Decimal(days)) - 1
+        windows = {
+            str(year): {
+                "start": first_by_year[year].isoformat(),
+                "end": last_by_year[year].isoformat(),
+                "days": (last_by_year[year] - first_by_year[year]).days,
+                "covers_period": first_by_year[year] <= date(year - 1, 12, 31),
+            }
+            for year in sorted(wealth_by_year)
+        }
+        yearly = {
+            str(year): _format_decimal(wealth_by_year[year] - 1)
+            for year in sorted(wealth_by_year)
+        }
+        key = None if close is None else str(close.year)
+        ppy, ppy_basis = _period_ppy(ends)
+        rate = _period_dec(mwr.get("mwr_xirr"))
+        opened_text = mwr.get("mwr_opening_date")
+        closed_text = mwr.get("mwr_terminal_date")
+        mwr_days = None
+        equivalent = None
+        if opened_text is not None and closed_text is not None:
+            mwr_days = (
+                _parse_canonical_date(closed_text) - _parse_canonical_date(opened_text)
+            ).days
+            if rate is not None and mwr_days > 0 and rate + 1 > 0:
+                equivalent = (rate + 1) ** (Decimal(mwr_days) / Decimal(365)) - 1
+        span = (
+            _parse_canonical_date(numeric["end"])
+            - _parse_canonical_date(numeric["opening_capital_date"])
+        ).days
+
+        def label(length: int | None) -> str | None:
+            if length is None:
+                return None
+            return (
+                "ANNUALISED" if length >= _PERIOD_YEAR_DAYS else "ANNUALISED_FROM_DAYS"
+            )
+
+        if annualised is not None:
+            status = "AVAILABLE"
+        elif days is not None and days < _PERIOD_YEAR_DAYS:
+            status = "SUPPRESSED_UNDER_365D"
+        else:
+            status = "UNAVAILABLE"
+        ronc_annual = numeric.get("annualized_return_on_net_capital")
+        return {
+            "return_window_start": None if start is None else start.isoformat(),
+            "return_close_date": None if close is None else close.isoformat(),
+            "window_days": days,
+            "twr_annualised": _period_fmt(annualised),
+            "ytd_twr": None if key is None else yearly[key],
+            "ytd_window": None if key is None else windows[key],
+            "calendar_year_twr": yearly,
+            "calendar_year_windows": windows,
+            "periods_per_year": ppy,
+            "periods_per_year_basis": ppy_basis,
+            "mwr_window_equivalent": _period_fmt(equivalent),
+            "annualisation_basis": {
+                "twr": {
+                    "reported_basis": "CUMULATIVE",
+                    "window_days": days,
+                    "annualised_field": "twr_annualised",
+                    "annualised_status": status,
+                    "annualised_method": (
+                        None if annualised is None else "GEOMETRIC_ACT_365"
+                    ),
+                },
+                "mwr_xirr": {
+                    "reported_basis": None if rate is None else label(mwr_days),
+                    "window_days": mwr_days,
+                    "method": "XIRR_ACT_365",
+                    "window_equivalent_field": "mwr_window_equivalent",
+                },
+                "mwr_window_equivalent": {
+                    "reported_basis": None if equivalent is None else "CUMULATIVE",
+                    "window_days": mwr_days,
+                    "method": "XIRR_TO_WINDOW_ACT_365",
+                },
+                "return_on_net_capital": {
+                    "reported_basis": "CUMULATIVE",
+                    "window_days": span,
+                },
+                "annualized_return_on_net_capital": {
+                    "reported_basis": None if ronc_annual is None else label(span),
+                    "window_days": span,
+                    "method": (
+                        "GEOMETRIC_ACT_365"
+                        if span >= _PERIOD_YEAR_DAYS
+                        else "LINEAR_ACT_365"
+                    ),
+                },
+                "ytd_twr": {
+                    "reported_basis": "CUMULATIVE",
+                    "window_days": None if key is None else windows[key]["days"],
+                },
+                "calendar_year_twr": {
+                    "reported_basis": "CUMULATIVE",
+                    "year_attribution": "LINK_END_DATE_YEAR",
+                },
+            },
+        }
+
+
 def _internal_id(value: object, *, nullable: bool = False) -> str | None:
     if nullable and value is None:
         return None
@@ -6776,8 +6960,16 @@ def _verify_mixed_output_and_state(
                 assignment, fact_form, bridge
             )
             if set(candidate) - _POST_LIQUIDATION_FIELDS != (
-                set(expected_base) | _NUMERIC_PROJECTION_FIELDS | _MWR_FIELDS
+                set(expected_base)
+                | _NUMERIC_PROJECTION_FIELDS
+                | _MWR_FIELDS
+                | _PERIOD_FIELDS
             ):
+                _fail()
+            expected_period = _independent_period_fields(
+                _independent_mixed_numeric_row(fact_form), expected_mwr
+            )
+            if {field: candidate[field] for field in _PERIOD_FIELDS} != expected_period:
                 _fail()
             projection = {
                 field: candidate[field]
@@ -6796,7 +6988,9 @@ def _verify_mixed_output_and_state(
                 comparison.comparison_count + row_comparison.comparison_count,
                 comparison.discrepancy_count + row_comparison.discrepancy_count,
             )
-            expected_rows.append({**expected_base, **projection, **expected_mwr})
+            expected_rows.append(
+                {**expected_base, **projection, **expected_mwr, **expected_period}
+            )
             blocker_chains.append(
                 {
                     "assignment": _assignment_record(assignment),
@@ -6898,7 +7092,7 @@ def _verify_mixed_output_and_state(
     )
     admission_policy = admission["policy"]
     expected_fixed = {
-        "schema_version": 9,
+        "schema_version": 10,
         "artifact": "account-strategy-manifest",
         "calculation_cutoff_date": calculation_cutoff.isoformat(),
         "accounting_currency": bridge["currency"],

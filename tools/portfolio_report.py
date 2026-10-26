@@ -11300,7 +11300,7 @@ def _validate_epoch_manifest_input(
         current_account_ids=current_account_ids,
         crosswalk=crosswalk,
     )
-    if manifest.get("schema_version") == 9 and manifest.get(
+    if manifest.get("schema_version") in {9, 10} and manifest.get(
         "calculation_cutoff_date"
     ) != crosswalk.get("calculation_cutoff_date"):
         raise ReportValidationError(
@@ -11448,7 +11448,7 @@ def _verified_epoch_authority_details(
             "epoch manifest schema-9 authority differs"
         ) from exc
     cutoff = cast(str, manifest.get("calculation_cutoff_date"))
-    if manifest.get("schema_version") != 9:
+    if manifest.get("schema_version") not in {9, 10}:
         raise ReportValidationError(
             "epoch generation requires schema-9 cutoff authority"
         )
