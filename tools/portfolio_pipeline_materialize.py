@@ -28,6 +28,7 @@ from quant_engine.core import (
 )
 from quant_engine.core import run_storage
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import inventory_identity
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     validate_admit_or_declare_receipt,
@@ -679,15 +680,7 @@ def _directory_identity(path: Path) -> dict[str, object]:
     # validate what they write. Omitting it made every panel-candidate receipt
     # unverifiable: the rows agree byte for byte and only the framing differed.
     # `test_directory_identity_agrees_across_producers` pins all three together.
-    rows = _directory_rows(path)
-    encoded = (
-        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-    return {
-        "file_count": len(rows),
-        "inventory_sha256": hashlib.sha256(encoded).hexdigest(),
-    }
+    return inventory_identity(_directory_rows(path))
 
 
 def _file_definition(path: Path) -> dict[str, object]:
