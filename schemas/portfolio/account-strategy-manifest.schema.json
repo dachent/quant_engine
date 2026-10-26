@@ -16,7 +16,7 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"enum": [7, 8, 9]},
+    "schema_version": {"enum": [7, 8, 9, 10]},
     "calculation_cutoff_date": {"$ref": "#/$defs/date"},
     "lifecycle_schema_version": {"const": 1},
     "artifact": {"const": "account-strategy-manifest"},
@@ -97,7 +97,7 @@
       }}}}}
     },
     {
-      "if": {"properties": {"schema_version": {"const": 9}}, "required": ["schema_version"]},
+      "if": {"properties": {"schema_version": {"enum": [9, 10]}}, "required": ["schema_version"]},
       "then": {"required": ["calculation_cutoff_date"], "properties": {
         "source_identities": {
           "properties": {
@@ -116,7 +116,7 @@
       }}
     },
     {
-      "if": {"properties": {"schema_version": {"const": 9}, "source_identities": {"required": ["selected_inputs"]}}, "required": ["schema_version", "source_identities"]},
+      "if": {"properties": {"schema_version": {"enum": [9, 10]}, "source_identities": {"required": ["selected_inputs"]}}, "required": ["schema_version", "source_identities"]},
       "then": {"properties": {"source_identities": {"required": ["selected_inputs", "account_assignment_perimeter", "calculation_inputs", "code_identities"]}}}
     },
     {
@@ -132,6 +132,17 @@
         "calculation_inputs": {"properties": {"schema": {"properties": {"version": {"const": "1"}}}}},
         "admission_policy": {"properties": {"artifact": {"properties": {"schema": {"properties": {"name": {"const": "mapped-epoch-admission"}, "version": {"const": "1"}}}}}}}
       }}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 10}}, "required": ["schema_version"]},
+      "then": {"properties": {"rows": {"items": {
+        "if": {"properties": {"status": {"const": "OK"}}, "required": ["status"]},
+        "then": {"required": ["return_window_start", "return_close_date", "window_days", "twr_annualised", "ytd_twr", "ytd_window", "calendar_year_twr", "calendar_year_windows", "periods_per_year", "periods_per_year_basis", "mwr_window_equivalent", "annualisation_basis"]}
+      }}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"enum": [7, 8, 9]}}, "required": ["schema_version"]},
+      "then": {"properties": {"rows": {"items": {"not": {"anyOf": [{"required": ["return_window_start"]}, {"required": ["return_close_date"]}, {"required": ["window_days"]}, {"required": ["twr_annualised"]}, {"required": ["ytd_twr"]}, {"required": ["ytd_window"]}, {"required": ["calendar_year_twr"]}, {"required": ["calendar_year_windows"]}, {"required": ["periods_per_year"]}, {"required": ["periods_per_year_basis"]}, {"required": ["mwr_window_equivalent"]}, {"required": ["annualisation_basis"]}]}}}}}
     },
     {
       "if": {
@@ -157,6 +168,46 @@
     }
   ],
   "$defs": {
+    "period_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "days", "covers_period"],
+      "properties": {
+        "start": {"$ref": "#/$defs/date"},
+        "end": {"$ref": "#/$defs/date"},
+        "days": {"type": "integer", "minimum": 0},
+        "covers_period": {"type": ["boolean", "null"]}
+      }
+    },
+    "annualisation_basis_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reported_basis"],
+      "properties": {
+        "reported_basis": {"enum": ["CUMULATIVE", "ANNUALISED", "ANNUALISED_FROM_DAYS", null]},
+        "window_days": {"type": ["integer", "null"], "minimum": 0},
+        "annualised_field": {"type": "string"},
+        "annualised_status": {"enum": ["AVAILABLE", "SUPPRESSED_UNDER_365D", "UNAVAILABLE"]},
+        "annualised_method": {"enum": ["GEOMETRIC_ACT_365", null]},
+        "method": {"enum": ["XIRR_ACT_365", "XIRR_TO_WINDOW_ACT_365", "GEOMETRIC_ACT_365", "LINEAR_ACT_365", null]},
+        "window_equivalent_field": {"type": "string"},
+        "year_attribution": {"const": "LINK_END_DATE_YEAR"}
+      }
+    },
+    "annualisation_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["twr", "mwr_xirr", "mwr_window_equivalent", "return_on_net_capital", "annualized_return_on_net_capital", "ytd_twr", "calendar_year_twr"],
+      "properties": {
+        "twr": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "mwr_xirr": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "mwr_window_equivalent": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "return_on_net_capital": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "annualized_return_on_net_capital": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "ytd_twr": {"$ref": "#/$defs/annualisation_basis_entry"},
+        "calendar_year_twr": {"$ref": "#/$defs/annualisation_basis_entry"}
+      }
+    },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "date": {"type": "string", "format": "date", "pattern": "^(?!0000)(?:(?:[0-9]{4}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29))$"},
     "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
@@ -518,6 +569,18 @@
         "mwr_day_count": {"const": "ACTUAL_365"},
         "mwr_unit": {"const": "ANNUALIZED_RETURN"},
         "mwr_source_binding": {"const": "GOVERNED_SOURCE_IDENTITIES"},
+        "return_window_start": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "return_close_date": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "window_days": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "twr_annualised": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "ytd_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "ytd_window": {"anyOf": [{"$ref": "#/$defs/period_window"}, {"type": "null"}]},
+        "calendar_year_twr": {"type": "object", "additionalProperties": {"$ref": "#/$defs/decimal"}, "propertyNames": {"pattern": "^[0-9]{4}$"}},
+        "calendar_year_windows": {"type": "object", "additionalProperties": {"$ref": "#/$defs/period_window"}, "propertyNames": {"pattern": "^[0-9]{4}$"}},
+        "periods_per_year": {"anyOf": [{"enum": [1, 4, 12, 52, 252, 365]}, {"type": "null"}]},
+        "periods_per_year_basis": {"enum": ["DAILY_CALENDAR", "DAILY_TRADING", "WEEKLY", "UNCLASSIFIED_TOO_FEW_OBSERVATIONS", "UNCLASSIFIED_CADENCE"]},
+        "mwr_window_equivalent": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "annualisation_basis": {"$ref": "#/$defs/annualisation_basis"},
         "observation_linked_return": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
         "observed_hwm_index": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
         "observed_max_drawdown": {"anyOf": [{"$ref": "#/$defs/nonnegative_decimal"}, {"type": "null"}]},
@@ -596,7 +659,7 @@
         {
           "if": {"not": {"properties": {"status": {"const": "OK"}}, "required": ["status"]}},
           "then": {
-            "not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}, {"required": ["opening_capital_date"]}, {"required": ["performance_status"]}, {"required": ["performance_reason"]}, {"required": ["performance_opening_date"]}, {"required": ["performance_opening_value"]}, {"required": ["performance_opening_basis"]}, {"required": ["performance_flags"]}, {"required": ["performance_flow_legs"]}, {"required": ["flow_count"]}]}
+            "not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}, {"required": ["opening_capital_date"]}, {"required": ["performance_status"]}, {"required": ["performance_reason"]}, {"required": ["performance_opening_date"]}, {"required": ["performance_opening_value"]}, {"required": ["performance_opening_basis"]}, {"required": ["performance_flags"]}, {"required": ["performance_flow_legs"]}, {"required": ["flow_count"]}, {"required": ["return_window_start"]}, {"required": ["return_close_date"]}, {"required": ["window_days"]}, {"required": ["twr_annualised"]}, {"required": ["ytd_twr"]}, {"required": ["ytd_window"]}, {"required": ["calendar_year_twr"]}, {"required": ["calendar_year_windows"]}, {"required": ["periods_per_year"]}, {"required": ["periods_per_year_basis"]}, {"required": ["mwr_window_equivalent"]}, {"required": ["annualisation_basis"]}]}
           }
         }
       ]

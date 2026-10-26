@@ -30,6 +30,7 @@ from quant_engine.core import (
     read_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import inventory_identity
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,
@@ -618,14 +619,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
                 "size_bytes": size,
             }
         )
-    content = (
-        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-    return {
-        "file_count": len(rows),
-        "inventory_sha256": hashlib.sha256(content).hexdigest(),
-    }
+    return inventory_identity(rows)
 
 
 def _stage_panel_qa(qa_dir: Path, output_root: Path) -> Path:

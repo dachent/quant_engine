@@ -211,7 +211,7 @@ def stage_current_epoch_manifest(
         bundle,
         artifact_id=_MANIFEST_ARTIFACT_ID,
         schema_name="account-strategy-manifest",
-        schema_version="9",
+        schema_version="10",
     )
     crosswalk_descriptor = _artifact_descriptor(
         bundle,

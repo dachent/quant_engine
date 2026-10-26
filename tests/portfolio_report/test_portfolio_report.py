@@ -8536,14 +8536,14 @@ def test_workbook_parity_accepts_report_schema1_and2(tmp_path: Path) -> None:
     workbook_path = tmp_path / "compatibility.xlsx"
     reporter._workbook(report, workbook_path)
     workbook_bytes = workbook_path.read_bytes()
-    for version in (1, 2, 3, 4):
+    for version in (1, 2, 3, 4, 5):
         compatible = json.loads(json.dumps(report))
         compatible["report_schema_version"] = version
         reporter._workbook_parity_receipt(
             canonical_json_bytes(compatible), workbook_bytes
         )
     unsupported = json.loads(json.dumps(report))
-    unsupported["report_schema_version"] = 5
+    unsupported["report_schema_version"] = 6
     with pytest.raises(reporter.ReportValidationError, match="contract differs"):
         reporter._workbook_parity_receipt(
             canonical_json_bytes(unsupported), workbook_bytes

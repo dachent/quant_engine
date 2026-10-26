@@ -290,7 +290,7 @@ def test_robuxios_assignment_is_evidenced_and_its_comparison_names_the_missing_g
     """GOOD: the contract's assignment is published; the comparison is NOT_READY."""
 
     report, _ = world_with_attribution
-    assert report["report_schema_version"] == 4
+    assert report["report_schema_version"] == 5
     row = _summary(report)[ROBUXIO]
 
     assert row["benchmark_assignment_status"] == "EVIDENCED"
@@ -608,14 +608,14 @@ def test_the_schema_admits_the_labels_at_four_only_and_closes_their_shape(
 ) -> None:
     report, _ = world_with_attribution
     rows = _schema_rows(report)
-    assert _summary_errors(4, rows) == []
+    assert _summary_errors(5, rows) == []
     assert _summary_errors(3, rows)
 
     forged = _schema_rows(report)
     target = next(r for r in forged if r["account_live_cagr_annualization"])
     target["account_live_cagr_annualization"]["short_window"] = "yes"
-    assert _summary_errors(4, forged)
+    assert _summary_errors(5, forged)
     extra = _schema_rows(report)
     target = next(r for r in extra if r["account_live_cagr_annualization"])
     target["account_live_cagr_annualization"]["note"] = "x"
-    assert _summary_errors(4, extra)
+    assert _summary_errors(5, extra)
