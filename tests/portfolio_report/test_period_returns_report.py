@@ -275,3 +275,16 @@ def test_versions_before_five_forbid_the_period_fields() -> None:
     ]
     assert len(gates) == 1
     assert SCHEMA["properties"]["report_schema_version"]["enum"] == [1, 2, 3, 4, 5]
+
+
+def test_weekly_series_sampled_on_weekends_is_weekly_not_daily_calendar(
+    reporter: Any,
+) -> None:
+    saturdays = [date(2025, 1, 4) + timedelta(days=7 * index) for index in range(30)]
+    sundays = [day + timedelta(days=1) for day in saturdays]
+    for series in (saturdays, sundays):
+        assert reporter._period_cadence(series) == (52, "WEEKLY")
+    calendar = [date(2025, 1, 1) + timedelta(days=index) for index in range(60)]
+    assert reporter._period_cadence(calendar) == (365, "DAILY_CALENDAR")
+    trading = [day for day in calendar if day.weekday() < 5]
+    assert reporter._period_cadence(trading) == (252, "DAILY_TRADING")

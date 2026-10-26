@@ -2700,19 +2700,19 @@ def _period_fmt(value: Decimal | None) -> str | None:
 
 
 def _period_ppy(days: list[date]) -> tuple[int | None, str]:
-    """Series cadence from its own dates: weekend share, then median gap."""
+    """Series cadence from its own dates: median gap, then weekend share."""
 
     if len(days) < 2:
         return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
-    if 5 * len([d for d in days if d.isoweekday() > 5]) >= len(days):
-        return 365, "DAILY_CALENDAR"
     gaps = [(days[i + 1] - days[i]).days for i in range(len(days) - 1)]
     gaps.sort()
     middle = gaps[len(gaps) // 2]
-    if middle < 4:
-        return 252, "DAILY_TRADING"
     if 5 <= middle <= 9:
         return 52, "WEEKLY"
+    if middle < 4:
+        if 5 * len([d for d in days if d.isoweekday() > 5]) >= len(days):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
     return None, "UNCLASSIFIED_CADENCE"
 
 

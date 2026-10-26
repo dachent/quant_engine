@@ -4207,17 +4207,19 @@ def _period_periods_per_year(end_dates: Sequence[date]) -> tuple[int | None, str
 
     if len(end_dates) < 2:
         return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
-    weekend = sum(1 for day in end_dates if day.weekday() >= 5)
-    if weekend * 5 >= len(end_dates):
-        return 365, "DAILY_CALENDAR"
     gaps = sorted(
         (later - earlier).days for earlier, later in zip(end_dates, end_dates[1:])
     )
     median_gap = gaps[len(gaps) // 2]
-    if median_gap <= 3:
-        return 252, "DAILY_TRADING"
+    # Spacing decides first: a weekly series sampled on weekends is still
+    # weekly.  The weekend share only separates calendar-daily from trading-daily.
     if 5 <= median_gap <= 9:
         return 52, "WEEKLY"
+    if median_gap <= 3:
+        weekend = sum(1 for day in end_dates if day.weekday() >= 5)
+        if weekend * 5 >= len(end_dates):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
     return None, "UNCLASSIFIED_CADENCE"
 
 

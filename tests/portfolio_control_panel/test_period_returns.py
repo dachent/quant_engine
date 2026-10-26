@@ -217,3 +217,23 @@ def test_manifest_schema_ten_requires_the_fields_and_nine_forbids_them(
     assert required == set(producer.PERIOD_RETURN_FIELDS)
     assert producer._CURRENT_MANIFEST_SCHEMA_VERSION == 10
     assert 9 in producer._CURRENT_MANIFEST_FAMILY
+
+
+def test_weekly_series_sampled_on_weekends_is_weekly_not_daily_calendar(
+    producer: Any, verifier: Any
+) -> None:
+    saturdays = [date(2025, 1, 4) + timedelta(days=7 * index) for index in range(30)]
+    sundays = [day + timedelta(days=1) for day in saturdays]
+    for series in (saturdays, sundays):
+        assert producer._period_periods_per_year(series) == (52, "WEEKLY")
+        assert verifier._period_ppy(series) == (52, "WEEKLY")
+    calendar = [date(2025, 1, 1) + timedelta(days=index) for index in range(60)]
+    assert producer._period_periods_per_year(calendar) == (365, "DAILY_CALENDAR")
+    assert verifier._period_ppy(calendar) == (365, "DAILY_CALENDAR")
+    trading = [
+        day
+        for day in (date(2025, 1, 1) + timedelta(days=index) for index in range(60))
+        if day.weekday() < 5
+    ]
+    assert producer._period_periods_per_year(trading) == (252, "DAILY_TRADING")
+    assert verifier._period_ppy(trading) == (252, "DAILY_TRADING")

@@ -2010,14 +2010,16 @@ def _period_cadence(days: Sequence[date]) -> tuple[int | None, str]:
 
     if len(days) < 2:
         return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
-    if sum(1 for day in days if day.weekday() >= 5) * 5 >= len(days):
-        return 365, "DAILY_CALENDAR"
     gaps = sorted((later - earlier).days for earlier, later in zip(days, days[1:]))
     median_gap = gaps[len(gaps) // 2]
-    if median_gap <= 3:
-        return 252, "DAILY_TRADING"
+    # Spacing decides first: a weekly series sampled on weekends is still
+    # weekly.  The weekend share only separates calendar-daily from trading-daily.
     if 5 <= median_gap <= 9:
         return 52, "WEEKLY"
+    if median_gap <= 3:
+        if sum(1 for day in days if day.weekday() >= 5) * 5 >= len(days):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
     return None, "UNCLASSIFIED_CADENCE"
 
 
