@@ -24,6 +24,7 @@ from quant_engine.core import (
     run_storage,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.directory_identity import inventory_identity
 
 
 class AttendedPreparationError(ValueError):
@@ -297,15 +298,7 @@ def _directory_definition(path: Path) -> dict[str, object]:
     # the `history_generation` definition written here, so a difference in
     # framing alone makes the attended request unverifiable even when every row
     # agrees. `test_directory_identity_agrees_across_producers` pins them.
-    encoded = (
-        json.dumps(files, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-    return {
-        "path": str(path.resolve()),
-        "file_count": len(files),
-        "inventory_sha256": hashlib.sha256(encoded).hexdigest(),
-    }
+    return {"path": str(path.resolve()), **inventory_identity(files)}
 
 
 def _write(path: Path, value: Mapping[str, Any]) -> None:

@@ -107,6 +107,9 @@ _PATH_STAGES = {
     # change to either genuinely can affect every stage's delivery -- declared
     # with real stage impact, not `[]`, unlike the audit/guard tools below.
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
+    # The one framing of every directory-inventory identity (panel, materializer,
+    # release builder, attended preparation): a change moves receipts of every stage.
+    "packages/core/src/quant_engine/core/directory_identity.py": list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],

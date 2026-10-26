@@ -109,3 +109,51 @@ def test_identity_changes_when_any_byte_changes(sample: Path, tmp_path: Path) ->
     after = materializer._directory_identity(mutated)  # noqa: SLF001
     assert after["inventory_sha256"] != before["inventory_sha256"]
     assert release._directory_inventory(mutated) == after  # noqa: SLF001
+
+
+# Digest of the sample above computed by the four pre-consolidation encoders at
+# main b4d8de34 (release_builder._directory_inventory); consolidating the framing
+# into core.directory_identity must not move a single byte.
+GOLDEN_SAMPLE_SHA256 = (
+    "c910b15d67b551c8c42cc4d38756b26e86f6c1fd56f1da0b67536c694425e5b9"
+)
+
+
+def test_every_producer_still_matches_the_pre_consolidation_golden_digest(
+    sample: Path,
+) -> None:
+    from quant_engine.core.directory_identity import inventory_identity
+
+    for name, compute in {
+        "materialize": lambda: _load(
+            "portfolio_pipeline_materialize"
+        )._directory_identity(  # noqa: SLF001
+            sample
+        ),
+        "release": lambda: _load("portfolio_release_builder")._directory_inventory(  # noqa: SLF001
+            sample
+        ),
+        "panel": lambda: _load(
+            "portfolio_control_panel"
+        )._authorization_directory_identity(sample, "golden"),  # noqa: SLF001
+        "preparation": lambda: _load(
+            "portfolio_attended_preparation"
+        )._directory_definition(sample),  # noqa: SLF001
+    }.items():
+        assert compute()["inventory_sha256"] == GOLDEN_SAMPLE_SHA256, name
+    rows = [
+        {"path": "a.txt", "sha256": "0" * 64, "size_bytes": 1},
+    ]
+    assert inventory_identity(rows)["file_count"] == 1
+    assert inventory_identity([]) == inventory_identity([])
+    assert inventory_identity(rows) != inventory_identity([])
+
+
+def test_the_two_stage_maps_are_equal() -> None:
+    from quant_engine.core import pipeline
+
+    materializer = _load("portfolio_pipeline_materialize")
+    assert tuple(materializer.STAGES) == tuple(pipeline._PORTFOLIO_STAGE_ORDER)  # noqa: SLF001
+    assert dict(materializer.STAGE_DEPENDENCIES) == dict(
+        pipeline._PORTFOLIO_STAGE_DEPENDENCIES  # noqa: SLF001
+    )
