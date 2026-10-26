@@ -933,3 +933,31 @@ def test_the_cli_writes_the_artifact_or_refuses_without_writing(
     assert builder.main([*args, "--output", str(refused)]) == 1
     assert not refused.exists()
     assert "quantbase fund facts refused" in capsys.readouterr().err
+
+
+def test_a_post_cutoff_rebalance_does_not_change_the_artifact() -> None:
+    baseline = _facts()
+    data = _inputs()
+    data["activity"].append(
+        _row(
+            activity_type="filled_txn",
+            id="a6",
+            fund="11",
+            fund_title="Alpha Fund",
+            type="RBLNC",
+            amount="9.9",
+            time=_at(9, "19:30:00"),
+            filled="Y",
+            is_rebalance="True",
+        )
+    )
+    summaries = _facts(data)["closure"]["fund_summaries"]
+    assert summaries == baseline["closure"]["fund_summaries"]
+    assert summaries["alpha"]["rebalance_count"] == 1
+
+
+def test_a_vendor_total_that_ends_before_the_components_is_refused() -> None:
+    def truncated(data: dict[str, Any]) -> None:
+        data["dashboards"]["total"] = data["dashboards"]["total"][:-1]
+
+    _refused(truncated, "total dashboard ends before")

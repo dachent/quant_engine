@@ -599,6 +599,9 @@ def _parse_activity(raw: bytes, cutoff: date) -> Activity:
             if txn_type == "RBLNC" or row["is_rebalance"] == "True":
                 if txn_type != "RBLNC":
                     raise QuantbaseFundFactsError("a rebalance has the wrong type")
+                if moment.date() > cutoff:
+                    after += 1
+                    continue
                 # In-fund trades: never a flow, never in the vendor cost basis.
                 count, net = rebalances.get(fund_id, (0, _ZERO))
                 rebalances[fund_id] = (
@@ -1181,6 +1184,14 @@ def _account_closure(
     missing_as_zero = 0
     exempted: list[dict[str, Any]] = []
     last_retired_value = max(item.decl.last_nonzero_day for item in funds)
+    covered = [day for day in total if day <= cutoff]
+    component_days = [
+        day for key in component_keys for day in dashboards[key] if day <= cutoff
+    ]
+    if not covered or max(covered) < max(component_days, default=max(covered)):
+        raise QuantbaseFundFactsError(
+            "the vendor total dashboard ends before the component dashboards"
+        )
     for day in sorted(total):
         if day > cutoff:
             continue

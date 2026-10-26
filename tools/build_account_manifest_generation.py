@@ -34,6 +34,7 @@ from quant_engine.core.contracts import (
 )
 from tools.account_strategy_manifest import (
     PERFORMANCE_ROW_FIELDS,
+    PERIOD_RETURN_FIELDS,
     ManifestCandidateSnapshots,
     ManifestError,
     SleeveManifestFacts,
@@ -129,7 +130,7 @@ _SUBJECT_SCHEMAS = MappingProxyType(
         _CROSSWALK_SUBJECT_PATH: ("account-strategy-current-epoch-crosswalk", "1"),
         "outputs/account-strategy-manifest.json": (
             "account-strategy-manifest",
-            "9",
+            "10",
         ),
         "authority/account-interval-retrieval-receipt-authority.json": (
             "account-interval-retrieval-receipt-authority",
@@ -4182,6 +4183,7 @@ def _build_mixed_account_manifest_payloads(
         "nav_observation_trace",
         "nav_observations",
         *PERFORMANCE_ROW_FIELDS,
+        *PERIOD_RETURN_FIELDS,
     }
     cutoff_excluded_keys = (
         cutoff_excluded_opening_anchor_keys
@@ -4427,6 +4429,7 @@ def _build_mixed_account_manifest_payloads(
         "nav_observation_trace",
         "nav_observations",
         *PERFORMANCE_ROW_FIELDS,
+        *PERIOD_RETURN_FIELDS,
     }
     if any(
         forbidden & set(row)
@@ -4491,7 +4494,7 @@ def _build_mixed_account_manifest_payloads(
         ),
     )
     output = {
-        "schema_version": 9,
+        "schema_version": 10,
         "artifact": "account-strategy-manifest",
         "accounting_currency": currency,
         "authority_readiness": {

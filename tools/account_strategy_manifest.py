@@ -102,7 +102,9 @@ _SOURCE_IDENTITY_COUNTERPARTY_RULE = (
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 _MANIFEST_SCHEMA_VERSION = 7
 _FLOW_CLASSES_SCHEMA_VERSION = 3
-_CURRENT_MANIFEST_SCHEMA_VERSION = 9
+_CURRENT_MANIFEST_SCHEMA_VERSION = 10
+_PERIOD_RETURNS_MANIFEST_SCHEMA_VERSION = 10
+_CURRENT_MANIFEST_FAMILY = frozenset({9, 10})
 _CURRENT_FLOW_CLASSES_SCHEMA_VERSION = 4
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _FLOW_COVERAGE_SCHEMA_VERSION = 2
@@ -4760,7 +4762,7 @@ def _assemble_manifest_impl(
                 and anchor["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
                 and _in_window(str(anchor["event_date"]), w0, w1)
             ]
-            if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
+            if manifest_schema_version in _CURRENT_MANIFEST_FAMILY:
                 if prev_closing is None and len(opening_anchors) > 1:
                     raise ManifestError(
                         "funded current-product epoch permits at most one opening capital anchor"
@@ -4921,6 +4923,220 @@ def _assemble_manifest_impl(
         },
         "rows": rows,
     }
+
+
+_PERIOD_ANNUALISATION_MIN_DAYS = 365
+_PERIOD_RETURN_CONTEXT = Context(prec=34)
+PERIOD_RETURN_FIELDS = (
+    "return_window_start",
+    "return_close_date",
+    "window_days",
+    "twr_annualised",
+    "ytd_twr",
+    "ytd_window",
+    "calendar_year_twr",
+    "calendar_year_windows",
+    "periods_per_year",
+    "periods_per_year_basis",
+    "mwr_window_equivalent",
+    "annualisation_basis",
+)
+
+
+def _period_decimal(raw: object) -> Decimal | None:
+    return None if raw is None else Decimal(str(raw))
+
+
+def _period_window(
+    first_start: date, last_end: date, year: int | None = None
+) -> dict[str, Any]:
+    return {
+        "start": first_start.isoformat(),
+        "end": last_end.isoformat(),
+        "days": (last_end - first_start).days,
+        "covers_period": (
+            None if year is None else first_start <= date(year - 1, 12, 31)
+        ),
+    }
+
+
+def _period_periods_per_year(end_dates: Sequence[date]) -> tuple[int | None, str]:
+    """Cadence of a return series from its observation dates (never assumed)."""
+
+    if len(end_dates) < 2:
+        return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
+    gaps = sorted(
+        (later - earlier).days for earlier, later in zip(end_dates, end_dates[1:])
+    )
+    median_gap = gaps[len(gaps) // 2]
+    # Spacing decides first: a weekly series sampled on weekends is still
+    # weekly.  The weekend share only separates calendar-daily from trading-daily.
+    if 5 <= median_gap <= 9:
+        return 52, "WEEKLY"
+    if median_gap <= 3:
+        weekend = sum(1 for day in end_dates if day.weekday() >= 5)
+        if weekend * 5 >= len(end_dates):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
+    return None, "UNCLASSIFIED_CADENCE"
+
+
+def _period_return_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Per-epoch window, annualisation, YTD and calendar-year returns (schema 10).
+
+    A pure function of one finished OK row: its observation trace (the daily
+    linked path), its TWR, its money-weighted rate and its window dates.  The
+    TWR is never changed; ``twr_annualised`` exists only from 365 days.
+    """
+
+    with localcontext(_PERIOD_RETURN_CONTEXT):
+        trace = row.get("observation_trace")
+        links = list(trace["links"]) if isinstance(trace, Mapping) else []
+        twr = _period_decimal(row.get("observation_linked_return"))
+        window_days: int | None = None
+        window_start: date | None = None
+        close: date | None = None
+        twr_annualised: Decimal | None = None
+        years: dict[int, list[dict[str, Any]]] = {}
+        if links:
+            window_start = date.fromisoformat(str(links[0]["start_date"]))
+            close = date.fromisoformat(str(links[-1]["end_date"]))
+            window_days = (close - window_start).days
+            for link in links:
+                year = date.fromisoformat(str(link["end_date"])).year
+                years.setdefault(year, []).append(link)
+            if (
+                twr is not None
+                and window_days >= _PERIOD_ANNUALISATION_MIN_DAYS
+                and twr > Decimal(-1)
+            ):
+                twr_annualised = (Decimal(1) + twr) ** (
+                    Decimal(365) / Decimal(window_days)
+                ) - Decimal(1)
+        calendar_twr: dict[str, Decimal] = {}
+        calendar_windows: dict[str, dict[str, Any]] = {}
+        for year, year_links in sorted(years.items()):
+            wealth = Decimal(1)
+            for link in year_links:
+                wealth *= Decimal(str(link["factor"]))
+            calendar_twr[str(year)] = wealth - Decimal(1)
+            calendar_windows[str(year)] = _period_window(
+                date.fromisoformat(str(year_links[0]["start_date"])),
+                date.fromisoformat(str(year_links[-1]["end_date"])),
+                year,
+            )
+        ytd_key = None if close is None else str(close.year)
+        periods, periods_basis = _period_periods_per_year(
+            [date.fromisoformat(str(link["end_date"])) for link in links]
+        )
+        mwr = _period_decimal(row.get("mwr_xirr"))
+        mwr_open = row.get("mwr_opening_date")
+        mwr_end = row.get("mwr_terminal_date")
+        mwr_days: int | None = None
+        mwr_equivalent: Decimal | None = None
+        if isinstance(mwr_open, str) and isinstance(mwr_end, str):
+            mwr_days = (date.fromisoformat(mwr_end) - date.fromisoformat(mwr_open)).days
+            if mwr is not None and mwr_days > 0 and mwr > Decimal(-1):
+                mwr_equivalent = (Decimal(1) + mwr) ** (
+                    Decimal(mwr_days) / Decimal(365)
+                ) - Decimal(1)
+        if twr_annualised is not None:
+            twr_status = "AVAILABLE"
+        elif window_days is not None and window_days < _PERIOD_ANNUALISATION_MIN_DAYS:
+            twr_status = "SUPPRESSED_UNDER_365D"
+        else:
+            twr_status = "UNAVAILABLE"
+        span_days: int | None = None
+        capital_date = row.get("opening_capital_date")
+        if isinstance(capital_date, str) and isinstance(row.get("end"), str):
+            span_days = (
+                date.fromisoformat(str(row["end"])) - date.fromisoformat(capital_date)
+            ).days
+
+        def _reported(days: int | None) -> str | None:
+            if days is None:
+                return None
+            return (
+                "ANNUALISED"
+                if days >= _PERIOD_ANNUALISATION_MIN_DAYS
+                else "ANNUALISED_FROM_DAYS"
+            )
+
+        basis: dict[str, Any] = {
+            "twr": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": window_days,
+                "annualised_field": "twr_annualised",
+                "annualised_status": twr_status,
+                "annualised_method": (
+                    "GEOMETRIC_ACT_365" if twr_annualised is not None else None
+                ),
+            },
+            "mwr_xirr": {
+                "reported_basis": _reported(mwr_days) if mwr is not None else None,
+                "window_days": mwr_days,
+                "method": "XIRR_ACT_365",
+                "window_equivalent_field": "mwr_window_equivalent",
+            },
+            "mwr_window_equivalent": {
+                "reported_basis": "CUMULATIVE" if mwr_equivalent is not None else None,
+                "window_days": mwr_days,
+                "method": "XIRR_TO_WINDOW_ACT_365",
+            },
+            "return_on_net_capital": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": span_days,
+            },
+            "annualized_return_on_net_capital": {
+                "reported_basis": (
+                    _reported(span_days)
+                    if row.get("annualized_return_on_net_capital") is not None
+                    else None
+                ),
+                "window_days": span_days,
+                "method": (
+                    None
+                    if span_days is None
+                    else "GEOMETRIC_ACT_365"
+                    if span_days >= _PERIOD_ANNUALISATION_MIN_DAYS
+                    else "LINEAR_ACT_365"
+                ),
+            },
+            "ytd_twr": {"reported_basis": "CUMULATIVE", "window_days": None},
+            "calendar_year_twr": {
+                "reported_basis": "CUMULATIVE",
+                "year_attribution": "LINK_END_DATE_YEAR",
+            },
+        }
+        if ytd_key is not None:
+            basis["ytd_twr"]["window_days"] = calendar_windows[ytd_key]["days"]
+        return {
+            "return_window_start": (
+                None if window_start is None else window_start.isoformat()
+            ),
+            "return_close_date": None if close is None else close.isoformat(),
+            "window_days": window_days,
+            "twr_annualised": twr_annualised,
+            "ytd_twr": None if ytd_key is None else calendar_twr[ytd_key],
+            "ytd_window": None if ytd_key is None else calendar_windows[ytd_key],
+            "calendar_year_twr": calendar_twr,
+            "calendar_year_windows": calendar_windows,
+            "periods_per_year": periods,
+            "periods_per_year_basis": periods_basis,
+            "mwr_window_equivalent": mwr_equivalent,
+            "annualisation_basis": basis,
+        }
+
+
+def _attach_period_returns(manifest: Mapping[str, Any]) -> None:
+    """Add the schema-10 period-return fields to every OK row, additively."""
+
+    rows = manifest.get("rows")
+    if not isinstance(rows, list):
+        raise ManifestError("manifest rows are invalid")
+    for row in rows:
+        if isinstance(row, dict) and row.get("status") == "OK":
+            row.update(_period_return_fields(cast(Mapping[str, Any], json_ready(row))))
 
 
 MWR_VALUATION_TIMING = "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE"
@@ -5749,7 +5965,7 @@ def _validate_manifest_semantics(
     full_chains: Mapping[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     schema_version = manifest.get("schema_version")
-    if schema_version not in {7, 8, 9}:
+    if schema_version not in {7, 8, 9, 10}:
         raise ManifestError("manifest schema version is invalid")
     source_identities = manifest.get("source_identities")
     if not isinstance(source_identities, Mapping):
@@ -5944,7 +6160,7 @@ def _validate_manifest_semantics(
             flow_class = flow.get("class")
             if flow_class not in gross_flows:
                 raise ManifestError(f"row {index} capital flow trace class is invalid")
-            if schema_version == 9:
+            if schema_version in _CURRENT_MANIFEST_FAMILY:
                 if set(flow) != {
                     "class",
                     "event_date",
@@ -6106,8 +6322,17 @@ def _validate_manifest_semantics(
             opening_capital=money["opening_capital"],
             current_value=money["current_value"],
             capital_entries=capital_entries,
-            dual_date_trace=schema_version == 9,
+            dual_date_trace=schema_version in _CURRENT_MANIFEST_FAMILY,
         )
+        if schema_version == _PERIOD_RETURNS_MANIFEST_SCHEMA_VERSION:
+            expected_period = json_ready(_period_return_fields(row))
+            if not isinstance(expected_period, dict) or any(
+                field not in row or row[field] != expected_period[field]
+                for field in PERIOD_RETURN_FIELDS
+            ):
+                raise ManifestError(f"row {index} period return fields are invalid")
+        elif any(field in row for field in PERIOD_RETURN_FIELDS):
+            raise ManifestError(f"row {index} period return fields need schema 10")
 
     projected_assignments: list[dict[str, Any]] = []
     row_chains: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -6641,13 +6866,15 @@ def _build_manifest_candidate_from_snapshots_impl(
             frozenset() if sleeve is None else sleeve.sleeve_accounts
         ),
     )
-    if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
+    if manifest_schema_version in _CURRENT_MANIFEST_FAMILY:
         _mwr_payloads_from_governed_inputs(
             manifest, ledger, reconciled_events, capital_anchors
         )
         manifest["calculation_cutoff_date"] = _iso_date(
             ledger.get("calculation_cutoff_date"), "ledger calculation_cutoff_date"
         )
+    if manifest_schema_version == _PERIOD_RETURNS_MANIFEST_SCHEMA_VERSION:
+        _attach_period_returns(manifest)
     manifest["accounting_currency"] = ledger["accounting_currency"]
     validate_manifest_schema(
         manifest,

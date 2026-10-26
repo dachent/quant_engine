@@ -82,6 +82,11 @@ from quant_engine.portfolio_ledger.returns import (
     value_periods,
 )
 from portfolio_private_stage import validate_private_stage_target
+from holdings_identity import build_holdings_identity
+from verify_holdings_identity import (
+    HoldingsIdentityError,
+    verify_holdings_identity,
+)
 from portfolio_invested_capital import (
     CapitalValidationError,
     governed_hwm_input_policy,
@@ -1974,6 +1979,236 @@ def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "account_live_cagr_annualization": cagr,
         "mwr_annualization": mwr,
+    }
+
+
+PERIOD_RETURNS_REPORT_SCHEMA_VERSION: Final = 5
+# Epoch-row fields the manifest (schema 10) derives and the report copies.
+_EPOCH_PERIOD_FIELDS: Final = (
+    "return_window_start",
+    "return_close_date",
+    "window_days",
+    "twr_annualised",
+    "ytd_twr",
+    "ytd_window",
+    "calendar_year_twr",
+    "calendar_year_windows",
+    "periods_per_year",
+    "periods_per_year_basis",
+    "mwr_window_equivalent",
+    "annualisation_basis",
+)
+
+
+def _epoch_period_payload(manifest_row: Mapping[str, Any]) -> dict[str, Any]:
+    """The period-return fields a schema-10 manifest row carries, verbatim."""
+
+    return {
+        field: manifest_row[field]
+        for field in _EPOCH_PERIOD_FIELDS
+        if field in manifest_row
+    }
+
+
+def _period_cadence(days: Sequence[date]) -> tuple[int | None, str]:
+    """The cadence of a return series from its own observation dates."""
+
+    if len(days) < 2:
+        return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
+    gaps = sorted((later - earlier).days for earlier, later in zip(days, days[1:]))
+    median_gap = gaps[len(gaps) // 2]
+    # Spacing decides first: a weekly series sampled on weekends is still
+    # weekly.  The weekend share only separates calendar-daily from trading-daily.
+    if 5 <= median_gap <= 9:
+        return 52, "WEEKLY"
+    if median_gap <= 3:
+        if sum(1 for day in days if day.weekday() >= 5) * 5 >= len(days):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
+    return None, "UNCLASSIFIED_CADENCE"
+
+
+def _daily_period_pieces(
+    rows: Sequence[Mapping[str, str]], spans: Sequence[ReturnSpan]
+) -> dict[str, Any]:
+    """Calendar-year returns and cadence of one canonical daily path.
+
+    A day belongs to the year of its own date; a gap-replacing span belongs to
+    the year of its start date, where the path splices it, so the yearly
+    returns multiply back to the path's cumulative return.  A year's window
+    opens at the previous observation (the base of its first return); it covers
+    the whole period only when that base falls in an earlier year.
+    """
+
+    with localcontext() as context:
+        context.prec = 34
+        by_start = {span.start_date: span for span in spans}
+        wealth: dict[int, Decimal] = {}
+        first: dict[int, date] = {}
+        last: dict[int, date] = {}
+        covers: dict[int, bool] = {}
+        previous: date | None = None
+        days: list[date] = []
+        for item in rows:
+            day = date.fromisoformat(item["date"])
+            days.append(day)
+            if day.year not in first:
+                first[day.year] = previous if previous is not None else day
+                covers[day.year] = previous is not None and previous.year < day.year
+            growth = Decimal(1) + Decimal(item["return"])
+            span = by_start.get(day)
+            if span is not None:
+                growth *= Decimal(1) + span.period_return
+            wealth[day.year] = wealth.get(day.year, Decimal(1)) * growth
+            last[day.year] = day
+            previous = day
+        periods, basis = _period_cadence(days)
+        return {
+            "calendar_year_twr": {
+                str(year): decimal_text(wealth[year] - Decimal(1))
+                for year in sorted(wealth)
+            },
+            "calendar_year_windows": {
+                str(year): {
+                    "start": first[year].isoformat(),
+                    "end": last[year].isoformat(),
+                    "days": (last[year] - first[year]).days,
+                    "covers_period": covers[year],
+                }
+                for year in sorted(wealth)
+            },
+            "periods_per_year": periods,
+            "periods_per_year_basis": basis,
+        }
+
+
+def _window_equivalent(rate: object, start: object, end: object) -> str | None:
+    """A governed annual rate restated over its own window (ACT/365)."""
+
+    if rate is None or not isinstance(start, str) or not isinstance(end, str):
+        return None
+    days = (_date(end, "window end") - _date(start, "window start")).days
+    annual = _decimal(rate, "annualised rate")
+    if days <= 0 or annual <= Decimal(-1):
+        return None
+    with localcontext() as context:
+        context.prec = 34
+        return decimal_text(
+            (Decimal(1) + annual) ** (Decimal(days) / Decimal(365)) - Decimal(1)
+        )
+
+
+def _strategy_period_fields(
+    row: Mapping[str, Any], pieces: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Window, annualisation basis, YTD and calendar-year returns of one strategy.
+
+    ``twr_annualised`` exists only from 365 days; the accepted cumulative return,
+    CAGR and pooled MWR are never changed, each is named with its basis.
+    """
+
+    start = row.get("account_live_observed_start")
+    end = row.get("account_live_observed_end")
+    cumulative = row.get("account_live_cumulative_return")
+    days: int | None = None
+    if isinstance(start, str) and isinstance(end, str):
+        days = (_date(end, "window end") - _date(start, "window start")).days
+    twr_annualised = (
+        _cagr(cumulative, start, end)
+        if days is not None
+        and days >= _ONE_YEAR_DAYS
+        and isinstance(cumulative, str)
+        and isinstance(start, str)
+        and isinstance(end, str)
+        else None
+    )
+    if twr_annualised is not None:
+        status = "AVAILABLE"
+    elif days is not None and days < _ONE_YEAR_DAYS:
+        status = "SUPPRESSED_UNDER_365D"
+    else:
+        status = "UNAVAILABLE"
+    mwr_days: int | None = None
+    mwr_open, mwr_end = row.get("mwr_opening_date"), row.get("mwr_terminal_date")
+    if isinstance(mwr_open, str) and isinstance(mwr_end, str):
+        mwr_days = (_date(mwr_end, "mwr end") - _date(mwr_open, "mwr start")).days
+    equivalent = _window_equivalent(row.get("mwr_xirr"), mwr_open, mwr_end)
+
+    def reported(length: int | None, present: bool) -> str | None:
+        if length is None or not present:
+            return None
+        return "ANNUALISED" if length >= _ONE_YEAR_DAYS else "ANNUALISED_FROM_DAYS"
+
+    calendar = {} if pieces is None else dict(pieces["calendar_year_twr"])
+    windows = {} if pieces is None else dict(pieces["calendar_year_windows"])
+    ytd_key = end[:4] if isinstance(end, str) else None
+    ytd_key = ytd_key if ytd_key in calendar else None
+    return {
+        "return_window_start": start,
+        "return_close_date": end,
+        "window_days": days,
+        "twr_annualised": twr_annualised,
+        "ytd_twr": None if ytd_key is None else calendar[ytd_key],
+        "ytd_window": None if ytd_key is None else windows[ytd_key],
+        "calendar_year_twr": calendar,
+        "calendar_year_windows": windows,
+        "periods_per_year": None if pieces is None else pieces["periods_per_year"],
+        "periods_per_year_basis": (
+            "UNAVAILABLE_NO_CANONICAL_DAILY_SERIES"
+            if pieces is None
+            else pieces["periods_per_year_basis"]
+        ),
+        "mwr_window_equivalent": equivalent,
+        "annualisation_basis": {
+            "twr": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": days,
+                "annualised_field": "twr_annualised",
+                "annualised_status": status,
+                "annualised_method": (
+                    "GEOMETRIC_ACT_365" if twr_annualised is not None else None
+                ),
+            },
+            "account_live_cagr": {
+                "reported_basis": reported(
+                    days, row.get("account_live_cagr") is not None
+                ),
+                "window_days": days,
+                "method": "GEOMETRIC_ACT_365",
+            },
+            "mwr_xirr": {
+                "reported_basis": reported(mwr_days, row.get("mwr_xirr") is not None),
+                "window_days": mwr_days,
+                "method": "XIRR_ACT_365",
+                "window_equivalent_field": "mwr_window_equivalent",
+            },
+            "mwr_window_equivalent": {
+                "reported_basis": None if equivalent is None else "CUMULATIVE",
+                "window_days": mwr_days,
+                "method": "XIRR_TO_WINDOW_ACT_365",
+            },
+            "ytd_twr": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": None if ytd_key is None else windows[ytd_key]["days"],
+            },
+            "calendar_year_twr": {
+                "reported_basis": "CUMULATIVE",
+                "year_attribution": "DAILY_RETURN_DATE_YEAR",
+            },
+        },
+    }
+
+
+def _label_window(label: object) -> dict[str, Any] | None:
+    """The window a comparison figure stands on, read from its annualisation label."""
+
+    if not isinstance(label, Mapping):
+        return None
+    return {
+        "start": label.get("window_start"),
+        "end": label.get("window_end"),
+        "days": label.get("window_days"),
+        "observations": label.get("observations"),
     }
 
 
@@ -4070,6 +4305,7 @@ def _account_live_return_series(
     *,
     calculation_cutoff_date: str | None = None,
     value_basis_bounds: ValueBasisBounds | None = None,
+    period_pieces: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Hash and summarize each canonical account-live return path.
 
@@ -4168,6 +4404,15 @@ def _account_live_return_series(
                     for span in spans
                 ):
                     raise ReportValidationError("epoch HPR span does not replace a gap")
+            span_values = [
+                ReturnSpan(
+                    date.fromisoformat(str(span["span_start_date"])),
+                    date.fromisoformat(str(span["span_end_date"])),
+                    _decimal(span["return"], "epoch HPR span return"),
+                )
+                for spans in spans_by_start.values()
+                for span in spans
+            ]
             try:
                 compounded = splice_spans(
                     [
@@ -4177,15 +4422,7 @@ def _account_live_return_series(
                         )
                         for item in rows
                     ],
-                    [
-                        ReturnSpan(
-                            date.fromisoformat(str(span["span_start_date"])),
-                            date.fromisoformat(str(span["span_end_date"])),
-                            _decimal(span["return"], "epoch HPR span return"),
-                        )
-                        for spans in spans_by_start.values()
-                        for span in spans
-                    ],
+                    span_values,
                 )
             except ReturnsError as exc:
                 raise ReportValidationError(
@@ -4245,6 +4482,11 @@ def _account_live_return_series(
             "observed_start": dates[0],
             "provider_ids": sorted(providers[strategy_id]),
             "return_observations": len(rows),
+            **(
+                {"period_pieces": _daily_period_pieces(rows, span_values)}
+                if period_pieces
+                else {}
+            ),
             "return_series_schema": "ordered-date-return/1",
             "return_series_sha256": hashlib.sha256(
                 _canonical_json_array_bytes(rows)
@@ -8713,6 +8955,39 @@ def build_report_data(
         strategy_summary = [
             {**row, **_account_annualization_labels(row)} for row in strategy_summary
         ]
+    # Version 5 (manifest schema 10): every epoch row carries its period returns.
+    period_returns_enabled = _uses_cutoff_basis(catalog) and any(
+        "annualisation_basis" in item for item in performance
+    )
+    if period_returns_enabled:
+        live_pieces = _account_live_return_series(
+            catalog,
+            strategy_product_controls,
+            calculation_cutoff_date=calculation_cutoff_date,
+            value_basis_bounds=value_basis_bounds,
+            period_pieces=True,
+        )
+        strategy_summary = [
+            {
+                **row,
+                **_strategy_period_fields(
+                    row,
+                    live_pieces.get(str(row.get("strategy_id")), {}).get(
+                        "period_pieces"
+                    )
+                    if row.get("account_live_return_authority")
+                    == "CANONICAL_STRATEGY_RETURNS"
+                    else None,
+                ),
+                "benchmark_comparison_window": _label_window(
+                    row.get("benchmark_annualization")
+                ),
+                "provider_comparison_window": _label_window(
+                    row.get("provider_annualization")
+                ),
+            }
+            for row in strategy_summary
+        ]
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
@@ -9249,16 +9524,37 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    # Present only when an accepted position source exists: the placeholder row of an
+    # empty source names no instrument, so it has no identity to state.
+    holdings_identity = build_holdings_identity(report["positions"], catalog)
+    if holdings_identity["rows"]:
+        report["holdings_identity"] = holdings_identity
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
-            report["report_schema_version"] = CUTOFF_BASIS_REPORT_SCHEMA_VERSION
+            report["report_schema_version"] = (
+                PERIOD_RETURNS_REPORT_SCHEMA_VERSION
+                if period_returns_enabled
+                else CUTOFF_BASIS_REPORT_SCHEMA_VERSION
+            )
             if calculation_cutoff_date is not None:
                 coverage_bounds = _capital_coverage_bounds(
                     verified_capital, calculation_cutoff_date
                 )
                 if coverage_bounds is not None:
                     report["capital_coverage_bounds"] = coverage_bounds
+    if report["report_schema_version"] != PERIOD_RETURNS_REPORT_SCHEMA_VERSION:
+        # Period-return fields exist only at report version 5.
+        for item in report["twr_mwr"]:
+            for field in _EPOCH_PERIOD_FIELDS:
+                item.pop(field, None)
+        for item in report["strategy_summary"]:
+            for field in (
+                *_EPOCH_PERIOD_FIELDS,
+                "benchmark_comparison_window",
+                "provider_comparison_window",
+            ):
+                item.pop(field, None)
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
     if decomposition_lenses is not None:
@@ -9275,7 +9571,10 @@ def build_report_data(
             attribution_ref,
             strategy_product_controls,
             cutoff_cost_rate=report["report_schema_version"]
-            == CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
+            in {
+                CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
+                PERIOD_RETURNS_REPORT_SCHEMA_VERSION,
+            },
         )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(
@@ -10483,7 +10782,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2, 3, 4}
+        or report.get("report_schema_version") not in {1, 2, 3, 4, 5}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
@@ -11300,7 +11599,7 @@ def _validate_epoch_manifest_input(
         current_account_ids=current_account_ids,
         crosswalk=crosswalk,
     )
-    if manifest.get("schema_version") == 9 and manifest.get(
+    if manifest.get("schema_version") in {9, 10} and manifest.get(
         "calculation_cutoff_date"
     ) != crosswalk.get("calculation_cutoff_date"):
         raise ReportValidationError(
@@ -11448,7 +11747,7 @@ def _verified_epoch_authority_details(
             "epoch manifest schema-9 authority differs"
         ) from exc
     cutoff = cast(str, manifest.get("calculation_cutoff_date"))
-    if manifest.get("schema_version") != 9:
+    if manifest.get("schema_version") not in {9, 10}:
         raise ReportValidationError(
             "epoch generation requires schema-9 cutoff authority"
         )
@@ -12392,6 +12691,11 @@ def _verified_epoch_authority_details(
                         if "performance_status" in manifest_row
                         else {}
                     ),
+                    **(
+                        _epoch_period_payload(manifest_row)
+                        if "performance_status" in manifest_row
+                        else {}
+                    ),
                     # A closed epoch (liquidated and transferred out): the
                     # dated, labelled non-TWR credits stay visible beside the
                     # return; they are already inside the epoch's dollar gain.
@@ -13143,6 +13447,21 @@ def _verification_from_snapshots(
     return verification
 
 
+def _verify_candidate_holdings_identity(
+    candidate_report_bytes: bytes, baseline_catalog_path: Path
+) -> dict[str, Any]:
+    """Re-derive the holdings sidecar independently from the retained catalog."""
+
+    try:
+        candidate_report = json.loads(candidate_report_bytes)
+        retained_catalog = json.loads(
+            _regular_file_bytes(baseline_catalog_path, "baseline catalog")
+        )
+        return verify_holdings_identity(candidate_report, retained_catalog)
+    except (ValueError, HoldingsIdentityError) as exc:
+        raise ReportValidationError(f"holdings identity sidecar: {exc}") from exc
+
+
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
@@ -13204,7 +13523,7 @@ def verify_candidate(
         if epoch_snapshots
         else epoch_crosswalk_path
     )
-    report, report_bytes, _ = build_report_data(
+    report, report_bytes, baseline_catalog_path = build_report_data(
         baseline_root,
         freshness_health_path,
         provider_ledger_root,
@@ -13237,6 +13556,9 @@ def verify_candidate(
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
+    holdings_identity_receipt = _verify_candidate_holdings_identity(
+        candidate_report_bytes, baseline_catalog_path
+    )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         expected_result_bytes = (
@@ -13275,6 +13597,7 @@ def verify_candidate(
         excel_workbook,
         workbook_bytes,
     )
+    verification.update(holdings_identity_receipt)
     if epoch_snapshots:
         verification.update(
             {
