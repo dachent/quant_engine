@@ -144,6 +144,10 @@ _PATH_STAGES = {
     "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": [],
+    # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
+    # source bytes only and nothing imports it yet.
+    "tools/build_quantbase_fund_facts.py": [],
+    "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
     # real delivery artifact); no producer imports it.
