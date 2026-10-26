@@ -175,13 +175,55 @@ def verify_holdings_identity(
             "holdings_identity rows differ from the independent derivation"
         )
     available = sum(1 for row in expected if row["symbol_status"] == "AVAILABLE")
-    summary = section.get("summary")
-    if not isinstance(summary, Mapping) or (
-        summary.get("row_count"),
-        summary.get("symbol_available_count"),
-        summary.get("symbol_unavailable_count"),
-    ) != (len(expected), available, len(expected) - available):
+    no_category = sum(1 for r in expected if r["asset_category_status"] != "AVAILABLE")
+    expected_summary = {
+        "asset_category_available_count": len(expected) - no_category,
+        "asset_category_unavailable_count": no_category,
+        "row_count": len(expected),
+        "symbol_available_count": available,
+        "symbol_unavailable_count": len(expected) - available,
+    }
+    if section.get("summary") != expected_summary:
         raise HoldingsIdentityError("holdings_identity summary differs")
+    expected_keys = {
+        "as_of_date",
+        "basis",
+        "required_pulls",
+        "rows",
+        "schema",
+        "summary",
+    }
+    if set(section) != expected_keys:
+        raise HoldingsIdentityError("holdings_identity keys differ")
+    if section["basis"] != "RETAINED_PROVIDER_LEDGER_ROWS_ONLY":
+        raise HoldingsIdentityError("holdings_identity basis differs")
+    if section["as_of_date"] != catalog.get("as_of_date"):
+        raise HoldingsIdentityError("holdings_identity as_of_date differs")
+    wanted: dict[tuple[str, bool], int] = {}
+    for row in expected:
+        reason = row["symbol_unavailable_reason"]
+        if reason is not None:
+            hashed = reason == "NO_SYMBOL_IN_RETAINED_LEDGER_ROWS" and (
+                "provider_identifier_sha256" in row["identity"]
+            )
+            wanted[(reason, hashed)] = wanted.get((reason, hashed), 0) + 1
+    if no_category:
+        wanted[("ASSET_CATEGORY_NOT_CARRIED_BY_LEDGER_POSITION_ROW", False)] = (
+            no_category
+        )
+    pulls = section["required_pulls"]
+    if not isinstance(pulls, list) or any(
+        not isinstance(p, Mapping)
+        or set(p) != {"pull", "reason", "row_count"}
+        or not isinstance(p["pull"], str)
+        or not p["pull"]
+        for p in pulls
+    ):
+        raise HoldingsIdentityError("holdings_identity required_pulls malformed")
+    if sorted((p["reason"], p["row_count"]) for p in pulls) != sorted(
+        (reason, count) for (reason, _hashed), count in wanted.items()
+    ):
+        raise HoldingsIdentityError("holdings_identity required_pulls differ")
     return {
         "holdings_identity_rows": len(expected),
         "holdings_identity_symbol_available": available,

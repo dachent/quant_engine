@@ -187,6 +187,13 @@ def test_independent_verifier_agrees_with_the_builder() -> None:
         lambda r: r["holdings_identity"]["rows"][0].update(asset_category="OPT"),
         lambda r: r["holdings_identity"]["rows"].pop(),
         lambda r: r["holdings_identity"]["summary"].update(row_count=99),
+        lambda r: r["holdings_identity"]["summary"].update(
+            asset_category_available_count=0
+        ),
+        lambda r: r["holdings_identity"].update(basis="OTHER"),
+        lambda r: r["holdings_identity"].update(as_of_date="1999-01-01"),
+        lambda r: r["holdings_identity"]["required_pulls"].pop(),
+        lambda r: r["holdings_identity"]["required_pulls"][0].update(row_count=9),
     ],
 )
 def test_verifier_rejects_a_hand_typed_or_dropped_value(tamper: Any) -> None:
