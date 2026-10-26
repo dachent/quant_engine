@@ -126,6 +126,10 @@ _PATH_STAGES = {
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
+    # The holdings identity sidecar: built by the report producer into the report
+    # payload, and re-derived by the report verifier.  A change moves report bytes.
+    "tools/holdings_identity.py": ["report", "panel"],
+    "tools/verify_holdings_identity.py": ["report", "panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
     # none writes a delivery artifact, so a change to any of them affects no
     # stage. They are declared rather than omitted because an omitted `tools/`
