@@ -1068,7 +1068,6 @@ def _pair_flows(
                 return fund.decl.sleeve_id
         return None
 
-    used_in: set[int] = set()
     order = sorted(
         range(len(outflows)),
         key=lambda i: (outflows[i][0].fill_at, outflows[i][0].txn_id),
@@ -1077,15 +1076,14 @@ def _pair_flows(
     left_out = {i: abs(outflows[i][0].amount) for i in range(len(outflows))}
     left_in = {j: inflows[j][0].amount for j in range(len(inflows))}
     for i in order:
-        j = pair_of_out.get(i)
-        if j is None:
+        partner = pair_of_out.get(i)
+        if partner is None:
             continue
         out, out_flow, out_account = outflows[i]
-        into, in_flow, in_account = inflows[j]
-        used_in.add(j)
-        amount = min(left_out[i], left_in[j])
+        into, in_flow, in_account = inflows[partner]
+        amount = min(left_out[i], left_in[partner])
         left_out[i] -= amount
-        left_in[j] -= amount
+        left_in[partner] -= amount
         recognition = (
             out_flow.recognition_day if out_flow else out.fill_day + timedelta(days=1)
         )
