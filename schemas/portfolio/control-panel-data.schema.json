@@ -2105,7 +2105,7 @@
               "required": ["name", "version"],
               "properties": {
                 "name": {"const": "account-strategy-manifest"},
-                "version": {"enum": ["8", "9"]}
+                "version": {"enum": ["8", "9", "10"]}
               }
             }
           }
@@ -2140,7 +2140,7 @@
         },
         {
           "if": {
-            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "9"}}}}}},
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"enum": ["9", "10"]}}}}}},
             "required": ["artifact"]
           },
           "then": {"required": ["crosswalk"]}

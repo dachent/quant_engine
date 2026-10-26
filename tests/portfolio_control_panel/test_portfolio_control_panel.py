@@ -9591,7 +9591,7 @@ def _panel_verified_payloads() -> tuple[dict[str, bytes], bytes]:
     validate_manifest_schema(decoded)
     # The live producer currently emits schema 9; this fixture must consume
     # that payload rather than relabeling it as an older schema.
-    assert decoded["schema_version"] == 9
+    assert decoded["schema_version"] == 10
 
     verifier_name = "_panel_manifest_fixture_verifier"
     verifier = sys.modules.get(verifier_name)
@@ -9838,7 +9838,7 @@ def _stage_panel_bundle(
     as_of = date(2026, 2, 1)
     manifest_payload = json.loads(payload)
     manifest_schema_version = manifest_payload.get("schema_version")
-    assert manifest_schema_version in {8, 9}
+    assert manifest_schema_version in {8, 9, 10}
     report_object = json.loads(independent_report)
     report_version = report_object.get("schema_version")
     if type(report_version) is not int:
@@ -11653,7 +11653,7 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
-    assert manifest["schema_version"] == 9
+    assert manifest["schema_version"] == 10
     rows = manifest["rows"]
     assert isinstance(rows, list)
     assert len(rows) == 13
