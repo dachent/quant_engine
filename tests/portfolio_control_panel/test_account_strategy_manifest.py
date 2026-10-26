@@ -192,6 +192,9 @@ def test_supported_public_surface_exposes_no_authority_or_numeric_assembly_seam(
         "receipt_snapshots",
         "mapped_assignments",
         "receipt_authority_snapshot",
+        # derived-sleeve coverage expectations (#567 stage 5): a row can only be
+        # accepted when the parent's own complete retrieval receipt spans it
+        "sleeve_rows",
     )
     assert tuple(
         inspect.signature(

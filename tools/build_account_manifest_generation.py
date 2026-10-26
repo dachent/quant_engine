@@ -34,7 +34,6 @@ from quant_engine.core.contracts import (
 )
 from tools.account_strategy_manifest import (
     PERFORMANCE_ROW_FIELDS,
-    SLEEVE_FLOW_TYPE,
     ManifestCandidateSnapshots,
     ManifestError,
     SleeveManifestFacts,

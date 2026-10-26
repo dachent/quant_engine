@@ -8,6 +8,8 @@ runs through the generation builder AND the independent verifier, which must
 agree.  All inputs are synthetic.
 """
 
+# ruff: noqa: F811  (the shared fixtures are imported, then used as parameters)
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -16,6 +18,7 @@ import hashlib
 import json
 from typing import Any
 
+from jsonschema import Draft202012Validator
 import pytest
 from quant_engine.core import InputSnapshot
 from quant_engine.core.contracts import canonical_json_bytes
@@ -26,6 +29,7 @@ from test_account_manifest_generation import (  # noqa: F401
     _mixed_crosswalk_selected_inputs,
     _mixed_membership_census_snapshot,
     _mixed_verifier_inputs,
+    VERIFIER_SCHEMA_PATH,
     _selected_input_kwargs,
     perimeter_module,
     verifier_module,
@@ -189,6 +193,20 @@ def _liquidate_and_reallocate_facts() -> dict[str, Any]:
     return _facts(funding, rows)
 
 
+# Parent NAV of the open-and-close scenario.  Day 3 sells 5 shares at the
+# unchanged mark of 12, so the account NAV does not move; day 4 marks 10 shares
+# down by 1.  (The account NAV must equal the cash plus the marked positions, or
+# the facts builder refuses the closure residual, which is what it is for.)
+OPEN_CLOSE_PARENT_NAV = {
+    DAYS[0]: "1000",
+    DAYS[1]: "1015",
+    DAYS[2]: "1030",
+    DAYS[3]: "1030",
+    DAYS[4]: "1020",
+    DAYS[5]: "1020",
+}
+
+
 def _open_and_close_facts() -> dict[str, Any]:
     """s2 opens on day 1 and closes on day 3 inside the account; s1 never exits."""
 
@@ -217,9 +235,9 @@ def _open_and_close_facts() -> dict[str, Any]:
             _change(DAYS[0], "1000", "1000"),
             _change(DAYS[1], "1000", "1015"),
             _change(DAYS[2], "1015", "1030"),
-            _change(DAYS[3], "1030", "1040"),
-            _change(DAYS[4], "1040", "1030"),
-            _change(DAYS[5], "1030", "1030"),
+            _change(DAYS[3], "1030", "1030"),
+            _change(DAYS[4], "1030", "1020"),
+            _change(DAYS[5], "1020", "1020"),
         ),
     )
     return _facts(funding, rows)
@@ -291,6 +309,7 @@ def _selected(
     *,
     ledger_edit: Any = None,
     census: InputSnapshot | None = None,
+    parent_nav: dict[str, str] | None = None,
 ) -> Any:
     """The mixed fixture with the parent's NAV by day and the facts selected."""
 
@@ -304,7 +323,7 @@ def _selected(
             "value_basis": "ACCOUNT_TOTAL",
             "nav": _money(value),
         }
-        for day, value in PARENT_NAV.items()
+        for day, value in (parent_nav or PARENT_NAV).items()
     ]
     ledger["flows"] = []
     ledger["capital_anchors"] = []
@@ -412,6 +431,13 @@ def test_liquidate_and_reallocate_builds_verifies_and_pairs(
     assert len(rows) == 13 - 1 + 2
     assert report["numeric_verification"]["discrepancy_count"] == 0
     assert report["numeric_verification"]["candidate_count"] == 2
+    # the facts are an identity of the verification report and its schema
+    Draft202012Validator(
+        json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    ).validate(report)
+    assert [
+        item["sha256"] for item in report["selected_source_identities"]["sleeve_facts"]
+    ] == [snapshot.sha256]
 
     # opening is the first end-of-day NAV; every later flow is an internal leg
     assert rows[S1]["opening_basis"] == "FIRST_AVAILABLE_NAV"
@@ -495,8 +521,12 @@ def test_parent_and_sleeves_reconcile_to_the_account(
             + pool_nav[day]
         )
         assert total == Decimal(PARENT_NAV[day]), day
-    # the sleeve NAV is the sleeve value after allocated cost, never the parent's
-    assert by_account[S2][DAYS[3]] == Decimal("104") - Decimal("0.5")
+    # the sleeve NAV is the sleeve value after allocated cost, never the parent's.
+    # The only account cost (-0.5 interest on day 1) falls on s1, the only sleeve
+    # holding anything that day (exposure share 1); s2 opens on day 2 and is
+    # charged nothing (facts: s2 alloc_total 0, nav_end_after_alloc 104).
+    assert by_account[S1][DAYS[1]] == Decimal("110") - Decimal("0.5")
+    assert by_account[S2][DAYS[3]] == Decimal("104")
 
 
 def test_sleeve_opened_and_closed_inside_the_account(
@@ -507,7 +537,12 @@ def test_sleeve_opened_and_closed_inside_the_account(
     census = _census(
         [("strategy-s1", DAYS[0], None), ("strategy-s2", DAYS[1], DAYS[3])]
     )
-    selected = _selected(perimeter_module, (snapshot,), census=census)
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=census,
+        parent_nav=OPEN_CLOSE_PARENT_NAV,
+    )
     payloads, report = _build_and_verify(perimeter_module, verifier_module, selected)
     rows = _rows(payloads)
     assert rows[S2]["status"] == "OK"
@@ -517,6 +552,186 @@ def test_sleeve_opened_and_closed_inside_the_account(
     assert rows[S1]["effective_end"] is None
     assert rows[S1]["status"] == "OK"
     assert report["numeric_verification"]["discrepancy_count"] == 0
+
+
+# --------------------------------------------------------------------------
+# a retired Quantbase fund beside the account's live fund
+
+
+FUND = f"{PARENT}-crisis"
+FUND_NAV = {DAYS[1]: "100", DAYS[2]: "115", DAYS[3]: "0"}
+
+
+def _quantbase_leg(
+    pair: str,
+    account: str,
+    flow_class: str,
+    day: str,
+    amount: str,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "pair_id": pair,
+        "account_id": account,
+        "class": flow_class,
+        "flow_type": "TRANSFER:INTERNAL:SLEEVE",
+        "event_date": day,
+        "nav_recognition_date": day,
+        "amount": amount,
+        "leg_source": source,
+    }
+
+
+def _quantbase_facts() -> dict[str, Any]:
+    """Hand-written ``quantbase-fund-facts``: a fund funded on days 1 and 2 from
+    unallocated cash and swept into the live fund on day 3.
+
+    Only the day-3 counterpart (the live fund's INTERNAL_IN) is a leg of the
+    parent ledger (``PARENT_LEDGER_REFERENCE``); every other leg is the artifact's.
+    """
+
+    legs = []
+    for pair, day, amount, into_fund in (
+        (f"{DAYS[1]}:0001", DAYS[1], "100", True),
+        (f"{DAYS[2]}:0002", DAYS[2], "10", True),
+        (f"{DAYS[3]}:0003", DAYS[3], "120", False),
+    ):
+        fund_class, other_class = (
+            ("INTERNAL_IN", "INTERNAL_OUT")
+            if into_fund
+            else ("INTERNAL_OUT", "INTERNAL_IN")
+        )
+        legs.append(_quantbase_leg(pair, FUND, fund_class, day, amount, "ARTIFACT"))
+        if into_fund:
+            legs.append(
+                _quantbase_leg(pair, POOL, other_class, day, amount, "ARTIFACT")
+            )
+        else:
+            legs.append(
+                _quantbase_leg(
+                    pair, PARENT, other_class, day, amount, "PARENT_LEDGER_REFERENCE"
+                )
+            )
+    return {
+        "schema_version": 1,
+        "artifact_id": "quantbase-fund-facts",
+        "parent_account_id": PARENT,
+        "base_currency": "USD",
+        "window": {"first_day": FIRST, "last_day": LAST},
+        "perimeter_account": {
+            "account_id": POOL,
+            "days": [{"day": day, "nav_end": "0"} for day in DAYS],
+        },
+        "sleeves": [
+            {
+                "sleeve_id": "crisis",
+                "account_id": FUND,
+                "strategy_id": "strategy-crisis",
+                "first_day": DAYS[1],
+                "last_day": DAYS[3],
+                "days": [{"day": day, "nav_end": nav} for day, nav in FUND_NAV.items()],
+            }
+        ],
+        "flows": legs,
+    }
+
+
+def _live_fund_receives_the_sweep(ledger: dict[str, Any]) -> None:
+    """R1's parent ledger already carries the live fund's INTERNAL_IN of the sweep."""
+
+    ledger["flows"].append(
+        {
+            "record_id": "parent-ledger-sweep-in",
+            "account_id": PARENT,
+            "event_date": DAYS[3],
+            "flow_type": "TRANSFER:INTERNAL:QUANTBASE",
+            "amount": _money("120"),
+        }
+    )
+
+
+def test_quantbase_parent_ledger_leg_is_pairing_evidence_not_a_second_flow(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    facts = _quantbase_facts()
+    snapshot = InputSnapshot.from_bytes("qb facts", _facts_bytes(facts))
+    census = _census([("strategy-crisis", DAYS[1], DAYS[3])])
+    kwargs: dict[str, Any] = {
+        "census": census,
+        "ledger_edit": _live_fund_receives_the_sweep,
+    }
+    selected = _selected(perimeter_module, (snapshot,), **kwargs)
+    payloads, report = _build_and_verify(perimeter_module, verifier_module, selected)
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+    rows = _rows(payloads)
+
+    # the live parent keeps its strategy row and its ledger flow is the only
+    # sweep leg on it: the artifact adds nothing to the parent
+    assert PARENT in rows
+    assert rows[PARENT]["strategy_id"] != "strategy-crisis"
+    sweep = [
+        leg
+        for leg in rows[PARENT]["capital_flow_trace"]
+        if leg.get("event_date") == DAYS[3]
+    ]
+    assert [leg["class"] for leg in sweep] == ["INTERNAL_IN"]
+    assert Decimal(sweep[0]["amount"]) == Decimal("120")
+
+    # the fund is its own one-strategy account; its deposits are INTERNAL_IN
+    fund = rows[FUND]
+    assert fund["strategy_id"] == "strategy-crisis"
+    assert (fund["start"], fund["end"]) == (DAYS[1], DAYS[3])
+    assert Decimal(fund["deposits"]) == 0
+    assert Decimal(fund["external_withdrawals"]) == 0
+    # (the first day's 100 is the epoch opening, not a flow)
+    assert Decimal(fund["opening_capital"]) == Decimal("100")
+    assert [
+        (leg["class"], leg["event_date"], Decimal(leg["amount"]))
+        for leg in fund["capital_flow_trace"]
+    ] == [
+        ("INTERNAL_IN", DAYS[2], Decimal("10")),
+        ("INTERNAL_OUT", DAYS[3], Decimal("120")),
+    ]
+    assert Decimal(fund["internal_in"]) == 10
+    assert Decimal(fund["internal_out"]) == 120
+    assert Decimal(fund["current_value"]) == 0
+
+    # classified flows: the fund's exit pairs with the parent ledger's own
+    # record, which stays the single flow of the live fund
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    events = {event["source_record_id"]: event for event in classified["events"]}
+    assert {
+        event["disposition"]
+        for event in events.values()
+        if event["account_id"] in {FUND, POOL}
+    } == {"INTERNAL"}
+    parent_events = [e for e in classified["events"] if e["account_id"] == PARENT]
+    assert [e["source_record_id"] for e in parent_events] == ["parent-ledger-sweep-in"]
+    assert parent_events[0]["disposition"] == "INTERNAL"
+    partner = events[parent_events[0]["counterparty_source_record_id"]]
+    assert partner["account_id"] == FUND
+
+    # The same ledger WITHOUT the fund facts: the parent's flow has no
+    # counterpart and falls back to EXTERNAL (a deposit).  With the facts it is
+    # INTERNAL_IN; invested capital, net capital, opening and value are unchanged.
+    plain = _selected(perimeter_module, (), ledger_edit=_live_fund_receives_the_sweep)
+    plain_row = _rows(perimeter_module.build_account_manifest_payloads(plain))[PARENT]
+    live_row = rows[PARENT]
+    assert (Decimal(plain_row["deposits"]), Decimal(plain_row["internal_in"])) == (
+        120,
+        0,
+    )
+    assert (Decimal(live_row["deposits"]), Decimal(live_row["internal_in"])) == (0, 120)
+    for field in (
+        "invested",
+        "net_capital",
+        "opening_capital",
+        "current_value",
+        "gain",
+        "observation_linked_return",
+        "flow_count",
+    ):
+        assert live_row[field] == plain_row[field], field
 
 
 def test_census_lists_a_funded_membership_per_derived_epoch(
