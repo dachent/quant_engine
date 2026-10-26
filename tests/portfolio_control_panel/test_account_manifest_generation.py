@@ -22050,7 +22050,7 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
     assert classified["schema_version"] == 5
     assert calculation["schema_version"] == 4
     assert calculation["calculation_classified_flows"]["schema_version"] == 4
-    assert output["schema_version"] == 9
+    assert output["schema_version"] == 10
     assert (
         classified["events"][0]["nav_recognition_date"]
         == (classified["events"][0]["event_date"])
@@ -24622,7 +24622,7 @@ def test_mixed_schema_scopes_current_receipt_outputs_only(
     validator = Draft202012Validator(
         json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
     )
-    assert generic["schema_version"] == 9
+    assert generic["schema_version"] == 10
     assert "receipt_authority" in generic["source_identities"]["flow_coverage"]
     assert (
         generic["source_identities"]["admission_policy"]["artifact"]["schema"][
@@ -24631,7 +24631,7 @@ def test_mixed_schema_scopes_current_receipt_outputs_only(
         == "2"
     )
     assert validator.is_valid(generic)
-    assert mixed["schema_version"] == 9
+    assert mixed["schema_version"] == 10
     assert mixed["source_identities"]["calculation_inputs"]["schema"]["version"] == "4"
     assert (
         mixed["source_identities"]["admission_policy"]["artifact"]["schema"]["version"]
@@ -28060,7 +28060,7 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
             "account-strategy-current-epoch-crosswalk",
             "1",
         ),
-        "outputs/account-strategy-manifest.json": ("account-strategy-manifest", "9"),
+        "outputs/account-strategy-manifest.json": ("account-strategy-manifest", "10"),
         "authority/account-interval-retrieval-receipt-authority.json": (
             "account-interval-retrieval-receipt-authority",
             "1",
@@ -28843,8 +28843,8 @@ def test_schema9_generation_coverage_boundary_is_version_neutral(
         if artifact.artifact_id == "outputs/account-strategy-manifest.json"
     )
 
-    assert output["schema_version"] == 9
-    assert output_artifact.schema_version == "9"
+    assert output["schema_version"] == 10
+    assert output_artifact.schema_version == "10"
     boundary = bundle.manifest.coverage.boundary
     assert "version-8" not in boundary.casefold()
     assert "selected output artifact" in boundary
