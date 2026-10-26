@@ -384,10 +384,18 @@ def _builder_code(modules: Sequence[str]) -> dict[str, Any]:
             path = Path(__file__).resolve().with_name(f"{name}.py")
         text = path.read_bytes().replace(b"\r\n", b"\n")
         files[f"tools/{name}.py"] = hashlib.sha256(text).hexdigest()
+    tie_break = {
+        "rule": ledger_module.SAME_SECOND_TIE_BREAK,
+        "sha256": ledger_module.SAME_SECOND_TIE_BREAK_SHA256,
+    }
     digest = hashlib.sha256(
-        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            {"files": files, "same_second_tie_break_sha256": tie_break["sha256"]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
-    return {"files": files, "sha256": digest}
+    return {"files": files, "same_second_tie_break": tie_break, "sha256": digest}
 
 
 def _pair_flows(

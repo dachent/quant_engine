@@ -24,6 +24,7 @@ from jsonschema import Draft202012Validator
 import pytest
 
 import build_sleeve_account_facts as builder
+import verify_sleeve_ledger as verifier
 
 FIXTURE = Path(__file__).with_name("sleeve_audit_fixture.json")
 ACCOUNT = "account-synthetic"
@@ -349,3 +350,194 @@ def test_a_row_that_names_no_account_is_refused() -> None:
     del document["change_in_nav_observations"][0]["account_id"]
     with pytest.raises(builder.SleeveFactsError, match="names none"):
         _build(_rows(document))
+
+
+# --- the clean-room verifier against the builder -------------------------------
+
+
+def _catalog_bytes(document: dict[str, Any], *, reverse: bool = False) -> bytes:
+    def order(items: list[Any]) -> list[Any]:
+        return list(reversed(items)) if reverse else list(items)
+
+    return _bytes(
+        {
+            "provider_id": "provider-a",
+            "catalog_schema_version": 7,
+            "accounts": [{"account_id": ACCOUNT}],
+            "transactions": order(document["transactions"]),
+            "positions": order(document["positions"]),
+            "change_in_nav_observations": order(document["change_in_nav_observations"]),
+        }
+    )
+
+
+def _built_from(catalog: bytes) -> bytes:
+    rows, sha = builder.rows_from_catalog(
+        catalog, ACCOUNT, "provider-a", DAYS[0], DAYS[-1]
+    )
+    return builder.build_sleeve_account_facts(
+        tag_map_bytes=_bytes(_tag_map()),
+        declared_inputs_bytes=_bytes(_declared()),
+        rows=rows,
+        rows_sha256=sha,
+        parent_ledger_generation_id=GENERATION,
+    )
+
+
+def _verify(artifact: bytes, catalog: bytes) -> verifier.FactsReport:
+    rows, sha = verifier.select_catalog_rows(catalog, ACCOUNT, DAYS[0], DAYS[-1])
+    return verifier.verify_sleeve_account_facts(
+        artifact, _bytes(_tag_map()), _bytes(_declared()), rows, sha
+    )
+
+
+def _canonical(document: Any) -> bytes:
+    return (
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("ascii")
+
+
+def test_builder_and_verifier_agree_on_the_synthetic_audit() -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    artifact = _built_from(catalog)
+    report = _verify(artifact, catalog)
+    assert report.mismatches == ()
+    assert report.compared > 1000
+    # nothing is "close enough" by accident: most figures are the same text
+    assert report.byte_identical > report.within_tolerance
+    parsed = json.loads(artifact)
+    assert {leg["trace"]["kind"] for leg in parsed["flows"]} >= {"REALLOCATION"}
+    # the verifier reads the rows in another order and still agrees on every
+    # derived fact (the same-second tie is decided by the stated rule, not by row
+    # order); only the rows' own digest, which is over their order, differs
+    reordered = _verify(artifact, _catalog_bytes(document, reverse=True))
+    assert [(item.table, item.key) for item in reordered.mismatches] == [
+        ("bindings", "account_rows_sha256")
+    ]
+
+
+def _tampered(mutate: Any) -> tuple[bytes, bytes]:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    parsed = json.loads(_built_from(catalog))
+    mutate(parsed)
+    return _canonical(parsed), catalog
+
+
+def _flip_nav(parsed: dict[str, Any]) -> None:
+    row = parsed["sleeves"][0]["days"][3]
+    row["nav_end"] = str(Decimal(row["nav_end"]) + Decimal("0.01"))
+
+
+def _flip_flow(parsed: dict[str, Any]) -> None:
+    leg = next(item for item in parsed["flows"] if item["class"] == "INTERNAL_IN")
+    leg["amount"] = str(Decimal(leg["amount"]) + Decimal("1"))
+
+
+def _flip_pairing(parsed: dict[str, Any]) -> None:
+    leg = next(
+        item for item in parsed["flows"] if item["trace"]["pairing"] == "SLEEVE_PAIR"
+    )
+    leg["trace"] = {**leg["trace"], "pairing": "UNALLOCATED_REMAINDER"}
+
+
+def _flip_own_pnl(parsed: dict[str, Any]) -> None:
+    row = parsed["sleeves"][1]["days"][2]
+    row["own_pnl"] = str(Decimal(row["own_pnl"]) - Decimal("0.5"))
+
+
+def _flip_alloc(parsed: dict[str, Any]) -> None:
+    row = parsed["allocated_cost"]["sleeve_allocations"][0]
+    row["alloc_total"] = str(Decimal(row["alloc_total"]) + Decimal("0.01"))
+
+
+def _flip_closure(parsed: dict[str, Any]) -> None:
+    parsed["closure"][2]["unexplained"] = "0.5"
+
+
+def _flip_tie_break(parsed: dict[str, Any]) -> None:
+    parsed["bindings"]["builder_code"]["same_second_tie_break"]["rule"] = "ROW_ORDER"
+
+
+def _swap_leg_accounts(parsed: dict[str, Any]) -> None:
+    first, second = parsed["flows"][0], parsed["flows"][1]
+    first["account_id"], second["account_id"] = (
+        second["account_id"],
+        first["account_id"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "table"),
+    [
+        (_flip_nav, "sleeves"),
+        (_flip_flow, "flows"),
+        (_flip_pairing, "flows"),
+        (_flip_own_pnl, "sleeves"),
+        (_flip_alloc, "allocated_cost"),
+        (_flip_closure, "closure"),
+        (_flip_tie_break, "bindings"),
+        (_swap_leg_accounts, "flows"),
+    ],
+)
+def test_the_verifier_fails_when_a_fact_is_tampered(mutate: Any, table: str) -> None:
+    artifact, catalog = _tampered(mutate)
+    report = _verify(artifact, catalog)
+    assert not report.verified
+    assert table in {item.table for item in report.mismatches}
+
+
+def test_the_verifier_fails_when_the_inputs_are_not_the_ones_bound() -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    artifact = _built_from(catalog)
+    document["positions"][0]["mark_price"] = str(
+        Decimal(document["positions"][0]["mark_price"]) + 1
+    )
+    report = _verify(artifact, _catalog_bytes(document))
+    assert not report.verified
+    assert "account_rows_sha256" in {item.key for item in report.mismatches}
+
+
+def test_the_verifier_refuses_bytes_that_are_not_canonical() -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    spaced = json.dumps(json.loads(_built_from(catalog)), indent=1).encode()
+    report = _verify(spaced, catalog)
+    assert [item.table for item in report.mismatches] == ["artifact"]
+
+
+def test_the_artifact_states_the_tie_break_and_binds_it_into_the_code_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    code = json.loads(_built_from(catalog))["bindings"]["builder_code"]
+    rule = code["same_second_tie_break"]
+    assert rule["rule"].startswith("TAG_RESOLVED_FIRST>")
+    assert rule["sha256"] == hashlib.sha256(rule["rule"].encode("ascii")).hexdigest()
+    assert (
+        code["sha256"]
+        == hashlib.sha256(
+            json.dumps(
+                {
+                    "files": code["files"],
+                    "same_second_tie_break_sha256": rule["sha256"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
+    # another rule gives another digest, and the verifier no longer agrees
+    monkeypatch.setattr(builder.ledger_module, "SAME_SECOND_TIE_BREAK", "ROW_ORDER")
+    monkeypatch.setattr(
+        builder.ledger_module,
+        "SAME_SECOND_TIE_BREAK_SHA256",
+        hashlib.sha256(b"ROW_ORDER").hexdigest(),
+    )
+    other = json.loads(_built_from(catalog))["bindings"]["builder_code"]
+    assert other["sha256"] != code["sha256"]
+    assert not _verify(_built_from(catalog), catalog).verified

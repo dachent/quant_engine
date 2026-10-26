@@ -34,8 +34,17 @@
         "builder_code": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["files", "sha256"],
+          "required": ["files", "same_second_tie_break", "sha256"],
           "properties": {
+            "same_second_tie_break": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rule", "sha256"],
+              "properties": {
+                "rule": {"type": "string", "minLength": 1},
+                "sha256": {"$ref": "#/$defs/sha256"}
+              }
+            },
             "files": {
               "type": "object",
               "minProperties": 1,

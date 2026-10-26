@@ -17,8 +17,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable, Mapping, Sequence
+import hashlib
+from typing import Callable, Final, Mapping, Sequence
 
+# The order of executions that share one timestamp (the provider stamps to the
+# second).  It decides who holds a symbol when an unassigned execution lands, so
+# the artifact states it and binds its hash into the code digest.
+SAME_SECOND_TIE_BREAK: Final = (
+    "TAG_RESOLVED_FIRST>SECURITY_ID>QUANTITY>PRICE>COMMISSION"
+)
+SAME_SECOND_TIE_BREAK_SHA256: Final = hashlib.sha256(
+    SAME_SECOND_TIE_BREAK.encode("ascii")
+).hexdigest()
 _ZERO = Decimal(0)
 _EPSILON = Decimal("1e-9")
 _RECONCILE_TOLERANCE = Decimal("1e-6")
