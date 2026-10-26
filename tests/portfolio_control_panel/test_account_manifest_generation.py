@@ -30036,3 +30036,180 @@ def test_tail_epoch_keys_treat_a_null_start_history_row_as_earliest() -> None:
         producer_module._tail_epoch_keys({"acct": [history, mapped]}, admissions)
         == set()
     )
+
+
+_LIFECYCLE_ROW_FIELDS = (
+    "lifecycle_state",
+    "retired_on",
+    "closed_on",
+    "parent_assignment_id",
+    "sleeve_label",
+)
+
+
+def _lifecycle_closed_selected(perimeter_module: Any) -> Any:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    policy = json.loads(selected.admission_policy.contents)
+    funded = [row for row in policy["admissions"] if row["status"] == "FUNDED"]
+    assert len(funded) == 1
+    funded[0]["funded_end"] = "2026-01-31"
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "mixed admission with funded end", canonical_json_bytes(policy)
+            ),
+            "manifest_schema": selected.manifest_schema,
+            "membership_census": selected.membership_census,
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_manifest_rows_carry_derived_lifecycle_and_the_verifier_rederives_it(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """#592: ACTIVE, RETIRED and CLOSED epochs come from governed facts only."""
+
+    selected = _lifecycle_closed_selected(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert output["lifecycle_schema_version"] == 1
+    rows = {row["account_id"]: row for row in output["rows"]}
+    assert all(
+        tuple(field for field in _LIFECYCLE_ROW_FIELDS if field in row)
+        == _LIFECYCLE_ROW_FIELDS
+        for row in rows.values()
+    )
+    closed = next(row for row in rows.values() if row["status"] == "OK")
+    assert closed["performance_closed_on"] == "2026-01-31"
+    assert {field: closed[field] for field in _LIFECYCLE_ROW_FIELDS} == {
+        "lifecycle_state": "CLOSED",
+        "retired_on": None,
+        "closed_on": "2026-01-31",
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+    retired = rows["synthetic-account-12"]
+    assert retired["effective_end"] == "2025-12-31"
+    assert {field: retired[field] for field in _LIFECYCLE_ROW_FIELDS} == {
+        "lifecycle_state": "RETIRED",
+        "retired_on": "2025-12-31",
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+    assert rows["synthetic-account-03"]["lifecycle_state"] == "ACTIVE"
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier.verify(inputs, payloads)
+
+    # Each forged lifecycle value, a dropped field and a dropped marker fail.
+    def forged(mutate: Any) -> None:
+        mutated = json.loads(payloads["outputs/account-strategy-manifest.json"])
+        mutate(mutated)
+        bad = dict(payloads)
+        bad["outputs/account-strategy-manifest.json"] = canonical_json_bytes(mutated)
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier.verify(inputs, bad)
+
+    forged(lambda doc: doc["rows"][0].__setitem__("lifecycle_state", "RETIRED"))
+    forged(lambda doc: doc["rows"][0].__setitem__("retired_on", "2025-12-31"))
+    forged(lambda doc: doc["rows"][1].__setitem__("closed_on", "2026-01-31"))
+    forged(lambda doc: doc["rows"][0].__setitem__("closed_on", None))
+    forged(lambda doc: doc["rows"][0].__setitem__("sleeve_label", "Forged sleeve"))
+    forged(lambda doc: doc["rows"][0].__setitem__("parent_assignment_id", "forged"))
+    forged(lambda doc: doc["rows"][0].pop("lifecycle_state"))
+    forged(lambda doc: doc.pop("lifecycle_schema_version"))
+
+
+def test_manifest_schema_keeps_the_previous_rows_readable_and_binds_the_new_ones() -> (
+    None
+):
+    """#592: no marker, no lifecycle fields (previous schema); a marker needs them."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes())
+    row = {
+        "account_id": "a",
+        "provider": "p",
+        "strategy_id": "s",
+        "effective_start": "2026-01-01",
+        "effective_end": None,
+        "admission_status": "BLOCKED",
+        "admission_policy_reference": "NONE",
+        "admission_authority_kind": "NONE",
+        "funded_nav_record_ids": [],
+        "continuity_to_successor": False,
+        "status": "BLOCKED_ADMISSION",
+        "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+    }
+    lifecycle = {
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+
+    def errors(document: dict[str, Any]) -> list[str]:
+        # Only the lifecycle rule is under test: every other failure of this
+        # minimal document (identities, readiness) is ignored by name.
+        names = ("lifecycle", *_LIFECYCLE_ROW_FIELDS)
+        return [
+            error.message
+            for error in Draft202012Validator(schema).iter_errors(document)
+            if any(
+                name in f"{error.message} {'/'.join(map(str, error.absolute_path))}"
+                for name in names
+            )
+        ]
+
+    previous = {"schema_version": 9, "rows": [dict(row)]}
+    assert errors(previous) == []
+    assert errors({**previous, "rows": [{**row, **lifecycle}]}) != []
+    current = {"schema_version": 9, "lifecycle_schema_version": 1}
+    assert errors({**current, "rows": [{**row, **lifecycle}]}) == []
+    assert errors({**current, "rows": [dict(row)]}) != []
+    assert errors(
+        {**current, "rows": [{**row, **lifecycle, "lifecycle_state": "DORMANT"}]}
+    )
+
+
+def test_producer_and_verifier_lifecycle_derivations_agree_on_every_case(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """#592: the two code paths share no code; they agree on the whole matrix."""
+
+    for end in (None, "2025-12-31"):
+        for closed in (None, "2026-01-31"):
+            for disposition in (
+                None,
+                "INCLUDED_PRODUCT_EPOCH",
+                "EXCLUDED_IMMATERIAL",
+                "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+            ):
+                row = {"effective_end": end, "performance_closed_on": closed}
+                produced = perimeter_module._epoch_lifecycle_fields(
+                    {**row, "status": "OK"}, disposition
+                )
+                derived = verifier_module._independent_epoch_lifecycle(
+                    end, closed, disposition
+                )
+                assert produced == derived, (end, closed, disposition)
+    inactive = perimeter_module._epoch_lifecycle_fields(
+        {"effective_end": None, "status": "OK"}, "EXCLUDED_IMMATERIAL"
+    )
+    assert inactive["lifecycle_state"] == "INACTIVE"
+    # A blocked row has no performance, so its closing date never counts.
+    blocked = perimeter_module._epoch_lifecycle_fields(
+        {
+            "effective_end": None,
+            "performance_closed_on": "2026-01-31",
+            "status": "BLOCKED_ADMISSION",
+        },
+        "INCLUDED_PRODUCT_EPOCH",
+    )
+    assert blocked["lifecycle_state"] == "ACTIVE"

@@ -15551,3 +15551,108 @@ def test_wire_form_without_lens_modes_is_unchanged() -> None:
     assert panel._panel_wire_form({"panel_schema_version": 25}) == {
         "panel_schema_version": 25
     }
+
+
+_LIFECYCLE_ACTIVE = {
+    "lifecycle_state": "ACTIVE",
+    "retired_on": None,
+    "closed_on": None,
+    "parent_assignment_id": None,
+    "sleeve_label": None,
+}
+
+
+def _retained_record(strategy_id: str, **override: Any) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "strategy_name": f"Retained {strategy_id}",
+        "record_kind": "RETAINED_HISTORY_ONLY",
+        "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+        "product_requirement": "EXCLUDED",
+        "source": "NESTED_STRATEGY_TAG_MAP",
+        "effective_start": "2024-07-24",
+        "effective_end": "2024-12-12",
+        "lifecycle_state": "RETIRED",
+        "retired_on": "2024-12-12",
+        "closed_on": None,
+        "parent_assignment_id": "assignment-parent",
+        "sleeve_label": f"Sleeve {strategy_id}",
+        **override,
+    }
+
+
+def test_panel_appends_retained_strategy_records_after_the_current_rows(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Fail-before (#592): the lifecycle marker and the retained records publish."""
+
+    report = _report_with_baseline(inputs)
+    current_ids = [row["strategy_id"] for row in report["strategy_summary"]]
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired"),
+        _retained_record(
+            "sleeve-inactive",
+            effective_end=None,
+            lifecycle_state="INACTIVE",
+            retired_on=None,
+        ),
+    ]
+    root = tmp_path / "lifecycle-report"
+    _publish_report(
+        root,
+        tmp_path / "lifecycle-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "lifecycle-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    assert data["lifecycle_schema_version"] == 1
+    strategies = data["strategies"]
+    assert [row["strategy_id"] for row in strategies] == [
+        *current_ids,
+        "fund-retired",
+        "sleeve-inactive",
+    ]
+    assert all(row["lifecycle_state"] == "ACTIVE" for row in strategies[:-2])
+    assert [row["lifecycle_state"] for row in strategies[-2:]] == [
+        "RETIRED",
+        "INACTIVE",
+    ]
+    # The current-product counts and checks are about the current rows only.
+    assert data["counts"]["strategies"] == len(current_ids)
+    assert all("lifecycle_state" in row for row in data["performance"])
+
+
+def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report_with_baseline(inputs)
+    root = tmp_path / "previous-report"
+    _publish_report(
+        root,
+        tmp_path / "previous-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "previous-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    assert "lifecycle_schema_version" not in data
+    assert len(data["strategies"]) == data["counts"]["strategies"]
+    assert not any("lifecycle_state" in row for row in data["strategies"])
