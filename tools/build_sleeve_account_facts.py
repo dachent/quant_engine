@@ -1,0 +1,905 @@
+"""Build the hash-bound sleeve facts of one provider account (#567, stage 5 PR 1).
+
+A post-ledger layer.  It is not a provider: it reads one IBKR account's
+provider-ledger rows (catalog schema 7), runs the sleeve ledger and the sleeve
+NAV derivation with the owner's tag map and declared inputs, and writes ONE
+artifact that a later manifest seam can read as ordinary one-strategy accounts
+``<parent>-<sleeve>`` plus the perimeter pseudo-account ``<parent>-unallocated``.
+
+Everything the rows cannot state is a declared input, hashed into the artifact:
+funding events (each with an evidence reference and a ``live`` flag), symbol
+aliases, the unheld-symbol fallback, the ChangeInNAV component roles and the
+closure tolerance.  Nothing is guessed: a missing day, a missing component, an
+unpaired flow or a closure residual above the tolerance stops the build.
+
+Flow mapping.  A reallocation is a paired INTERNAL_OUT / INTERNAL_IN with
+``flow_type`` ``TRANSFER:INTERNAL:SLEEVE``; sleeve provenance is carried in the
+optional ``trace``.  Cash a sleeve exchanges with the account's unallocated
+cash is paired with a leg on ``<parent>-unallocated``.  Allocated cost (interest,
+fees, dividend accruals) is not a flow: it is disclosed in its own block and in
+``nav_end_after_alloc``.  No new flow class exists.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, InvalidOperation, localcontext
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+from typing import Any, Final, Mapping, Sequence
+
+import nested_strategy_tag_map as tag_map_module
+import sleeve_inputs as inputs_module
+import sleeve_ledger as ledger_module
+import sleeve_nav as nav_module
+
+SCHEMA_PATH: Final = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "portfolio"
+    / "sleeve-account-facts.schema.json"
+)
+ARTIFACT_ID: Final = "sleeve-account-facts"
+DECLARED_ARTIFACT_ID: Final = "sleeve-declared-inputs"
+FLOW_TYPE: Final = "TRANSFER:INTERNAL:SLEEVE"
+UNALLOCATED_SUFFIX: Final = "unallocated"
+_ZERO: Final = Decimal(0)
+_PRECISION: Final = 28
+_ROLES: Final = ("external_flow", "interest", "fees", "dividend_accrual")
+_GENERATION_ID: Final = re.compile(r"^[A-Za-z0-9._:@+-]{1,200}$")
+_SOURCE_MODULES: Final = (
+    "build_sleeve_account_facts",
+    "nested_strategy_tag_map",
+    "sleeve_inputs",
+    "sleeve_ledger",
+    "sleeve_nav",
+)
+_EVENT_KEYS: Final = {
+    "kind",
+    "evidence",
+    "evidence_ref",
+    "live",
+    "note",
+    "counterparty",
+}
+
+
+class SleeveFactsError(ValueError):
+    """The sleeve facts cannot be built from the inputs; nothing was written."""
+
+
+@dataclass(frozen=True)
+class AccountRows:
+    """One account's de-duplicated provider-ledger rows."""
+
+    transactions: tuple[Mapping[str, Any], ...]
+    positions: tuple[Mapping[str, Any], ...]
+    change_in_nav: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DeclaredInputs:
+    sha256: str
+    parent_account_id: str
+    base_currency: str
+    residual_id: str
+    first_day: str
+    last_day: str
+    tolerance_per_day: Decimal
+    tolerance_window: Decimal
+    roles: Mapping[str, tuple[str, ...]]
+    aliases: Mapping[str, str]
+    alias_from_day: str | None
+    unheld_fallback: Mapping[str, str]
+    funding: Mapping[str, Mapping[str, nav_module.FundingEvent]]
+
+
+def _dec(value: Decimal) -> str:
+    """Canonical plain decimal text: no exponent, no trailing zeros."""
+
+    if value == 0:
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _decimal(value: object, name: str) -> Decimal:
+    if not isinstance(value, str):
+        raise SleeveFactsError(f"{name} must be decimal text")
+    try:
+        number = Decimal(value)
+    except InvalidOperation as error:
+        raise SleeveFactsError(f"{name} is not a number: {value!r}") from error
+    if not number.is_finite():
+        raise SleeveFactsError(f"{name} is not finite")
+    return number
+
+
+def _iso_day(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise SleeveFactsError(f"{name} must be an ISO date")
+    try:
+        date.fromisoformat(value)
+    except ValueError as error:
+        raise SleeveFactsError(f"{name} must be an ISO date") from error
+    return value
+
+
+def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SleeveFactsError(f"duplicate JSON member: {key}")
+        result[key] = value
+    return result
+
+
+def _load_json(raw: bytes, name: str) -> Any:
+    try:
+        return json.loads(raw, object_pairs_hook=_reject_duplicates)
+    except SleeveFactsError:
+        raise
+    except ValueError as error:
+        raise SleeveFactsError(f"{name} is not JSON") from error
+
+
+def _strict(value: object, keys: set[str], name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise SleeveFactsError(f"{name} keys are invalid")
+    return value
+
+
+def _id_list(value: object, name: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise SleeveFactsError(f"{name} must be a non-empty list of distinct keys")
+    return tuple(value)
+
+
+def load_declared_inputs(raw: bytes, tag_map: tag_map_module.TagMap) -> DeclaredInputs:
+    """Parse the owner's declared inputs strictly; refuse anything unstated."""
+
+    top = _strict(
+        _load_json(raw, "declared inputs"),
+        {
+            "schema_version",
+            "artifact_id",
+            "parent_account_id",
+            "base_currency",
+            "residual_id",
+            "window",
+            "closure_tolerance",
+            "change_in_nav_components",
+            "symbol_aliases",
+            "unheld_fallback",
+            "funding_events",
+        },
+        "declared inputs",
+    )
+    version = top["schema_version"]
+    if (
+        type(version) is not int
+        or version != 1
+        or top["artifact_id"] != DECLARED_ARTIFACT_ID
+    ):
+        raise SleeveFactsError("declared inputs identity is invalid")
+    parent_id = top["parent_account_id"]
+    if not isinstance(parent_id, str):
+        raise SleeveFactsError("declared parent_account_id is invalid")
+    try:
+        parent = tag_map.parent(parent_id)
+    except tag_map_module.TagMapError as error:
+        raise SleeveFactsError(str(error)) from error
+    currency = top["base_currency"]
+    residual = top["residual_id"]
+    if not isinstance(currency, str) or re.fullmatch(r"[A-Z]{3}", currency) is None:
+        raise SleeveFactsError("declared base_currency is invalid")
+    if (
+        not isinstance(residual, str)
+        or re.fullmatch(r"[a-z][a-z0-9]{0,15}", residual) is None
+    ):
+        raise SleeveFactsError("declared residual_id is invalid")
+    sleeve_ids = {sleeve.sleeve_id for sleeve in parent.sleeves}
+    if residual in sleeve_ids or UNALLOCATED_SUFFIX in sleeve_ids:
+        raise SleeveFactsError("residual and unallocated ids must not be sleeves")
+    if len(f"{parent_id}-{UNALLOCATED_SUFFIX}") > 64:
+        raise SleeveFactsError("unallocated account id is too long")
+    window = _strict(top["window"], {"first_day", "last_day"}, "window")
+    first_day = _iso_day(window["first_day"], "window.first_day")
+    last_day = _iso_day(window["last_day"], "window.last_day")
+    if last_day < first_day:
+        raise SleeveFactsError("window is reversed")
+    tolerance = _strict(top["closure_tolerance"], {"per_day", "window"}, "tolerance")
+    per_day = _decimal(tolerance["per_day"], "closure_tolerance.per_day")
+    in_window = _decimal(tolerance["window"], "closure_tolerance.window")
+    if per_day < 0 or in_window < 0:
+        raise SleeveFactsError("closure tolerance must not be negative")
+    components = _strict(
+        top["change_in_nav_components"], set(_ROLES), "change_in_nav_components"
+    )
+    roles = {
+        role: _id_list(components[role], f"component role {role}") for role in _ROLES
+    }
+    claimed = [key for role in _ROLES for key in roles[role]]
+    if len(set(claimed)) != len(claimed):
+        raise SleeveFactsError("a ChangeInNAV component serves two roles")
+    aliases_block = _strict(
+        top["symbol_aliases"], {"aliases", "from_day"}, "symbol_aliases"
+    )
+    aliases_raw = aliases_block["aliases"]
+    if not isinstance(aliases_raw, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in aliases_raw.items()
+    ):
+        raise SleeveFactsError("symbol aliases are invalid")
+    from_day_raw = aliases_block["from_day"]
+    if aliases_raw and from_day_raw is None:
+        raise SleeveFactsError("aliases need a from_day")
+    from_day = (
+        None if from_day_raw is None else _iso_day(from_day_raw, "alias from_day")
+    )
+    fallback_raw = top["unheld_fallback"]
+    if not isinstance(fallback_raw, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) and v in sleeve_ids
+        for k, v in fallback_raw.items()
+    ):
+        raise SleeveFactsError("unheld fallback must name known sleeves")
+    funding_raw = top["funding_events"]
+    if not isinstance(funding_raw, Mapping) or not funding_raw:
+        raise SleeveFactsError("no funding events are declared")
+    funding: dict[str, dict[str, nav_module.FundingEvent]] = {}
+    for sleeve, events_raw in funding_raw.items():
+        if sleeve not in sleeve_ids:
+            raise SleeveFactsError(f"funding names an unknown sleeve: {sleeve}")
+        if not isinstance(events_raw, Mapping) or not events_raw:
+            raise SleeveFactsError(f"sleeve {sleeve} has no funding events")
+        funding[sleeve] = {}
+        for day, event_raw in events_raw.items():
+            _iso_day(day, f"{sleeve} event day")
+            event = _strict(event_raw, _EVENT_KEYS, f"{sleeve} {day} event")
+            ref = event["evidence_ref"]
+            if not isinstance(ref, str) or not ref.strip():
+                raise SleeveFactsError(f"{sleeve} {day} has no evidence reference")
+            if type(event["live"]) is not bool:
+                raise SleeveFactsError(f"{sleeve} {day} live flag must be a boolean")
+            for optional in ("note", "counterparty"):
+                if event[optional] is not None and not isinstance(event[optional], str):
+                    raise SleeveFactsError(f"{sleeve} {day} {optional} is invalid")
+            kind, evidence = event["kind"], event["evidence"]
+            if kind not in nav_module.KINDS or evidence not in nav_module.EVIDENCE:
+                raise SleeveFactsError(f"{sleeve} {day} kind or evidence is invalid")
+            funding[sleeve][day] = nav_module.FundingEvent(
+                kind=kind,
+                evidence=evidence,
+                note=event["note"],
+                counterparty=event["counterparty"],
+                evidence_ref=ref,
+                live=event["live"],
+            )
+    return DeclaredInputs(
+        sha256=hashlib.sha256(raw).hexdigest(),
+        parent_account_id=parent_id,
+        base_currency=currency,
+        residual_id=residual,
+        first_day=first_day,
+        last_day=last_day,
+        tolerance_per_day=per_day,
+        tolerance_window=in_window,
+        roles=roles,
+        aliases=dict(aliases_raw),
+        alias_from_day=from_day,
+        unheld_fallback=dict(fallback_raw),
+        funding=funding,
+    )
+
+
+def _account_days(
+    rows: AccountRows, declared: DeclaredInputs
+) -> tuple[list[nav_module.AccountDay], list[str]]:
+    """The account's daily ChangeInNAV figures; a gap or a missing role is refused."""
+
+    by_day: dict[str, Mapping[str, Any]] = {}
+    for row in rows.change_in_nav:
+        account = row.get("account_id")
+        if account is not None and account != declared.parent_account_id:
+            raise SleeveFactsError("a ChangeInNAV row belongs to another account")
+        day = _iso_day(row.get("accounting_date"), "ChangeInNAV accounting_date")
+        if day in by_day:
+            raise SleeveFactsError(f"ChangeInNAV is repeated on {day}")
+        by_day[day] = row
+    days = sorted(by_day)
+    if not days or days[0] != declared.first_day or days[-1] != declared.last_day:
+        raise SleeveFactsError(
+            f"ChangeInNAV covers {days[:1]}..{days[-1:]} not the declared window "
+            f"{declared.first_day}..{declared.last_day}"
+        )
+    figures: list[nav_module.AccountDay] = []
+    previous_end: Decimal | None = None
+    for day in days:
+        row = by_day[day]
+        if row.get("currency") != declared.base_currency:
+            raise SleeveFactsError(f"ChangeInNAV on {day} is not in the base currency")
+        start = _decimal(row.get("opening_nav"), f"{day} opening_nav")
+        end = _decimal(row.get("ending_nav"), f"{day} ending_nav")
+        if previous_end is not None and start != previous_end:
+            raise SleeveFactsError(f"ChangeInNAV is not contiguous at {day}")
+        previous_end = end
+        components: dict[str, Decimal] = {}
+        raw_components = row.get("components")
+        if not isinstance(raw_components, list):
+            raise SleeveFactsError(f"{day} has no ChangeInNAV components")
+        for item in raw_components:
+            key = (
+                item.get("source_component_key") if isinstance(item, Mapping) else None
+            )
+            if not isinstance(key, str) or key in components:
+                raise SleeveFactsError(f"{day} has an invalid or repeated component")
+            components[key] = _decimal(item.get("value"), f"{day} component {key}")
+        totals: dict[str, Decimal] = {}
+        for role in _ROLES:
+            total = _ZERO
+            for key in declared.roles[role]:
+                if key not in components:
+                    raise SleeveFactsError(
+                        f"{day} ChangeInNAV does not state component {key} ({role})"
+                    )
+                total += components[key]
+            totals[role] = total
+        figures.append(
+            nav_module.AccountDay(
+                day=day,
+                start_nav=start,
+                end_nav=end,
+                external_flow=totals["external_flow"],
+                interest=totals["interest"],
+                fees=totals["fees"],
+                dividend_accrual=totals["dividend_accrual"],
+            )
+        )
+    return figures, days
+
+
+def _builder_code(modules: Sequence[str]) -> dict[str, Any]:
+    """Digest of the builder and the modules it derives with (LF-normalized)."""
+
+    files: dict[str, str] = {}
+    for name in modules:
+        module = sys.modules.get(name)
+        path = Path(getattr(module, "__file__", "") or "")
+        if not path.is_file():
+            path = Path(__file__).resolve().with_name(f"{name}.py")
+        text = path.read_bytes().replace(b"\r\n", b"\n")
+        files[f"tools/{name}.py"] = hashlib.sha256(text).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"files": files, "sha256": digest}
+
+
+def _pair_flows(
+    nav: nav_module.SleeveNav,
+    declared: DeclaredInputs,
+    parent: tag_map_module.ParentMap,
+) -> list[dict[str, Any]]:
+    """Paired INTERNAL legs for every sleeve funding step.
+
+    A step that names UNALLOCATED_ACCOUNT_CASH pairs with a leg on the
+    perimeter pseudo-account.  Steps with no counterparty pair with each other
+    on the same day (REALLOCATION); what cannot pair stays in the account's
+    unallocated cash and is labelled so.
+    """
+
+    unallocated = f"{parent.parent_account_id}-{UNALLOCATED_SUFFIX}"
+    by_day: dict[str, list[nav_module.SleeveNavDay]] = {}
+    for row in nav.rows:
+        if row.flow_in or row.flow_out:
+            by_day.setdefault(row.day, []).append(row)
+    legs: list[dict[str, Any]] = []
+    counter = 0
+
+    def ref(sleeve: str, day: str) -> str:
+        event = declared.funding[sleeve][day]
+        return str(event.evidence_ref)
+
+    def emit(
+        day: str,
+        out_account: str,
+        in_account: str,
+        amount: Decimal,
+        kind: str,
+        pairing: str,
+        out_sleeve: str | None,
+        in_sleeve: str | None,
+        refs: Sequence[str],
+    ) -> None:
+        nonlocal counter
+        counter += 1
+        pair_id = f"{day}:{counter:04d}"
+        trace = {
+            "kind": kind,
+            "pairing": pairing,
+            "from_sleeve": out_sleeve,
+            "to_sleeve": in_sleeve,
+            "evidence_refs": sorted(set(refs)),
+        }
+        for account, flow_class, other in (
+            (out_account, "INTERNAL_OUT", in_account),
+            (in_account, "INTERNAL_IN", out_account),
+        ):
+            legs.append(
+                {
+                    "pair_id": pair_id,
+                    "account_id": account,
+                    "class": flow_class,
+                    "flow_type": FLOW_TYPE,
+                    "event_date": day,
+                    "nav_recognition_date": day,
+                    "amount": _dec(amount),
+                    "counterparty_account_id": other,
+                    "trace": trace,
+                }
+            )
+
+    for day in sorted(by_day):
+        ins: list[tuple[str, Decimal]] = []
+        outs: list[tuple[str, Decimal]] = []
+        for row in sorted(by_day[day], key=lambda item: item.sleeve_id):
+            net = row.flow_in + row.flow_out
+            if net == 0:
+                continue
+            account = parent.sleeve_account_id(row.sleeve_id)
+            amount = abs(net)
+            if row.counterparty == nav_module.UNALLOCATED_ACCOUNT_CASH:
+                emit(
+                    day,
+                    unallocated if net > 0 else account,
+                    account if net > 0 else unallocated,
+                    amount,
+                    "UNALLOCATED_CASH",
+                    "DECLARED_UNALLOCATED",
+                    None if net > 0 else row.sleeve_id,
+                    row.sleeve_id if net > 0 else None,
+                    [ref(row.sleeve_id, day)],
+                )
+            elif net > 0:
+                ins.append((row.sleeve_id, amount))
+            else:
+                outs.append((row.sleeve_id, amount))
+        # Greedy pairing of the undeclared legs, in sleeve-id order.
+        in_left: list[list[Any]] = [[sleeve, amount] for sleeve, amount in ins]
+        out_left: list[list[Any]] = [[sleeve, amount] for sleeve, amount in outs]
+        i = o = 0
+        while i < len(in_left) and o < len(out_left):
+            take = min(in_left[i][1], out_left[o][1])
+            in_id, out_id = str(in_left[i][0]), str(out_left[o][0])
+            emit(
+                day,
+                parent.sleeve_account_id(out_id),
+                parent.sleeve_account_id(in_id),
+                take,
+                "REALLOCATION",
+                "SLEEVE_PAIR",
+                out_id,
+                in_id,
+                [ref(in_id, day), ref(out_id, day)],
+            )
+            in_left[i][1] -= take
+            out_left[o][1] -= take
+            if in_left[i][1] == 0:
+                i += 1
+            if out_left[o][1] == 0:
+                o += 1
+        for sleeve, amount in in_left[i:]:
+            if amount:
+                emit(
+                    day,
+                    unallocated,
+                    parent.sleeve_account_id(str(sleeve)),
+                    amount,
+                    "UNALLOCATED_CASH",
+                    "UNALLOCATED_REMAINDER",
+                    None,
+                    str(sleeve),
+                    [ref(str(sleeve), day)],
+                )
+        for sleeve, amount in out_left[o:]:
+            if amount:
+                emit(
+                    day,
+                    parent.sleeve_account_id(str(sleeve)),
+                    unallocated,
+                    amount,
+                    "UNALLOCATED_CASH",
+                    "UNALLOCATED_REMAINDER",
+                    str(sleeve),
+                    None,
+                    [ref(str(sleeve), day)],
+                )
+    legs.sort(
+        key=lambda leg: (
+            leg["event_date"],
+            leg["pair_id"],
+            leg["class"] != "INTERNAL_OUT",
+            leg["account_id"],
+        )
+    )
+    return legs
+
+
+def _refuse_open_closure(nav: nav_module.SleeveNav, declared: DeclaredInputs) -> None:
+    bad = [
+        (item.day, item.unexplained)
+        for item in nav.closure
+        if abs(item.unexplained) > declared.tolerance_per_day
+    ]
+    if bad:
+        shown = ", ".join(f"{day}: {_dec(value)}" for day, value in bad[:5])
+        raise SleeveFactsError(
+            f"closure residual exceeds the declared per-day tolerance "
+            f"{_dec(declared.tolerance_per_day)} on {len(bad)} day(s): {shown}"
+        )
+    total, within = nav_module.closure_within(
+        nav, declared.first_day, declared.last_day, declared.tolerance_window
+    )
+    if not within:
+        raise SleeveFactsError(
+            f"closure residual {_dec(total)} exceeds the declared window tolerance "
+            f"{_dec(declared.tolerance_window)}"
+        )
+
+
+def build_sleeve_account_facts(
+    *,
+    tag_map_bytes: bytes,
+    declared_inputs_bytes: bytes,
+    rows: AccountRows,
+    rows_sha256: str,
+    parent_ledger_generation_id: str,
+) -> bytes:
+    """The canonical bytes of the sleeve-facts artifact, or a refusal."""
+
+    if _GENERATION_ID.fullmatch(parent_ledger_generation_id) is None:
+        raise SleeveFactsError("parent ledger generation id is invalid")
+    try:
+        tag_map = tag_map_module.validate_tag_map(tag_map_bytes)
+    except tag_map_module.TagMapError as error:
+        raise SleeveFactsError(str(error)) from error
+    declared = load_declared_inputs(declared_inputs_bytes, tag_map)
+    parent = tag_map.parent(declared.parent_account_id)
+    for item in (*rows.transactions, *rows.positions):
+        account = item.get("account_id")
+        if account is not None and account != declared.parent_account_id:
+            raise SleeveFactsError("a row belongs to another account")
+    with localcontext() as context:
+        context.prec = _PRECISION
+        account_days, days = _account_days(rows, declared)
+        try:
+            inputs = inputs_module.sleeve_inputs(
+                rows.transactions,
+                rows.positions,
+                parent,
+                base_currency=declared.base_currency,
+                days=days,
+            )
+        except inputs_module.SleeveInputError as error:
+            raise SleeveFactsError(str(error)) from error
+        if set(inputs.positions) != set(days):
+            raise SleeveFactsError("position days differ from the ChangeInNAV days")
+        policy = inputs.policy(
+            declared.residual_id,
+            aliases=declared.aliases,
+            alias_from_day=declared.alias_from_day,
+        )
+        merged = {**dict(inputs.unheld_fallback), **dict(declared.unheld_fallback)}
+        policy = ledger_module.SleevePolicy(
+            sleeve_ids=policy.sleeve_ids,
+            residual_id=policy.residual_id,
+            aliases=policy.aliases,
+            alias_from_day=policy.alias_from_day,
+            unheld_fallback=merged,
+        )
+        ledger = ledger_module.derive_sleeve_ledger(
+            inputs.trades,
+            inputs.positions,
+            inputs.marks,
+            inputs.dividends,
+            inputs.resolve,
+            policy,
+        )
+        nav = nav_module.derive_sleeve_nav(
+            ledger,
+            declared.funding,
+            account_days,
+            days,
+            policy.sleeve_ids,
+            declared.residual_id,
+            account_label=declared.parent_account_id,
+        )
+        _refuse_open_closure(nav, declared)
+        flows = _pair_flows(nav, declared, parent)
+        artifact = _artifact(
+            tag_map,
+            declared,
+            parent,
+            ledger,
+            nav,
+            flows,
+            account_days,
+            days,
+            rows_sha256,
+            parent_ledger_generation_id,
+        )
+    return (
+        json.dumps(artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("ascii")
+
+
+def _artifact(
+    tag_map: tag_map_module.TagMap,
+    declared: DeclaredInputs,
+    parent: tag_map_module.ParentMap,
+    ledger: ledger_module.SleeveLedger,
+    nav: nav_module.SleeveNav,
+    flows: list[dict[str, Any]],
+    account_days: Sequence[nav_module.AccountDay],
+    days: Sequence[str],
+    rows_sha256: str,
+    generation_id: str,
+) -> dict[str, Any]:
+    by_sleeve: dict[str, list[nav_module.SleeveNavDay]] = {}
+    for row in nav.rows:
+        by_sleeve.setdefault(row.sleeve_id, []).append(row)
+    carried = {day: _ZERO for day in days}
+    sleeves: list[dict[str, Any]] = []
+    for item in parent.sleeves:
+        sleeve_rows = by_sleeve.get(item.sleeve_id)
+        if not sleeve_rows:
+            continue
+        cumulative = _ZERO
+        day_rows: list[dict[str, Any]] = []
+        for row in sleeve_rows:
+            cumulative += row.alloc_total
+            event = declared.funding[item.sleeve_id].get(row.day)
+            after = _ZERO if row.event == "EXIT" else row.nav_end + cumulative
+            carried[row.day] += after
+            day_rows.append(
+                {
+                    "day": row.day,
+                    "event": row.event,
+                    "event_evidence": row.event_evidence,
+                    "evidence_ref": None if event is None else event.evidence_ref,
+                    "live": None if event is None else event.live,
+                    "counterparty": row.counterparty or None,
+                    "nav_prev": _dec(row.nav_prev),
+                    "flow_in": _dec(row.flow_in),
+                    "flow_out": _dec(row.flow_out),
+                    "nav_end": _dec(row.nav_end),
+                    "nav_end_after_alloc": _dec(after),
+                    "value": _dec(row.value),
+                    "price_pnl": _dec(row.price_pnl),
+                    "commission": _dec(row.commission),
+                    "dividend": _dec(row.dividend),
+                    "own_pnl": _dec(row.own_pnl),
+                    "exposure": _dec(row.exposure),
+                    "exposure_share": _dec(row.exposure_share),
+                    "alloc_total": _dec(row.alloc_total),
+                }
+            )
+        sleeves.append(
+            {
+                "sleeve_id": item.sleeve_id,
+                "account_id": parent.sleeve_account_id(item.sleeve_id),
+                "strategy_id": item.strategy_id,
+                "first_day": sleeve_rows[0].day,
+                "last_day": sleeve_rows[-1].day,
+                "days": day_rows,
+            }
+        )
+    figures = {item.day: item for item in account_days}
+    alloc_rows = [
+        {
+            "day": row.day,
+            "sleeve_id": row.sleeve_id,
+            "alloc_interest": _dec(row.alloc_interest),
+            "alloc_fees": _dec(row.alloc_fees),
+            "alloc_dividend_accrual": _dec(row.alloc_dividend_accrual),
+            "alloc_total": _dec(row.alloc_total),
+        }
+        for row in sorted(nav.rows, key=lambda r: (r.day, r.sleeve_id))
+        if row.alloc_total
+        or row.alloc_interest
+        or row.alloc_fees
+        or row.alloc_dividend_accrual
+    ]
+    account_costs = [
+        {
+            "day": item.day,
+            "interest": _dec(item.interest),
+            "fees": _dec(item.fees),
+            "dividend_accrual": _dec(item.dividend_accrual),
+        }
+        for item in account_days
+        if item.interest or item.fees or item.dividend_accrual
+    ]
+    # The perimeter pseudo-account: the account NAV no sleeve carries.
+    first = days[0]
+    opening = figures[first].start_nav
+    signed: dict[str, Decimal] = {day: _ZERO for day in days}
+    unallocated = f"{parent.parent_account_id}-{UNALLOCATED_SUFFIX}"
+    for leg in flows:
+        if leg["account_id"] == unallocated:
+            amount = Decimal(leg["amount"])
+            signed[leg["event_date"]] += (
+                amount if leg["class"] == "INTERNAL_IN" else -amount
+            )
+    perimeter_days: list[dict[str, Any]] = []
+    previous = opening
+    for day in days:
+        end = figures[day].end_nav - carried[day]
+        perimeter_days.append(
+            {
+                "day": day,
+                "nav_end": _dec(end),
+                "external_flow": _dec(figures[day].external_flow),
+                "internal_flow_net": _dec(signed[day]),
+                "residual_pnl": _dec(
+                    end - previous - figures[day].external_flow - signed[day]
+                ),
+            }
+        )
+        previous = end
+    return {
+        "schema_version": 1,
+        "artifact_id": ARTIFACT_ID,
+        "parent_account_id": parent.parent_account_id,
+        "provider_id": parent.provider_id,
+        "base_currency": declared.base_currency,
+        "window": {"first_day": days[0], "last_day": days[-1]},
+        "bindings": {
+            "tag_map_sha256": tag_map.sha256,
+            "parent_ledger_generation_id": generation_id,
+            "declared_inputs_sha256": declared.sha256,
+            "account_rows_sha256": rows_sha256,
+            "builder_code": _builder_code(_SOURCE_MODULES),
+        },
+        "closure_policy": {
+            "tolerance_per_day": _dec(declared.tolerance_per_day),
+            "tolerance_window": _dec(declared.tolerance_window),
+            "max_abs_unexplained": _dec(
+                max((abs(item.unexplained) for item in nav.closure), default=_ZERO)
+            ),
+            "window_unexplained": _dec(
+                nav_module.closure_within(
+                    nav,
+                    declared.first_day,
+                    declared.last_day,
+                    declared.tolerance_window,
+                )[0]
+            ),
+        },
+        "sleeves": sleeves,
+        "perimeter_account": {
+            "account_id": unallocated,
+            "opening_nav": _dec(opening),
+            "days": perimeter_days,
+        },
+        "flows": flows,
+        "allocated_cost": {
+            "convention": "EXPOSURE_SHARE",
+            "folded_into": "nav_end_after_alloc",
+            "account_costs": account_costs,
+            "sleeve_allocations": alloc_rows,
+        },
+        "closure": [
+            {
+                "day": item.day,
+                "account_pnl": _dec(item.account_pnl),
+                "sleeves_own_plus_alloc": _dec(item.sleeves_own_plus_alloc),
+                "residual_and_post_exit": _dec(item.residual_and_post_exit),
+                "unexplained": _dec(item.unexplained),
+                "unallocated_cash_flow": _dec(item.unallocated_cash_flow),
+            }
+            for item in nav.closure
+        ],
+        "disclosures": {
+            "manual_assignments": [
+                {
+                    "day": day,
+                    "security_id": symbol,
+                    "quantity": _dec(quantity),
+                    "how": how,
+                    "sleeves": sleeves_text,
+                }
+                for day, symbol, quantity, how, sleeves_text in ledger.manual_assignments
+            ],
+            "reconciliation_gaps": [
+                {
+                    "day": day,
+                    "security_id": symbol,
+                    "derived": _dec(derived),
+                    "account": _dec(actual),
+                }
+                for day, symbol, derived, actual in ledger.reconciliation_gaps
+            ],
+            "reconciliation_scalings": [
+                {"day": day, "security_id": symbol, "factor": _dec(factor)}
+                for day, symbol, factor in ledger.reconciliation_scalings
+            ],
+            "offsetting_residues": [
+                {
+                    "day": day,
+                    "security_id": symbol,
+                    "quantities": [
+                        {"sleeve_id": sleeve, "quantity": _dec(quantity)}
+                        for sleeve, quantity in residue
+                    ],
+                }
+                for day, symbol, residue in ledger.offsetting_residues
+            ],
+            "unallocated_dividends": [
+                {"day": day, "amount": _dec(amount)}
+                for day, amount in sorted(ledger.unallocated_dividends.items())
+            ],
+        },
+    }
+
+
+def _rows_from_file(raw: bytes) -> AccountRows:
+    document = _strict(
+        _load_json(raw, "account rows"),
+        {"transactions", "positions", "change_in_nav_observations"},
+        "account rows",
+    )
+    for key, value in document.items():
+        if not isinstance(value, list) or not all(
+            isinstance(x, Mapping) for x in value
+        ):
+            raise SleeveFactsError(f"{key} must be a list of objects")
+    return AccountRows(
+        tuple(document["transactions"]),
+        tuple(document["positions"]),
+        tuple(document["change_in_nav_observations"]),
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag-map", type=Path, required=True)
+    parser.add_argument("--declared-inputs", type=Path, required=True)
+    parser.add_argument("--account-rows", type=Path, required=True)
+    parser.add_argument("--parent-ledger-generation-id", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    rows_bytes = args.account_rows.read_bytes()
+    try:
+        data = build_sleeve_account_facts(
+            tag_map_bytes=args.tag_map.read_bytes(),
+            declared_inputs_bytes=args.declared_inputs.read_bytes(),
+            rows=_rows_from_file(rows_bytes),
+            rows_sha256=hashlib.sha256(rows_bytes).hexdigest(),
+            parent_ledger_generation_id=args.parent_ledger_generation_id,
+        )
+    except (
+        SleeveFactsError,
+        ledger_module.SleeveLedgerError,
+        nav_module.SleeveNavError,
+    ) as error:
+        print(f"sleeve facts refused: {error}", file=sys.stderr)
+        return 1
+    args.output.write_bytes(data)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

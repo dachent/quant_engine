@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/sleeve-account-facts.schema.json",
+  "title": "Sleeve account facts",
+  "description": "Hash-bound facts of the strategies (sleeves) nested inside one provider account: per-sleeve daily NAV, flows, own P&L and allocated cost, paired INTERNAL_IN/INTERNAL_OUT legs for reallocations (flow_type TRANSFER:INTERNAL:SLEEVE, sleeve provenance in trace), a perimeter pseudo-account for the account's unallocated cash, and the closure residual per day. Allocated cost is not a flow: it is disclosed in allocated_cost and folded into nav_end_after_alloc. No flow class is added.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact_id", "parent_account_id", "provider_id", "base_currency",
+    "window", "bindings", "closure_policy", "sleeves", "perimeter_account", "flows",
+    "allocated_cost", "closure", "disclosures"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_id": {"const": "sleeve-account-facts"},
+    "parent_account_id": {"$ref": "#/$defs/internal_id"},
+    "provider_id": {"$ref": "#/$defs/internal_id"},
+    "base_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_day", "last_day"],
+      "properties": {"first_day": {"$ref": "#/$defs/date"}, "last_day": {"$ref": "#/$defs/date"}}
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag_map_sha256", "parent_ledger_generation_id", "declared_inputs_sha256", "account_rows_sha256", "builder_code"],
+      "properties": {
+        "tag_map_sha256": {"$ref": "#/$defs/sha256"},
+        "parent_ledger_generation_id": {"type": "string", "pattern": "^[A-Za-z0-9._:@+-]{1,200}$"},
+        "declared_inputs_sha256": {"$ref": "#/$defs/sha256"},
+        "account_rows_sha256": {"$ref": "#/$defs/sha256"},
+        "builder_code": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["files", "sha256"],
+          "properties": {
+            "files": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"$ref": "#/$defs/sha256"},
+              "propertyNames": {"pattern": "^tools/[a-z_]+\\.py$"}
+            },
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "closure_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tolerance_per_day", "tolerance_window", "max_abs_unexplained", "window_unexplained"],
+      "properties": {
+        "tolerance_per_day": {"$ref": "#/$defs/decimal"},
+        "tolerance_window": {"$ref": "#/$defs/decimal"},
+        "max_abs_unexplained": {"$ref": "#/$defs/decimal"},
+        "window_unexplained": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "sleeves": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sleeve_id", "account_id", "strategy_id", "first_day", "last_day", "days"],
+        "properties": {
+          "sleeve_id": {"type": "string", "pattern": "^[a-z][a-z0-9]{0,15}$"},
+          "account_id": {"$ref": "#/$defs/internal_id"},
+          "strategy_id": {"$ref": "#/$defs/internal_id"},
+          "first_day": {"$ref": "#/$defs/date"},
+          "last_day": {"$ref": "#/$defs/date"},
+          "days": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "day", "event", "event_evidence", "evidence_ref", "live", "counterparty",
+                "nav_prev", "flow_in", "flow_out", "nav_end", "nav_end_after_alloc", "value",
+                "price_pnl", "commission", "dividend", "own_pnl", "exposure", "exposure_share", "alloc_total"
+              ],
+              "properties": {
+                "day": {"$ref": "#/$defs/date"},
+                "event": {"enum": ["", "IN", "OUT", "SWEEP", "EXIT"]},
+                "event_evidence": {"enum": ["", "DERIVED", "EVIDENCED", "DECLARED_UNRESOLVED"]},
+                "evidence_ref": {"type": ["string", "null"]},
+                "live": {"type": ["boolean", "null"]},
+                "counterparty": {"enum": [null, "UNALLOCATED_ACCOUNT_CASH"]},
+                "nav_prev": {"$ref": "#/$defs/decimal"},
+                "flow_in": {"$ref": "#/$defs/decimal"},
+                "flow_out": {"$ref": "#/$defs/decimal"},
+                "nav_end": {"$ref": "#/$defs/decimal"},
+                "nav_end_after_alloc": {"$ref": "#/$defs/decimal"},
+                "value": {"$ref": "#/$defs/decimal"},
+                "price_pnl": {"$ref": "#/$defs/decimal"},
+                "commission": {"$ref": "#/$defs/decimal"},
+                "dividend": {"$ref": "#/$defs/decimal"},
+                "own_pnl": {"$ref": "#/$defs/decimal"},
+                "exposure": {"$ref": "#/$defs/decimal"},
+                "exposure_share": {"$ref": "#/$defs/decimal"},
+                "alloc_total": {"$ref": "#/$defs/decimal"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "perimeter_account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "opening_nav", "days"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/internal_id"},
+        "opening_nav": {"$ref": "#/$defs/decimal"},
+        "days": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "nav_end", "external_flow", "internal_flow_net", "residual_pnl"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "nav_end": {"$ref": "#/$defs/decimal"},
+              "external_flow": {"$ref": "#/$defs/decimal"},
+              "internal_flow_net": {"$ref": "#/$defs/decimal"},
+              "residual_pnl": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pair_id", "account_id", "class", "flow_type", "event_date", "nav_recognition_date",
+          "amount", "counterparty_account_id", "trace"
+        ],
+        "properties": {
+          "pair_id": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}$"},
+          "account_id": {"$ref": "#/$defs/internal_id"},
+          "class": {"enum": ["INTERNAL_IN", "INTERNAL_OUT"]},
+          "flow_type": {"const": "TRANSFER:INTERNAL:SLEEVE"},
+          "event_date": {"$ref": "#/$defs/date"},
+          "nav_recognition_date": {"$ref": "#/$defs/date"},
+          "amount": {"$ref": "#/$defs/positive_decimal"},
+          "counterparty_account_id": {"$ref": "#/$defs/internal_id"},
+          "trace": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "pairing", "from_sleeve", "to_sleeve", "evidence_refs"],
+            "properties": {
+              "kind": {"enum": ["REALLOCATION", "UNALLOCATED_CASH"]},
+              "pairing": {"enum": ["SLEEVE_PAIR", "DECLARED_UNALLOCATED", "UNALLOCATED_REMAINDER"]},
+              "from_sleeve": {"type": ["string", "null"]},
+              "to_sleeve": {"type": ["string", "null"]},
+              "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "allocated_cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["convention", "folded_into", "account_costs", "sleeve_allocations"],
+      "properties": {
+        "convention": {"const": "EXPOSURE_SHARE"},
+        "folded_into": {"const": "nav_end_after_alloc"},
+        "account_costs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "interest", "fees", "dividend_accrual"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "interest": {"$ref": "#/$defs/decimal"},
+              "fees": {"$ref": "#/$defs/decimal"},
+              "dividend_accrual": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "sleeve_allocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "sleeve_id", "alloc_interest", "alloc_fees", "alloc_dividend_accrual", "alloc_total"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "sleeve_id": {"type": "string"},
+              "alloc_interest": {"$ref": "#/$defs/decimal"},
+              "alloc_fees": {"$ref": "#/$defs/decimal"},
+              "alloc_dividend_accrual": {"$ref": "#/$defs/decimal"},
+              "alloc_total": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
+    "closure": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["day", "account_pnl", "sleeves_own_plus_alloc", "residual_and_post_exit", "unexplained", "unallocated_cash_flow"],
+        "properties": {
+          "day": {"$ref": "#/$defs/date"},
+          "account_pnl": {"$ref": "#/$defs/decimal"},
+          "sleeves_own_plus_alloc": {"$ref": "#/$defs/decimal"},
+          "residual_and_post_exit": {"$ref": "#/$defs/decimal"},
+          "unexplained": {"$ref": "#/$defs/decimal"},
+          "unallocated_cash_flow": {"$ref": "#/$defs/decimal"}
+        }
+      }
+    },
+    "disclosures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manual_assignments", "reconciliation_gaps", "reconciliation_scalings", "offsetting_residues", "unallocated_dividends"],
+      "properties": {
+        "manual_assignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "security_id", "quantity", "how", "sleeves"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "security_id": {"type": "string"},
+              "quantity": {"$ref": "#/$defs/decimal"},
+              "how": {"enum": ["assigned", "split", "unheld"]},
+              "sleeves": {"type": "string"}
+            }
+          }
+        },
+        "reconciliation_gaps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "security_id", "derived", "account"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "security_id": {"type": "string"},
+              "derived": {"$ref": "#/$defs/decimal"},
+              "account": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "reconciliation_scalings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "security_id", "factor"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "security_id": {"type": "string"},
+              "factor": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "offsetting_residues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "security_id", "quantities"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "security_id": {"type": "string"},
+              "quantities": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["sleeve_id", "quantity"],
+                  "properties": {"sleeve_id": {"type": "string"}, "quantity": {"$ref": "#/$defs/decimal"}}
+                }
+              }
+            }
+          }
+        },
+        "unallocated_dividends": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "amount"],
+            "properties": {"day": {"$ref": "#/$defs/date"}, "amount": {"$ref": "#/$defs/decimal"}}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "date": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"},
+    "internal_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$"},
+    "positive_decimal": {"type": "string", "pattern": "^[0-9]*[1-9][0-9]*(\\.[0-9]+)?$|^0\\.[0-9]*[1-9][0-9]*$"}
+  }
+}
