@@ -159,7 +159,7 @@
           "retired_on": {"type": ["string", "null"], "format": "date"},
           "closed_on": {"type": ["string", "null"], "format": "date"},
           "parent_assignment_id": {"type": ["string", "null"], "minLength": 1},
-          "sleeve_label": {"type": ["string", "null"], "minLength": 1},
+          "sleeve_label": {"type": ["string", "null"], "minLength": 1}
         }
       }
     },
