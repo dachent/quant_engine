@@ -88,6 +88,11 @@ from portfolio_invested_capital import (
     resolve_financial_input_authority,
     verify_governed_capital_result,
 )
+from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
+from portfolio_totals_verify import (
+    PortfolioTotalsVerificationError,
+    verify_portfolio_totals,
+)
 
 
 REPORT_SCHEMA_VERSION: Final = 2
@@ -8486,6 +8491,7 @@ def build_report_data(
     excluded_epoch_account_ids: set[str] = set()
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
+    epoch_manifest_rows: list[Mapping[str, Any]] = []
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
@@ -8561,6 +8567,17 @@ def build_report_data(
                     "account_label": row["account_label"],
                     "last_four": row["last_four"],
                 }
+        epoch_manifest_rows = [
+            row
+            for row in _objects(_manifest.get("rows"), "epoch manifest rows")
+            if (
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
+            )
+            in current_epoch_tuples
+        ]
         current_account_ids = {row[0] for row in current_epoch_tuples}
         excluded_epoch_account_ids = {
             row["account_id"]
@@ -9261,6 +9278,20 @@ def build_report_data(
                     report["capital_coverage_bounds"] = coverage_bounds
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
+        # PANEL-VIS-002: portfolio-level totals read the accepted values and add
+        # no figure of their own to any accepted TWR, MWR or capital value.
+        try:
+            report.update(
+                build_portfolio_totals(
+                    rows=epoch_manifest_rows,
+                    invested_capital=invested_capital,
+                    governed_hwm_proof=governed_hwm_proof,
+                    hwm_summary=hwm_summary,
+                    calculation_cutoff_date=calculation_cutoff_date,
+                )
+            )
+        except PortfolioTotalsError as exc:
+            raise ReportValidationError(str(exc)) from exc
     if decomposition_lenses is not None:
         report["decomposition_lenses"] = decomposition_lenses
     if portable_hwm_proof is not None:
@@ -13262,6 +13293,17 @@ def verify_candidate(
             raise ReportValidationError(
                 "candidate invested-capital input generation differs"
             )
+    if epoch_snapshots:
+        # PANEL-VIS-002: the portfolio-level totals are re-derived from the
+        # candidate's own bytes by a producer-independent implementation.
+        try:
+            verify_portfolio_totals(
+                json.loads(candidate_report_bytes),
+                json.loads(epoch_snapshots["epoch_manifest"][1]),
+                json.loads(epoch_snapshots["epoch_crosswalk"][1]),
+            )
+        except PortfolioTotalsVerificationError as exc:
+            raise ReportValidationError(str(exc)) from exc
     workbook_bytes = (
         _regular_file_bytes(excel_workbook, "Excel workbook")
         if excel_workbook is not None
