@@ -104,8 +104,10 @@ def test_ibkr_symbol_is_unavailable_with_the_exact_pull_not_guessed() -> None:
     assert row["asset_category_status"] == "AVAILABLE"
     assert row["identity"]["sub_category"] == "ETF"
     section = build_holdings_identity(reporter._positions(_catalog()), _catalog())
-    pulls = {item["reason"]: item for item in section["required_pulls"]}
-    assert "Flex statement" in pulls["NO_SYMBOL_IN_RETAINED_LEDGER_ROWS"]["pull"]
+    flex = [i for i in section["required_pulls"] if "Flex statement" in i["pull"]]
+    assert [(i["reason"], i["row_count"]) for i in flex] == [
+        ("NO_SYMBOL_IN_RETAINED_LEDGER_ROWS", 1)
+    ]
 
 
 def test_position_row_and_security_table_symbols_are_proven_by_the_id_hash() -> None:
