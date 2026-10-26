@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
 import hashlib
@@ -613,6 +614,7 @@ def verify_sleeve_ledger(
 # ---------------------------------------------------------------------------
 
 SAME_SECOND_TIE_BREAK = "TAG_RESOLVED_FIRST>SECURITY_ID>QUANTITY>PRICE>COMMISSION"
+_TAG_FIELD = "orderReference"
 _FLOW_TYPE = "TRANSFER:INTERNAL:SLEEVE"
 _UNALLOCATED_CASH = "UNALLOCATED_ACCOUNT_CASH"
 _ROLE_NAMES = ("external_flow", "interest", "fees", "dividend_accrual")
@@ -738,6 +740,10 @@ def _facts_inputs(
     if len(found) != 1:
         raise SleeveVerificationError("the tag map does not name the declared parent")
     parent = found[0]
+    if parent["tag_field"] != _TAG_FIELD:
+        raise SleeveVerificationError(
+            f"the tag map reads executions by {parent['tag_field']!r}, not {_TAG_FIELD!r}"
+        )
     base = declared["base_currency"]
     first_day = declared["window"]["first_day"]
     last_day = declared["window"]["last_day"]
@@ -758,7 +764,18 @@ def _facts_inputs(
         raise SleeveVerificationError("ChangeInNAV does not cover the declared window")
     account: list[dict[str, str]] = []
     previous_end: Fraction | None = None
+    previous_day: date | None = None
     for day in days:
+        current = date.fromisoformat(day)
+        if previous_day is not None:
+            weekday = previous_day + timedelta(days=1)
+            while weekday.weekday() >= 5:
+                weekday += timedelta(days=1)
+            if current not in (previous_day + timedelta(days=1), weekday):
+                raise SleeveVerificationError(
+                    f"ChangeInNAV skips from {previous_day.isoformat()} to {day}"
+                )
+        previous_day = current
         item = by_day[day]
         if item.get("currency") != base:
             raise SleeveVerificationError(f"ChangeInNAV on {day} is not in {base}")
@@ -1074,6 +1091,13 @@ def _expected_facts(
     notes: dict[str, Any] = {}
     ledger = _rederive_ledger(inputs, notes)
     nav, closure = _rederive_nav(inputs, ledger)
+    for sleeve, declared_events in declared["funding_events"].items():
+        for day, event in declared_events.items():
+            row = nav.get((day, sleeve))
+            if row is None or row["event"] != event["kind"]:
+                raise SleeveVerificationError(
+                    f"declared event {sleeve} {day} is not on an open NAV day"
+                )
     days: list[str] = inputs["days"]
     real: list[str] = inputs["policy"]["sleeve_ids"]
     residual: str = declared["residual_id"]

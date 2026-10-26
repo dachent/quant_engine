@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
@@ -51,6 +51,9 @@ UNALLOCATED_SUFFIX: Final = "unallocated"
 _ZERO: Final = Decimal(0)
 _PRECISION: Final = 28
 _ROLES: Final = ("external_flow", "interest", "fees", "dividend_accrual")
+# The only execution tag the rows carry (``order_reference`` is IBKR's
+# orderReference); a tag map that names another field cannot be applied.
+_TAG_FIELD: Final = "orderReference"
 _GENERATION_ID: Final = re.compile(r"^[A-Za-z0-9._:@+-]{1,200}$")
 _SOURCE_MODULES: Final = (
     "build_sleeve_account_facts",
@@ -306,6 +309,15 @@ def load_declared_inputs(raw: bytes, tag_map: tag_map_module.TagMap) -> Declared
     )
 
 
+def _next_weekday(day: date) -> date:
+    """The next weekday: the Flex history producer's declared source calendar."""
+
+    candidate = day + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def _account_days(
     rows: AccountRows, declared: DeclaredInputs
 ) -> tuple[list[nav_module.AccountDay], list[str]]:
@@ -329,7 +341,20 @@ def _account_days(
         )
     figures: list[nav_module.AccountDay] = []
     previous_end: Decimal | None = None
+    previous_day: date | None = None
     for day in days:
+        current = date.fromisoformat(day)
+        # An omitted weekday would drop that day's closure and facts silently,
+        # whatever the NAVs say: only the next calendar day or the next weekday
+        # may follow.
+        if previous_day is not None and current not in (
+            previous_day + timedelta(days=1),
+            _next_weekday(previous_day),
+        ):
+            raise SleeveFactsError(
+                f"ChangeInNAV skips from {previous_day.isoformat()} to {day}"
+            )
+        previous_day = current
         row = by_day[day]
         if row.get("currency") != declared.base_currency:
             raise SleeveFactsError(f"ChangeInNAV on {day} is not in the base currency")
@@ -548,6 +573,31 @@ def _pair_flows(
     return legs
 
 
+def _refuse_unconsumed_events(
+    nav: nav_module.SleeveNav, declared: DeclaredInputs
+) -> None:
+    """Every declared funding event must appear as that day's event of its sleeve.
+
+    The NAV derivation stops a sleeve after EXIT and ignores days outside the
+    window; an event it did not consume would be hashed into the artifact and
+    then vanish from the rows and flows.
+    """
+
+    consumed = {(row.day, row.sleeve_id): row.event for row in nav.rows}
+    lost = sorted(
+        (day, sleeve)
+        for sleeve, events in declared.funding.items()
+        for day, event in events.items()
+        if consumed.get((day, sleeve)) != event.kind
+    )
+    if lost:
+        shown = ", ".join(f"{sleeve} {day}" for day, sleeve in lost[:5])
+        raise SleeveFactsError(
+            f"{len(lost)} declared funding event(s) are not on a NAV day of an open "
+            f"sleeve (after an EXIT, or outside the window): {shown}"
+        )
+
+
 def _refuse_open_closure(nav: nav_module.SleeveNav, declared: DeclaredInputs) -> None:
     bad = [
         (item.day, item.unexplained)
@@ -588,6 +638,11 @@ def build_sleeve_account_facts(
         raise SleeveFactsError(str(error)) from error
     declared = load_declared_inputs(declared_inputs_bytes, tag_map)
     parent = tag_map.parent(declared.parent_account_id)
+    if parent.tag_field != _TAG_FIELD:
+        raise SleeveFactsError(
+            f"the tag map reads executions by {parent.tag_field!r}; the rows carry "
+            f"only {_TAG_FIELD!r}"
+        )
     for item in (*rows.transactions, *rows.positions):
         if item.get("account_id") != declared.parent_account_id:
             raise SleeveFactsError("a row belongs to another account or names none")
@@ -637,6 +692,7 @@ def build_sleeve_account_facts(
             declared.residual_id,
             account_label=declared.parent_account_id,
         )
+        _refuse_unconsumed_events(nav, declared)
         _refuse_open_closure(nav, declared)
         flows = _pair_flows(nav, declared, parent)
         artifact = _artifact(

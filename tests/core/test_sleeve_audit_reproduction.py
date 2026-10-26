@@ -541,3 +541,23 @@ def test_the_artifact_states_the_tie_break_and_binds_it_into_the_code_digest(
     other = json.loads(_built_from(catalog))["bindings"]["builder_code"]
     assert other["sha256"] != code["sha256"]
     assert not _verify(_built_from(catalog), catalog).verified
+
+
+def test_the_verifier_refuses_a_skipped_weekday_and_a_foreign_tag_field() -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = _catalog_bytes(document)
+    artifact = _built_from(catalog)
+    document["change_in_nav_observations"] = [
+        row
+        for row in document["change_in_nav_observations"]
+        if row["accounting_date"] != DAYS[2]
+    ]
+    with pytest.raises(verifier.SleeveVerificationError, match="skips from"):
+        _verify(artifact, _catalog_bytes(document))
+    rows, sha = verifier.select_catalog_rows(catalog, ACCOUNT, DAYS[0], DAYS[-1])
+    other = _tag_map()
+    other["parents"][0]["tag_field"] = "clientReference"
+    with pytest.raises(verifier.SleeveVerificationError, match="clientReference"):
+        verifier.verify_sleeve_account_facts(
+            artifact, _bytes(other), _bytes(_declared()), rows, sha
+        )

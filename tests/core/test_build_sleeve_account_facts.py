@@ -434,8 +434,16 @@ def test_missing_inputs_refuse_instead_of_being_guessed() -> None:
         rows.positions,
         (rows.change_in_nav[0], rows.change_in_nav[2]),
     )
-    with pytest.raises(builder.SleeveFactsError, match="contiguous"):
+    with pytest.raises(builder.SleeveFactsError, match="skips from"):
         _build(declared, gap)
+    # adjacent days whose NAVs do not join
+    broken = list(rows.change_in_nav)
+    broken[1] = _change(D2, "999", "1020")
+    with pytest.raises(builder.SleeveFactsError, match="contiguous"):
+        _build(
+            declared,
+            builder.AccountRows(rows.transactions, rows.positions, tuple(broken)),
+        )
     short = builder.AccountRows(
         rows.transactions, rows.positions, rows.change_in_nav[:2]
     )
@@ -493,3 +501,51 @@ def test_the_cli_writes_the_same_bytes(tmp_path: Path) -> None:
     assert (tmp_path / "out.json").read_bytes() == expected
     (tmp_path / "declared.json").write_bytes(b"{}")
     assert builder.main(args) == 1
+
+
+def _flat(days: list[str]) -> tuple[dict[str, Any], builder.AccountRows]:
+    """One sleeve opened by an IN event with nothing traded, on the given days."""
+
+    declared = _declared(
+        {"s1": {days[0]: _event("IN", "flex:open")}}, days[0], days[-1]
+    )
+    changes = [_change(day, "1000", "1000") for day in days]
+    return declared, _rows([], [], changes)
+
+
+def test_a_skipped_weekday_in_change_in_nav_is_refused() -> None:
+    # Friday, then the next Monday: the weekend is not a gap
+    declared, rows = _flat(["2026-01-02", "2026-01-05"])
+    assert _build(declared, rows)["window"]["last_day"] == "2026-01-05"
+    # Friday, then Tuesday with an unchanged NAV: Monday is missing
+    declared, rows = _flat(["2026-01-02", "2026-01-06"])
+    with pytest.raises(builder.SleeveFactsError, match="skips from 2026-01-02"):
+        _build(declared, rows)
+    # Wednesday, then Friday
+    declared, rows = _flat(["2026-01-07", "2026-01-09"])
+    with pytest.raises(builder.SleeveFactsError, match="skips from 2026-01-07"):
+        _build(declared, rows)
+
+
+def test_a_declared_event_the_nav_would_skip_is_refused() -> None:
+    declared, rows = _reallocate()
+    # an IN after the sleeve's EXIT would be hashed in and then vanish
+    declared["funding_events"]["s1"][D3] = _event("IN", "flex:late")
+    with pytest.raises(builder.SleeveFactsError, match="not on a NAV day"):
+        _build(declared, rows)
+    # an event outside the window
+    declared, rows = _reallocate()
+    declared["funding_events"]["s2"]["2026-01-09"] = _event("OUT", "flex:later")
+    with pytest.raises(builder.SleeveFactsError, match="2026-01-09"):
+        _build(declared, rows)
+    # and the untouched declaration builds
+    declared, rows = _reallocate()
+    assert _build(declared, rows)["sleeves"]
+
+
+def test_a_tag_field_the_rows_do_not_carry_is_refused() -> None:
+    declared, rows = _reallocate()
+    other = _tag_map()
+    other["parents"][0]["tag_field"] = "clientReference"
+    with pytest.raises(builder.SleeveFactsError, match="clientReference"):
+        _build(declared, rows, other)
