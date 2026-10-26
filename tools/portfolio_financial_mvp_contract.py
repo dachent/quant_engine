@@ -266,7 +266,7 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final[dict[str, tuple[str, str]]] = {}
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final[dict[str, dict[str, object]]] = {}
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-manifest"
-EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset({"8", "9"})
+EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset({"8", "9", "10"})
 EPOCH_CROSSWALK_ARTIFACT_PATH: Final = "authority/account-assignment-crosswalk.json"
 EPOCH_CROSSWALK_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-current-epoch-crosswalk"
 EPOCH_CROSSWALK_ARTIFACT_SCHEMA_VERSION: Final = "1"
@@ -303,6 +303,16 @@ _V9_REPORT_INVARIANTS: Final = frozenset(
     }
 )
 _V9_DECIMAL: Final = re.compile(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$")
+_EPOCH_MANIFEST_V9_SOURCE_KEYS: Final = frozenset(
+    {
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+        "artifact",
+        "crosswalk",
+    }
+)
 _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION: Final = {
     "8": frozenset(
         {
@@ -313,16 +323,8 @@ _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION: Final = {
             "artifact",
         }
     ),
-    "9": frozenset(
-        {
-            "generation_id",
-            "generation_manifest_sha256",
-            "generation_receipt_sha256",
-            "full_directory_inventory_sha256",
-            "artifact",
-            "crosswalk",
-        }
-    ),
+    "9": _EPOCH_MANIFEST_V9_SOURCE_KEYS,
+    "10": _EPOCH_MANIFEST_V9_SOURCE_KEYS,
 }
 _EPOCH_MANIFEST_ARTIFACT_KEYS: Final = frozenset(
     {"path", "sha256", "size_bytes", "schema"}
@@ -683,7 +685,7 @@ def epoch_manifest_source_from_bundle(bundle: GenerationBundle) -> dict[str, obj
         "full_directory_inventory_sha256": bundle.full_directory_inventory_sha256,
         "artifact": artifact,
     }
-    if artifact_version == "9":
+    if artifact_version in {"9", "10"}:
         crosswalk, crosswalk_payload = _epoch_artifact_descriptor(
             bundle,
             artifact_id=EPOCH_CROSSWALK_ARTIFACT_PATH,
@@ -793,7 +795,7 @@ def validate_epoch_manifest_source(source: object, *, bundle: GenerationBundle) 
         raise FinancialMvpContractError(
             "epoch manifest source artifact schema version differs"
         )
-    if version == "9" and "crosswalk" not in source:
+    if version in {"9", "10"} and "crosswalk" not in source:
         raise FinancialMvpContractError("epoch manifest source crosswalk is required")
     if set(source) != _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION[version]:
         raise FinancialMvpContractError(
@@ -808,7 +810,7 @@ def validate_epoch_manifest_source(source: object, *, bundle: GenerationBundle) 
         _epoch_manifest_source_value(source[key], expected[key], key)
 
     _validate_epoch_source_descriptor(artifact, expected["artifact"], "artifact")
-    if version == "9":
+    if version in {"9", "10"}:
         _validate_epoch_source_descriptor(
             source["crosswalk"], expected["crosswalk"], "crosswalk"
         )
@@ -6546,7 +6548,7 @@ def _validate_epoch_manifest_source_shape(source: object) -> None:
         )
     if schema["version"] != version:
         raise AssertionError("epoch source version changed during validation")
-    if version == "9":
+    if version in {"9", "10"}:
         crosswalk = _object(
             source_object["crosswalk"], "epoch_manifest_source.crosswalk"
         )
@@ -7201,7 +7203,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                 f"- Artifact schema: `{epoch_schema['name']}@{epoch_schema['version']}`",
             ]
         )
-        if epoch_schema["version"] == "9":
+        if epoch_schema["version"] in {"9", "10"}:
             epoch_crosswalk = _object(
                 epoch_manifest_source["crosswalk"], "epoch_manifest_source crosswalk"
             )

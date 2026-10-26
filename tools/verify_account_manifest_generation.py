@@ -90,6 +90,22 @@ _COUNTERPARTY_RULE = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
 _SOURCE_IDENTITY_COUNTERPARTY_RULE = (
     "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
 )
+_PERIOD_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "return_window_start",
+        "return_close_date",
+        "window_days",
+        "twr_annualised",
+        "ytd_twr",
+        "ytd_window",
+        "calendar_year_twr",
+        "calendar_year_windows",
+        "periods_per_year",
+        "periods_per_year_basis",
+        "mwr_window_equivalent",
+        "annualisation_basis",
+    }
+)
 _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "start",
@@ -124,6 +140,7 @@ _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
         "performance_flags",
         "performance_flow_legs",
         "flow_count",
+        *_PERIOD_FIELDS,
     }
 )
 _MWR_VALUE_BASES: Final[frozenset[str]] = frozenset(
@@ -2669,22 +2686,6 @@ def _derive_independent_mwr_projection(
     }
 
 
-_PERIOD_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "return_window_start",
-        "return_close_date",
-        "window_days",
-        "twr_annualised",
-        "ytd_twr",
-        "ytd_window",
-        "calendar_year_twr",
-        "calendar_year_windows",
-        "periods_per_year",
-        "periods_per_year_basis",
-        "mwr_window_equivalent",
-        "annualisation_basis",
-    }
-)
 _PERIOD_YEAR_DAYS: Final[int] = 365
 
 

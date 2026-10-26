@@ -104,9 +104,10 @@ def test_short_window_has_no_annualised_twr_and_states_the_basis(
     expected = (Decimal("1.3") ** (Decimal(40) / Decimal(365)) - 1).quantize(
         Decimal("1e-20")
     )
-    assert Decimal(str(fields["mwr_window_equivalent"])).quantize(
-        Decimal("1e-20")
-    ) == expected
+    assert (
+        Decimal(str(fields["mwr_window_equivalent"])).quantize(Decimal("1e-20"))
+        == expected
+    )
     assert fields["periods_per_year"] == 252
     assert fields["periods_per_year_basis"] == "DAILY_TRADING"
 
@@ -172,9 +173,7 @@ def test_independent_verifier_derivation_equals_the_producer(
         row = _row(links, mwr_days=mwr_days)
         numeric = {
             "observation_trace": {
-                "links": [
-                    {**link, "factor": Decimal(link["factor"])} for link in links
-                ]
+                "links": [{**link, "factor": Decimal(link["factor"])} for link in links]
             },
             "observation_linked_return": Decimal(row["observation_linked_return"]),
             "annualized_return_on_net_capital": Decimal("0.1"),

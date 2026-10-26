@@ -91,7 +91,7 @@ def test_period_recomputation_flags_a_wrong_or_early_annualised_value() -> None:
 
     with localcontext() as context:
         context.prec = 34
-        equivalent = (Decimal("1.3176") ** (Decimal(40) / Decimal(365)) - 1)
+        equivalent = Decimal("1.3176") ** (Decimal(40) / Decimal(365)) - 1
     good["mwr_window_equivalent"] = format(equivalent, "f")
     report = {"report_schema_version": 5, "twr_mwr": [good], "strategy_summary": []}
     assert list(checks.check_period_returns(_context(report))) == []

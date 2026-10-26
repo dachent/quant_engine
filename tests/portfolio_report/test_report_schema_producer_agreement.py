@@ -183,14 +183,14 @@ def test_capital_coverage_bounds_exists_only_from_report_schema_version_3() -> N
 
 
 def test_report_schema_enumerates_version_four_and_no_other() -> None:
-    """QC-1: version 4 is declared, version 5 is not, and the older versions stay."""
+    """Version 5 (period returns) extends version 4; version 6 is not declared."""
 
     versions = SCHEMA["properties"]["report_schema_version"]["enum"]
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert reporter.CUTOFF_BASIS_REPORT_SCHEMA_VERSION == 4
     assert reporter.CUSTODY_COVERAGE_REPORT_SCHEMA_VERSION == 3
     assert _versioned_errors(4) == []
-    assert _versioned_errors(5)
+    assert _versioned_errors(6)
 
 
 def test_version_two_weight_label_rules_cover_version_four() -> None:
@@ -218,7 +218,7 @@ def test_the_custody_cash_shape_of_version_three_is_required_at_version_four() -
         for item in SCHEMA["allOf"]
         if "custody_current_capital" in item["then"].get("properties", {})
     )
-    assert shape["if"]["properties"]["report_schema_version"]["enum"] == [3, 4]
+    assert shape["if"]["properties"]["report_schema_version"]["enum"] == [3, 4, 5]
     assert shape["then"]["properties"]["custody_current_capital"]["$ref"] == (
         "#/$defs/custody_handoff_current_capital_v3"
     )

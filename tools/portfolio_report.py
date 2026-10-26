@@ -4298,6 +4298,7 @@ def _account_live_return_series(
     *,
     calculation_cutoff_date: str | None = None,
     value_basis_bounds: ValueBasisBounds | None = None,
+    period_pieces: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Hash and summarize each canonical account-live return path.
 
@@ -4474,7 +4475,11 @@ def _account_live_return_series(
             "observed_start": dates[0],
             "provider_ids": sorted(providers[strategy_id]),
             "return_observations": len(rows),
-            "period_pieces": _daily_period_pieces(rows, span_values),
+            **(
+                {"period_pieces": _daily_period_pieces(rows, span_values)}
+                if period_pieces
+                else {}
+            ),
             "return_series_schema": "ordered-date-return/1",
             "return_series_sha256": hashlib.sha256(
                 _canonical_json_array_bytes(rows)
@@ -8953,6 +8958,7 @@ def build_report_data(
             strategy_product_controls,
             calculation_cutoff_date=calculation_cutoff_date,
             value_basis_bounds=value_basis_bounds,
+            period_pieces=True,
         )
         strategy_summary = [
             {
