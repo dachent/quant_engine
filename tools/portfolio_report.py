@@ -8567,10 +8567,11 @@ def build_report_data(
                     "account_label": row["account_label"],
                     "last_four": row["last_four"],
                 }
+        manifest_rows_raw = _manifest.get("rows")
         epoch_manifest_rows = [
             row
             for row in (
-                _manifest.get("rows") if isinstance(_manifest.get("rows"), list) else []
+                manifest_rows_raw if isinstance(manifest_rows_raw, list) else []
             )
             if isinstance(row, Mapping)
             and (

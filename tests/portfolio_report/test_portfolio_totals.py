@@ -385,3 +385,38 @@ def test_independent_verifier_rejects_each_tampered_total() -> None:
         mutate(broken)
         with pytest.raises(verify.PortfolioTotalsVerificationError):
             verify.verify_portfolio_totals(broken, manifest, crosswalk)
+
+
+def test_verifier_solver_reaches_rates_above_one_thousand() -> None:
+    from datetime import date
+
+    flows = [
+        (date(2026, 1, 1), Decimal("-1000")),
+        (date(2026, 1, 31), Decimal("100000")),
+    ]
+    rate = verify._solve_rate(flows)
+    assert rate is not None and rate > Decimal(1000)
+    producer = totals.build_portfolio_mwr(
+        {
+            "events": [
+                _event("e", "S", "OPENING_CONTRIBUTED_BASIS", "1000", "2026-01-01")
+            ]
+        },
+        Decimal("100000"),
+        "2026-01-31",
+    )
+    assert producer["status"] == "AVAILABLE"
+    assert abs(
+        Decimal(producer["window_equivalent_cumulative"]) - Decimal("99")
+    ) < Decimal("1e-15")
+
+
+def test_verifier_rejects_a_suppressed_mwr() -> None:
+    report, manifest, crosswalk = _verification_inputs(_case())
+    report["portfolio_mwr_annualised"] = {
+        "schema_version": 1,
+        "status": "UNAVAILABLE",
+        "reason": "NO_GOVERNED_PERIMETER_VALUE",
+    }
+    with pytest.raises(verify.PortfolioTotalsVerificationError, match="unique root"):
+        verify.verify_portfolio_totals(report, manifest, crosswalk)

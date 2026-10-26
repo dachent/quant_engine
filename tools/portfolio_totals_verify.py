@@ -243,16 +243,36 @@ def _npv(flows: Sequence[tuple[date, Decimal]], rate: Decimal) -> Decimal:
     )
 
 
+def _bracket(
+    flows: Sequence[tuple[date, Decimal]],
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """A sign-changing rate interval, widened by powers of ten on both sides."""
+
+    candidates_low = [
+        Decimal(-1) + Decimal(10) ** -exponent for exponent in (9, 20, 40)
+    ]
+    candidates_high = [Decimal(10) ** exponent for exponent in (3, 6, 12, 24, 40)]
+    for low in candidates_low:
+        f_low = _npv(flows, low)
+        for high in candidates_high:
+            f_high = _npv(flows, high)
+            if f_low == 0:
+                return low, low, f_low
+            if f_high == 0:
+                return high, high, f_high
+            if (f_low < 0) != (f_high < 0):
+                return low, high, f_low
+    return None
+
+
 def _solve_rate(flows: Sequence[tuple[date, Decimal]]) -> Decimal | None:
-    low, high = Decimal("-0.999999999"), Decimal(1000)
-    f_low, f_high = _npv(flows, low), _npv(flows, high)
-    if f_low == 0:
-        return low
-    if f_high == 0:
-        return high
-    if (f_low < 0) == (f_high < 0):
+    found = _bracket(flows)
+    if found is None:
         return None
-    for _ in range(300):
+    low, high, f_low = found
+    if low == high:
+        return low
+    for _ in range(400):
         middle = (low + high) / 2
         f_middle = _npv(flows, middle)
         if (f_middle < 0) == (f_low < 0):
@@ -269,23 +289,46 @@ def _check_mwr(
     hwm_summary: Mapping[str, Any],
     cutoff: str,
 ) -> None:
-    if block.get("status") != "AVAILABLE":
-        return
     with localcontext() as context:
         context.prec = 50
         net: dict[date, Decimal] = defaultdict(Decimal)
-        for event in capital["events"]:
+        for event in capital.get("events") or []:
             if _event_class(event) in FLOW_CLASSES:
                 net[date.fromisoformat(event["date"])] -= _d(
                     event["invested_capital_effect_usd"]
                 )
         flows = sorted((day, amount) for day, amount in net.items() if amount != 0)
         end = date.fromisoformat(cutoff)
-        terminal = _d(hwm_summary["governed_perimeter_value_usd"])
+        perimeter = hwm_summary.get("governed_perimeter_value_usd")
         open_current = sum(
             (_d(r["current_value"]) for r in rows if r["end"] == cutoff), Decimal(0)
         )
-        if abs(terminal - open_current) > Decimal("1e-18"):
+        terminal = _d(perimeter) if perimeter is not None else None
+        justified = (
+            not flows
+            or terminal is None
+            or abs(terminal - open_current) > Decimal("1e-18")
+            or end <= flows[0][0]
+        )
+        if not justified:
+            assert terminal is not None
+            amounts = [amount for _day, amount in [*flows, (end, terminal)]]
+            changes = sum(
+                1
+                for a, b in zip(amounts, amounts[1:], strict=False)
+                if (a < 0) != (b < 0)
+            )
+            # One chronological sign change proves a unique root: an
+            # unavailable block is then only justified if no root exists.
+            if changes == 1 and _solve_rate([*flows, (end, terminal)]) is not None:
+                if block.get("status") != "AVAILABLE":
+                    raise _fail(
+                        "portfolio_mwr_annualised is unavailable although the "
+                        "governed flows have a unique root"
+                    )
+        if block.get("status") != "AVAILABLE":
+            return
+        if terminal is None or abs(terminal - open_current) > Decimal("1e-18"):
             raise _fail(
                 "portfolio_mwr_annualised is available but the perimeter value differs"
             )
@@ -303,13 +346,13 @@ def _check_mwr(
         if rate is None:
             raise _fail("portfolio_mwr_annualised has no independent root")
         equivalent = (Decimal(1) + rate) ** (Decimal(days) / Decimal(365)) - 1
-        if abs(_d(block["window_equivalent_cumulative"]) - equivalent) > RATE_TOLERANCE:
+        tolerance = RATE_TOLERANCE * max(Decimal(1), abs(equivalent))
+        if abs(_d(block["window_equivalent_cumulative"]) - equivalent) > tolerance:
             raise _fail("portfolio_mwr_annualised window equivalent differs")
         if days >= 365:
-            if (
-                block.get("value") is None
-                or abs(_d(block["value"]) - rate) > RATE_TOLERANCE
-            ):
+            if block.get("value") is None or abs(
+                _d(block["value"]) - rate
+            ) > RATE_TOLERANCE * max(Decimal(1), abs(rate)):
                 raise _fail(
                     "portfolio_mwr_annualised value differs from the re-derivation"
                 )
