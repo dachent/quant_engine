@@ -1278,6 +1278,8 @@ def test_builds_source_bound_seven_strategy_inputs_from_exact_thirteen_epochs(
     manifest_output = json.loads(
         account_bundle.payloads["outputs/account-strategy-manifest.json"]
     )
+    # The selector accepts the schema-10 manifest the builder now emits (#594).
+    assert manifest_output["schema_version"] == 10
     tt_links = []
     for row in manifest_output["rows"]:
         if row["strategy_id"] != "tt-portfolio":
