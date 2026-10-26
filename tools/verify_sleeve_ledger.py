@@ -12,7 +12,7 @@ Inputs (all strings for numbers and days):
 * ``tag_map``: one parent of the tag map (``sleeves`` with ``tags``,
   ``tag_normalization``, ``unmatched``), plus ``day_dates`` mapping each ledger
   day to its ISO date so the tag map's effective dates can be applied;
-* ``policy``: ``sleeve_ids``, ``residual_id``, ``aliases``, ``alias_from_day``,
+* ``policy``: ``sleeve_ids``, ``residual_id``, ``aliases``, ``alias_from_day``, ``alias_days`` (optional),
   ``unheld_fallback``;
 * ``funding``: sleeve -> day -> ``{"kind", "evidence"}``;
 * ``trades``, ``positions``, ``marks``, ``dividends``, ``account`` (per day:
@@ -105,6 +105,7 @@ def _rederive_ledger(
     every = [*real, residual]
     aliases: Mapping[str, str] = policy.get("aliases", {})
     alias_from = policy.get("alias_from_day")
+    alias_days: Mapping[str, str] = policy.get("alias_days", {})
     fallback: Mapping[str, str] = policy.get("unheld_fallback", {})
     inverse = {new: old for old, new in aliases.items()}
     positions = {
@@ -127,19 +128,31 @@ def _rederive_ledger(
     out: dict[tuple[str, str], dict[str, Fraction]] = {}
     for index, day in enumerate(days):
         previous = days[index - 1] if index else None
-        if alias_from is not None and day >= alias_from:
+        for old, new in aliases.items():
+            start = alias_days.get(old, alias_from)
+            if start is None or day < start:
+                continue
             for sleeve in every:
-                for old, new in aliases.items():
-                    if old in held[sleeve]:
-                        held[sleeve][new] = held[sleeve].get(new, _ZERO) + held[
-                            sleeve
-                        ].pop(old)
+                if old in held[sleeve]:
+                    held[sleeve][new] = held[sleeve].get(new, _ZERO) + held[sleeve].pop(
+                        old
+                    )
         before = {
             sleeve: {k: v for k, v in held[sleeve].items() if abs(v) > _EPS}
             for sleeve in every
         }
         legs: list[tuple[str, Mapping[str, Any], Fraction, Fraction]] = []
-        for trade in sorted(by_day.get(day, ()), key=lambda item: item["timestamp"]):
+        for trade in sorted(
+            by_day.get(day, ()),
+            key=lambda item: (
+                item["timestamp"],
+                _resolve(parent, item.get("tag"), day) is None,
+                item["symbol"],
+                _q(item["quantity"]),
+                _q(item["price"]),
+                _q(item["commission"]),
+            ),
+        ):
             quantity = _q(trade["quantity"])
             commission = _q(trade["commission"])
             symbol = trade["symbol"]

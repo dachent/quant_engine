@@ -87,7 +87,7 @@ def _declared(
             "fees": ["otherFees"],
             "dividend_accrual": ["changeInDividendAccruals"],
         },
-        "symbol_aliases": {"aliases": {}, "from_day": None},
+        "symbol_aliases": {"aliases": {}},
         "unheld_fallback": {},
         "funding_events": funding,
     }

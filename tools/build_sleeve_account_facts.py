@@ -94,7 +94,7 @@ class DeclaredInputs:
     tolerance_window: Decimal
     roles: Mapping[str, tuple[str, ...]]
     aliases: Mapping[str, str]
-    alias_from_day: str | None
+    alias_days: Mapping[str, str]
     unheld_fallback: Mapping[str, str]
     funding: Mapping[str, Mapping[str, nav_module.FundingEvent]]
 
@@ -234,20 +234,23 @@ def load_declared_inputs(raw: bytes, tag_map: tag_map_module.TagMap) -> Declared
     claimed = [key for role in _ROLES for key in roles[role]]
     if len(set(claimed)) != len(claimed):
         raise SleeveFactsError("a ChangeInNAV component serves two roles")
-    aliases_block = _strict(
-        top["symbol_aliases"], {"aliases", "from_day"}, "symbol_aliases"
-    )
+    aliases_block = _strict(top["symbol_aliases"], {"aliases"}, "symbol_aliases")
     aliases_raw = aliases_block["aliases"]
-    if not isinstance(aliases_raw, Mapping) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in aliases_raw.items()
-    ):
+    if not isinstance(aliases_raw, Mapping):
         raise SleeveFactsError("symbol aliases are invalid")
-    from_day_raw = aliases_block["from_day"]
-    if aliases_raw and from_day_raw is None:
-        raise SleeveFactsError("aliases need a from_day")
-    from_day = (
-        None if from_day_raw is None else _iso_day(from_day_raw, "alias from_day")
-    )
+    aliases: dict[str, str] = {}
+    alias_days: dict[str, str] = {}
+    for old, alias_raw in aliases_raw.items():
+        alias = _strict(alias_raw, {"to", "from_day", "evidence_ref"}, f"alias {old}")
+        target, ref = alias["to"], alias["evidence_ref"]
+        if not isinstance(old, str) or not old or not isinstance(target, str):
+            raise SleeveFactsError("symbol aliases are invalid")
+        if not isinstance(ref, str) or not ref.strip():
+            raise SleeveFactsError(f"alias {old} has no evidence reference")
+        aliases[old] = target
+        alias_days[old] = _iso_day(alias["from_day"], f"alias {old} from_day")
+    if set(aliases) & set(aliases.values()):
+        raise SleeveFactsError("an alias target is itself renamed")
     fallback_raw = top["unheld_fallback"]
     if not isinstance(fallback_raw, Mapping) or not all(
         isinstance(k, str) and isinstance(v, str) and v in sleeve_ids
@@ -296,8 +299,8 @@ def load_declared_inputs(raw: bytes, tag_map: tag_map_module.TagMap) -> Declared
         tolerance_per_day=per_day,
         tolerance_window=in_window,
         roles=roles,
-        aliases=dict(aliases_raw),
-        alias_from_day=from_day,
+        aliases=aliases,
+        alias_days=alias_days,
         unheld_fallback=dict(fallback_raw),
         funding=funding,
     )
@@ -310,9 +313,10 @@ def _account_days(
 
     by_day: dict[str, Mapping[str, Any]] = {}
     for row in rows.change_in_nav:
-        account = row.get("account_id")
-        if account is not None and account != declared.parent_account_id:
-            raise SleeveFactsError("a ChangeInNAV row belongs to another account")
+        if row.get("account_id") != declared.parent_account_id:
+            raise SleeveFactsError(
+                "a ChangeInNAV row belongs to another account or names none"
+            )
         day = _iso_day(row.get("accounting_date"), "ChangeInNAV accounting_date")
         if day in by_day:
             raise SleeveFactsError(f"ChangeInNAV is repeated on {day}")
@@ -577,9 +581,8 @@ def build_sleeve_account_facts(
     declared = load_declared_inputs(declared_inputs_bytes, tag_map)
     parent = tag_map.parent(declared.parent_account_id)
     for item in (*rows.transactions, *rows.positions):
-        account = item.get("account_id")
-        if account is not None and account != declared.parent_account_id:
-            raise SleeveFactsError("a row belongs to another account")
+        if item.get("account_id") != declared.parent_account_id:
+            raise SleeveFactsError("a row belongs to another account or names none")
     with localcontext() as context:
         context.prec = _PRECISION
         account_days, days = _account_days(rows, declared)
@@ -598,7 +601,7 @@ def build_sleeve_account_facts(
         policy = inputs.policy(
             declared.residual_id,
             aliases=declared.aliases,
-            alias_from_day=declared.alias_from_day,
+            alias_days=declared.alias_days,
         )
         merged = {**dict(inputs.unheld_fallback), **dict(declared.unheld_fallback)}
         policy = ledger_module.SleevePolicy(
@@ -606,6 +609,7 @@ def build_sleeve_account_facts(
             residual_id=policy.residual_id,
             aliases=policy.aliases,
             alias_from_day=policy.alias_from_day,
+            alias_days=policy.alias_days,
             unheld_fallback=merged,
         )
         ledger = ledger_module.derive_sleeve_ledger(
@@ -855,6 +859,72 @@ def _artifact(
     }
 
 
+def rows_from_catalog(
+    raw: bytes, parent_account_id: str, provider_id: str, first_day: str, last_day: str
+) -> tuple[AccountRows, str]:
+    """One account's rows inside the declared window, from a provider catalog.
+
+    Reads catalog schema 7 as the provider ledger writes it: executions and
+    cash activity (``transactions``), ``positions`` and
+    ``change_in_nav_observations``.  Rows of other accounts and rows outside
+    the window are left out; nothing else is selected or changed.  The second
+    value is the SHA-256 of the canonical bytes of the selected rows, which is
+    what the artifact binds as ``account_rows_sha256``.
+    """
+
+    catalog = _load_json(raw, "catalog")
+    if not isinstance(catalog, Mapping):
+        raise SleeveFactsError("catalog is not an object")
+    if (
+        catalog.get("provider_id") != provider_id
+        or catalog.get("catalog_schema_version") != 7
+    ):
+        raise SleeveFactsError(
+            "catalog is not a schema-7 catalog of the tag map's provider"
+        )
+    accounts = catalog.get("accounts")
+    if not isinstance(accounts, list) or parent_account_id not in {
+        item.get("account_id") for item in accounts if isinstance(item, Mapping)
+    }:
+        raise SleeveFactsError("catalog does not list the declared parent account")
+    selected: dict[str, list[Mapping[str, Any]]] = {}
+    for key, day_key in (
+        ("transactions", None),
+        ("positions", "as_of_date"),
+        ("change_in_nav_observations", "accounting_date"),
+    ):
+        items = catalog.get(key)
+        if not isinstance(items, list) or not all(
+            isinstance(item, Mapping) for item in items
+        ):
+            raise SleeveFactsError(f"catalog {key} must be a list of objects")
+        chosen: list[Mapping[str, Any]] = []
+        for item in items:
+            if item.get("account_id") != parent_account_id:
+                continue
+            if day_key is not None:
+                day = item.get(day_key)
+            elif str(item.get("kind", "")).startswith("CASH_ACTIVITY:"):
+                # the day the sleeve ledger reads a dividend on
+                day = item.get("nav_recognition_date") or item.get("event_date")
+            else:
+                day = item.get("event_date")
+            if first_day <= _iso_day(day, f"{key} day") <= last_day:
+                chosen.append(item)
+        selected[key] = chosen
+    canonical = json.dumps(
+        selected, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return (
+        AccountRows(
+            tuple(selected["transactions"]),
+            tuple(selected["positions"]),
+            tuple(selected["change_in_nav_observations"]),
+        ),
+        hashlib.sha256(canonical).hexdigest(),
+    )
+
+
 def _rows_from_file(raw: bytes) -> AccountRows:
     document = _strict(
         _load_json(raw, "account rows"),
@@ -877,21 +947,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag-map", type=Path, required=True)
     parser.add_argument("--declared-inputs", type=Path, required=True)
-    parser.add_argument("--account-rows", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--account-rows", type=Path)
+    source.add_argument(
+        "--catalog",
+        type=Path,
+        help="a schema-7 provider catalog; the declared account and window are read from it",
+    )
     parser.add_argument("--parent-ledger-generation-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    rows_bytes = args.account_rows.read_bytes()
+    tag_map_bytes = args.tag_map.read_bytes()
+    declared_bytes = args.declared_inputs.read_bytes()
     try:
+        if args.catalog is not None:
+            tag_map = tag_map_module.validate_tag_map(tag_map_bytes)
+            declared = load_declared_inputs(declared_bytes, tag_map)
+            rows, rows_sha256 = rows_from_catalog(
+                args.catalog.read_bytes(),
+                declared.parent_account_id,
+                tag_map.parent(declared.parent_account_id).provider_id,
+                declared.first_day,
+                declared.last_day,
+            )
+        else:
+            rows_bytes = args.account_rows.read_bytes()
+            rows = _rows_from_file(rows_bytes)
+            rows_sha256 = hashlib.sha256(rows_bytes).hexdigest()
         data = build_sleeve_account_facts(
-            tag_map_bytes=args.tag_map.read_bytes(),
-            declared_inputs_bytes=args.declared_inputs.read_bytes(),
-            rows=_rows_from_file(rows_bytes),
-            rows_sha256=hashlib.sha256(rows_bytes).hexdigest(),
+            tag_map_bytes=tag_map_bytes,
+            declared_inputs_bytes=declared_bytes,
+            rows=rows,
+            rows_sha256=rows_sha256,
             parent_ledger_generation_id=args.parent_ledger_generation_id,
         )
     except (
         SleeveFactsError,
+        tag_map_module.TagMapError,
         ledger_module.SleeveLedgerError,
         nav_module.SleeveNavError,
     ) as error:

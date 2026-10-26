@@ -58,9 +58,12 @@ class SleevePolicy:
     sleeve_ids: tuple[str, ...]
     # The residual sleeve for what no rule assigns (never a real strategy).
     residual_id: str
-    # old symbol -> new symbol, applied from ``alias_from_day`` on.
+    # old symbol -> new symbol, applied from ``alias_from_day`` on, or from the
+    # day ``alias_days`` states for that old symbol (a provider that re-issues a
+    # security id on each reverse split renames many securities on many days).
     aliases: Mapping[str, str] = field(default_factory=dict)
     alias_from_day: str | None = None
+    alias_days: Mapping[str, str] = field(default_factory=dict)
     # symbol -> sleeve for an unmatched execution in a symbol no sleeve holds.
     unheld_fallback: Mapping[str, str] = field(default_factory=dict)
 
@@ -154,19 +157,37 @@ def derive_sleeve_ledger(
 
     for index, day in enumerate(days):
         previous_day = days[index - 1] if index else None
-        if policy.alias_from_day is not None and day >= policy.alias_from_day:
+        for old, new in policy.aliases.items():
+            alias_start = policy.alias_days.get(old, policy.alias_from_day)
+            if alias_start is None or day < alias_start:
+                continue
             for member in every:
-                for old, new in policy.aliases.items():
-                    if old in quantity[member]:
-                        quantity[member][new] = quantity[member].get(
-                            new, _ZERO
-                        ) + quantity[member].pop(old)
+                if old in quantity[member]:
+                    quantity[member][new] = quantity[member].get(new, _ZERO) + quantity[
+                        member
+                    ].pop(old)
         previous_quantity = {
             sleeve: {k: v for k, v in quantity[sleeve].items() if abs(v) > _EPSILON}
             for sleeve in every
         }
         legs: list[tuple[str, TaggedTrade, Decimal, Decimal]] = []
-        for trade in sorted(by_day.get(day, ()), key=lambda item: item.timestamp):
+        # Executions are stamped to the second, so several share a timestamp.
+        # Their order must not depend on the input's row order: within one
+        # timestamp the tag-resolved executions go first (their sleeve is
+        # evidenced), then the unassigned ones, which take whoever holds the
+        # symbol by then; the remaining keys only make the order total.
+        ordered = sorted(
+            by_day.get(day, ()),
+            key=lambda item: (
+                item.timestamp,
+                resolve(item.tag, day) is None,
+                item.symbol,
+                item.quantity,
+                item.price,
+                item.commission,
+            ),
+        )
+        for trade in ordered:
             sleeve: str | None = resolve(trade.tag, day)
             if sleeve is not None and sleeve not in known:
                 raise SleeveLedgerError(f"tag resolves to an unknown sleeve: {sleeve}")
