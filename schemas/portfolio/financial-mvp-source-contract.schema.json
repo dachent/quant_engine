@@ -104,7 +104,7 @@
               "required": ["name", "version"],
               "properties": {
                 "name": {"const": "account-strategy-manifest"},
-                "version": {"enum": ["8", "9"]}
+                "version": {"enum": ["8", "9", "10"]}
               }
             }
           }
@@ -148,7 +148,7 @@
             "properties": {
               "artifact": {
                 "properties": {
-                  "schema": {"properties": {"version": {"const": "9"}}}
+                  "schema": {"properties": {"version": {"enum": ["9", "10"]}}}
                 }
               }
             },
@@ -224,7 +224,7 @@
               "required": ["name", "version"],
               "properties": {
                 "name": {"const": "account-strategy-manifest"},
-                "version": {"const": "9"}
+                "version": {"enum": ["9", "10"]}
               }
             }
           }
