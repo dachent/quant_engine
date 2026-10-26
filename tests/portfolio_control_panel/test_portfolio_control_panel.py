@@ -7445,7 +7445,9 @@ def test_control_panel_schema_validates_rendered_surface_shapes() -> None:
     assert validator.evolve(schema=performance).is_valid([{}] * 13)
     assert not validator.evolve(schema=performance).is_valid([{}] * 12)
     assert validator.evolve(schema=strategies).is_valid([{}] * 7)
-    assert not validator.evolve(schema=strategies).is_valid([{}] * 8)
+    # Retained history-only records (#592) follow the seven current rows.
+    assert validator.evolve(schema=strategies).is_valid([{}] * 15)
+    assert not validator.evolve(schema=strategies).is_valid([{}] * 16)
     # These valid arrays contain duplicate generic objects intentionally; the
     # Python current-epoch validator enforces semantic identity uniqueness.
     assert "hybrid_mode_gate" in schema["required"]
@@ -10026,6 +10028,11 @@ def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values
         "provider": "SYNTHETIC",
         "status": "BLOCKED_ADMISSION",
         "strategy_id": "synthetic-strategy-02",
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
         "mwr_status": "BLOCKED_ADMISSION",
         "mwr_reason": "SYNTHETIC_BLOCKED",
         "mwr_xirr": None,
