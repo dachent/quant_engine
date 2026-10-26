@@ -350,6 +350,11 @@
     ],
     [
       "portfolio_report",
+      "lifecycle_fields",
+      1
+    ],
+    [
+      "portfolio_report",
       "nested_strategy_tag_map",
       1
     ],
