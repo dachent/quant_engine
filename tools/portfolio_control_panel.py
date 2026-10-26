@@ -2693,6 +2693,26 @@ def _validate_current_product_boundary(
             )
 
 
+_RETAINED_RECORD_KIND: Final = "RETAINED_HISTORY_ONLY"
+
+
+def _current_strategy_rows(
+    data: Mapping[str, Any], label: str = "strategies"
+) -> list[dict[str, Any]]:
+    """The panel's current strategy rows, without the retained history-only records.
+
+    Retained records (#592) are appended to ``strategies`` for the lifecycle view;
+    they carry no capital, return or underwriting facts, so every current-product
+    check reads only the rows that are not marked retained.
+    """
+
+    return [
+        row
+        for row in _objects(data.get("strategies"), label)
+        if row.get("record_kind") != _RETAINED_RECORD_KIND
+    ]
+
+
 def _current_product_rows(
     rows: Sequence[Mapping[str, Any]],
     strategy_product_controls: Mapping[str, Mapping[str, str]],
@@ -3772,7 +3792,7 @@ def _capital_identity_problems(data: Mapping[str, Any]) -> list[str]:
             problems.append(f"capital is not ready but dated for {key}")
     strategy_values = [
         row.get("current_value_usd")
-        for row in _objects(data.get("strategies"), "panel strategies")
+        for row in _current_strategy_rows(data, "panel strategies")
     ]
     if strategy_values and all(item is not None for item in strategy_values):
         strategy_total = _exact_capital_sum(
@@ -10339,6 +10359,16 @@ def _panel_data(
         "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
+    if report.get("lifecycle_schema_version") == 1:
+        # Lifecycle fields (#592): the current strategy rows already carry them
+        # from the report; the retained history-only records follow them.  A
+        # report without the marker is the previous schema and publishes the
+        # previous shape.
+        panel_data["lifecycle_schema_version"] = 1
+        panel_data["strategies"] = [
+            *strategies,
+            *_objects(report.get("retained_strategies"), "retained_strategies"),
+        ]
     if portable_hwm_proof is not None:
         panel_data["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
@@ -12450,7 +12480,7 @@ def verify_candidate(
     lens_rows = _objects(lens_payload.get("lenses"), "decomposition lenses")
     required_analysis_series = {
         _text(row.get("strategy_name"), "strategy.strategy_name")
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
         if row.get("product_requirement") == "REQUIRED"
     }
     if not required_analysis_series:
@@ -12498,7 +12528,7 @@ def verify_candidate(
     )
     current_strategy_ids = {
         _text(row.get("strategy_id"), "current strategy_id")
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
     }
     replication_counts = _replication_disposition_counts(replication_rows)
     counts_match_rows = replication_counts is not None and all(
@@ -12542,7 +12572,7 @@ def verify_candidate(
     weekly_expected = weekly_returns_root is not None
     expected_weekly_strategy_count = sum(
         row.get("product_requirement") != "EXCLUDED"
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
     )
     checks.append(
         _check(
@@ -12799,7 +12829,7 @@ def verify_candidate(
     if report.get("strategy_provider_evidence"):
         strategy_rows = {
             _text(row.get("strategy_id"), "strategy strategy_id"): row
-            for row in _objects(data.get("strategies"), "strategies")
+            for row in _current_strategy_rows(data)
         }
         volatis = strategy_rows.get("volatis-strategy", {})
         robuxio = strategy_rows.get("robuxio-crypto", {})

@@ -585,9 +585,10 @@
       "$comment": "JSON Schema uniqueItems cannot enforce semantic strategy identity for generic objects; the Python panel validator owns that invariant.",
       "type": "array",
       "minItems": 7,
-      "maxItems": 7,
+      "maxItems": 15,
       "items": { "type": "object" }
     },
+    "lifecycle_schema_version": { "const": 1 },
     "strategy_underwriting": {
       "type": "object",
       "additionalProperties": false,

@@ -72,9 +72,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "2a022a459d3e83dbdc2497b7c24b5a9d7b5074449912bf26cae4b22d82ae3159"
+    "1a33d41cf337c9d709b35b155568ffea4b526b6fde0251c23d643b51e4a6219a"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30007
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 30942
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -384,6 +384,57 @@ def _independent_crosswalk_display_by_epoch(
             "last_four": row.get("last_four"),
         }
     return result
+
+
+def _independent_crosswalk_dispositions_by_epoch(
+    crosswalk: InputSnapshot,
+) -> dict[tuple[object, object, object, object], object]:
+    """Independently recover the crosswalk's product disposition by epoch identity."""
+
+    payload = _strict_object(crosswalk.contents)
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        _fail()
+    result: dict[tuple[object, object, object, object], object] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            _fail()
+        key = tuple(
+            row.get(field)
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        if key in result:
+            _fail()
+        result[key] = row.get("product_epoch_disposition")
+    return result
+
+
+def _independent_epoch_lifecycle(
+    effective_end: object, closed_on: object, disposition: object
+) -> dict[str, object]:
+    """Re-derive an epoch's lifecycle from the assignment end, the epoch's own
+    closing date and the crosswalk disposition (#592), with no shared code."""
+
+    if closed_on is not None:
+        state = "CLOSED"
+    elif effective_end is not None:
+        state = "RETIRED"
+    elif disposition != "INCLUDED_PRODUCT_EPOCH":
+        state = "INACTIVE"
+    else:
+        state = "ACTIVE"
+    return {
+        "lifecycle_state": state,
+        "retired_on": effective_end if state in ("RETIRED", "CLOSED") else None,
+        "closed_on": closed_on if state == "CLOSED" else None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
 
 
 def _validate_approved_manifest_schema(snapshot: InputSnapshot) -> None:
@@ -6562,6 +6613,13 @@ def _verify_mixed_output_and_state(
         if selected.current_epoch_crosswalk is None
         else _independent_crosswalk_display_by_epoch(selected.current_epoch_crosswalk)
     )
+    disposition_by_key = (
+        {}
+        if selected.current_epoch_crosswalk is None
+        else _independent_crosswalk_dispositions_by_epoch(
+            selected.current_epoch_crosswalk
+        )
+    )
     admission_by_key = admission["by_key"]
     coverage_rows = authority_state["coverage"]["rows"]
     coverage_by_key = {tuple(row["assignment"].values()): row for row in coverage_rows}
@@ -6636,6 +6694,10 @@ def _verify_mixed_output_and_state(
             "continuity_to_successor": policy_row["continuity_to_successor"],
             **display_by_key.get(key, {}),
         }
+        epoch_disposition = disposition_by_key.get(key)
+        blocked_lifecycle = _independent_epoch_lifecycle(
+            assignment["effective_end"], None, epoch_disposition
+        )
         if selected.current_epoch_crosswalk is not None and set(base) != {
             "account_id",
             "strategy_id",
@@ -6662,6 +6724,7 @@ def _verify_mixed_output_and_state(
                 )
                 expected = {
                     **base,
+                    **blocked_lifecycle,
                     "admission_status": "FUNDED",
                     "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
                     "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
@@ -6730,6 +6793,7 @@ def _verify_mixed_output_and_state(
             ):
                 expected = {
                     **base,
+                    **blocked_lifecycle,
                     "admission_status": "FUNDED",
                     "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
                     "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
@@ -6764,8 +6828,14 @@ def _verify_mixed_output_and_state(
                     }
                 )
                 continue
+            ok_lifecycle = _independent_epoch_lifecycle(
+                assignment["effective_end"],
+                candidate.get("performance_closed_on"),
+                epoch_disposition,
+            )
             expected_base = {
                 **base,
+                **ok_lifecycle,
                 "admission_status": "FUNDED",
                 "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
                 "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
@@ -6809,6 +6879,7 @@ def _verify_mixed_output_and_state(
         elif not admission_funded:
             expected = {
                 **base,
+                **blocked_lifecycle,
                 "admission_status": "BLOCKED",
                 "admission_policy_reference": "NONE",
                 "admission_authority_kind": "NONE",
@@ -6845,6 +6916,7 @@ def _verify_mixed_output_and_state(
         else:
             expected = {
                 **base,
+                **blocked_lifecycle,
                 "admission_status": "FUNDED",
                 "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
                 "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
@@ -6899,6 +6971,7 @@ def _verify_mixed_output_and_state(
     admission_policy = admission["policy"]
     expected_fixed = {
         "schema_version": 9,
+        "lifecycle_schema_version": 1,
         "artifact": "account-strategy-manifest",
         "calculation_cutoff_date": calculation_cutoff.isoformat(),
         "accounting_currency": bridge["currency"],

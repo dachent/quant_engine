@@ -134,8 +134,10 @@ _PATH_STAGES = {
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
-    # resolution only; no producer imports it yet, so a change affects no stage.
-    "tools/nested_strategy_tag_map.py": [],
+    # resolution.  The report reads it for sleeve lifecycle links (#592), so a
+    # change affects the report and the panel built from it.
+    "tools/nested_strategy_tag_map.py": ["report", "panel"],
+    "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_ledger.py": [],
     "tools/sleeve_nav.py": [],
     "tools/sleeve_inputs.py": [],

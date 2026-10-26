@@ -18,6 +18,7 @@
   "properties": {
     "schema_version": {"enum": [7, 8, 9]},
     "calculation_cutoff_date": {"$ref": "#/$defs/date"},
+    "lifecycle_schema_version": {"const": 1},
     "artifact": {"const": "account-strategy-manifest"},
     "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
@@ -56,6 +57,11 @@
     }
   },
   "allOf": [
+    {
+      "if": {"required": ["lifecycle_schema_version"]},
+      "then": {"properties": {"rows": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}}},
+      "else": {"properties": {"rows": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}}}
+    },
     {
       "if": {"properties": {"schema_version": {"const": 7}}, "required": ["schema_version"]},
       "then": {"properties": {"source_identities": {"allOf": [
@@ -434,6 +440,11 @@
         "account_id": {"type": "string", "minLength": 1},
         "account_label": {"type": "string", "minLength": 1},
         "last_four": {"anyOf": [{"type": "string", "pattern": "^[0-9]{4}$"}, {"type": "null"}]},
+        "lifecycle_state": {"enum": ["ACTIVE", "INACTIVE", "RETIRED", "CLOSED"]},
+        "retired_on": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "closed_on": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "parent_assignment_id": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "sleeve_label": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "provider": {"type": "string"},
         "strategy_id": {"type": "string", "minLength": 1},
         "effective_start": {"$ref": "#/$defs/date"},
