@@ -587,7 +587,15 @@ def _summary_errors(version: int, rows: list[dict[str, Any]]) -> list[str]:
     validator = Draft202012Validator(
         {**SCHEMA, "required": []}, format_checker=FormatChecker()
     )
-    document = {"report_schema_version": version, "strategy_summary": rows}
+    document: dict[str, Any] = {
+        "report_schema_version": version,
+        "strategy_summary": rows,
+    }
+    if any("lifecycle_state" in row for row in rows):
+        # Rows from a real report carry the lifecycle fields; the payload
+        # marker and retained_strategies travel with them.
+        document["lifecycle_schema_version"] = 1
+        document["retained_strategies"] = []
     return [error.message[:100] for error in validator.iter_errors(document)]
 
 
