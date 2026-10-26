@@ -122,11 +122,11 @@ def test_position_row_and_security_table_symbols_are_proven_by_the_id_hash() -> 
     )
 
 
-def test_a_symbol_that_does_not_hash_to_its_security_id_is_refused() -> None:
+def test_a_carried_symbol_that_does_not_hash_to_the_id_is_labelled_carried() -> None:
     row = _rows(_catalog())[LYING_ID]
 
-    assert row["symbol"] is None
-    assert row["symbol_unavailable_reason"] == "SYMBOL_DOES_NOT_HASH_TO_SECURITY_ID"
+    assert row["symbol"] == "XYZ"
+    assert row["symbol_proof"] == "LEDGER_ROW_CARRIED"
 
 
 def test_transaction_symbol_resolves_a_security_and_conflicts_are_refused() -> None:
@@ -155,8 +155,8 @@ def test_summary_counts_and_the_empty_position_source() -> None:
         "asset_category_available_count": 1,
         "asset_category_unavailable_count": 4,
         "row_count": 5,
-        "symbol_available_count": 2,
-        "symbol_unavailable_count": 3,
+        "symbol_available_count": 3,
+        "symbol_unavailable_count": 2,
     }
     empty = build_holdings_identity(reporter._positions({"positions": []}), {})
     assert empty["rows"] == [] and empty["summary"]["row_count"] == 0
@@ -175,7 +175,7 @@ def test_independent_verifier_agrees_with_the_builder() -> None:
     receipt = verify_holdings_identity(_report(catalog), catalog)
 
     assert receipt["holdings_identity_rows"] == 5
-    assert receipt["holdings_identity_symbol_available"] == 2
+    assert receipt["holdings_identity_symbol_available"] == 3
 
 
 @pytest.mark.parametrize(

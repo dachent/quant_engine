@@ -66,16 +66,11 @@ def _expected_row(
     elif len(pool) != 1:
         reason = "CONFLICTING_SYMBOLS_IN_RETAINED_LEDGER_ROWS"
     else:
-        candidate = pool.pop()
+        symbol = pool.pop()
         source = next(iter(carried), "TRANSACTION_ROW")
-        if provider in ("schwab", "alpaca", "fidelity"):
-            digest = hashlib.sha256(candidate.encode()).hexdigest()[:24]
-            if sid == "security-" + provider + "-" + digest:
-                symbol, proof = candidate, "ID_HASH_VERIFIED"
-            else:
-                source, reason = None, "SYMBOL_DOES_NOT_HASH_TO_SECURITY_ID"
-        else:
-            symbol, proof = candidate, "LEDGER_ROW_CARRIED"
+        digest = hashlib.sha256(symbol.encode()).hexdigest()[:24]
+        matches = sid == "security-" + str(provider) + "-" + digest
+        proof = "ID_HASH_VERIFIED" if matches else "LEDGER_ROW_CARRIED"
     category = _clean(raw.get("asset_category"))
     identity = {}
     for key in sorted(_PASSTHROUGH):
@@ -102,7 +97,7 @@ def _expected_row(
         "strategy_id": position.get("strategy_id"),
         "symbol": symbol,
         "symbol_proof": proof,
-        "symbol_source": source if symbol is not None else None,
+        "symbol_source": source,
         "symbol_status": "UNAVAILABLE" if symbol is None else "AVAILABLE",
         "symbol_unavailable_reason": reason,
     }

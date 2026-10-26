@@ -119,6 +119,10 @@ _PATH_STAGES = {
     "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # The holdings identity sidecar: built by the report producer into the report
+    # payload, and re-derived by the report verifier.  A change moves report bytes.
+    "tools/holdings_identity.py": ["report", "panel"],
+    "tools/verify_holdings_identity.py": ["report", "panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
     # none writes a delivery artifact, so a change to any of them affects no
     # stage. They are declared rather than omitted because an omitted `tools/`

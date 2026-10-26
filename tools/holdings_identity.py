@@ -10,9 +10,10 @@ Derivation uses retained governed rows only; nothing is typed in, guessed or
 fetched.  A symbol comes from, in order: the position row, the ledger
 ``securities`` row, then the ``transactions`` rows of the same security.  Every
 source found must agree.  For providers whose security id is
-``sha256(symbol)[:24]`` (Schwab, Alpaca, Fidelity) the symbol must also hash to
-the id.  IBKR ids are ``sha256(conid)[:24]``: no symbol can be derived from the id,
-so a symbol exists only if a ledger row carries it.
+``sha256(symbol)[:24]`` the proof is ``ID_HASH_VERIFIED`` when the carried symbol
+hashes to the id (the provider adapters already refuse a symbol that does not).
+Other ids, such as the hashed contract id of a provider that keys by it, cannot
+yield a symbol: a symbol exists only if a ledger row carries it.
 
 ``verify_holdings_identity.py`` derives the same section independently.
 """
@@ -26,7 +27,6 @@ from typing import Any, Final, Mapping, Sequence
 HOLDINGS_IDENTITY_SCHEMA: Final = "portfolio-holdings-identity/1"
 HOLDINGS_IDENTITY_BASIS: Final = "RETAINED_PROVIDER_LEDGER_ROWS_ONLY"
 
-_SYMBOL_HASH_PROVIDERS: Final = frozenset({"schwab", "alpaca", "fidelity"})
 _IDENTITY_KEYS: Final = (
     "cusip",
     "expiry",
@@ -42,21 +42,19 @@ _IDENTITY_KEYS: Final = (
 
 NO_SYMBOL_IN_LEDGER: Final = "NO_SYMBOL_IN_RETAINED_LEDGER_ROWS"
 CONFLICTING_SYMBOLS: Final = "CONFLICTING_SYMBOLS_IN_RETAINED_LEDGER_ROWS"
-SYMBOL_FAILS_HASH: Final = "SYMBOL_DOES_NOT_HASH_TO_SECURITY_ID"
 CATEGORY_NOT_CARRIED: Final = "ASSET_CATEGORY_NOT_CARRIED_BY_LEDGER_POSITION_ROW"
 
 REQUIRED_PULLS: Final[dict[str, str]] = {
-    "IBKR:" + NO_SYMBOL_IN_LEDGER: (
+    "HASHED_IDENTIFIER:" + NO_SYMBOL_IN_LEDGER: (
         "IBKR Flex statement OpenPosition, Trade and CashTransaction rows (conid, "
         "symbol, assetCategory) for the account and date, joined where "
         "sha256(conid)[:24] equals the security id; or an IBKR generation whose "
         "securities rows carry symbol"
     ),
-    "OTHER:" + NO_SYMBOL_IN_LEDGER: (
+    "SYMBOL_ID:" + NO_SYMBOL_IN_LEDGER: (
         "the provider statement row for the security carrying its symbol"
     ),
     CONFLICTING_SYMBOLS: "the provider statement row that settles which symbol is current",
-    SYMBOL_FAILS_HASH: "the provider statement row for the security",
     CATEGORY_NOT_CARRIED: (
         "the provider statement position row carrying its asset category "
         "(IBKR Flex OpenPosition assetCategory)"
@@ -145,15 +143,11 @@ def build_holdings_identity(
             reason = CONFLICTING_SYMBOLS
         else:
             candidate = next(iter(distinct))
-            if provider in _SYMBOL_HASH_PROVIDERS:
-                if security_id == f"security-{provider}-{_id_hash(candidate)}":
-                    symbol, source = candidate, next(iter(found))
-                    proof = "ID_HASH_VERIFIED"
-                else:
-                    reason = SYMBOL_FAILS_HASH
-            else:
-                symbol, source = candidate, next(iter(found))
-                proof = "LEDGER_ROW_CARRIED"
+            symbol, source = candidate, next(iter(found))
+            hashed = f"security-{provider}-{_id_hash(candidate)}"
+            proof = (
+                "ID_HASH_VERIFIED" if security_id == hashed else "LEDGER_ROW_CARRIED"
+            )
         category = _text(raw.get("asset_category"))
         identity = {
             key: value
@@ -205,7 +199,8 @@ def _pull_key(row: Mapping[str, Any]) -> str | None:
     if not isinstance(reason, str):
         return None
     if reason == NO_SYMBOL_IN_LEDGER:
-        return ("IBKR:" if row.get("provider") == "ibkr" else "OTHER:") + reason
+        hashed = "provider_identifier_sha256" in (row.get("identity") or {})
+        return ("HASHED_IDENTIFIER:" if hashed else "SYMBOL_ID:") + reason
     return reason
 
 
