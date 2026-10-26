@@ -9254,7 +9254,11 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
-    report["holdings_identity"] = build_holdings_identity(report["positions"], catalog)
+    # Present only when an accepted position source exists: the placeholder row of an
+    # empty source names no instrument, so it has no identity to state.
+    holdings_identity = build_holdings_identity(report["positions"], catalog)
+    if holdings_identity["rows"]:
+        report["holdings_identity"] = holdings_identity
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:

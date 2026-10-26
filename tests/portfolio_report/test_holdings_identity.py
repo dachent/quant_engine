@@ -196,9 +196,25 @@ def test_verifier_rejects_a_hand_typed_or_dropped_value(tamper: Any) -> None:
         verify_holdings_identity(report, catalog)
 
 
-def test_verifier_requires_the_sidecar() -> None:
+def test_verifier_requires_the_sidecar_when_instruments_are_held() -> None:
+    catalog = _catalog()
     with pytest.raises(HoldingsIdentityError):
-        verify_holdings_identity({"positions": []}, {})
+        verify_holdings_identity({"positions": reporter._positions(catalog)}, catalog)
+
+
+def test_no_sidecar_without_a_held_instrument() -> None:
+    placeholder = reporter._positions({"positions": []})
+
+    assert (
+        verify_holdings_identity({"positions": placeholder}, {})[
+            "holdings_identity_rows"
+        ]
+        == 0
+    )
+    with pytest.raises(HoldingsIdentityError):
+        verify_holdings_identity(
+            {"positions": placeholder, "holdings_identity": {"schema": "x"}}, {}
+        )
 
 
 def test_schema_admits_the_sidecar_and_old_reports_without_it() -> None:

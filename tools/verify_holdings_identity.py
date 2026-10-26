@@ -159,6 +159,16 @@ def verify_holdings_identity(
     """Re-derive the sidecar and compare; return a receipt, or raise."""
 
     section = report.get("holdings_identity")
+    if not derive_holdings_rows(report.get("positions") or [], catalog):
+        if section is not None:
+            raise HoldingsIdentityError(
+                "holdings_identity present without any held instrument"
+            )
+        return {
+            "holdings_identity_rows": 0,
+            "holdings_identity_symbol_available": 0,
+            "holdings_identity_symbol_unavailable": 0,
+        }
     if not isinstance(section, Mapping):
         raise HoldingsIdentityError("report has no holdings_identity sidecar")
     if section.get("schema") != "portfolio-holdings-identity/1":
