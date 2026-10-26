@@ -103,6 +103,13 @@ from quant_engine.core.release import (
     recover_release,
     rollback_release,
 )
+from quant_engine.core.providers import (
+    AdapterCapabilities,
+    ProviderCapability,
+    ProviderContractError,
+    ProviderRegistry,
+    contract_findings,
+)
 from quant_engine.core.rehearsal import (
     RehearsalError,
     rehearse_dated_rollforwards,
@@ -113,6 +120,11 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "AdapterCapabilities",
+    "ProviderCapability",
+    "ProviderContractError",
+    "ProviderRegistry",
+    "contract_findings",
     "AdmissionDecision",
     "AdapterIdentity",
     "AuthorityCatalog",
