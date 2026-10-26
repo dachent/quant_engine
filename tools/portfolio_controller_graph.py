@@ -138,9 +138,12 @@ _PATH_STAGES = {
     "tools/nested_strategy_tag_map.py": [],
     "tools/sleeve_ledger.py": [],
     "tools/sleeve_nav.py": [],
+    # #567 stage 5: the post-ledger sleeve-facts builder; nothing imports it yet.
+    "tools/build_sleeve_account_facts.py": [],
     "tools/sleeve_inputs.py": [],
     "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
+    "schemas/portfolio/sleeve-account-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
     # real delivery artifact); no producer imports it.
