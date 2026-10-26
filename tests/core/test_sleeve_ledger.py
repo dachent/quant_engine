@@ -361,3 +361,48 @@ def test_offsetting_fractions_with_no_account_position_are_closed_and_reported()
     )
     assert _row(ledger, "d2", "s1").value == 0 and _row(ledger, "d2", "s2").value == 0
     assert _row(ledger, "d1", "s1").value == D("0")
+
+
+def test_each_alias_applies_from_its_own_day() -> None:
+    positions, marks = _book(
+        {
+            "d1": ({"O1": "10", "O2": "10"}, {"O1": "10", "O2": "10"}),
+            "d2": ({"N1": "10", "O2": "10"}, {"N1": "11", "O2": "10"}),
+            "d3": ({"N1": "10", "N2": "10"}, {"N1": "11", "N2": "12"}),
+        }
+    )
+    policy = SleevePolicy(
+        sleeve_ids=("s1", "s2"),
+        residual_id="other",
+        aliases={"O1": "N1", "O2": "N2"},
+        alias_days={"O1": "d2", "O2": "d3"},
+    )
+    ledger = sl.derive_sleeve_ledger(
+        [_trade("d1", "O1", "10", "10", "t1"), _trade("d1", "O2", "10", "10", "t1")],
+        positions,
+        marks,
+        [],
+        _resolve,
+        policy,
+    )
+    assert not ledger.reconciliation_gaps
+    assert _row(ledger, "d2", "s1").value == D("210")
+    assert _row(ledger, "d3", "s1").price_pnl == D("20")
+
+
+def test_executions_in_one_second_are_ordered_without_the_input_order() -> None:
+    positions, marks = _book(
+        {"d1": ({"A": "10"}, {"A": "10"}), "d2": ({"A": "4.5"}, {"A": "10"})}
+    )
+    trades = [
+        _trade("d1", "A", "10", "10", "t1", timestamp="1"),
+        _trade("d2", "A", "-10", "10", "t1", timestamp="2"),
+        _trade("d2", "A", "-0.5", "10", None, timestamp="2"),
+        _trade("d2", "A", "5", "10", "t2", timestamp="2"),
+    ]
+    results = [
+        sl.derive_sleeve_ledger(order, positions, marks, [], _resolve, _POLICY)
+        for order in (trades, list(reversed(trades)))
+    ]
+    assert results[0].rows == results[1].rows
+    assert results[0].manual_assignments == results[1].manual_assignments

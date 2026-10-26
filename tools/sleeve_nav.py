@@ -11,6 +11,8 @@ Two inputs are declarations, not derivations, and are carried with their
 evidence status so nothing unresolved is presented as settled:
 
 * funding events (a sleeve is funded, drained, swept or liquidated on a day);
+  an unresolved event on a live sleeve is refused with the provider pull that
+  would resolve it;
 * the exposure-share convention that spreads account-level interest, fees and
   dividend accruals over the sleeves.
 """
@@ -50,6 +52,10 @@ class FundingEvent:
     evidence: str
     note: str | None = None
     counterparty: str | None = None
+    # Where the owner's evidence for this step is recorded (never inferred).
+    evidence_ref: str | None = None
+    # A live sleeve feeds a current outcome: an unresolved step cannot stand.
+    live: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,9 @@ class SleeveMetrics:
 def _validate_events(
     funding: Mapping[str, Mapping[str, FundingEvent]],
     real: Sequence[str],
+    *,
+    account_label: str,
+    window: str,
 ) -> None:
     for sleeve, events in funding.items():
         if sleeve not in real:
@@ -151,6 +160,12 @@ def _validate_events(
                 COUNTERPARTIES
             ):
                 raise SleeveNavError(f"unknown counterparty: {sleeve} {day}")
+            if event.live and event.evidence == "DECLARED_UNRESOLVED":
+                raise SleeveNavError(
+                    f"live sleeve {sleeve} has an unresolved funding step on {day}; "
+                    "resolve it from the IBKR Flex cash transactions and trades "
+                    f"for account {account_label}, window {window}"
+                )
         opening = events[min(events)]
         if opening.kind != "IN":
             raise SleeveNavError(f"sleeve {sleeve} does not open with an IN event")
@@ -163,6 +178,8 @@ def derive_sleeve_nav(
     days: Sequence[str],
     real_sleeves: Sequence[str],
     residual_id: str,
+    *,
+    account_label: str = "the parent account",
 ) -> SleeveNav:
     """Each sleeve's NAV path, allocated costs and the closure to the account.
 
@@ -171,7 +188,12 @@ def derive_sleeve_nav(
     each sleeve's funding events by day.
     """
 
-    _validate_events(funding, real_sleeves)
+    _validate_events(
+        funding,
+        real_sleeves,
+        account_label=account_label,
+        window=f"{min(days)}..{max(days)}" if days else "(no NAV days)",
+    )
     by_key: dict[tuple[str, str], SleeveDay] = {
         (row.day, row.sleeve_id): row for row in ledger.rows
     }
