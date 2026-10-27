@@ -281,7 +281,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_financial_mvp_contract",
-      2
+      3
     ],
     [
       "portfolio_financial_outcomes",
@@ -351,11 +351,6 @@
     [
       "portfolio_pipeline_materialize",
       "check_retained_authority_pins",
-      1
-    ],
-    [
-      "portfolio_pipeline_materialize",
-      "derived_epoch_perimeter",
       1
     ],
     [
