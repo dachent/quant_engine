@@ -293,7 +293,8 @@ def test_epoch_replay_uses_bound_projection_and_checks_its_source(
     assert received[0][0].payloads[
         "authority/mapped-epoch-admission.json"
     ] == canonical_json_bytes(json.loads(projected))
-    assert received[0][1] == sources
+    # no sleeve facts are selected by this generation, so none are replayed
+    assert received[0][1] == {**sources, "sleeve_facts_paths": ()}
 
 
 def _contract():
