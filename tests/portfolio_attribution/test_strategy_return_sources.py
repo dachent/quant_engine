@@ -19,11 +19,20 @@ SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "portfolio" / "strategy-return-sources.schema.json"
 )
 
+RETIRED_HISTORY_ONLY_STRATEGIES = {
+    "p123-conn-1911998-andreas-sc-ai-mq-live",
+    "p123-conn-1951348-higher-beta-earnings",
+    "p123-conn-1956961-ai-largecap-ls",
+    "p123-conn-1958970-high-octane",
+    "quantbase-crisis-factor-investing",
+    "quantbase-single-index-leveraged-in-out",
+}
+
 NO_CURRENT_SOURCE_HYPOTHESIS_STRATEGIES = {
     "p123-eu",
     "echotrade-growth-pivots",
     "composer-holy-grail",
-}
+} | RETIRED_HISTORY_ONLY_STRATEGIES
 
 ANALYZABLE_STRATEGIES = {
     "p123-ai-factor",
@@ -214,7 +223,7 @@ def _schema_validate(
 def _assert_strategy_ids(contract: dict) -> None:
     registry_ids = _registry_strategy_ids()
     contract_ids = [s["strategy_id"] for s in contract["strategies"]]
-    assert len(contract_ids) == 9, f"expected 9 strategies, got {len(contract_ids)}"
+    assert len(contract_ids) == 15, f"expected 15 strategies, got {len(contract_ids)}"
     assert contract_ids == registry_ids, (
         f"contract order {contract_ids} does not match registry order {registry_ids}"
     )
@@ -441,7 +450,7 @@ def test_schema_contains_conditional_block() -> None:
 
 def test_contract_with_missing_strategy_fails() -> None:
     contract = copy.deepcopy(_contract())
-    contract["strategies"] = contract["strategies"][:8]
+    contract["strategies"] = contract["strategies"][:14]
     with pytest.raises(AssertionError, match="minItems"):
         _assert_valid_contract(contract)
 

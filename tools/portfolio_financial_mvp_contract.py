@@ -162,6 +162,10 @@ _OWNER_RECEIPT_MARKER: Final = "<!-- financial-mvp-owner-decision-receipts-v1 --
 _JSON_FENCE_RE: Final = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _GITHUB_COMMENT_API: Final = "repos/dachent/quant_engine/issues/comments/{comment_id}"
 _CENSUS_OWNER_COMMENT_ID: Final = 5350132900
+# The census assignment authority of an epoch derived from a nested-strategy tag
+# map (R2, #567): the epoch exists only in the account manifest, never in the
+# baseline crosswalk perimeter, and is not part of the owner perimeter decision.
+DERIVED_SLEEVE_EPOCH_AUTHORITY: Final = "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
 _CENSUS_OWNER_MEMBERSHIP_ORDER: Final = (
     "p123-ai-factor",
     "grizzlybears-vtma",
@@ -3155,23 +3159,23 @@ def census_owner_decision_projection(
         "DEPRECATED_HISTORY_ONLY": "DEPRECATED_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
         "IMMATERIAL_EXCLUDED": "IMMATERIAL_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
     }
-    # A retired funded member (a strategy with a FUNDED_MEMBERSHIP census epoch
-    # that is itself excluded from the current product) is a retained
-    # history-only record, not part of the 2026-08-19 perimeter decision: it did
-    # not exist as a strategy when the owner approved that payload.
-    funded_strategy_ids = {
-        _text(assignment.get("strategy_id"), "census owner funded strategy")
+    # A retired derived member (a strategy whose census epochs come from a
+    # nested-strategy tag map) is a retained history-only record, not part of the
+    # 2026-08-19 perimeter decision: it did not exist as a strategy when the
+    # owner approved that payload.
+    derived_strategy_ids = {
+        _text(assignment.get("strategy_id"), "census owner derived strategy")
         for sleeve in _objects(census.get("account_sleeves"), "census account_sleeves")
         for assignment in _objects(
             sleeve.get("assignments"), "census sleeve assignments"
         )
-        if assignment.get("status") == "FUNDED_MEMBERSHIP"
+        if assignment.get("authority") == DERIVED_SLEEVE_EPOCH_AUTHORITY
     }
     perimeter: list[dict[str, str]] = []
     for strategy_id, row in sorted(strategy_by_id.items()):
         if row.get("product_requirement") != "EXCLUDED":
             continue
-        if strategy_id in funded_strategy_ids:
+        if strategy_id in derived_strategy_ids:
             continue
         lifecycle = _text(
             row.get("lifecycle_status"), f"census owner lifecycle {strategy_id}"

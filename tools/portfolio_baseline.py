@@ -72,10 +72,15 @@ CATALOG_SCHEMA_VERSION: Final = 1
 CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
 BUILDER_VERSION: Final = "1.3.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
-# The provenance registry binds nine strategy identities (including the retained
-# excluded ones).  It is a registry fact, never the count of current strategies:
+# The provenance registry binds fifteen strategy identities: the seven current
+# strategies, the retained excluded ones, and six retired history-only records
+# (R2).  It is a registry fact, never the count of current strategies:
 # `current_capital` makes no count assumption.
-RETAINED_REGISTRY_STRATEGY_COUNT: Final = 9
+RETAINED_REGISTRY_STRATEGY_COUNT: Final = 15
+# The tracker allocation snapshot names one component per tracker strategy (the
+# seven current strategies and the two retained excluded ones); the retired
+# history-only records carry no tracker row.
+ALLOCATION_SNAPSHOT_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _PROVIDER_LEDGER_CATALOG_SCHEMA_VERSIONS: Final = frozenset({1, 2})
@@ -1142,7 +1147,9 @@ def _strategy_index(
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     strategies = _objects(catalog.get("strategies"), "provenance.strategies")
     if len(strategies) != RETAINED_REGISTRY_STRATEGY_COUNT:
-        raise BaselineValidationError("provenance must contain exactly 9 strategies")
+        raise BaselineValidationError(
+            f"provenance must contain exactly {RETAINED_REGISTRY_STRATEGY_COUNT} strategies"
+        )
     aliases: dict[str, str] = {}
     for strategy in strategies:
         strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
@@ -1154,6 +1161,41 @@ def _strategy_index(
                 raise BaselineValidationError("strategy alias is ambiguous")
             aliases[alias] = strategy_id
     return sorted(strategies, key=lambda item: str(item["strategy_id"])), aliases
+
+
+def _split_tracker_registry(
+    strategies: Sequence[dict[str, Any]],
+    tracked_ids: set[str],
+    policy_exclusions: Mapping[str, date],
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Split the provenance registry into the tracker strategies and retired records.
+
+    The provenance registry also names retired history-only records (derived
+    sleeves and funds): they have no tracker allocation, no baseline account and
+    no capital row, because their capital and returns are derived in the account
+    manifest.  A registry strategy outside the tracker allocation snapshot is
+    admitted only when the governed HWM policy excludes it; anything else is a
+    real strategy the tracker lost, and the baseline refuses it.
+    """
+
+    tracked = [row for row in strategies if row["strategy_id"] in tracked_ids]
+    retired = {
+        str(row["strategy_id"])
+        for row in strategies
+        if row["strategy_id"] not in tracked_ids
+    }
+    unexplained = sorted(retired - set(policy_exclusions))
+    if unexplained:
+        raise BaselineValidationError(
+            "registry strategies lack a tracker allocation and are not policy-"
+            "excluded retired records: " + ", ".join(unexplained)
+        )
+    if len(tracked) != ALLOCATION_SNAPSHOT_STRATEGY_COUNT:
+        raise BaselineValidationError(
+            "allocation snapshot must map exactly "
+            f"{ALLOCATION_SNAPSHOT_STRATEGY_COUNT} registry strategies"
+        )
+    return tracked, frozenset(retired)
 
 
 def _resolve_strategy(aliases: Mapping[str, str], observed: str) -> str:
@@ -2214,9 +2256,9 @@ def _allocations_and_coverage(
         allocations.append(
             {"allocation_id": _record_id("allocation", payload), **payload}
         )
-    if len(by_strategy) != RETAINED_REGISTRY_STRATEGY_COUNT:
+    if len(by_strategy) != ALLOCATION_SNAPSHOT_STRATEGY_COUNT:
         raise BaselineValidationError(
-            "allocation snapshot must map exactly 9 strategies"
+            f"allocation snapshot must map exactly {ALLOCATION_SNAPSHOT_STRATEGY_COUNT} strategies"
         )
 
     coverage: list[dict[str, Any]] = []
@@ -5594,6 +5636,15 @@ def build_catalog(
             as_of,
         )
     )
+    strategies, retired_strategy_ids = _split_tracker_registry(
+        strategies,
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in allocations
+            if item.get("strategy_id") is not None
+        },
+        _hwm_policy_exclusions(),
+    )
     # The envelope resolves attestations and provenance against the COMPLETE
     # final artifact set, so it is validated only after provider artifacts and
     # the allocation snapshot exist.
@@ -5830,7 +5881,16 @@ def build_catalog(
                 f"{certified_at} but the baseline is dated {catalog.get('as_of_date')}; "
                 "re-certify the provenance generation at this cutoff"
             )
-        catalog["strategy_version_catalog"] = version_catalog
+        catalog["strategy_version_catalog"] = {
+            **version_catalog,
+            "strategies": [
+                row
+                for row in _objects(
+                    version_catalog.get("strategies"), "strategy_version_catalog"
+                )
+                if row.get("strategy_id") not in retired_strategy_ids
+            ],
+        }
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/portfolio-baseline.json",
