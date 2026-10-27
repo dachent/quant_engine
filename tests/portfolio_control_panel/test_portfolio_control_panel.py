@@ -6893,12 +6893,26 @@ def test_hwm_policy_enforces_exclusion_effective_date() -> None:
     after_echo_close, _ = panel._hwm_policy(date(2025, 11, 25))
     composer_effective, _ = panel._hwm_policy(date(2026, 8, 1))
 
-    assert before_echo_close["excluded_strategy_ids"] == []
-    assert after_echo_close["excluded_strategy_ids"] == ["echotrade-growth-pivots"]
-    assert composer_effective["excluded_strategy_ids"] == [
-        "composer-holy-grail",
-        "echotrade-growth-pivots",
+    # The retired Quantbase funds (R2) are excluded from their derived epoch's end.
+    retired_funds = [
+        "quantbase-crisis-factor-investing",
+        "quantbase-single-index-leveraged-in-out",
     ]
+    assert before_echo_close["excluded_strategy_ids"] == retired_funds
+    assert after_echo_close["excluded_strategy_ids"] == sorted(
+        ["echotrade-growth-pivots", *retired_funds]
+    )
+    assert composer_effective["excluded_strategy_ids"] == sorted(
+        [
+            "composer-holy-grail",
+            "echotrade-growth-pivots",
+            *retired_funds,
+            "p123-conn-1911998-andreas-sc-ai-mq-live",
+            "p123-conn-1951348-higher-beta-earnings",
+            "p123-conn-1956961-ai-largecap-ls",
+            "p123-conn-1958970-high-octane",
+        ]
+    )
 
 
 def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
