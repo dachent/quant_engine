@@ -21,10 +21,12 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 import pytest
-from quant_engine.core import InputSnapshot
+from quant_engine.core import InputSnapshot, read_generation_bundle
+from quant_engine.core.contracts import GenerationManifest
 from quant_engine.core.contracts import canonical_json_bytes
 
 import build_sleeve_account_facts as facts_builder
+import portfolio_hwm_selected_inputs as selected_hwm
 from test_account_manifest_generation import (  # noqa: F401
     _generation_manifest_snapshot,
     _mixed_crosswalk_selected_inputs,
@@ -1133,3 +1135,122 @@ def test_stage_runner_selects_sleeve_facts_and_binds_their_identity(
             sleeve_facts_paths=(stray,),
         )
     assert not (tmp_path / "output-stray").exists()
+
+
+# --------------------------------------------------------------------------
+# candidate verification replays the selected facts, hash-checked
+
+
+def _staged_for_replay(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, dict[str, Any], Path]:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts" / "sleeve-account-facts.json"
+    facts_path.parent.mkdir()
+    facts_path.write_bytes(_facts_bytes(facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    bundle = read_generation_bundle(tmp_path / "output", result["generation_id"])
+
+    def source(path: Path, field: str) -> Any:
+        snapshots = {
+            "provider-ledger": (
+                selected.provider_ledger_manifest,
+                "normalized/provider-ledger.json",
+                selected.provider_ledger,
+            ),
+            "baseline": (
+                selected.baseline_manifest,
+                "normalized/portfolio-baseline.json",
+                selected.baseline,
+            ),
+        }
+        manifest, artifact_id, catalog = snapshots[field]
+        return (
+            GenerationManifest.from_json_bytes(manifest.contents),
+            {artifact_id: catalog.contents},
+            manifest.contents,
+        )
+
+    monkeypatch.setattr(selected_hwm, "_source_generation_from_path", source)
+    return bundle, arguments, facts_path
+
+
+def _replay(bundle: Any, arguments: dict[str, Any], facts: tuple[Path, ...]) -> Any:
+    return selected_hwm._verify_account_manifest_replay(
+        bundle,
+        account_manifest_admission_policy_path=arguments["admission_policy_path"],
+        account_manifest_flow_classification_policy_path=arguments["flow_policy_path"],
+        provider_ledger_generation_path=Path("provider/generation.json"),
+        baseline_generation_path=Path("baseline/generation.json"),
+        membership_census_path=arguments["membership_census_path"],
+        sleeve_facts_paths=facts,
+    )
+
+
+def test_replay_resupplies_the_selected_facts_and_refuses_anything_else(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, arguments, facts_path = _staged_for_replay(
+        tmp_path, perimeter_module, runner_module, reallocate_facts, monkeypatch
+    )
+    replayed = _replay(bundle, arguments, (facts_path,))
+    assert replayed[0] == arguments["provider_ledger_generation_id"]
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="was not supplied"):
+        _replay(bundle, arguments, ())
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="supplied twice"):
+        _replay(bundle, arguments, (facts_path, facts_path))
+
+    altered = tmp_path / "facts" / "altered.json"
+    altered.write_bytes(_facts_bytes(reallocate_facts) + b" ")
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (altered,))
+    extra = tmp_path / "facts" / "extra.json"
+    extra.write_bytes(_facts_bytes(_open_and_close_facts()))
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (facts_path, extra))
+
+
+def test_replay_of_a_generation_without_facts_refuses_any_supplied_file(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _selected(perimeter_module, ())
+    arguments = _materialize_inputs(tmp_path, selected)
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments, output_generation_root=tmp_path / "output"
+    )
+    bundle = read_generation_bundle(tmp_path / "output", result["generation_id"])
+    stray = tmp_path / "stray.json"
+    stray.write_bytes(_facts_bytes(reallocate_facts))
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (stray,))
+
+
+def test_selected_identities_must_be_a_list_of_unique_identities() -> None:
+    check = selected_hwm._selected_sleeve_facts
+    assert check((), {}) == ()
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="identities differ"):
+        check((), {"sleeve_facts": {"sha256": "0" * 64}})
+    twice = {"sha256": "0" * 64, "size_bytes": 3}
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="repeat"):
+        check((), {"sleeve_facts": [twice, twice]})
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="positive integer"):
+        check((), {"sleeve_facts": [{"sha256": "0" * 64, "size_bytes": True}]})

@@ -149,6 +149,12 @@ def _sha(value: object, field: str) -> str:
     return accepted
 
 
+def _positive_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SelectedHwmInputError(f"{field} must be a positive integer")
+    return value
+
+
 def _day(value: object, field: str) -> date:
     accepted = _text(value, field)
     try:
@@ -400,6 +406,50 @@ def _identity_snapshot(
     return InputSnapshot.from_bytes(field, payload)
 
 
+def _selected_sleeve_facts(
+    paths: Sequence[Path], selected: Mapping[str, Any]
+) -> tuple[InputSnapshot, ...]:
+    """Re-supply the sleeve-facts bytes the generation selected, and only those.
+
+    The bundle stores the identity of each selected sleeve-facts artifact, never
+    its bytes (they are an input, like the admission policy).  A replay must
+    hand back exactly that set: every named file is checked against an identity
+    the generation selected, and every selected identity must be supplied once.
+    Missing, extra, repeated and altered files all fail closed.
+    """
+
+    raw = selected.get("sleeve_facts", [])
+    if not isinstance(raw, list):
+        raise SelectedHwmInputError("selected sleeve facts identities differ")
+    expected: dict[tuple[str, int], int] = {}
+    for item in raw:
+        identity = _mapping(item, "sleeve facts identity")
+        key = (
+            _sha(identity.get("sha256"), "sleeve facts sha256"),
+            _positive_int(identity.get("size_bytes"), "sleeve facts size_bytes"),
+        )
+        if key in expected:
+            raise SelectedHwmInputError("selected sleeve facts identities repeat")
+        expected[key] = 0
+    snapshots: list[InputSnapshot] = []
+    for path in paths:
+        payload = _filesystem_path(path).read_bytes()
+        key = (hashlib.sha256(payload).hexdigest(), len(payload))
+        if key not in expected:
+            raise SelectedHwmInputError(
+                "sleeve facts file is not an input this generation selected"
+            )
+        if expected[key]:
+            raise SelectedHwmInputError("sleeve facts file is supplied twice")
+        expected[key] = 1
+        snapshots.append(InputSnapshot.from_bytes("sleeve facts", payload))
+    if not all(expected.values()):
+        raise SelectedHwmInputError(
+            "a sleeve facts artifact this generation selected was not supplied"
+        )
+    return tuple(snapshots)
+
+
 def _verify_account_manifest_replay(
     bundle: GenerationBundle,
     *,
@@ -408,6 +458,7 @@ def _verify_account_manifest_replay(
     provider_ledger_generation_path: Path,
     baseline_generation_path: Path,
     membership_census_path: Path | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> tuple[str, str, GenerationManifest, Row]:
     payloads = bundle.payloads
     selected = strict_json_object(
@@ -427,6 +478,7 @@ def _verify_account_manifest_replay(
         _mapping(selected.get("membership_census"), "membership census identity"),
         "membership census",
     )
+    sleeve_facts = _selected_sleeve_facts(sleeve_facts_paths, selected)
     report_bytes = payloads["verification/independent-verification.json"]
     strict_json_object(report_bytes, label="independent account-manifest report")
 
@@ -529,6 +581,7 @@ def _verify_account_manifest_replay(
         admission_policy=admission_policy,
         manifest_schema=manifest_schema,
         membership_census=membership_census,
+        sleeve_facts=sleeve_facts,
     )
     subjects = {
         artifact_id: payload
@@ -1691,6 +1744,7 @@ def _selected_hwm_source_rows(
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
     membership_census_path: Path | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> _SelectedHwmSourceRows:
     generation_path = _filesystem_path(account_manifest_generation_path)
     if generation_path.name != "generation.json":
@@ -1798,6 +1852,7 @@ def _selected_hwm_source_rows(
             provider_ledger_generation_path=provider_ledger_generation_path,
             baseline_generation_path=baseline_generation_path,
             membership_census_path=membership_census_path,
+            sleeve_facts_paths=sleeve_facts_paths,
         )
     )
     _validate_provider_admission_binding(
@@ -1871,6 +1926,7 @@ def _build_selected_hwm_inputs(
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
     membership_census_path: Path | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> Row:
     source = _selected_hwm_source_rows(
         account_manifest_generation_path=account_manifest_generation_path,
@@ -1886,6 +1942,7 @@ def _build_selected_hwm_inputs(
         hwm_policy_path=hwm_policy_path,
         hwm_policy_bytes=hwm_policy_bytes,
         membership_census_path=membership_census_path,
+        sleeve_facts_paths=sleeve_facts_paths,
     )
     result = build_governed_hwm_inputs(
         members=source.memberships,
@@ -2119,6 +2176,7 @@ def derive_selected_hwm_calendar_authority(
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
     membership_census_path: Path | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> Row:
     """Derive the governed HWM calendar for the exact selected source generation."""
 
@@ -2137,6 +2195,7 @@ def derive_selected_hwm_calendar_authority(
             hwm_policy_path=hwm_policy_path,
             hwm_policy_bytes=hwm_policy_bytes,
             membership_census_path=membership_census_path,
+            sleeve_facts_paths=sleeve_facts_paths,
         )
         return _derive_selected_hwm_calendar(source)
     except SelectedHwmInputError:
@@ -2158,6 +2217,7 @@ def build_selected_hwm_inputs(
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
     membership_census_path: Path | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> Row:
     """Build schema-1 HWM inputs from one exact verified account-manifest generation.
 
@@ -2182,6 +2242,7 @@ def build_selected_hwm_inputs(
             hwm_policy_path=hwm_policy_path,
             hwm_policy_bytes=hwm_policy_bytes,
             membership_census_path=membership_census_path,
+            sleeve_facts_paths=sleeve_facts_paths,
         )
     except SelectedHwmInputError:
         raise
