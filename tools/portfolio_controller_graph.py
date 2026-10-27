@@ -154,6 +154,11 @@ _PATH_STAGES = {
     # change affects the report and the panel built from it.
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
+    # R2 (registry nine -> fifteen): the economic return-source registry and its
+    # schema are read by tests and pinned by digest in the product contract (whose
+    # own path carries the stage impact); no producer imports them.
+    "contracts/strategy-return-sources-v1.json": [],
+    "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.
     "tools/derived_epoch_perimeter.py": ["report", "panel"],
