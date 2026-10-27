@@ -6442,8 +6442,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 28
-    assert len(lints) == 27
+    assert len(manifests) == 31
+    assert len(lints) == 30
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7625,13 +7625,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    # Nine views exist, but only eight are primary navigation.  The frozen
+    # Ten views exist (the Performance charts tab was added), but only nine are primary navigation.  The frozen
     # candidate catalog is dated research context that cannot change current
     # strategies, readiness or allocation, so it is reachable only through the
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 8
+    assert template.count('class="nav-item') == 9
     for view in (
         "command",
         "capital",
@@ -7640,6 +7640,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "attribution",
         "dependence",
         "weekly",
+        "performance",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -14213,7 +14214,7 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const htmlUrl = pathToFileURL(process.env.G2_PANEL_HTML).href;
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "performance", "candidates", "data"];
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
 try {
   const results = [];
@@ -14296,6 +14297,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderAttribution",
         "renderDependence",
         "renderWeekly",
+        "renderPerformance",
         "renderCandidates",
         "renderData",
     )
@@ -14390,7 +14392,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 28
+    assert len(manifests) == 31
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
