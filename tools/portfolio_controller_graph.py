@@ -135,6 +135,7 @@ _PATH_STAGES = {
     # integration, one of them on a pure type-annotation change.
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
+    "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
