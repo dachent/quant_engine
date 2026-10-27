@@ -71,9 +71,23 @@
       "then": {"properties": {
         "selected_source_identities": {"$ref": "#/$defs/selected_source_identities_v3"},
         "subjects": {"$ref": "#/$defs/subjects_v3"},
-        "counts": {"$ref": "#/$defs/counts_v3"},
         "blocker_chains": {"$ref": "#/$defs/blocker_chains_v3"}
-      }}
+      }},
+      "else": true
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"const": 3},
+          "selected_source_identities": {"required": ["sleeve_facts"]}
+        },
+        "required": ["schema_version", "selected_source_identities"]
+      },
+      "then": {"properties": {"counts": {"$ref": "#/$defs/counts_v3_derived_sleeves"}}},
+      "else": {
+        "if": {"properties": {"schema_version": {"const": 3}}},
+        "then": {"properties": {"counts": {"$ref": "#/$defs/counts_v3"}}}
+      }
     }
   ],
   "$defs": {
@@ -297,7 +311,13 @@
         "admission_policy": {"$ref": "#/$defs/snapshot_identity"},
         "manifest_schema": {"$ref": "#/$defs/snapshot_identity"},
         "membership_census": {"$ref": "#/$defs/snapshot_identity"},
-        "current_epoch_crosswalk": {"$ref": "#/$defs/snapshot_identity"}
+        "current_epoch_crosswalk": {"$ref": "#/$defs/snapshot_identity"},
+        "sleeve_facts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/snapshot_identity"}
+        }
       }
     },
     "subject": {
@@ -731,6 +751,65 @@
         "blocked_coverage_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
         "blocked_admission_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
         "blocked_output_row_count": {"type": "integer", "minimum": 0, "maximum": 15}
+      }
+    },
+    "counts_v3_derived_sleeves": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_baseline_account_count",
+        "account_count",
+        "assignment_count",
+        "mapped_assignment_count",
+        "historical_assignment_count",
+        "reserve_assignment_count",
+        "observed_nav_fact_count",
+        "observed_raw_flow_count",
+        "classified_event_count",
+        "classified_event_classified_count",
+        "classified_event_blocked_count",
+        "unmatched_nav_fact_count",
+        "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count",
+        "unmatched_projection_count",
+        "calculation_input_row_count",
+        "coverage_row_count",
+        "admission_row_count",
+        "output_row_count",
+        "complete_coverage_row_count",
+        "funded_admission_row_count",
+        "ok_output_row_count",
+        "blocked_coverage_row_count",
+        "blocked_admission_row_count",
+        "blocked_output_row_count"
+      ],
+      "properties": {
+        "selected_baseline_account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "mapped_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "historical_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "reserve_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "current_product_epoch_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_raw_flow_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_classified_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_blocked_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_raw_flow_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_projection_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "calculation_input_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "output_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "complete_coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "funded_admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "ok_output_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_output_row_count": {"$ref": "#/$defs/nonnegative_integer"}
       }
     },
     "numeric_verification": {

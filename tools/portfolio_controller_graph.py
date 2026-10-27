@@ -511,6 +511,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
             "schemas/portfolio/account-assignment-perimeter.schema.json",
+            "schemas/portfolio/account-flow-coverage.schema.json",
             "schemas/portfolio/account-strategy-current-epoch-crosswalk.schema.json",
         ),
         "contracts": (
