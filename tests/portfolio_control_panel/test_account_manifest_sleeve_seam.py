@@ -512,6 +512,7 @@ def test_liquidate_and_reallocate_builds_verifies_and_pairs(
         assert row["derivation"] == {
             "parent_account_id": PARENT,
             "sleeve_facts_sha256": snapshot.sha256,
+            "tag_map_sha256": reallocate_facts["bindings"]["tag_map_sha256"],
         }
         assert row["receipt_artifact_id"] == "receipt/mixed-account-01.json"
         assert row["status"] == "COMPLETE"

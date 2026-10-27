@@ -25,12 +25,15 @@ This module reads identities only; it holds no policy, amount or account name.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Iterable, Mapping, Sequence
 
 EpochKey = tuple[str, str, str, str | None]
 
 DERIVED_SLEEVE_AUTHORITY_KIND: Final = "DERIVED_SLEEVE_COVERAGE_V1"
+# The production specification names each selected sleeve-facts artifact as a node
+# whose id starts with this prefix (the verifier replays need their bytes).
+SLEEVE_FACTS_NODE_PREFIX: Final = "financial-account-manifest-sleeve-facts-"
 _KEY_FIELDS: Final = ("account_id", "strategy_id", "effective_start", "effective_end")
 
 
@@ -47,6 +50,7 @@ class EffectivePerimeter:
     derived: frozenset[EpochKey]
     parents: Mapping[EpochKey, str]
     product_strategy_ids: frozenset[str]
+    tag_map_digests: Mapping[EpochKey, str] = field(default_factory=dict)
 
     @property
     def has_derived(self) -> bool:
@@ -111,6 +115,31 @@ def derived_epochs(coverage_rows: Sequence[Mapping[str, Any]]) -> dict[EpochKey,
     return result
 
 
+def derived_tag_maps(
+    coverage_rows: Sequence[Mapping[str, Any]],
+) -> dict[EpochKey, str]:
+    """Derived epoch -> digest of the tag map its sleeve facts were built from.
+
+    A coverage row that names none is simply absent here: a consumer that needs
+    the binding (the report) refuses a derived epoch it cannot find.
+    """
+
+    result: dict[EpochKey, str] = {}
+    for row in coverage_rows:
+        if row.get("authority_kind") != DERIVED_SLEEVE_AUTHORITY_KIND:
+            continue
+        derivation = row.get("derivation")
+        assignment = row.get("assignment")
+        digest = (
+            derivation.get("tag_map_sha256")
+            if isinstance(derivation, Mapping)
+            else None
+        )
+        if isinstance(assignment, Mapping) and isinstance(digest, str):
+            result[epoch_key(assignment, "derived coverage assignment")] = digest
+    return result
+
+
 def effective_perimeter(
     baseline_included: Iterable[EpochKey],
     manifest_keys: Iterable[EpochKey],
@@ -119,7 +148,10 @@ def effective_perimeter(
     """Bind the manifest's epochs to the baseline perimeter plus derived epochs."""
 
     return bind_perimeter(
-        baseline_included, manifest_keys, derived_epochs(coverage_rows)
+        baseline_included,
+        manifest_keys,
+        derived_epochs(coverage_rows),
+        derived_tag_maps(coverage_rows),
     )
 
 
@@ -127,6 +159,7 @@ def bind_perimeter(
     baseline_included: Iterable[EpochKey],
     manifest_keys: Iterable[EpochKey],
     parents: Mapping[EpochKey, str],
+    tag_map_digests: Mapping[EpochKey, str] | None = None,
 ) -> EffectivePerimeter:
     """The same binding from an already derived epoch -> parent account map."""
 
@@ -160,4 +193,5 @@ def bind_perimeter(
         derived=derived,
         parents=dict(parents),
         product_strategy_ids=frozenset(key[1] for key in baseline),
+        tag_map_digests=dict(tag_map_digests or {}),
     )

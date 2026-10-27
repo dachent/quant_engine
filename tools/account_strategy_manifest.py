@@ -858,6 +858,7 @@ def _validate_flow_coverage_payload(
                 != {
                     "parent_account_id": expected_row["parent_account_id"],
                     "sleeve_facts_sha256": expected_row["sleeve_facts_sha256"],
+                    "tag_map_sha256": expected_row["tag_map_sha256"],
                 }
                 or not isinstance(receipt_id, str)
                 or receipt_id not in receipt_snapshots
@@ -3242,6 +3243,9 @@ def derive_sleeve_manifest_facts(
                     "requested_end": end or window_last,
                     "parent_account_id": parent,
                     "sleeve_facts_sha256": snapshot.sha256,
+                    "tag_map_sha256": _sleeve_object(
+                        payload.get("bindings"), "bindings"
+                    )["tag_map_sha256"],
                 }
             )
             if exit_day is not None and cumulative != 0:

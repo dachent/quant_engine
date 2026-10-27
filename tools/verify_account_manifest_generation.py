@@ -4936,6 +4936,7 @@ def _mixed_coverage_payload(
                     "derivation": {
                         "parent_account_id": derived["parent_account_id"],
                         "sleeve_facts_sha256": derived["sleeve_facts_sha256"],
+                        "tag_map_sha256": derived["tag_map_sha256"],
                     },
                 }
             )
@@ -5969,6 +5970,9 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                         "requested_end": end or window_last,
                         "parent_account_id": parent,
                         "sleeve_facts_sha256": snapshot.sha256,
+                        "tag_map_sha256": _sleeve_obj(payload.get("bindings")).get(
+                            "tag_map_sha256"
+                        ),
                     }
                 )
                 if exit_day is not None and carried != 0:

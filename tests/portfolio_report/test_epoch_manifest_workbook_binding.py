@@ -771,6 +771,7 @@ def _verified_schema9_epoch_bundle(
                             )
                         ],
                         "sleeve_facts_sha256": "7" * 64,
+                        "tag_map_sha256": "8" * 64,
                     },
                 }
                 if tuple(chain["assignment"][field] for field in chain["assignment"])

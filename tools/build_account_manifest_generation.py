@@ -3312,6 +3312,7 @@ def _mixed_coverage_payload(
                     "derivation": {
                         "parent_account_id": derived["parent_account_id"],
                         "sleeve_facts_sha256": derived["sleeve_facts_sha256"],
+                        "tag_map_sha256": derived["tag_map_sha256"],
                     },
                 }
             )

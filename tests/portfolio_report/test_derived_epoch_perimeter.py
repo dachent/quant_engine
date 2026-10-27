@@ -24,7 +24,11 @@ def _row(key: tuple[str, str, str, str | None], parent: str = PARENT) -> dict[st
             zip(("account_id", "strategy_id", "effective_start", "effective_end"), key)
         ),
         "authority_kind": perimeter.DERIVED_SLEEVE_AUTHORITY_KIND,
-        "derivation": {"parent_account_id": parent, "sleeve_facts_sha256": "0" * 64},
+        "derivation": {
+            "parent_account_id": parent,
+            "sleeve_facts_sha256": "0" * 64,
+            "tag_map_sha256": "9" * 64,
+        },
     }
 
 
@@ -129,3 +133,20 @@ def test_identities_are_strictly_typed() -> None:
             "effective_end": None,
         }
     ) == ("a", "s", "2026-01-01", None)
+
+
+def test_the_tag_map_digest_of_each_derived_epoch_is_carried_when_named() -> None:
+    plain = _row(S1)
+    del plain["derivation"]["tag_map_sha256"]
+    result = perimeter.effective_perimeter(
+        BASELINE,
+        {(OTHER, "qsi", "2026-01-05", None), S1, S2},
+        [_row(S2), plain, _plain((OTHER, "qsi", "x", None))],
+    )
+    # a row that names no digest is absent: the report, which needs the
+    # binding, refuses it; the HWM selection, which does not, still binds
+    assert result.tag_map_digests == {S2: "9" * 64}
+    assert perimeter.derived_tag_maps([_row(S1), _row(S2)]) == {
+        S1: "9" * 64,
+        S2: "9" * 64,
+    }

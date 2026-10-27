@@ -406,7 +406,7 @@ def _production_hwm_source_paths(
     sources: Mapping[str, Path],
     artifact_rows: Sequence[Mapping[str, Any]],
     manifest_inputs: Mapping[str, Any] | None,
-) -> dict[str, Path]:
+) -> dict[str, Any]:
     """Resolve the selected ledger authorities already present in the production spec."""
 
     account_rows = [
@@ -443,7 +443,7 @@ def _production_hwm_source_paths(
         baseline_path = sources["portfolio-baseline"] / "generation.json"
     except KeyError as exc:
         raise MaterializationError("selected HWM generation source is absent") from exc
-    return {
+    resolved: dict[str, Any] = {
         "account_manifest_generation_path": account_path.resolve(),
         "account_manifest_admission_policy_path": admission_path.resolve(),
         "account_manifest_flow_classification_policy_path": (
@@ -452,6 +452,10 @@ def _production_hwm_source_paths(
         "provider_ledger_generation_path": provider_path.resolve(),
         "baseline_generation_path": baseline_path.resolve(),
     }
+    facts = _production_sleeve_facts_paths(artifact_rows)
+    if facts:
+        resolved["sleeve_facts_paths"] = facts
+    return resolved
 
 
 FINANCIAL_MVP_SCHEMA = (
