@@ -1376,7 +1376,8 @@ def _preparation_stage_inputs(
             "epoch_crosswalk_template": config["epoch_crosswalk_template"],
             **(
                 {"sleeve_policy_manifest": config["sleeve_facts"]["policy_manifest"]}
-                if config.get("sleeve_facts") is not None
+                if isinstance(config.get("sleeve_facts"), Mapping)
+                and "policy_manifest" in config["sleeve_facts"]
                 else {}
             ),
         },

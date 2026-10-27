@@ -2769,6 +2769,13 @@ def _preparation_function_fixture(
                 "attribution_baseline_reader",
                 "value_basis_bounds",
                 "layered_history_repository_dependencies",
+                "sleeve_facts_release",
+                "sleeve_account_facts",
+                "quantbase_fund_facts",
+                "nested_tag_map",
+                "sleeve_inputs",
+                "sleeve_ledger",
+                "sleeve_nav",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -4585,3 +4592,182 @@ def test_attended_execute_rejects_bad_preparation_before_output_or_stage(
 
     assert materializer.main(_argv(tmp_path, execute=True)) == 1
     assert not output.exists()
+
+
+def _with_sleeve_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, section: object
+) -> None:
+    original = preparation._validated_inputs
+
+    def with_section(*args: object) -> tuple[dict[str, object], object]:
+        config, plan = original(*args)
+        return {**config, "sleeve_facts": section}, plan
+
+    monkeypatch.setattr(preparation, "_validated_inputs", with_section)
+
+
+def _sleeve_section(tmp_path: Path) -> dict[str, object]:
+    manifest = tmp_path / "sleeve-policy-manifest.json"
+    manifest.write_bytes(b'{"policy":"synthetic"}\n')
+    return {
+        "policy_manifest": preparation._definition(manifest),
+        "ibkr_generation_root": str(tmp_path / "ibkr-root"),
+        "quantbase_source_dir": str(tmp_path / "quantbase-sources"),
+    }
+
+
+def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configured sleeve facts reach the epoch stage and the HWM replay, byte for byte."""
+
+    import build_sleeve_facts_release as sleeve_release
+    import portfolio_hwm_selected_inputs as hwm_inputs
+    import stage_current_epoch_manifest as epoch_stage
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    section = _sleeve_section(tmp_path)
+    _with_sleeve_config(monkeypatch, tmp_path, section)
+    built: dict[str, object] = {}
+
+    def build(**kwargs: Any) -> dict[str, object]:
+        built.update(kwargs)
+        destination = Path(kwargs["output_dir"])
+        files = []
+        for name in ("sleeve-account-facts.json", "quantbase-fund-facts.json"):
+            payload = canonical_json_bytes({"artifact": name})
+            (destination / name).write_bytes(payload)
+            files.append({"path": name})
+        return {"files": files}
+
+    monkeypatch.setattr(sleeve_release, "build_release_sleeve_facts", build)
+    staged: dict[str, object] = {}
+    previous_stage = epoch_stage.stage_current_epoch_manifest
+
+    def stage(**kwargs: Any) -> dict[str, str]:
+        staged["paths"] = kwargs["sleeve_facts_paths"]
+        return previous_stage(**kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(epoch_stage, "stage_current_epoch_manifest", stage)
+    replayed: list[object] = []
+    for name in ("derive_selected_hwm_calendar_authority", "build_selected_hwm_inputs"):
+        previous = getattr(hwm_inputs, name)
+
+        def spy(*, _previous: Any = previous, **kwargs: Any) -> Any:
+            replayed.append(kwargs["sleeve_facts_paths"])
+            return _previous(**kwargs)
+
+        monkeypatch.setattr(hwm_inputs, name, spy)
+
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+
+    destination = output / "preparation" / "sleeve-facts"
+    expected = (
+        destination / "sleeve-account-facts.json",
+        destination / "quantbase-fund-facts.json",
+    )
+    assert staged["paths"] == expected
+    assert replayed == [expected, expected]
+    # the staged ledger generation is the one the build reads its rows from
+    assert Path(str(built["provider_ledger_generation_dir"])).parent == (
+        output / "stages" / "ledger" / "generations"
+    )
+    assert built["ibkr_generation_root"] == (tmp_path / "ibkr-root").resolve()
+    assert built["quantbase_source_dir"] == (tmp_path / "quantbase-sources").resolve()
+    checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "epoch.json", "epoch checkpoint"
+    )
+    assert checkpoint["result"]["sleeve_facts"] == [
+        preparation._definition(path) for path in expected
+    ]
+    assert "sleeve_facts" in checkpoint["outputs"]
+    assert checkpoint["input_identity"]["inputs"]["sleeve_policy_manifest"] == (
+        section["policy_manifest"]
+    )
+
+
+def test_no_sleeve_configuration_selects_no_nested_strategies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_hwm_selected_inputs as hwm_inputs
+    import stage_current_epoch_manifest as epoch_stage
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    staged: dict[str, object] = {}
+    previous_stage = epoch_stage.stage_current_epoch_manifest
+
+    def stage(**kwargs: Any) -> dict[str, str]:
+        staged["paths"] = kwargs["sleeve_facts_paths"]
+        return previous_stage(**kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(epoch_stage, "stage_current_epoch_manifest", stage)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    assert staged["paths"] == ()
+    checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "epoch.json", "epoch checkpoint"
+    )
+    assert checkpoint["result"]["sleeve_facts"] == []
+    assert "sleeve_policy_manifest" not in checkpoint["input_identity"]["inputs"]
+    assert hwm_inputs is not None
+
+
+def test_a_refused_sleeve_build_stops_before_the_epoch_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import build_sleeve_facts_release as sleeve_release
+
+    spec, calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    _with_sleeve_config(monkeypatch, tmp_path, _sleeve_section(tmp_path))
+
+    def refuse(**_kwargs: object) -> dict[str, object]:
+        raise sleeve_release.SleeveFactsReleaseError("a pin differs")
+
+    monkeypatch.setattr(sleeve_release, "build_release_sleeve_facts", refuse)
+    output = tmp_path / "prepared"
+    with pytest.raises(preparation.AttendedPreparationError, match="a pin differs"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
+    assert calls["hwm"] == 0
+    assert not (output / "preparation" / "checkpoints" / "epoch.json").exists()
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        {"policy_manifest": {}},
+        {"policy_manifest": {}, "ibkr_generation_root": "x"},
+        "not an object",
+    ],
+)
+def test_a_malformed_sleeve_configuration_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: object
+) -> None:
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    _with_sleeve_config(monkeypatch, tmp_path, section)
+    with pytest.raises(preparation.AttendedPreparationError, match="configuration"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=tmp_path / "prepared",
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
