@@ -510,7 +510,9 @@
           ],
           "screened_out_candidates": [
             "BTC-USD",
-            "ETH-USD"
+            "ETH-USD",
+            "SPY",
+            "SPXL"
           ]
         },
         {
@@ -773,7 +775,9 @@
           ],
           "screened_out_candidates": [
             "BTC-USD",
-            "ETH-USD"
+            "ETH-USD",
+            "SPY",
+            "SPXL"
           ]
         },
         {
@@ -1036,7 +1040,9 @@
           ],
           "screened_out_candidates": [
             "BTC-USD",
-            "ETH-USD"
+            "ETH-USD",
+            "SPY",
+            "SPXL"
           ]
         },
         {
@@ -1299,7 +1305,9 @@
           ],
           "screened_out_candidates": [
             "BTC-USD",
-            "ETH-USD"
+            "ETH-USD",
+            "SPY",
+            "SPXL"
           ]
         },
         {
@@ -1479,7 +1487,9 @@
             "VNQ",
             "GLD",
             "DBC",
-            "UUP"
+            "UUP",
+            "SPY",
+            "SPXL"
           ]
         }
       ]
