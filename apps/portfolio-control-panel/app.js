@@ -1383,7 +1383,7 @@
       || "Unknown authority profile — non-releaseable";
     // T5d-lite: a row opened from a provider capital anchor measures Capital in, Net
     // capital and Gain on the sleeve allocation basis (what entered the strategy
-    // sleeve), not the deposits into the provider cash or wallet account.  The label
+    // sleeve; account deposits and wallet conversions are not capital).  The label
     // is an attribute and a legend sentence: every header and cell text stays what the
     // attended interaction QA compares.
     const sleeveRow = (row) => row.opening_basis === "PROVIDER_CAPITAL_ANCHOR";
@@ -1392,9 +1392,16 @@
     // capital figure on these rows, so the label says it is an allocation and that
     // invested capital was not supplied (N36).
     const governedCapitalSupplied = Boolean(data.invested_capital);
-    const sleeveTitle = "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account."
+    // Only fund-scoped providers (Quantbase: the dashboard is fund-scoped strategy NAV, linked brokerage deposits do not
+    // cross its perimeter) count the gross fund allocation as capital and deny any deposits or strategy cash line; the
+    // other anchor providers keep the general sleeve-allocation wording.
+    const fundScopedRow = (row) => sleeveRow(row) && String(row.provider || "").toLowerCase() === "quantbase";
+    const hasFundScopedRows = manifest.rows.some(fundScopedRow);
+    const sleeveTitleFor = (row) => (fundScopedRow(row)
+      ? "Sleeve allocation basis: the gross amount allocated to the fund from its provider capital anchor; account deposits and wallet conversions are not capital."
+      : "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account.")
       + (governedCapitalSupplied ? "" : " Governed invested capital was not supplied to this build, so this is an allocation, not invested capital.");
-    const sleeveAttribute = (row) => (sleeveRow(row) ? ` title="${safe(sleeveTitle)}"` : "");
+    const sleeveAttribute = (row) => (sleeveRow(row) ? ` title="${safe(sleeveTitleFor(row))}"` : "");
     const sleeveHeader = hasSleeveRows ? "Sleeve allocation basis for rows opened from a provider capital anchor" : "";
     const rows = manifest.rows.map((row) => {
       const label = manifestLabel(row);
@@ -1410,7 +1417,7 @@
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM (index, base 100)", "numeric"], ["Observed Max DD (signed)", "numeric"],
     ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`, manifestFooter(manifest.rows));
-    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Capital in = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Capital in − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Capital in, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account. ${governedCapitalSupplied ? "Governed invested capital (the deposits) and the strategy cash line are reported separately." : "Governed invested capital was not supplied to this build: on these rows Capital in is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
+    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Capital in = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Capital in − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.${hasSleeveRows ? ` Rows opened from a provider capital anchor show Capital in, Net capital and Gain on the sleeve allocation basis: the amount that entered the strategy sleeve, not the deposits into the provider cash or wallet account.${hasFundScopedRows ? " For fund-scoped providers (Quantbase) that amount is the gross allocation to the fund at fill dates; account deposits and wallet conversions are not capital and no derived strategy cash line exists." : ""} ${governedCapitalSupplied ? (hasFundScopedRows ? "Governed invested capital is reported separately (for fund-scoped providers, the gross allocations to the fund; account deposits are not capital)." : "Governed invested capital (the deposits) and the strategy cash line are reported separately.") : "Governed invested capital was not supplied to this build: on these rows Capital in is an allocation to the strategy sleeve, not invested capital."}` : ""}`;
     const disclosure = $("#account-manifest-disclosure");
     const producerReadiness = panelVerification.producer_readiness;
     const notes = [

@@ -34,12 +34,38 @@ def test_the_sleeve_label_depends_on_the_governed_capital_result() -> None:
 
 
 def test_the_separate_report_claim_only_appears_when_the_input_was_supplied() -> None:
-    sentence = (
+    general = (
         "Governed invested capital (the deposits) and the strategy cash line are "
         "reported separately."
     )
-    assert APP_JS.count(sentence) == 1
-    assert f'governedCapitalSupplied ? "{sentence}"' in APP_JS
+    fund_scoped = (
+        "Governed invested capital is reported separately (for fund-scoped providers, "
+        "the gross allocations to the fund; account deposits are not capital)."
+    )
+    assert APP_JS.count(general) == 1 and APP_JS.count(fund_scoped) == 1
+    assert (
+        f'governedCapitalSupplied ? (hasFundScopedRows ? "{fund_scoped}" : "{general}")'
+        in APP_JS
+    )
+
+
+def test_the_fund_scoped_wording_is_limited_to_fund_scoped_rows() -> None:
+    """Owner decision B on #330 applies to fund-scoped providers (Quantbase) only."""
+
+    assert 'String(row.provider || "").toLowerCase() === "quantbase"' in APP_JS
+    assert "const hasFundScopedRows = manifest.rows.some(fundScopedRow);" in APP_JS
+    clause = (
+        "For fund-scoped providers (Quantbase) that amount is the gross allocation to "
+        "the fund at fill dates; account deposits and wallet conversions are not "
+        "capital and no derived strategy cash line exists."
+    )
+    assert f'hasFundScopedRows ? " {clause}" : ""' in APP_JS
+    # The sleeve tooltip only uses the fund wording for fund-scoped rows.
+    assert (
+        "the gross amount allocated to the fund from its provider capital anchor"
+        in APP_JS
+    )
+    assert "const sleeveTitleFor = (row) => (fundScopedRow(row)" in APP_JS
 
 
 def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
