@@ -49,6 +49,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--code-commit")
     parser.add_argument("--inputs", type=Path, help="acceptance-inputs manifest")
+    parser.add_argument("--sleeve-inputs", type=Path)
+    parser.add_argument("--sleeves-only", action="store_true")
     return parser
 
 
@@ -59,9 +61,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError:
         print(f"derive_a: invalid --cutoff {args.cutoff!r}", file=sys.stderr)
         return 2
-    commit = args.code_commit or _head_commit(REPO_ROOT)
+    commit = args.code_commit or (
+        "UNKNOWN"
+        if args.sleeve_inputs or args.sleeves_only
+        else _head_commit(REPO_ROOT)
+    )
     manifest: InputsManifest | None = None
     try:
+        if args.sleeves_only and args.sleeve_inputs is None:
+            raise InputError("--sleeves-only requires --sleeve-inputs")
         if args.inputs is not None:
             try:
                 data = args.inputs.read_bytes()
@@ -75,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             code_commit=commit,
             manifest=manifest,
+            sleeve_inputs=args.sleeve_inputs,
+            sleeves_only=args.sleeves_only,
         )
     except InputError as exc:
         print(f"derive_a: input error: {exc}", file=sys.stderr)

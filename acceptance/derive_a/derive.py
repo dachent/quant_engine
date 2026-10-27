@@ -3910,6 +3910,8 @@ def derive(
     layout: Mapping[str, str] | None = None,
     declared_cutoff: dt.date = DECLARED_CUTOFF,
     manifest: InputsManifest | None = None,
+    sleeve_inputs: Path | None = None,
+    sleeves_only: bool = False,
 ) -> dict[str, Any]:
     """Derive every metric.
 
@@ -3921,6 +3923,30 @@ def derive(
     selection.
     """
 
+    if sleeves_only and sleeve_inputs is None:
+        raise InputError("--sleeves-only requires --sleeve-inputs")
+    if sleeves_only:
+        from .sleeves import append_sleeves
+
+        assert sleeve_inputs is not None
+        return append_sleeves(
+            {
+                "schema": SCHEMA,
+                "derivation": DERIVATION,
+                "model": model,
+                "code_commit": code_commit,
+                "cutoff": _day(cutoff),
+                "inputs": [],
+                "contracts": [],
+                "convention_notes": [],
+                "metrics": [],
+                "not_derivable": [],
+            },
+            sleeve_inputs,
+            qe_root,
+            repo_root,
+            cutoff,
+        )
     if manifest is not None:
         if layout is not None or expected_sha256 is not None:
             raise InputError(
@@ -3931,7 +3957,7 @@ def derive(
         expected_sha256 = manifest.pins
     with localcontext() as context:
         context.prec = PRECISION
-        return _derive(
+        document = _derive(
             qe_root,
             repo_root,
             cutoff,
@@ -3942,6 +3968,11 @@ def derive(
             declared_cutoff,
             manifest,
         )
+    if sleeve_inputs is not None:
+        from .sleeves import append_sleeves
+
+        return append_sleeves(document, sleeve_inputs, qe_root, repo_root, cutoff)
+    return document
 
 
 def _epoch_boundaries(crosswalk: Crosswalk, data: bytes, cutoff: dt.date) -> Crosswalk:
