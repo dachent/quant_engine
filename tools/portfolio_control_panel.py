@@ -10422,7 +10422,6 @@ def _panel_data(
         panel_data["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
         panel_data["hwm_governed_proof"] = governed_hwm_proof
-    panel_data["performance_tab"] = build_performance_tab(panel_data)
     return panel_data
 
 
@@ -11743,6 +11742,9 @@ def _rendered_files(
     for totals_key in PORTFOLIO_TOTALS_KEYS:
         if totals_key in report:
             data[totals_key] = report[totals_key]
+    # The Performance tab reads the totals above (summed-epoch TWR and difference),
+    # so it is built after they are attached.
+    data["performance_tab"] = build_performance_tab(data)
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,

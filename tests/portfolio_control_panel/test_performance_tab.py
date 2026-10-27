@@ -653,3 +653,18 @@ def test_the_verifier_rejects_a_benchmark_line_outside_the_admitted_pair() -> No
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(bad, panel)
     assert block["schema_version"] == 2
+
+
+def test_a_wholly_unavailable_593_block_passes_its_reason_through() -> None:
+    panel = _panel()
+    panel["portfolio_twr_cumulative"] = {
+        "schema_version": 1,
+        "status": "UNAVAILABLE",
+        "reason": "NO_GOVERNED_HWM_PROOF",
+    }
+    block = tab.build_performance_tab(panel)
+    readout = block["readout"]
+    assert readout["summed_epoch_twr"] is None
+    assert readout["headline_minus_summed_epoch_twr"] is None
+    assert readout["summed_epoch_unavailable_reason"] == "NO_GOVERNED_HWM_PROOF"
+    tab.verify_performance_tab(block, panel)

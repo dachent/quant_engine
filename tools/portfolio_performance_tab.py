@@ -594,7 +594,11 @@ def _build_readout(panel: Mapping[str, Any]) -> dict[str, Any]:
         difference = totals.get("headline_minus_summed_epoch_twr")
         reason = None
         if summed is None or summed.get("status") != "AVAILABLE":
-            reason = str((summed or {}).get("reason") or "SUMMED_EPOCH_TWR_UNAVAILABLE")
+            reason = str(
+                (summed or {}).get("reason")
+                or totals.get("reason")
+                or "SUMMED_EPOCH_TWR_UNAVAILABLE"
+            )
             difference = None
     return {
         "headline": "HWM_GOVERNED_INDEX",
@@ -1069,7 +1073,9 @@ def _verify_readout(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             raise _fail("summed-epoch figure differs from portfolio_twr_cumulative")
         if source is None or source.get("status") != "AVAILABLE":
             expected_reason = str(
-                (source or {}).get("reason") or "SUMMED_EPOCH_TWR_UNAVAILABLE"
+                (source or {}).get("reason")
+                or totals.get("reason")
+                or "SUMMED_EPOCH_TWR_UNAVAILABLE"
             )
             expected_difference = None
         else:
