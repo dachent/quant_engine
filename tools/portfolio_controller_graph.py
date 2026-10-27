@@ -21,6 +21,7 @@ class ControllerGraphError(ValueError):
     """The static projection is stale, incomplete, or internally inconsistent."""
 
 
+_DIRECTORY_IDENTITY = "packages/core/src/quant_engine/core/directory_identity.py"
 _CORE = "packages/core/src/quant_engine/core/pipeline.py"
 _MATERIALIZER = "tools/portfolio_pipeline_materialize.py"
 _RELEASE = "tools/portfolio_release_builder.py"
@@ -107,6 +108,9 @@ _PATH_STAGES = {
     # change to either genuinely can affect every stage's delivery -- declared
     # with real stage impact, not `[]`, unlike the audit/guard tools below.
     "packages/core/src/quant_engine/core/release.py": list(_STAGE_ORDER),
+    # The one framing of every directory-inventory identity (panel, materializer,
+    # release builder, attended preparation): a change moves receipts of every stage.
+    _DIRECTORY_IDENTITY: list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
@@ -123,6 +127,13 @@ _PATH_STAGES = {
     "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # The Performance tab producer: builds one additive panel block from the weekly
+    # returns, account manifest and governed HWM proof the panel already holds.
+    "tools/portfolio_performance_tab.py": ["panel"],
+    # The holdings identity sidecar: built by the report producer into the report
+    # payload, and re-derived by the report verifier.  A change moves report bytes.
+    "tools/holdings_identity.py": ["report", "panel"],
+    "tools/verify_holdings_identity.py": ["report", "panel"],
     # Audit, guard and CI tooling. None of these is imported by a producer and
     # none writes a delivery artifact, so a change to any of them affects no
     # stage. They are declared rather than omitted because an omitted `tools/`
@@ -138,8 +149,10 @@ _PATH_STAGES = {
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
-    # resolution only; no producer imports it yet, so a change affects no stage.
-    "tools/nested_strategy_tag_map.py": [],
+    # resolution.  The report reads it for sleeve lifecycle links (#592), so a
+    # change affects the report and the panel built from it.
+    "tools/nested_strategy_tag_map.py": ["report", "panel"],
+    "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_ledger.py": [],
     "tools/sleeve_nav.py": [],
     # #567 stage 5: the post-ledger sleeve-facts builder; nothing imports it yet.
@@ -148,6 +161,10 @@ _PATH_STAGES = {
     "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": [],
+    # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
+    # source bytes only and nothing imports it yet.
+    "tools/build_quantbase_fund_facts.py": [],
+    "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
     # real delivery artifact); no producer imports it.
@@ -745,6 +762,7 @@ def _required_paths(
         _PANEL,
         _SOURCE_CONTRACT,
         _SOURCE_SCHEMA,
+        _DIRECTORY_IDENTITY,
     ]
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)

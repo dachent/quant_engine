@@ -1665,6 +1665,18 @@ def test_single_account_trace_never_replaces_the_canonical_path_gate() -> None:
 def _publish_single_link_sole_account_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    report, trace_links, manifest_rows = _build_single_link_sole_account_report(
+        tmp_path, monkeypatch
+    )
+    return report["twr_mwr"], trace_links, manifest_rows
+
+
+def _build_single_link_sole_account_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    nested_tag_map_path: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Publish one sole-account epoch through the public report builder.
 
     The member's whole observation trace is ONE link, July 1 -> July 30, +4%
@@ -1794,6 +1806,7 @@ def _publish_single_link_sole_account_report(
         epoch_manifest_source_path=tmp_path / "synthetic-source.json",
         epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
         epoch_manifest_generation_root=REPOSITORY_ROOT,
+        nested_tag_map_path=nested_tag_map_path,
     )
 
     manifest_rows = [
@@ -1806,7 +1819,7 @@ def _publish_single_link_sole_account_report(
             "observation_linked_return": twr,
         }
     ]
-    return report["twr_mwr"], trace_links, manifest_rows
+    return report, trace_links, manifest_rows
 
 
 def _twr_view_findings(
@@ -2703,3 +2716,222 @@ def test_public_builder_threads_the_r3_inputs_into_the_composite_reconcile(
             epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
             epoch_manifest_generation_root=REPOSITORY_ROOT,
         )
+
+
+_LIFECYCLE_FIELDS = (
+    "lifecycle_state",
+    "retired_on",
+    "closed_on",
+    "parent_assignment_id",
+    "sleeve_label",
+)
+
+
+def _lifecycle_tag_map_bytes(parent_account_id: str) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "artifact_id": "nested-strategy-tag-map",
+            "as_of_date": "2026-09-17",
+            "parents": [
+                {
+                    "parent_account_id": parent_account_id,
+                    "provider_id": "synthetic",
+                    "tag_field": "orderReference",
+                    "tag_normalization": "NONE",
+                    "sleeves": [
+                        {
+                            "sleeve_id": "s1",
+                            "strategy_id": "strategy-nested-retired",
+                            "label": "Nested retired sleeve",
+                            "effective_start": "2026-07-05",
+                            "effective_end": "2026-08-10",
+                            "tags": [{"match": "exact", "pattern": "T1"}],
+                        },
+                        {
+                            "sleeve_id": "s2",
+                            "strategy_id": "strategy-nested-inactive",
+                            "label": "Nested inactive sleeve",
+                            "effective_start": "2026-07-06",
+                            "effective_end": None,
+                            "tags": [{"match": "exact", "pattern": "T2"}],
+                        },
+                    ],
+                    "unmatched": {"mode": "BLOCK"},
+                }
+            ],
+        }
+    ).encode("utf-8")
+
+
+def test_report_carries_lifecycle_fields_derived_from_governed_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-before (#592): the report publishes lifecycle state and its marker."""
+
+    report, _links, _manifest_rows = _build_single_link_sole_account_report(
+        tmp_path, monkeypatch
+    )
+    assert report["lifecycle_schema_version"] == 1
+    (row,) = report["twr_mwr"]
+    assert {field: row[field] for field in _LIFECYCLE_FIELDS} == {
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+    assert report["strategy_summary"]
+    assert all(
+        item["lifecycle_state"] == "ACTIVE"
+        and item["retired_on"] is None
+        and item["closed_on"] is None
+        for item in report["strategy_summary"]
+    )
+    assert report["retained_strategies"] == []
+
+
+def test_report_adds_nested_sleeves_as_retained_history_only_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-before (#592): the tag map names retired and inactive strategies."""
+
+    tag_map_path = tmp_path / "tag-map.json"
+    tag_map_path.write_bytes(_lifecycle_tag_map_bytes("account-a"))
+    report, _links, _manifest_rows = _build_single_link_sole_account_report(
+        tmp_path, monkeypatch, nested_tag_map_path=tag_map_path
+    )
+    parent_assignment = next(
+        row["assignment_id"]
+        for row in report["twr_mwr"]
+        if row["account_id"] == "account-a"
+    )
+    retained = {row["strategy_id"]: row for row in report["retained_strategies"]}
+    assert set(retained) == {"strategy-nested-retired", "strategy-nested-inactive"}
+    retired = retained["strategy-nested-retired"]
+    assert retired["record_kind"] == "RETAINED_HISTORY_ONLY"
+    assert retired["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+    assert retired["product_requirement"] == "EXCLUDED"
+    assert retired["source"] == "NESTED_STRATEGY_TAG_MAP"
+    assert retired["lifecycle_state"] == "RETIRED"
+    assert retired["retired_on"] == "2026-08-10"
+    assert retired["effective_start"] == "2026-07-05"
+    assert retired["parent_assignment_id"] == parent_assignment
+    assert retired["sleeve_label"] == "Nested retired sleeve"
+    inactive = retained["strategy-nested-inactive"]
+    assert inactive["lifecycle_state"] == "INACTIVE"
+    assert inactive["retired_on"] is None
+    assert inactive["effective_end"] is None
+
+
+def test_report_binds_the_tag_map_identity_and_refuses_it_without_epoch_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#592 review: the tag map is bound by digest, never read without epochs."""
+
+    tag_map_path = tmp_path / "tag-map.json"
+    tag_map_path.write_bytes(_lifecycle_tag_map_bytes("account-a"))
+    report, _links, _manifest_rows = _build_single_link_sole_account_report(
+        tmp_path, monkeypatch, nested_tag_map_path=tag_map_path
+    )
+    bound = [
+        row
+        for row in report["provenance"]
+        if row["artifact"] == "nested-strategy-tag-map"
+    ]
+    assert bound == [
+        {
+            "artifact": "nested-strategy-tag-map",
+            "as_of_date": "2026-09-17",
+            "schema": "nested-strategy-tag-map/1",
+            "sha256": hashlib.sha256(tag_map_path.read_bytes()).hexdigest(),
+        }
+    ]
+    full = _full_report_fixture()
+    baseline_root = full._published_baseline(
+        tmp_path / "plain", full._baseline_catalog()
+    )
+    with pytest.raises(
+        full.reporter.ReportValidationError,
+        match="requires the current epoch evidence",
+    ):
+        full.reporter.build_report_data(baseline_root, nested_tag_map_path=tag_map_path)
+
+
+def test_candidate_helper_finds_the_tag_map_only_when_the_candidate_carries_it(
+    tmp_path: Path,
+) -> None:
+    assert reporter._candidate_nested_tag_map(tmp_path) is None
+    (tmp_path / reporter.NESTED_TAG_MAP_EVIDENCE_NAME).write_bytes(b"{}")
+    assert (
+        reporter._candidate_nested_tag_map(tmp_path)
+        == tmp_path / reporter.NESTED_TAG_MAP_EVIDENCE_NAME
+    )
+
+
+def test_retained_strategy_close_comes_from_the_full_verified_details() -> None:
+    """#592 review: an excluded epoch's own close makes the retained record CLOSED."""
+
+    key = ("account-x", "strategy-x", "2025-01-01", "2025-06-30")
+    crosswalk_row = {
+        "account_id": key[0],
+        "strategy_id": key[1],
+        "effective_start": key[2],
+        "effective_end": key[3],
+    }
+    _current, retained = reporter._lifecycle_strategy_rows(
+        [],
+        controls={},
+        crosswalk_rows=[crosswalk_row],
+        details={key: {"performance_closed_on": "2025-06-27"}},
+        sleeves_by_strategy={},
+        strategy_names={"strategy-x": "Strategy X"},
+    )
+    (record,) = retained
+    assert record["lifecycle_state"] == "CLOSED"
+    assert record["closed_on"] == "2025-06-27"
+    assert record["retired_on"] == "2025-06-30"
+
+
+def test_report_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
+    """#592 review: marker without fields, or fields without marker, is invalid."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+
+    def lifecycle_errors(document: dict[str, Any]) -> list[str]:
+        return [
+            error.message
+            for error in validator.iter_errors(document)
+            if any(
+                name in f"{error.message} {list(error.absolute_path)}"
+                for name in (*_LIFECYCLE_FIELDS, "retained_strategies", "lifecycle")
+            )
+        ]
+
+    row = {"strategy_id": "s"}
+    fields = {
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
+    legacy = {"strategy_summary": [row] * 7, "twr_mwr": [row]}
+    assert lifecycle_errors(legacy) == []
+    assert lifecycle_errors({**legacy, "lifecycle_schema_version": 1}) != []
+    assert (
+        lifecycle_errors({**legacy, "strategy_summary": [{**row, **fields}] * 7}) != []
+    )
+    assert lifecycle_errors({**legacy, "retained_strategies": []}) != []
+    current = {
+        "lifecycle_schema_version": 1,
+        "retained_strategies": [],
+        "strategy_summary": [{**row, **fields}] * 7,
+        "twr_mwr": [{**row, **fields}],
+    }
+    assert lifecycle_errors(current) == []

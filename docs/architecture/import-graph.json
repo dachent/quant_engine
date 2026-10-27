@@ -69,6 +69,11 @@
   ],
   "tools_edges": [
     [
+      "build_quantbase_fund_facts",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
       "build_sleeve_account_facts",
       "nested_strategy_tag_map",
       1
@@ -196,6 +201,11 @@
     [
       "portfolio_control_panel",
       "portfolio_invested_capital",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "portfolio_performance_tab",
       1
     ],
     [
@@ -370,6 +380,21 @@
     ],
     [
       "portfolio_report",
+      "holdings_identity",
+      1
+    ],
+    [
+      "portfolio_report",
+      "lifecycle_fields",
+      1
+    ],
+    [
+      "portfolio_report",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "portfolio_report",
       "portfolio_attended_preparation",
       1
     ],
@@ -416,6 +441,11 @@
     [
       "portfolio_report",
       "provider_ledger",
+      1
+    ],
+    [
+      "portfolio_report",
+      "verify_holdings_identity",
       1
     ],
     [

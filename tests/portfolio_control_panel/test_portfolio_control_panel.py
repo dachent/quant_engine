@@ -6442,8 +6442,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 28
-    assert len(lints) == 27
+    assert len(manifests) == 31
+    assert len(lints) == 30
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7445,7 +7445,9 @@ def test_control_panel_schema_validates_rendered_surface_shapes() -> None:
     assert validator.evolve(schema=performance).is_valid([{}] * 13)
     assert not validator.evolve(schema=performance).is_valid([{}] * 12)
     assert validator.evolve(schema=strategies).is_valid([{}] * 7)
-    assert not validator.evolve(schema=strategies).is_valid([{}] * 8)
+    # Retained history-only records (#592) follow the seven current rows.
+    assert validator.evolve(schema=strategies).is_valid([{}] * 15)
+    assert not validator.evolve(schema=strategies).is_valid([{}] * 16)
     # These valid arrays contain duplicate generic objects intentionally; the
     # Python current-epoch validator enforces semantic identity uniqueness.
     assert "hybrid_mode_gate" in schema["required"]
@@ -7623,13 +7625,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    # Nine views exist, but only eight are primary navigation.  The frozen
+    # Ten views exist (the Performance charts tab was added), but only nine are primary navigation.  The frozen
     # candidate catalog is dated research context that cannot change current
     # strategies, readiness or allocation, so it is reachable only through the
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 8
+    assert template.count('class="nav-item') == 9
     for view in (
         "command",
         "capital",
@@ -7638,6 +7640,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "attribution",
         "dependence",
         "weekly",
+        "performance",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -9591,7 +9594,7 @@ def _panel_verified_payloads() -> tuple[dict[str, bytes], bytes]:
     validate_manifest_schema(decoded)
     # The live producer currently emits schema 9; this fixture must consume
     # that payload rather than relabeling it as an older schema.
-    assert decoded["schema_version"] == 9
+    assert decoded["schema_version"] == 10
 
     verifier_name = "_panel_manifest_fixture_verifier"
     verifier = sys.modules.get(verifier_name)
@@ -9838,7 +9841,7 @@ def _stage_panel_bundle(
     as_of = date(2026, 2, 1)
     manifest_payload = json.loads(payload)
     manifest_schema_version = manifest_payload.get("schema_version")
-    assert manifest_schema_version in {8, 9}
+    assert manifest_schema_version in {8, 9, 10}
     report_object = json.loads(independent_report)
     report_version = report_object.get("schema_version")
     if type(report_version) is not int:
@@ -10026,6 +10029,11 @@ def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values
         "provider": "SYNTHETIC",
         "status": "BLOCKED_ADMISSION",
         "strategy_id": "synthetic-strategy-02",
+        "lifecycle_state": "ACTIVE",
+        "retired_on": None,
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
         "mwr_status": "BLOCKED_ADMISSION",
         "mwr_reason": "SYNTHETIC_BLOCKED",
         "mwr_xirr": None,
@@ -11653,7 +11661,7 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
-    assert manifest["schema_version"] == 9
+    assert manifest["schema_version"] == 10
     rows = manifest["rows"]
     assert isinstance(rows, list)
     assert len(rows) == 13
@@ -13864,10 +13872,10 @@ def test_panel_rejects_a_report_capital_the_governed_baseline_does_not_carry(
     )
 
 
-def test_report_readers_accept_versions_one_to_four_and_reject_five(
+def test_report_readers_accept_versions_one_to_five_and_reject_six(
     tmp_path: Path,
 ) -> None:
-    for version in (1, 2, 3, 4):
+    for version in (1, 2, 3, 4, 5):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"published-{version}"
@@ -13886,7 +13894,7 @@ def test_report_readers_accept_versions_one_to_four_and_reject_five(
         assert candidate_value["report_schema_version"] == version
         assert candidate_identity["sha256"] == identity["sha256"]
         assert candidate_path == payload
-    for version in (5, True, "2"):
+    for version in (6, True, "2"):
         value = _report()
         value["report_schema_version"] = version
         root = tmp_path / f"rejected-{version!s}"
@@ -14206,7 +14214,7 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const htmlUrl = pathToFileURL(process.env.G2_PANEL_HTML).href;
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "performance", "candidates", "data"];
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
 try {
   const results = [];
@@ -14289,6 +14297,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderAttribution",
         "renderDependence",
         "renderWeekly",
+        "renderPerformance",
         "renderCandidates",
         "renderData",
     )
@@ -14383,7 +14392,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 28
+    assert len(manifests) == 31
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
@@ -15551,3 +15560,148 @@ def test_wire_form_without_lens_modes_is_unchanged() -> None:
     assert panel._panel_wire_form({"panel_schema_version": 25}) == {
         "panel_schema_version": 25
     }
+
+
+_LIFECYCLE_ACTIVE = {
+    "lifecycle_state": "ACTIVE",
+    "retired_on": None,
+    "closed_on": None,
+    "parent_assignment_id": None,
+    "sleeve_label": None,
+}
+
+
+def _retained_record(strategy_id: str, **override: Any) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "strategy_name": f"Retained {strategy_id}",
+        "record_kind": "RETAINED_HISTORY_ONLY",
+        "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+        "product_requirement": "EXCLUDED",
+        "source": "NESTED_STRATEGY_TAG_MAP",
+        "effective_start": "2024-07-24",
+        "effective_end": "2024-12-12",
+        "lifecycle_state": "RETIRED",
+        "retired_on": "2024-12-12",
+        "closed_on": None,
+        "parent_assignment_id": "assignment-parent",
+        "sleeve_label": f"Sleeve {strategy_id}",
+        **override,
+    }
+
+
+def test_panel_appends_retained_strategy_records_after_the_current_rows(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Fail-before (#592): the lifecycle marker and the retained records publish."""
+
+    report = _report_with_baseline(inputs)
+    current_ids = [row["strategy_id"] for row in report["strategy_summary"]]
+    report["lifecycle_schema_version"] = 1
+    report["strategy_summary"] = [
+        {**row, **_LIFECYCLE_ACTIVE} for row in report["strategy_summary"]
+    ]
+    report["twr_mwr"] = [{**row, **_LIFECYCLE_ACTIVE} for row in report["twr_mwr"]]
+    report["retained_strategies"] = [
+        _retained_record("fund-retired"),
+        _retained_record(
+            "sleeve-inactive",
+            effective_end=None,
+            lifecycle_state="INACTIVE",
+            retired_on=None,
+        ),
+    ]
+    root = tmp_path / "lifecycle-report"
+    _publish_report(
+        root,
+        tmp_path / "lifecycle-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "lifecycle-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    assert data["lifecycle_schema_version"] == 1
+    strategies = data["strategies"]
+    assert [row["strategy_id"] for row in strategies] == [
+        *current_ids,
+        "fund-retired",
+        "sleeve-inactive",
+    ]
+    assert all(row["lifecycle_state"] == "ACTIVE" for row in strategies[:-2])
+    assert [row["lifecycle_state"] for row in strategies[-2:]] == [
+        "RETIRED",
+        "INACTIVE",
+    ]
+    # The current-product counts and checks are about the current rows only.
+    assert data["counts"]["strategies"] == len(current_ids)
+    assert all("lifecycle_state" in row for row in data["performance"])
+
+
+def test_panel_without_the_lifecycle_marker_keeps_the_previous_shape(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report_with_baseline(inputs)
+    root = tmp_path / "previous-report"
+    _publish_report(
+        root,
+        tmp_path / "previous-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    built = panel.build_candidate(
+        root,
+        inputs["legacy"],
+        tmp_path / "previous-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    data = _candidate_data(built)
+    assert "lifecycle_schema_version" not in data
+    assert len(data["strategies"]) == data["counts"]["strategies"]
+    assert not any("lifecycle_state" in row for row in data["strategies"])
+
+
+def test_panel_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
+    """#592 review: marker without fields, or fields without marker, is invalid."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+    names = (*_LIFECYCLE_ACTIVE, "lifecycle_schema_version")
+
+    def lifecycle_errors(document: dict[str, Any]) -> list[str]:
+        return [
+            error.message
+            for error in validator.iter_errors(document)
+            if any(
+                name in f"{error.message} {list(error.absolute_path)}" for name in names
+            )
+            and "too short" not in error.message
+        ]
+
+    row = {"strategy_id": "s"}
+    legacy = {"strategies": [row] * 7, "performance": [row] * 13}
+    assert lifecycle_errors(legacy) == []
+    assert lifecycle_errors({**legacy, "lifecycle_schema_version": 1}) != []
+    assert (
+        lifecycle_errors({**legacy, "strategies": [{**row, **_LIFECYCLE_ACTIVE}] * 7})
+        != []
+    )
+    current = {
+        "lifecycle_schema_version": 1,
+        "strategies": [{**row, **_LIFECYCLE_ACTIVE}] * 7,
+        "performance": [{**row, **_LIFECYCLE_ACTIVE}] * 13,
+    }
+    assert lifecycle_errors(current) == []

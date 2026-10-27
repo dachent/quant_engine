@@ -81,7 +81,21 @@ from quant_engine.portfolio_ledger.returns import (
     summed_value_composite,
     value_periods,
 )
+from lifecycle_fields import (
+    LIFECYCLE_SCHEMA_VERSION,
+    RETAINED_HISTORY_ONLY,
+    LifecycleError,
+    epoch_lifecycle,
+    parent_assignment_id,
+    strategy_lifecycle,
+)
+from nested_strategy_tag_map import TagMap, TagMapError, validate_tag_map
 from portfolio_private_stage import validate_private_stage_target
+from holdings_identity import build_holdings_identity
+from verify_holdings_identity import (
+    HoldingsIdentityError,
+    verify_holdings_identity,
+)
 from portfolio_invested_capital import (
     CapitalValidationError,
     governed_hwm_input_policy,
@@ -251,6 +265,9 @@ WORKBOOK_DELIVERY_EVIDENCE_VERSION: Final = 1
 EPOCH_MANIFEST_WORKBOOK_NAME: Final = "account-strategy-manifest.json"
 EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME: Final = "epoch-manifest-source.json"
 EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk.json"
+# The nested-strategy tag map a candidate was built with (#592), kept beside the
+# report so verification and publication rebuild from the same bytes.
+NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -1979,6 +1996,236 @@ def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "account_live_cagr_annualization": cagr,
         "mwr_annualization": mwr,
+    }
+
+
+PERIOD_RETURNS_REPORT_SCHEMA_VERSION: Final = 5
+# Epoch-row fields the manifest (schema 10) derives and the report copies.
+_EPOCH_PERIOD_FIELDS: Final = (
+    "return_window_start",
+    "return_close_date",
+    "window_days",
+    "twr_annualised",
+    "ytd_twr",
+    "ytd_window",
+    "calendar_year_twr",
+    "calendar_year_windows",
+    "periods_per_year",
+    "periods_per_year_basis",
+    "mwr_window_equivalent",
+    "annualisation_basis",
+)
+
+
+def _epoch_period_payload(manifest_row: Mapping[str, Any]) -> dict[str, Any]:
+    """The period-return fields a schema-10 manifest row carries, verbatim."""
+
+    return {
+        field: manifest_row[field]
+        for field in _EPOCH_PERIOD_FIELDS
+        if field in manifest_row
+    }
+
+
+def _period_cadence(days: Sequence[date]) -> tuple[int | None, str]:
+    """The cadence of a return series from its own observation dates."""
+
+    if len(days) < 2:
+        return None, "UNCLASSIFIED_TOO_FEW_OBSERVATIONS"
+    gaps = sorted((later - earlier).days for earlier, later in zip(days, days[1:]))
+    median_gap = gaps[len(gaps) // 2]
+    # Spacing decides first: a weekly series sampled on weekends is still
+    # weekly.  The weekend share only separates calendar-daily from trading-daily.
+    if 5 <= median_gap <= 9:
+        return 52, "WEEKLY"
+    if median_gap <= 3:
+        if sum(1 for day in days if day.weekday() >= 5) * 5 >= len(days):
+            return 365, "DAILY_CALENDAR"
+        return 252, "DAILY_TRADING"
+    return None, "UNCLASSIFIED_CADENCE"
+
+
+def _daily_period_pieces(
+    rows: Sequence[Mapping[str, str]], spans: Sequence[ReturnSpan]
+) -> dict[str, Any]:
+    """Calendar-year returns and cadence of one canonical daily path.
+
+    A day belongs to the year of its own date; a gap-replacing span belongs to
+    the year of its start date, where the path splices it, so the yearly
+    returns multiply back to the path's cumulative return.  A year's window
+    opens at the previous observation (the base of its first return); it covers
+    the whole period only when that base falls in an earlier year.
+    """
+
+    with localcontext() as context:
+        context.prec = 34
+        by_start = {span.start_date: span for span in spans}
+        wealth: dict[int, Decimal] = {}
+        first: dict[int, date] = {}
+        last: dict[int, date] = {}
+        covers: dict[int, bool] = {}
+        previous: date | None = None
+        days: list[date] = []
+        for item in rows:
+            day = date.fromisoformat(item["date"])
+            days.append(day)
+            if day.year not in first:
+                first[day.year] = previous if previous is not None else day
+                covers[day.year] = previous is not None and previous.year < day.year
+            growth = Decimal(1) + Decimal(item["return"])
+            span = by_start.get(day)
+            if span is not None:
+                growth *= Decimal(1) + span.period_return
+            wealth[day.year] = wealth.get(day.year, Decimal(1)) * growth
+            last[day.year] = day
+            previous = day
+        periods, basis = _period_cadence(days)
+        return {
+            "calendar_year_twr": {
+                str(year): decimal_text(wealth[year] - Decimal(1))
+                for year in sorted(wealth)
+            },
+            "calendar_year_windows": {
+                str(year): {
+                    "start": first[year].isoformat(),
+                    "end": last[year].isoformat(),
+                    "days": (last[year] - first[year]).days,
+                    "covers_period": covers[year],
+                }
+                for year in sorted(wealth)
+            },
+            "periods_per_year": periods,
+            "periods_per_year_basis": basis,
+        }
+
+
+def _window_equivalent(rate: object, start: object, end: object) -> str | None:
+    """A governed annual rate restated over its own window (ACT/365)."""
+
+    if rate is None or not isinstance(start, str) or not isinstance(end, str):
+        return None
+    days = (_date(end, "window end") - _date(start, "window start")).days
+    annual = _decimal(rate, "annualised rate")
+    if days <= 0 or annual <= Decimal(-1):
+        return None
+    with localcontext() as context:
+        context.prec = 34
+        return decimal_text(
+            (Decimal(1) + annual) ** (Decimal(days) / Decimal(365)) - Decimal(1)
+        )
+
+
+def _strategy_period_fields(
+    row: Mapping[str, Any], pieces: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Window, annualisation basis, YTD and calendar-year returns of one strategy.
+
+    ``twr_annualised`` exists only from 365 days; the accepted cumulative return,
+    CAGR and pooled MWR are never changed, each is named with its basis.
+    """
+
+    start = row.get("account_live_observed_start")
+    end = row.get("account_live_observed_end")
+    cumulative = row.get("account_live_cumulative_return")
+    days: int | None = None
+    if isinstance(start, str) and isinstance(end, str):
+        days = (_date(end, "window end") - _date(start, "window start")).days
+    twr_annualised = (
+        _cagr(cumulative, start, end)
+        if days is not None
+        and days >= _ONE_YEAR_DAYS
+        and isinstance(cumulative, str)
+        and isinstance(start, str)
+        and isinstance(end, str)
+        else None
+    )
+    if twr_annualised is not None:
+        status = "AVAILABLE"
+    elif days is not None and days < _ONE_YEAR_DAYS:
+        status = "SUPPRESSED_UNDER_365D"
+    else:
+        status = "UNAVAILABLE"
+    mwr_days: int | None = None
+    mwr_open, mwr_end = row.get("mwr_opening_date"), row.get("mwr_terminal_date")
+    if isinstance(mwr_open, str) and isinstance(mwr_end, str):
+        mwr_days = (_date(mwr_end, "mwr end") - _date(mwr_open, "mwr start")).days
+    equivalent = _window_equivalent(row.get("mwr_xirr"), mwr_open, mwr_end)
+
+    def reported(length: int | None, present: bool) -> str | None:
+        if length is None or not present:
+            return None
+        return "ANNUALISED" if length >= _ONE_YEAR_DAYS else "ANNUALISED_FROM_DAYS"
+
+    calendar = {} if pieces is None else dict(pieces["calendar_year_twr"])
+    windows = {} if pieces is None else dict(pieces["calendar_year_windows"])
+    ytd_key = end[:4] if isinstance(end, str) else None
+    ytd_key = ytd_key if ytd_key in calendar else None
+    return {
+        "return_window_start": start,
+        "return_close_date": end,
+        "window_days": days,
+        "twr_annualised": twr_annualised,
+        "ytd_twr": None if ytd_key is None else calendar[ytd_key],
+        "ytd_window": None if ytd_key is None else windows[ytd_key],
+        "calendar_year_twr": calendar,
+        "calendar_year_windows": windows,
+        "periods_per_year": None if pieces is None else pieces["periods_per_year"],
+        "periods_per_year_basis": (
+            "UNAVAILABLE_NO_CANONICAL_DAILY_SERIES"
+            if pieces is None
+            else pieces["periods_per_year_basis"]
+        ),
+        "mwr_window_equivalent": equivalent,
+        "annualisation_basis": {
+            "twr": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": days,
+                "annualised_field": "twr_annualised",
+                "annualised_status": status,
+                "annualised_method": (
+                    "GEOMETRIC_ACT_365" if twr_annualised is not None else None
+                ),
+            },
+            "account_live_cagr": {
+                "reported_basis": reported(
+                    days, row.get("account_live_cagr") is not None
+                ),
+                "window_days": days,
+                "method": "GEOMETRIC_ACT_365",
+            },
+            "mwr_xirr": {
+                "reported_basis": reported(mwr_days, row.get("mwr_xirr") is not None),
+                "window_days": mwr_days,
+                "method": "XIRR_ACT_365",
+                "window_equivalent_field": "mwr_window_equivalent",
+            },
+            "mwr_window_equivalent": {
+                "reported_basis": None if equivalent is None else "CUMULATIVE",
+                "window_days": mwr_days,
+                "method": "XIRR_TO_WINDOW_ACT_365",
+            },
+            "ytd_twr": {
+                "reported_basis": "CUMULATIVE",
+                "window_days": None if ytd_key is None else windows[ytd_key]["days"],
+            },
+            "calendar_year_twr": {
+                "reported_basis": "CUMULATIVE",
+                "year_attribution": "DAILY_RETURN_DATE_YEAR",
+            },
+        },
+    }
+
+
+def _label_window(label: object) -> dict[str, Any] | None:
+    """The window a comparison figure stands on, read from its annualisation label."""
+
+    if not isinstance(label, Mapping):
+        return None
+    return {
+        "start": label.get("window_start"),
+        "end": label.get("window_end"),
+        "days": label.get("window_days"),
+        "observations": label.get("observations"),
     }
 
 
@@ -4075,6 +4322,7 @@ def _account_live_return_series(
     *,
     calculation_cutoff_date: str | None = None,
     value_basis_bounds: ValueBasisBounds | None = None,
+    period_pieces: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Hash and summarize each canonical account-live return path.
 
@@ -4173,6 +4421,15 @@ def _account_live_return_series(
                     for span in spans
                 ):
                     raise ReportValidationError("epoch HPR span does not replace a gap")
+            span_values = [
+                ReturnSpan(
+                    date.fromisoformat(str(span["span_start_date"])),
+                    date.fromisoformat(str(span["span_end_date"])),
+                    _decimal(span["return"], "epoch HPR span return"),
+                )
+                for spans in spans_by_start.values()
+                for span in spans
+            ]
             try:
                 compounded = splice_spans(
                     [
@@ -4182,15 +4439,7 @@ def _account_live_return_series(
                         )
                         for item in rows
                     ],
-                    [
-                        ReturnSpan(
-                            date.fromisoformat(str(span["span_start_date"])),
-                            date.fromisoformat(str(span["span_end_date"])),
-                            _decimal(span["return"], "epoch HPR span return"),
-                        )
-                        for spans in spans_by_start.values()
-                        for span in spans
-                    ],
+                    span_values,
                 )
             except ReturnsError as exc:
                 raise ReportValidationError(
@@ -4250,6 +4499,11 @@ def _account_live_return_series(
             "observed_start": dates[0],
             "provider_ids": sorted(providers[strategy_id]),
             "return_observations": len(rows),
+            **(
+                {"period_pieces": _daily_period_pieces(rows, span_values)}
+                if period_pieces
+                else {}
+            ),
             "return_series_schema": "ordered-date-return/1",
             "return_series_sha256": hashlib.sha256(
                 _canonical_json_array_bytes(rows)
@@ -8264,6 +8518,215 @@ def _crosswalk_epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str, str | N
     )
 
 
+def _load_nested_tag_map(path: Path) -> tuple[TagMap, bytes]:
+    try:
+        raw = path.read_bytes()
+        return validate_tag_map(raw), raw
+    except (OSError, TagMapError) as exc:
+        raise ReportValidationError(
+            f"nested strategy tag map is invalid: {exc}"
+        ) from exc
+
+
+def _lifecycle_sleeves(
+    tag_map: TagMap | None, assignments: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Sleeve links by derived account id and by strategy id (#592).
+
+    A sleeve's parent is the parent account's assignment its window overlaps; a
+    window no assignment overlaps has no provable parent and stops the report.
+    """
+
+    by_account: dict[str, dict[str, Any]] = {}
+    by_strategy: dict[str, dict[str, Any]] = {}
+    if tag_map is None:
+        return by_account, by_strategy
+    mapped = [
+        assignment
+        for assignment in assignments
+        if assignment.get("mapping_status") == "MAPPED"
+        and assignment.get("strategy_id") is not None
+    ]
+    for parent in tag_map.parents:
+        for sleeve in parent.sleeves:
+            try:
+                parent_id = parent_assignment_id(
+                    mapped,
+                    parent.parent_account_id,
+                    sleeve.effective_start.isoformat(),
+                    None
+                    if sleeve.effective_end is None
+                    else sleeve.effective_end.isoformat(),
+                )
+            except LifecycleError as exc:
+                raise ReportValidationError(
+                    f"nested sleeve {sleeve.sleeve_id} has no provable parent: {exc}"
+                ) from exc
+            link = {
+                "sleeve": sleeve,
+                "parent_assignment_id": parent_id,
+                "sleeve_label": sleeve.label,
+            }
+            by_account[parent.sleeve_account_id(sleeve.sleeve_id)] = link
+            by_strategy[sleeve.strategy_id] = link
+    return by_account, by_strategy
+
+
+def _with_epoch_lifecycle(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    dispositions: Mapping[tuple[str, str, str, str | None], str],
+    sleeves_by_account: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add the lifecycle fields to each epoch row from governed facts (#592)."""
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        key = cast(
+            tuple[str, str, str, str | None],
+            (
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
+            ),
+        )
+        detail = details.get(key)
+        try:
+            fields = epoch_lifecycle(
+                effective_end=row.get("effective_end"),
+                closed_on=(
+                    None if detail is None else detail.get("performance_closed_on")
+                ),
+                product_disposition=dispositions.get(key),
+            )
+        except LifecycleError as exc:
+            raise ReportValidationError(f"epoch lifecycle is invalid: {exc}") from exc
+        link = sleeves_by_account.get(str(row.get("account_id")))
+        if link is not None:
+            fields["parent_assignment_id"] = link["parent_assignment_id"]
+            fields["sleeve_label"] = link["sleeve_label"]
+        result.append({**row, **fields})
+    return result
+
+
+def _lifecycle_strategy_fields(
+    *,
+    current_required: bool,
+    effective_ends: Sequence[object],
+    closed_ons: Sequence[object],
+    link: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        fields = strategy_lifecycle(
+            current_required=current_required,
+            effective_ends=effective_ends,
+            closed_ons=closed_ons,
+        )
+    except LifecycleError as exc:
+        raise ReportValidationError(f"strategy lifecycle is invalid: {exc}") from exc
+    if link is not None:
+        fields["parent_assignment_id"] = link["parent_assignment_id"]
+        fields["sleeve_label"] = link["sleeve_label"]
+    return fields
+
+
+def _lifecycle_strategy_rows(
+    summary: Sequence[Mapping[str, Any]],
+    *,
+    controls: Mapping[str, Mapping[str, Any]],
+    crosswalk_rows: Sequence[Mapping[str, Any]],
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    sleeves_by_strategy: Mapping[str, Mapping[str, Any]],
+    strategy_names: Mapping[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lifecycle fields for the current strategies and the retained records.
+
+    The retained records are the strategies the report does not carry as current
+    but that the current-epoch crosswalk or the nested-strategy tag map names:
+    history-only, effective-dated, with no live product outcome (#592, #567).
+    """
+
+    epochs_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
+    for crosswalk_row in crosswalk_rows:
+        epochs_by_strategy.setdefault(str(crosswalk_row["strategy_id"]), []).append(
+            crosswalk_row
+        )
+
+    def closed_ons(strategy_id: str) -> list[object]:
+        return [
+            details.get(_crosswalk_epoch_key(item), {}).get("performance_closed_on")
+            for item in epochs_by_strategy.get(strategy_id, [])
+        ]
+
+    current: list[dict[str, Any]] = []
+    current_ids: set[str] = set()
+    for row in summary:
+        strategy_id = str(row["strategy_id"])
+        current_ids.add(strategy_id)
+        control = controls.get(strategy_id, {})
+        fields = _lifecycle_strategy_fields(
+            current_required=control.get("product_requirement") == "REQUIRED"
+            and control.get("lifecycle_status") == "ACTIVE",
+            effective_ends=[
+                item["effective_end"]
+                for item in epochs_by_strategy.get(strategy_id, [])
+            ],
+            closed_ons=closed_ons(strategy_id),
+            link=sleeves_by_strategy.get(strategy_id),
+        )
+        current.append({**row, **fields})
+
+    retained: dict[str, dict[str, Any]] = {}
+    for strategy_id, items in epochs_by_strategy.items():
+        if strategy_id in current_ids:
+            continue
+        control = controls.get(strategy_id, {})
+        ends = [item["effective_end"] for item in items]
+        retained[strategy_id] = {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_names.get(strategy_id, strategy_id),
+            "record_kind": RETAINED_HISTORY_ONLY,
+            "lifecycle_status": control.get("lifecycle_status")
+            or "DEPRECATED_HISTORY_ONLY",
+            "product_requirement": "EXCLUDED",
+            "source": "CURRENT_EPOCH_CROSSWALK",
+            "effective_start": min(str(item["effective_start"]) for item in items),
+            "effective_end": (
+                None if any(end is None for end in ends) else max(map(str, ends))
+            ),
+            **_lifecycle_strategy_fields(
+                current_required=False,
+                effective_ends=ends,
+                closed_ons=closed_ons(strategy_id),
+                link=sleeves_by_strategy.get(strategy_id),
+            ),
+        }
+    for strategy_id, link in sleeves_by_strategy.items():
+        if strategy_id in current_ids or strategy_id in retained:
+            continue
+        sleeve = link["sleeve"]
+        end = None if sleeve.effective_end is None else sleeve.effective_end.isoformat()
+        retained[strategy_id] = {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_names.get(strategy_id, sleeve.label),
+            "record_kind": RETAINED_HISTORY_ONLY,
+            "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+            "product_requirement": "EXCLUDED",
+            "source": "NESTED_STRATEGY_TAG_MAP",
+            "effective_start": sleeve.effective_start.isoformat(),
+            "effective_end": end,
+            **_lifecycle_strategy_fields(
+                current_required=False,
+                effective_ends=[end],
+                closed_ons=[None],
+                link=link,
+            ),
+        }
+    return current, [retained[key] for key in sorted(retained)]
+
+
 def _current_epoch_detail(
     row: Mapping[str, Any], verified: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -8459,6 +8922,7 @@ def build_report_data(
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -8492,10 +8956,18 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    epoch_crosswalk_rows: list[dict[str, Any]] = []
+    epoch_verified_details: Mapping[
+        tuple[str, str, str, str | None], Mapping[str, Any]
+    ] = {}
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
     _require_epoch_generation_root(epoch_supplied, epoch_manifest_generation_root)
+    if nested_tag_map_path is not None and not epoch_supplied:
+        raise ReportValidationError(
+            "nested strategy tag map requires the current epoch evidence"
+        )
     if (
         _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
         and not epoch_supplied
@@ -8543,6 +9015,8 @@ def build_report_data(
         ]
         crosswalk_payload = json.loads(_crosswalk_bytes.decode("utf-8"))
         calculation_cutoff_date = crosswalk_payload["calculation_cutoff_date"]
+        epoch_crosswalk_rows = list(crosswalk_payload["rows"])
+        epoch_verified_details = verified_epoch_details
         current_epoch_tuples = {
             (
                 row["account_id"],
@@ -8733,6 +9207,39 @@ def build_report_data(
     if _uses_cutoff_basis(catalog):
         strategy_summary = [
             {**row, **_account_annualization_labels(row)} for row in strategy_summary
+        ]
+    # Version 5 (manifest schema 10): every epoch row carries its period returns.
+    period_returns_enabled = _uses_cutoff_basis(catalog) and any(
+        "annualisation_basis" in item for item in performance
+    )
+    if period_returns_enabled:
+        live_pieces = _account_live_return_series(
+            catalog,
+            strategy_product_controls,
+            calculation_cutoff_date=calculation_cutoff_date,
+            value_basis_bounds=value_basis_bounds,
+            period_pieces=True,
+        )
+        strategy_summary = [
+            {
+                **row,
+                **_strategy_period_fields(
+                    row,
+                    live_pieces.get(str(row.get("strategy_id")), {}).get(
+                        "period_pieces"
+                    )
+                    if row.get("account_live_return_authority")
+                    == "CANONICAL_STRATEGY_RETURNS"
+                    else None,
+                ),
+                "benchmark_comparison_window": _label_window(
+                    row.get("benchmark_annualization")
+                ),
+                "provider_comparison_window": _label_window(
+                    row.get("provider_annualization")
+                ),
+            }
+            for row in strategy_summary
         ]
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
@@ -9261,6 +9768,50 @@ def build_report_data(
     }
     if calculation_cutoff_date is not None:
         report["calculation_cutoff_date"] = calculation_cutoff_date
+    if current_epoch_details is not None:
+        # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
+        # close and the tag map only.  A report built without a current-epoch
+        # crosswalk keeps the previous schema: no marker, no fields.
+        tag_map: TagMap | None = None
+        if nested_tag_map_path is not None:
+            tag_map, tag_map_bytes = _load_nested_tag_map(nested_tag_map_path)
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "nested-strategy-tag-map",
+                    "as_of_date": tag_map.as_of_date.isoformat(),
+                    "schema": "nested-strategy-tag-map/1",
+                    "sha256": hashlib.sha256(tag_map_bytes).hexdigest(),
+                },
+            ]
+        sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
+            tag_map, _objects(catalog.get("assignments"), "assignments")
+        )
+        report["twr_mwr"] = _with_epoch_lifecycle(
+            performance,
+            details=current_epoch_details,
+            dispositions={
+                _crosswalk_epoch_key(row): row["product_epoch_disposition"]
+                for row in epoch_crosswalk_rows
+            },
+            sleeves_by_account=sleeves_by_account,
+        )
+        report["strategy_summary"], report["retained_strategies"] = (
+            _lifecycle_strategy_rows(
+                strategy_summary,
+                controls=strategy_product_controls,
+                crosswalk_rows=epoch_crosswalk_rows,
+                details=epoch_verified_details,
+                sleeves_by_strategy=sleeves_by_strategy,
+                strategy_names={
+                    _text(item.get("strategy_id"), "strategy.strategy_id"): _text(
+                        item.get("name"), "strategy.name"
+                    )
+                    for item in _objects(catalog.get("strategies"), "strategies")
+                },
+            )
+        )
+        report["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
     if history_contract_ref is not None:
         report["strategy_history_contract"] = history_contract_ref
     if implementation_contract_ref is not None:
@@ -9270,16 +9821,37 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    # Present only when an accepted position source exists: the placeholder row of an
+    # empty source names no instrument, so it has no identity to state.
+    holdings_identity = build_holdings_identity(report["positions"], catalog)
+    if holdings_identity["rows"]:
+        report["holdings_identity"] = holdings_identity
     if verified_capital.get("custody_authority") is not None:
         report["custody_current_capital"] = dict(verified_capital)
         if catalog.get("baseline_schema_version") == 2:
-            report["report_schema_version"] = CUTOFF_BASIS_REPORT_SCHEMA_VERSION
+            report["report_schema_version"] = (
+                PERIOD_RETURNS_REPORT_SCHEMA_VERSION
+                if period_returns_enabled
+                else CUTOFF_BASIS_REPORT_SCHEMA_VERSION
+            )
             if calculation_cutoff_date is not None:
                 coverage_bounds = _capital_coverage_bounds(
                     verified_capital, calculation_cutoff_date
                 )
                 if coverage_bounds is not None:
                     report["capital_coverage_bounds"] = coverage_bounds
+    if report["report_schema_version"] != PERIOD_RETURNS_REPORT_SCHEMA_VERSION:
+        # Period-return fields exist only at report version 5.
+        for item in report["twr_mwr"]:
+            for field in _EPOCH_PERIOD_FIELDS:
+                item.pop(field, None)
+        for item in report["strategy_summary"]:
+            for field in (
+                *_EPOCH_PERIOD_FIELDS,
+                "benchmark_comparison_window",
+                "provider_comparison_window",
+            ):
+                item.pop(field, None)
     if invested_capital is not None:
         report["invested_capital"] = invested_capital
         # PANEL-VIS-002: portfolio-level totals read the accepted values and add
@@ -9310,7 +9882,10 @@ def build_report_data(
             attribution_ref,
             strategy_product_controls,
             cutoff_cost_rate=report["report_schema_version"]
-            == CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
+            in {
+                CUTOFF_BASIS_REPORT_SCHEMA_VERSION,
+                PERIOD_RETURNS_REPORT_SCHEMA_VERSION,
+            },
         )
     if value_basis_bounds is not None:
         value_basis_disclosure = _value_basis_bounds_disclosure(
@@ -10156,6 +10731,7 @@ def build_candidate(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     include_workbook: bool = False,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -10187,6 +10763,7 @@ def build_candidate(
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
+        nested_tag_map_path=nested_tag_map_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -10195,6 +10772,11 @@ def build_candidate(
     excel_input_path = candidate / "excel-input" / WORKBOOK_NAME
     excel_path = candidate / "excel" / WORKBOOK_NAME
     _write_exact(data_path, report_bytes)
+    if nested_tag_map_path is not None:
+        _write_exact(
+            candidate / NESTED_TAG_MAP_EVIDENCE_NAME,
+            _regular_file_bytes(nested_tag_map_path, "nested strategy tag map"),
+        )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         capital_result_bytes = (
@@ -10518,7 +11100,7 @@ def _workbook_parity_receipt(
     if (
         not isinstance(report, dict)
         or isinstance(report.get("report_schema_version"), bool)
-        or report.get("report_schema_version") not in {1, 2, 3, 4}
+        or report.get("report_schema_version") not in {1, 2, 3, 4, 5}
     ):
         raise ReportValidationError("workbook parity report contract differs")
     try:
@@ -11162,6 +11744,13 @@ def _workbook_evidence_binding_from_snapshots(
     return binding
 
 
+def _candidate_nested_tag_map(candidate_dir: Path) -> Path | None:
+    """The tag map a candidate was built with, when it carries one (#592)."""
+
+    path = candidate_dir / NESTED_TAG_MAP_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
+
+
 def _epoch_manifest_workbook_snapshots(
     candidate_dir: Path,
     epoch_manifest_path: Path | None,
@@ -11335,7 +11924,7 @@ def _validate_epoch_manifest_input(
         current_account_ids=current_account_ids,
         crosswalk=crosswalk,
     )
-    if manifest.get("schema_version") == 9 and manifest.get(
+    if manifest.get("schema_version") in {9, 10} and manifest.get(
         "calculation_cutoff_date"
     ) != crosswalk.get("calculation_cutoff_date"):
         raise ReportValidationError(
@@ -11483,7 +12072,7 @@ def _verified_epoch_authority_details(
             "epoch manifest schema-9 authority differs"
         ) from exc
     cutoff = cast(str, manifest.get("calculation_cutoff_date"))
-    if manifest.get("schema_version") != 9:
+    if manifest.get("schema_version") not in {9, 10}:
         raise ReportValidationError(
             "epoch generation requires schema-9 cutoff authority"
         )
@@ -12427,6 +13016,11 @@ def _verified_epoch_authority_details(
                         if "performance_status" in manifest_row
                         else {}
                     ),
+                    **(
+                        _epoch_period_payload(manifest_row)
+                        if "performance_status" in manifest_row
+                        else {}
+                    ),
                     # A closed epoch (liquidated and transferred out): the
                     # dated, labelled non-TWR credits stay visible beside the
                     # return; they are already inside the epoch's dollar gain.
@@ -13178,6 +13772,21 @@ def _verification_from_snapshots(
     return verification
 
 
+def _verify_candidate_holdings_identity(
+    candidate_report_bytes: bytes, baseline_catalog_path: Path
+) -> dict[str, Any]:
+    """Re-derive the holdings sidecar independently from the retained catalog."""
+
+    try:
+        candidate_report = json.loads(candidate_report_bytes)
+        retained_catalog = json.loads(
+            _regular_file_bytes(baseline_catalog_path, "baseline catalog")
+        )
+        return verify_holdings_identity(candidate_report, retained_catalog)
+    except (ValueError, HoldingsIdentityError) as exc:
+        raise ReportValidationError(f"holdings identity sidecar: {exc}") from exc
+
+
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
@@ -13239,7 +13848,7 @@ def verify_candidate(
         if epoch_snapshots
         else epoch_crosswalk_path
     )
-    report, report_bytes, _ = build_report_data(
+    report, report_bytes, baseline_catalog_path = build_report_data(
         baseline_root,
         freshness_health_path,
         provider_ledger_root,
@@ -13269,9 +13878,13 @@ def verify_candidate(
         attribution_generation_id=attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
+    holdings_identity_receipt = _verify_candidate_holdings_identity(
+        candidate_report_bytes, baseline_catalog_path
+    )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         expected_result_bytes = (
@@ -13321,6 +13934,7 @@ def verify_candidate(
         excel_workbook,
         workbook_bytes,
     )
+    verification.update(holdings_identity_receipt)
     if epoch_snapshots:
         verification.update(
             {
@@ -14327,6 +14941,7 @@ def publish_report(
         attribution_generation_id=snapshot_attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -14751,6 +15366,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--epoch-manifest-source", type=Path)
     build.add_argument("--epoch-crosswalk", type=Path)
     build.add_argument("--epoch-manifest-generation-root", type=Path)
+    build.add_argument("--nested-tag-map", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -14907,6 +15523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 source_clock_path=args.source_clock,
+                nested_tag_map_path=args.nested_tag_map,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

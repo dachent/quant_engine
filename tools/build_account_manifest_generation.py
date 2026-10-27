@@ -34,6 +34,7 @@ from quant_engine.core.contracts import (
 )
 from tools.account_strategy_manifest import (
     PERFORMANCE_ROW_FIELDS,
+    PERIOD_RETURN_FIELDS,
     ManifestCandidateSnapshots,
     ManifestError,
     build_manifest_candidate_from_snapshots,
@@ -125,7 +126,7 @@ _SUBJECT_SCHEMAS = MappingProxyType(
         _CROSSWALK_SUBJECT_PATH: ("account-strategy-current-epoch-crosswalk", "1"),
         "outputs/account-strategy-manifest.json": (
             "account-strategy-manifest",
-            "9",
+            "10",
         ),
         "authority/account-interval-retrieval-receipt-authority.json": (
             "account-interval-retrieval-receipt-authority",
@@ -363,6 +364,71 @@ def _current_epoch_calculation_cutoff(
         "current epoch crosswalk"
     )
     return date.fromisoformat(str(payload["calculation_cutoff_date"]))
+
+
+_LIFECYCLE_SCHEMA_VERSION = 1
+
+
+def _crosswalk_dispositions_by_epoch(
+    crosswalk: InputSnapshot,
+) -> dict[tuple[object, object, object, object], object]:
+    """Return the owner crosswalk's product disposition keyed by epoch identity."""
+
+    try:
+        rows = crosswalk.json_object("current epoch crosswalk")["rows"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise AccountAssignmentPerimeterError(
+            "current epoch crosswalk is invalid"
+        ) from exc
+    if not isinstance(rows, list):
+        raise AccountAssignmentPerimeterError("current epoch crosswalk is invalid")
+    result: dict[tuple[object, object, object, object], object] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise AccountAssignmentPerimeterError("current epoch crosswalk is invalid")
+        key = tuple(
+            row.get(field)
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        if key in result:
+            raise AccountAssignmentPerimeterError("current epoch crosswalk is invalid")
+        result[key] = row.get("product_epoch_disposition")
+    return result
+
+
+def _epoch_lifecycle_fields(
+    row: Mapping[str, object], disposition: object
+) -> dict[str, object]:
+    """Lifecycle of one manifest epoch from governed facts only (#592).
+
+    CLOSED when the epoch's own return closed inside it (``performance_closed_on``),
+    RETIRED when its assignment ended, INACTIVE when it is open but the crosswalk
+    keeps it outside the current product, ACTIVE otherwise.  Sleeve links stay
+    null: a sleeve account only exists once the sleeve pipeline supplies it.
+    """
+
+    end = row.get("effective_end")
+    closed = row.get("performance_closed_on") if row.get("status") == "OK" else None
+    if closed is not None:
+        state = "CLOSED"
+    elif end is not None:
+        state = "RETIRED"
+    elif disposition != "INCLUDED_PRODUCT_EPOCH":
+        state = "INACTIVE"
+    else:
+        state = "ACTIVE"
+    return {
+        "lifecycle_state": state,
+        "retired_on": end if state in {"RETIRED", "CLOSED"} else None,
+        "closed_on": closed if state == "CLOSED" else None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+    }
 
 
 def _crosswalk_display_by_epoch(
@@ -3853,6 +3919,7 @@ def _build_mixed_account_manifest_payloads(
         "nav_observation_trace",
         "nav_observations",
         *PERFORMANCE_ROW_FIELDS,
+        *PERIOD_RETURN_FIELDS,
     }
     cutoff_excluded_keys = (
         cutoff_excluded_opening_anchor_keys
@@ -4050,23 +4117,31 @@ def _build_mixed_account_manifest_payloads(
         display_by_epoch = _crosswalk_display_by_epoch(
             selected_inputs.current_epoch_crosswalk
         )
+        disposition_by_epoch = _crosswalk_dispositions_by_epoch(
+            selected_inputs.current_epoch_crosswalk
+        )
+        epoch_keys = [
+            tuple(
+                row.get(field)
+                for field in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
+            )
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
         rows = [
             {
                 **dict(row),
-                **display_by_epoch[
-                    tuple(
-                        row.get(field)
-                        for field in (
-                            "account_id",
-                            "strategy_id",
-                            "effective_start",
-                            "effective_end",
-                        )
-                    )
-                ],
+                **display_by_epoch[key],
+                **_epoch_lifecycle_fields(row, disposition_by_epoch[key]),
             }
-            for row in rows
-            if isinstance(row, Mapping)
+            for row, key in zip(
+                (row for row in rows if isinstance(row, Mapping)), epoch_keys
+            )
         ]
     if len(rows) != len(mapped):
         raise AccountAssignmentPerimeterError("mixed output rows are invalid")
@@ -4096,6 +4171,7 @@ def _build_mixed_account_manifest_payloads(
         "nav_observation_trace",
         "nav_observations",
         *PERFORMANCE_ROW_FIELDS,
+        *PERIOD_RETURN_FIELDS,
     }
     if any(
         forbidden & set(row)
@@ -4160,7 +4236,8 @@ def _build_mixed_account_manifest_payloads(
         ),
     )
     output = {
-        "schema_version": 9,
+        "schema_version": 10,
+        "lifecycle_schema_version": _LIFECYCLE_SCHEMA_VERSION,
         "artifact": "account-strategy-manifest",
         "accounting_currency": currency,
         "authority_readiness": {

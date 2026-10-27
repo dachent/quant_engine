@@ -186,6 +186,23 @@ the dated renderer with the accepted control-panel data contract in
 `schemas/portfolio/control-panel-data.schema.json`. `analytics.css` extends the
 locked legacy stylesheet without modifying it or adding a framework.
 
+## Lifecycle fields (#592)
+
+A manifest, report or panel that declares `lifecycle_schema_version` 1 carries
+`lifecycle_state` (`ACTIVE`, `INACTIVE`, `RETIRED`, `CLOSED`), `retired_on`,
+`closed_on`, `parent_assignment_id` and `sleeve_label`; a payload without the
+member is the previous schema and stays readable. They are derived, never
+typed: `CLOSED` when the epoch's own return closed inside it
+(`performance_closed_on`), `RETIRED` when its assignment ended
+(`effective_end`), `INACTIVE` when it is open but the current-epoch crosswalk
+keeps it outside the product, `ACTIVE` otherwise. A sleeve's parent is the
+parent account's assignment that its window overlaps, and its label is the tag
+map's. The report adds `retained_strategies[]` (history-only records the
+crosswalk or the nested-strategy tag map names) and the panel appends them to
+`strategies[]` after the current rows, marked `record_kind`
+`RETAINED_HISTORY_ONLY`; `counts.strategies` and every current-product check
+read the current rows only.
+
 ## Build and verify
 
 From the repository root, set local paths without committing them:

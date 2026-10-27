@@ -45,6 +45,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import inventory_identity
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -84,6 +85,21 @@ else:
     ManifestError = _manifest_module.ManifestError
     build_manifest_candidate = _manifest_module.build_manifest_candidate
     validate_manifest_schema = _manifest_module.validate_manifest_schema
+
+if TYPE_CHECKING:
+    from portfolio_performance_tab import (
+        build_performance_tab,
+        verify_performance_tab,
+    )
+else:
+    try:
+        _performance_tab_module = import_module("tools.portfolio_performance_tab")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _performance_tab_module = import_module("portfolio_performance_tab")
+    build_performance_tab = _performance_tab_module.build_performance_tab
+    verify_performance_tab = _performance_tab_module.verify_performance_tab
 
 ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
     build_manifest_candidate.__code__.co_filename
@@ -452,14 +468,7 @@ def _authorization_directory_identity(path: Path, field_name: str) -> dict[str, 
                     "size_bytes": len(content),
                 }
             )
-    content = (
-        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-    return {
-        "file_count": len(rows),
-        "inventory_sha256": hashlib.sha256(content).hexdigest(),
-    }
+    return inventory_identity(rows)
 
 
 def _validated_coordinated_release_receipt(
@@ -1117,7 +1126,7 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         ) from exc
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3, 4}:
+    ) not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
     return (
         report,
@@ -1199,7 +1208,7 @@ def _report_candidate(
     report = _json_from_bytes(content, "report candidate data")
     if isinstance(report.get("report_schema_version"), bool) or report.get(
         "report_schema_version"
-    ) not in {1, 2, 3, 4}:
+    ) not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError("report candidate schema is unsupported")
     return (
         report,
@@ -2698,6 +2707,26 @@ def _validate_current_product_boundary(
             )
 
 
+_RETAINED_RECORD_KIND: Final = "RETAINED_HISTORY_ONLY"
+
+
+def _current_strategy_rows(
+    data: Mapping[str, Any], label: str = "strategies"
+) -> list[dict[str, Any]]:
+    """The panel's current strategy rows, without the retained history-only records.
+
+    Retained records (#592) are appended to ``strategies`` for the lifecycle view;
+    they carry no capital, return or underwriting facts, so every current-product
+    check reads only the rows that are not marked retained.
+    """
+
+    return [
+        row
+        for row in _objects(data.get("strategies"), label)
+        if row.get("record_kind") != _RETAINED_RECORD_KIND
+    ]
+
+
 def _current_product_rows(
     rows: Sequence[Mapping[str, Any]],
     strategy_product_controls: Mapping[str, Mapping[str, str]],
@@ -3040,7 +3069,7 @@ def _validate_current_product_epoch_surface(
     """Require exact current account-strategy identities across two surfaces."""
 
     crosswalk_tuples: set[tuple[object, object, object, object]] | None = None
-    if account_manifest.get("schema_version") == 9:
+    if account_manifest.get("schema_version") in {9, 10}:
         if current_epoch_crosswalk is None:
             raise ControlPanelValidationError(
                 "current manifest and performance identities differ"
@@ -3114,7 +3143,7 @@ def _validate_current_product_epoch_surface(
 
     boundary_text = as_of_date or "2026-08-13"
     if (
-        account_manifest.get("schema_version") == 9
+        account_manifest.get("schema_version") in {9, 10}
         and current_epoch_crosswalk is not None
     ):
         boundary_text = _text(
@@ -3261,7 +3290,10 @@ def _performance_lineage(
 ) -> dict[str, Any]:
     """Compare the report/baseline ledger with the manifest calculation ledger."""
 
-    if account_manifest is None or account_manifest.get("schema_version") != 9:
+    if account_manifest is None or account_manifest.get("schema_version") not in {
+        9,
+        10,
+    }:
         return {"status": "NOT_APPLICABLE"}
     baseline_candidates = [
         row
@@ -3777,7 +3809,7 @@ def _capital_identity_problems(data: Mapping[str, Any]) -> list[str]:
             problems.append(f"capital is not ready but dated for {key}")
     strategy_values = [
         row.get("current_value_usd")
-        for row in _objects(data.get("strategies"), "panel strategies")
+        for row in _current_strategy_rows(data, "panel strategies")
     ]
     if strategy_values and all(item is not None for item in strategy_values):
         strategy_total = _exact_capital_sum(
@@ -8692,6 +8724,8 @@ def _strategy_underwriting(
                     "hybrid_net_alpha": factor_value(
                         hybrid_factor, "alpha", "net_annualized"
                     ),
+                    "live_net_alpha_window": _alpha_window(live_factor),
+                    "hybrid_net_alpha_window": _alpha_window(hybrid_factor),
                     "live_holdout_predicted_r_squared": factor_value(
                         live_factor,
                         "model_quality",
@@ -8912,10 +8946,38 @@ def _position_symbol_status_and_reason(
     return "NOT_APPLICABLE", None
 
 
+def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The aligned window and training count one annualised alpha stands on."""
+
+    coverage = None if row is None else row.get("coverage")
+    if not isinstance(coverage, Mapping):
+        return None
+    start, end = coverage.get("observed_start"), coverage.get("observed_end")
+    days = (
+        (date.fromisoformat(end) - date.fromisoformat(start)).days
+        if isinstance(start, str) and isinstance(end, str)
+        else None
+    )
+    return {
+        "start": start,
+        "end": end,
+        "days": days,
+        "aligned_observations": coverage.get("aligned_observations"),
+        "train_observations": coverage.get("train_observations"),
+        "annualisation_basis": (
+            None
+            if days is None
+            else "ANNUALISED_FROM_DAYS"
+            if days < 365
+            else "ANNUALISED"
+        ),
+    }
+
+
 def _panel_schema_version_for(report_schema_version: object) -> int:
     """The panel version a report version selects: custody coverage reports are 25."""
 
-    if report_schema_version in {3, 4}:
+    if report_schema_version in {3, 4, 5}:
         return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
     return PANEL_SCHEMA_VERSION
 
@@ -10344,10 +10406,21 @@ def _panel_data(
         "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
+    if report.get("lifecycle_schema_version") == 1:
+        # Lifecycle fields (#592): the current strategy rows already carry them
+        # from the report; the retained history-only records follow them.  A
+        # report without the marker is the previous schema and publishes the
+        # previous shape.
+        panel_data["lifecycle_schema_version"] = 1
+        panel_data["strategies"] = [
+            *strategies,
+            *_objects(report.get("retained_strategies"), "retained_strategies"),
+        ]
     if portable_hwm_proof is not None:
         panel_data["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
         panel_data["hwm_governed_proof"] = governed_hwm_proof
+    panel_data["performance_tab"] = build_performance_tab(panel_data)
     return panel_data
 
 
@@ -10388,7 +10461,7 @@ _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH: Final = (
 _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH: Final = (
     "authority/account-assignment-crosswalk.json"
 )
-_SUPPORTED_EPOCH_MANIFEST_SCHEMA_VERSIONS: Final = frozenset({8, 9})
+_SUPPORTED_EPOCH_MANIFEST_SCHEMA_VERSIONS: Final = frozenset({8, 9, 10})
 
 
 def _epoch_manifest_source_from_bundle(
@@ -10496,7 +10569,7 @@ def _epoch_manifest_source_from_bundle(
             for entry in bundle.manifest.artifacts
             if entry.artifact_id == _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH
         )
-        if schema_version == 9
+        if schema_version in {9, 10}
         else ()
     )
     if len(crosswalk_matches) == 1:
@@ -10573,7 +10646,7 @@ def _epoch_manifest_report_attestation(
     report_artifact = report_artifacts[0]
     data_as_of = (
         _panel_date(manifest.get("calculation_cutoff_date"), "account manifest cutoff")
-        if manifest.get("schema_version") == 9
+        if manifest.get("schema_version") in {9, 10}
         else bundle.manifest.as_of_date
     )
     if (
@@ -10659,7 +10732,7 @@ def _epoch_manifest_report_attestation(
             *_EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS,
             _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH,
         )
-        if manifest.get("schema_version") == 9:
+        if manifest.get("schema_version") in {9, 10}:
             fixed_paths += (_EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH,)
         receipt_paths = tuple(
             sorted(actual_subject_paths - set(fixed_paths), key=str.casefold)
@@ -10974,7 +11047,7 @@ def _verified_bundle_account_manifest(
         staged_bytes,
     )
     current_epoch_crosswalk = None
-    if value.get("schema_version") == 9:
+    if value.get("schema_version") in {9, 10}:
         crosswalk_bytes = bundle.payloads.get(
             _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH
         )
@@ -12459,7 +12532,7 @@ def verify_candidate(
     lens_rows = _objects(lens_payload.get("lenses"), "decomposition lenses")
     required_analysis_series = {
         _text(row.get("strategy_name"), "strategy.strategy_name")
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
         if row.get("product_requirement") == "REQUIRED"
     }
     if not required_analysis_series:
@@ -12507,7 +12580,7 @@ def verify_candidate(
     )
     current_strategy_ids = {
         _text(row.get("strategy_id"), "current strategy_id")
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
     }
     replication_counts = _replication_disposition_counts(replication_rows)
     counts_match_rows = replication_counts is not None and all(
@@ -12546,12 +12619,27 @@ def verify_candidate(
             },
         )
     )
+    performance_tab = data.get("performance_tab")
+    performance_tab_error: str | None = None
+    try:
+        if not isinstance(performance_tab, Mapping):
+            raise ValueError("performance_tab is absent")
+        verify_performance_tab(performance_tab, data)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        performance_tab_error = str(exc)
+    checks.append(
+        _check(
+            "Performance tab re-derives from the panel inputs",
+            performance_tab_error is None,
+            performance_tab_error,
+        )
+    )
     weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
     weekly_series = _objects(weekly_payload.get("series"), "weekly series")
     weekly_expected = weekly_returns_root is not None
     expected_weekly_strategy_count = sum(
         row.get("product_requirement") != "EXCLUDED"
-        for row in _objects(data.get("strategies"), "strategies")
+        for row in _current_strategy_rows(data)
     )
     checks.append(
         _check(
@@ -12808,7 +12896,7 @@ def verify_candidate(
     if report.get("strategy_provider_evidence"):
         strategy_rows = {
             _text(row.get("strategy_id"), "strategy strategy_id"): row
-            for row in _objects(data.get("strategies"), "strategies")
+            for row in _current_strategy_rows(data)
         }
         volatis = strategy_rows.get("volatis-strategy", {})
         robuxio = strategy_rows.get("robuxio-crypto", {})
@@ -14196,7 +14284,7 @@ def publish_panel(
     retained_report_schema_version = retained_report.get("report_schema_version")
     if isinstance(
         retained_report_schema_version, bool
-    ) or retained_report_schema_version not in {1, 2, 3, 4}:
+    ) or retained_report_schema_version not in {1, 2, 3, 4, 5}:
         raise ControlPanelValidationError(
             "bound publication report schema is unsupported"
         )

@@ -2596,7 +2596,16 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
             (),
         ),
         "accounts": (len(rows(ctx.panel, "account_summary")), ()),
-        "strategies": (len(rows(ctx.panel, "strategies")), ("D9",)),
+        # Retained history-only records (#592) follow the current strategy rows in
+        # the panel; the count is of the current strategies.
+        "strategies": (
+            sum(
+                1
+                for row in rows(ctx.panel, "strategies")
+                if row.get("record_kind") != "RETAINED_HISTORY_ONLY"
+            ),
+            ("D9",),
+        ),
         # The count is the current holdings: a classified panel counts the rows at the
         # cutoff, not the accepted history beside them (N62).
         "positions": (
@@ -3327,7 +3336,8 @@ COVERAGE_END_CHECK = "expected.capital.strategy_cash.coverage_end"
 _COVERAGE_BLOCK = "capital_coverage_bounds"
 _COVERAGE_DEFECTS = ("N56",)
 # The coverage disclosure exists from report schema 3; version 4 keeps it unchanged.
-_COVERAGE_REPORT_VERSIONS = frozenset({3, 4})
+_COVERAGE_REPORT_VERSIONS = frozenset({3, 4, 5})
+PERIOD_RETURNS_REPORT_VERSION = 5
 _COVERAGE_RULE = "N56-COVERAGE"
 _COVERAGE_BLOCK_KEYS = frozenset(
     {"schema_version", "rule", "calculation_cutoff_date", "lines", "bounded_sections"}
@@ -4690,10 +4700,14 @@ def _view_ids(
     value = node(document, *path)
     if not isinstance(value, list):
         return None
+    # Retained history-only records (#592) are marked non-current; they sit after
+    # the current rows in the panel and belong to no current view.
     return [
         str(row.get(key))
         for row in value
-        if isinstance(row, dict) and row.get(key) is not None
+        if isinstance(row, dict)
+        and row.get(key) is not None
+        and row.get("record_kind") != "RETAINED_HISTORY_ONLY"
     ]
 
 
@@ -5742,7 +5756,7 @@ def _snapshot_weight_findings(
     this is a finding; older versions keep the recorded column and are not judged.
     """
 
-    if ctx.report.get("report_schema_version") != 4:
+    if ctx.report.get("report_schema_version") not in {4, 5}:
         return
     tolerance = Decimal("1e-12")
     by_day: dict[str, list[tuple[int, dict[str, Any]]]] = {}
@@ -8106,6 +8120,38 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
     modes = node(ctx.report, "dependence_analysis", "mode_summaries")
     extreme: dict[str, Any] = {}
     short: dict[str, Any] = {}
+    # Report version 5 states each figure's annualisation basis and window, so a
+    # figure annualised from under 365 days that does not declare it is an error;
+    # earlier versions carry no basis label and stay a warning.
+    blocking: dict[str, Any] = {}
+    version = ctx.report.get("report_schema_version")
+    labelled_era = type(version) is int and version >= PERIOD_RETURNS_REPORT_VERSION
+
+    def declared_from_days(row: Mapping[str, Any], metric: str) -> bool:
+        entry = node(row, "annualisation_basis", metric)
+        return (
+            isinstance(entry, Mapping)
+            and entry.get("reported_basis") == "ANNUALISED_FROM_DAYS"
+        )
+
+    def short_window(
+        key: str,
+        days: int,
+        row: Mapping[str, Any] | None = None,
+        metric: str | None = None,
+        label: object = None,
+    ) -> None:
+        """Record one short-window annualised figure, blocking it when unlabelled."""
+
+        short[key] = days
+        if not labelled_era or row is None:
+            return
+        labelled = (
+            metric is not None and declared_from_days(row, metric)
+        ) or isinstance(label, Mapping)
+        if not labelled:
+            blocking[key] = days
+
     for mode, summary in sorted(modes.items()) if isinstance(modes, Mapping) else []:
         performance = node(summary, "performance")
         for series, perf in (
@@ -8131,7 +8177,22 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
         if cagr is not None and (cagr > 1 or cagr < Decimal("-0.5")):
             extreme[f"strategy_summary:{row.get('strategy_id')}"] = {"cagr": cagr}
         if cagr is not None and days is not None and days < ONE_YEAR_DAYS:
-            short[f"strategy_summary.account_live_cagr:{row.get('strategy_id')}"] = days
+            short_window(
+                f"strategy_summary.account_live_cagr:{row.get('strategy_id')}",
+                days,
+                row,
+                "account_live_cagr",
+            )
+        annualised = to_decimal(row.get("twr_annualised"))
+        period_days = row.get("window_days")
+        if (
+            annualised is not None
+            and isinstance(period_days, int)
+            and period_days < ONE_YEAR_DAYS
+        ):
+            key = f"strategy_summary.twr_annualised:{row.get('strategy_id')}"
+            short[key] = period_days
+            blocking[key] = period_days
     for _, row in twr_rows(ctx):
         days = _window_days(row.get("mwr_opening_date"), row.get("mwr_terminal_date"))
         if (
@@ -8140,8 +8201,23 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             and days < ONE_YEAR_DAYS
             and row.get("mwr_xirr") is not None
         ):
-            short[_unique_label("twr_mwr.mwr_xirr:", row, short)] = days
+            label = _unique_label("twr_mwr.mwr_xirr:", row, short)
+            short_window(label, days, row, "mwr_xirr")
+        annualised = to_decimal(row.get("twr_annualised"))
+        period_days = row.get("window_days")
+        if (
+            annualised is not None
+            and isinstance(period_days, int)
+            and period_days < ONE_YEAR_DAYS
+        ):
+            label = _unique_label("twr_mwr.twr_annualised:", row, short)
+            short[label] = period_days
+            blocking[label] = period_days
     impossible: dict[str, Any] = {}
+    comparison_labels = {
+        str(item.get("strategy_id")): item
+        for item in rows(ctx.report, "strategy_summary")
+    }
     comparisons = node(ctx.report, "strategy_attribution", "benchmark_comparisons")
     for row in comparisons if isinstance(comparisons, list) else []:
         metrics = row.get("metrics") if isinstance(row, dict) else None
@@ -8155,7 +8231,14 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             if amount < -1:
                 impossible[f"{row.get('strategy_id')}.{key}"] = amount
             if days is not None and days < ONE_YEAR_DAYS:
-                short[f"benchmark.{row.get('strategy_id')}.{key}"] = days
+                summary = comparison_labels.get(str(row.get("strategy_id")), {})
+                short_window(
+                    f"benchmark.{row.get('strategy_id')}.{key}",
+                    days,
+                    summary,
+                    None,
+                    summary.get("benchmark_annualization"),
+                )
     if extreme:
         yield _finding(
             "lint.extreme_cagr",
@@ -8180,12 +8263,26 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             ("A4",),
             "annualized return below -100%",
         )
-    if short:
+    if blocking:
+        yield _finding(
+            "lint.short_window_annualization",
+            BLOCKER_INVARIANT,
+            "annualized",
+            blocking,
+            f"annualize only windows >= {ONE_YEAR_DAYS} days, or state the "
+            "ANNUALISED_FROM_DAYS basis and window beside the figure",
+            REPORT,
+            "(multiple)",
+            ("A5",),
+            "annualized figures on windows shorter than one year without a stated basis",
+        )
+    unblocked = {key: value for key, value in short.items() if key not in blocking}
+    if unblocked:
         yield _finding(
             "lint.short_window_annualization",
             WARNING,
             "annualized",
-            short,
+            unblocked,
             f"annualize only windows >= {ONE_YEAR_DAYS} days",
             REPORT,
             "(multiple)",
@@ -8216,6 +8313,112 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             "$.twr_mwr",
             ("A1",) if any(".twr:" in key for key in live) else (),
             "implausible cumulative live return",
+        )
+
+
+def _period_row_problems(row: Mapping[str, Any], mwr_keys: bool) -> dict[str, Any]:
+    """Recompute one version-5 row's period fields from its own window and returns."""
+
+    problems: dict[str, Any] = {}
+    days = row.get("window_days")
+    start, close = row.get("return_window_start"), row.get("return_close_date")
+    if isinstance(start, str) and isinstance(close, str):
+        derived_days = _window_days(start, close)
+        if derived_days != days:
+            problems["window_days"] = {"observed": days, "derived": derived_days}
+    cumulative = to_decimal(
+        row.get("twr" if mwr_keys else "account_live_cumulative_return")
+    )
+    annualised = to_decimal(row.get("twr_annualised"))
+    with localcontext() as context:
+        context.prec = 34
+        if isinstance(days, int) and days < ONE_YEAR_DAYS:
+            if annualised is not None:
+                problems["twr_annualised"] = {"observed": annualised, "expected": None}
+        elif (
+            isinstance(days, int)
+            and cumulative is not None
+            and cumulative > Decimal(-1)
+            and annualised is not None
+        ):
+            expected = (Decimal(1) + cumulative) ** (Decimal(365) / Decimal(days)) - 1
+            if abs(expected - annualised) > Decimal("1e-24"):
+                problems["twr_annualised"] = {
+                    "observed": annualised,
+                    "expected": expected,
+                }
+        yearly = row.get("calendar_year_twr")
+        if isinstance(yearly, Mapping) and yearly and cumulative is not None:
+            wealth = Decimal(1)
+            for value in yearly.values():
+                piece = to_decimal(value)
+                if piece is None:
+                    wealth = Decimal("NaN")
+                    break
+                wealth *= Decimal(1) + piece
+            if not wealth.is_finite() or abs(wealth - 1 - cumulative) > Decimal(
+                "1e-20"
+            ):
+                problems["calendar_year_twr"] = {
+                    "product": wealth - 1,
+                    "cumulative": cumulative,
+                }
+        mwr = to_decimal(row.get("mwr_xirr"))
+        mwr_days = _window_days(
+            row.get("mwr_opening_date"), row.get("mwr_terminal_date")
+        )
+        equivalent = to_decimal(row.get("mwr_window_equivalent"))
+        if mwr is not None and mwr_days is not None and mwr_days > 0 and mwr > -1:
+            expected_equivalent = (Decimal(1) + mwr) ** (
+                Decimal(mwr_days) / Decimal(365)
+            ) - 1
+            if equivalent is None or abs(equivalent - expected_equivalent) > Decimal(
+                "1e-24"
+            ):
+                problems["mwr_window_equivalent"] = {
+                    "observed": equivalent,
+                    "expected": expected_equivalent,
+                }
+    return problems
+
+
+def check_period_returns(ctx: Context) -> Iterator[Finding]:
+    """Version 5: window, annualisation and period-return fields match their inputs.
+
+    The annualised TWR exists only from 365 days; the window-equivalent MWR is the
+    governed XIRR restated over its own window; calendar-year returns multiply back
+    to the cumulative return.  All are recomputed here from the published values.
+    """
+
+    version = ctx.report.get("report_schema_version")
+    if type(version) is not int or version < PERIOD_RETURNS_REPORT_VERSION:
+        return
+    found: dict[str, Any] = {}
+    for _, row in twr_rows(ctx):
+        if row.get("twr_status") != "AVAILABLE_WITH_INFERRED_FLOW_TIMING":
+            continue
+        problems = _period_row_problems(row, True)
+        if "annualisation_basis" not in row:
+            problems["annualisation_basis"] = "missing"
+        if problems:
+            found[_unique_label("twr_mwr:", row, found)] = problems
+    for row in rows(ctx.report, "strategy_summary"):
+        problems = _period_row_problems(row, False)
+        if "annualisation_basis" not in row:
+            problems["annualisation_basis"] = "missing"
+        if problems:
+            found[f"strategy_summary:{row.get('strategy_id')}"] = problems
+    if found:
+        yield _finding(
+            "period_returns.recomputation",
+            BLOCKER_INVARIANT,
+            "period_returns",
+            found,
+            "period-return fields equal their recomputation",
+            REPORT,
+            "$.twr_mwr / $.strategy_summary",
+            (),
+            "a window, annualised or period-return field differs from its inputs",
         )
 
 
@@ -10525,6 +10728,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("code.unescaped_date_fallback", check_unescaped_dates),
     ("code.stress_callout", check_stress_callout),
     ("code.hardcoded_status_literal", check_hardcoded_status),
+    ("period_returns.recomputation", check_period_returns),
     ("lint.returns", check_lint_returns),
     ("lint.extreme_alpha", check_lint_alpha),
     ("lint.daily_move_near_flow", check_lint_daily_moves),

@@ -1737,7 +1737,7 @@ def test_n56_report_with_custody_cash_is_version_four_and_schema_valid(
         **epoch,
     )
 
-    assert report["report_schema_version"] == 4
+    assert report["report_schema_version"] == 5
     schema = json.loads(
         (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
             encoding="utf-8"
@@ -2359,7 +2359,7 @@ def test_a_version_four_report_publishes_self_consistent_snapshot_weights(
 
     report = _complete_world_report(cr2_custody_structural_complete_world)
     catalog = cr2_custody_structural_complete_world[5]
-    assert report["report_schema_version"] == 4
+    assert report["report_schema_version"] == 5
     recorded = [
         Decimal(row["current_value"]["value"])
         for row in catalog["allocations"]
@@ -2389,3 +2389,47 @@ def test_a_version_four_report_publishes_self_consistent_snapshot_weights(
     stripped = deepcopy(report)
     del stripped["allocation_history"][1]["weight_denominator_usd"]
     assert list(validator.iter_errors(stripped))
+
+
+def test_version_five_report_carries_period_returns_and_recomputes(
+    cr2_custody_structural_complete_world,
+):
+    """#594: the real builder emits report 5; its period fields recompute and the lint is quiet."""
+
+    from types import SimpleNamespace
+
+    from acceptance.validate import checks
+
+    _root, admitted, _recipe, _template, output, _catalog, clock, epoch = (
+        cr2_custody_structural_complete_world
+    )
+    report, _raw, _path = reporter.build_report_data(
+        output,
+        provider_ledger_root=admitted["ledger_root"],
+        source_clock_path=clock,
+        **epoch,
+    )
+    assert report["report_schema_version"] == 5
+    funded = [
+        row
+        for row in report["twr_mwr"]
+        if row.get("twr_status") == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+    ]
+    assert funded
+    for row in funded:
+        assert row["annualisation_basis"]["twr"]["reported_basis"] == "CUMULATIVE"
+        assert row["window_days"] is not None
+        if row["window_days"] < 365:
+            assert row["twr_annualised"] is None
+    for row in report["strategy_summary"]:
+        assert "annualisation_basis" in row
+        assert "benchmark_comparison_window" in row
+        assert "provider_comparison_window" in row
+    context = SimpleNamespace(report=report, panel={}, _cache={})
+    assert list(checks.check_period_returns(context)) == []
+    blocking = [
+        finding
+        for finding in checks.check_lint_returns(context)
+        if finding.klass in checks.BLOCKERS
+    ]
+    assert blocking == []
