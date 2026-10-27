@@ -27,6 +27,7 @@ from quant_engine.core.contracts import (
 )
 
 from portfolio_financial_mvp_contract import (
+    DERIVED_SLEEVE_EPOCH_AUTHORITY,
     FinancialMvpContractError,
     _validate_owner_decision_receipts,
     census_digest,
@@ -2049,7 +2050,11 @@ def build_governed_capital_result(
         )
         for sleeve in contract["current_census"]["account_sleeves"]
         for assignment in sleeve["assignments"]
+        # Capital is custody capital of the baseline perimeter: an epoch derived
+        # from a nested-strategy tag map is a manifest epoch of an account whose
+        # capital its parent epoch already carries.
         if assignment["strategy_id"] in required_strategies
+        and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
     }
     actual_epochs = [
         (

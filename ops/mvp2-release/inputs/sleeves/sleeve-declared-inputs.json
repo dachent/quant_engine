@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "artifact_id": "sleeve-declared-inputs",
+  "parent_account_id": "account-1b44c987969b9e47",
+  "base_currency": "USD",
+  "residual_id": "other",
+  "window": {"first_day": "2026-01-26", "last_day": "2026-09-17"},
+  "closure_tolerance": {"per_day": "1.00", "window": "1.00"},
+  "change_in_nav_components": {
+    "external_flow": ["depositsWithdrawals", "internalCashTransfers"],
+    "interest": ["interest", "changeInInterestAccruals"],
+    "fees": ["otherFees", "brokerFees", "otherIncome", "other", "transactionTax", "changeInBrokerFeeAccruals"],
+    "dividend_accrual": ["changeInDividendAccruals"]
+  },
+  "symbol_aliases": {"aliases": {
+      "security-ibkr-9586c7a6b8f73850fe8897a6": {"to": "security-ibkr-5d64d0230b8f910082c6fded", "from_day": "2026-02-06", "evidence_ref": "catalog f65c8ddb corporate_actions RS 2026-02-05: -350 on the old security id, +43.75 on the new one (same ticker RLYB, reverse split re-issues the provider security id); first position day without the old id 2026-02-06"},
+      "security-ibkr-6165d0690ec94330691e794a": {"to": "security-ibkr-0e03a907d2496f1751f12e00", "from_day": "2026-04-22", "evidence_ref": "catalog f65c8ddb corporate_actions RS 2026-04-21: -66 old id, +6.6 new id (ticker TOUR); first position day without the old id 2026-04-22"},
+      "security-ibkr-ffc7e4e3740bcf2dd9a4c394": {"to": "security-ibkr-0cc1c063adde645563e707cd", "from_day": "2026-06-05", "evidence_ref": "catalog f65c8ddb corporate_actions RS 2026-06-04: -129 old id, +25.8 new id (ticker SMSI); first position day without the old id 2026-06-05"},
+      "security-ibkr-1389623c6633057f92d30b59": {"to": "security-ibkr-c7da514f20d48ac5599b7655", "from_day": "2026-06-17", "evidence_ref": "catalog f65c8ddb corporate_actions RS 2026-06-16: -179 old id, +17.9 new id (ticker UPLD); first position day without the old id 2026-06-17"},
+      "security-ibkr-18bd2b47fe90295bf608721a": {"to": "security-ibkr-c46768db64fe50b75d04520e", "from_day": "2026-08-24", "evidence_ref": "catalog f65c8ddb corporate_actions RS 2026-08-21: -158 old id, +15.8 new id (ticker BRCC); first position day without the old id 2026-08-24"}
+  }},
+  "unheld_fallback": {"security-ibkr-532a817f6131446e282ae3c9": "s4"},
+  "funding_events": {
+    "s1": {
+      "2026-01-26": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 214 s1-tagged executions, net buys 50569.61 on the first trading day; account cash 50346.15 before, ChangeInNAV 01-23 close 50359.07 (audit RESULT.md 2.1)",
+        "note": "entry funded by account cash and 224 margin"},
+      "2026-01-30": {"kind": "OUT", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 160 s1-tagged executions, net sells 10339.43; same day 279 s2-tagged executions, net buys 9868.44 (reallocation to s2)",
+        "note": "S2 entry funded by this sale; the 471 not re-used stays in account cash"},
+      "2026-02-10": {"kind": "OUT", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 39 s1-tagged executions on 2026-02-10, net sells 2403.44, net cash +2388.66 after commission -14.78; ChangeInNAV depositsWithdrawals and internalCashTransfers are 0 that day and the account has no transfer rows",
+        "note": "rebalance inside the account, evidenced by the tagged trades; why s1 was resized is not in the ledger and is not needed by it"},
+      "2026-02-17": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 17 s1-tagged executions on 2026-02-17, net buys 1614.38, net cash -1636.10 after commission -21.72; ChangeInNAV depositsWithdrawals and internalCashTransfers are 0 that day and the account has no transfer rows",
+        "note": "rebalance inside the account funded from account cash, evidenced by the tagged trades; why s1 was resized is not in the ledger and is not needed by it"},
+      "2026-06-22": {"kind": "SWEEP", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 66 s1-tagged executions, net sells 40307.26; same day s2 net buys 22362.14 (101 tickets) and s3 net buys 10733.25 (7 tickets)",
+        "note": "sleeve swept to a stub held for the next day"},
+      "2026-06-23": {"kind": "EXIT", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 30 s1-tagged executions, net sells 383.17; s1 holds nothing at the 06-23 close",
+        "note": "stub liquidation"}
+    },
+    "s2": {
+      "2026-01-30": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 279 s2-tagged executions, net buys 9868.44; paired with the s1 sale of the same day",
+        "note": "entry"},
+      "2026-03-24": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 65 s2-tagged executions on 2026-03-24, net buys 753.75, net cash -791.76 after commission -38.00; ChangeInNAV depositsWithdrawals and internalCashTransfers are 0 that day, the only cash rows are two dividends (0.60, 0.36); no sleeve sells to fund it (s1 also buys 379.64)",
+        "note": "buy-up inside the account funded from account cash, evidenced by the tagged trades; the audit P123 connection value step of +791 the same day matches the net cash; why s2 was resized is not in the ledger"},
+      "2026-06-22": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 101 s2-tagged executions, net buys 22362.14; paired with the s1 sweep",
+        "note": "reallocation from s1"},
+      "2026-06-23": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 211 s2-tagged executions, net buys 9479.69; s1 stub exit pairs, the rest is funded by account margin",
+        "note": "reallocation from s1 plus margin"},
+      "2026-07-27": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 116 s2-tagged executions, net buys 25148.91; same day s4 and s5 liquidated by 58 untagged executions, net sells 35128.08",
+        "note": "reallocation from s4 and s5"},
+      "2026-08-03": {"kind": "IN", "evidence": "EVIDENCED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 113 s2-tagged executions, net buys 5518.03; ChangeInNAV depositsWithdrawals 5309.52 the same day (account deposit)",
+        "note": "deposit into the account the same day, used by s2; the remaining 208.51 is account margin"}
+    },
+    "s3": {
+      "2026-06-22": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 7 s3-tagged executions, net buys 10733.25; paired with the s1 sweep",
+        "note": "entry"},
+      "2026-06-23": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 7 s3-tagged executions, net buys 3621.68; s1 stub exit pairs, the rest is funded by account margin",
+        "note": "top-up"},
+      "2026-07-22": {"kind": "EXIT", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 6 s3-tagged executions, net sells 11641.43; s5 entry the same day pairs with it",
+        "note": "liquidation"}
+    },
+    "s4": {
+      "2026-07-15": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 39 s4-tagged executions, net buys 12512.59; no sleeve sells that day, funded by account margin",
+        "note": "entry"},
+      "2026-07-27": {"kind": "EXIT", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: s4 positions liquidated by untagged executions (numeric order reference, 58 untagged tickets across s4 and s5, net sells 35128.08); s2 buys 25148.91 the same day",
+        "note": "manual liquidation"}
+    },
+    "s5": {
+      "2026-07-22": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: 11 s5-tagged executions (Yuval Taylor stream), net buys 11993.90; paired with the s3 liquidation of the same day",
+        "note": "entry, first order stream"},
+      "2026-07-24": {"kind": "IN", "evidence": "DERIVED", "live": true, "counterparty": "UNALLOCATED_ACCOUNT_CASH",
+        "evidence_ref": "catalog f65c8ddb: 12 s5-tagged executions (connection stream), net buys 11969.12; no sleeve sells that day, funded by account margin",
+        "note": "second order stream"},
+      "2026-07-27": {"kind": "EXIT", "evidence": "DERIVED", "live": true, "counterparty": null,
+        "evidence_ref": "catalog f65c8ddb: s5 positions liquidated by untagged executions (58 untagged tickets across s4 and s5); s2 buys 25148.91 the same day",
+        "note": "manual liquidation"}
+    }
+  }
+}

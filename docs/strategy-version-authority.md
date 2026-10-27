@@ -12,7 +12,7 @@ Seven records are REQUIRED active current strategies; Echo is retained as
 - `UNRESOLVED` keeps the version reference null and requires explicit gaps.
 
 The private provenance builder now emits a non-null disposition for every one
-of the nine retained strategy registry records. Existing null references
+of the fifteen retained strategy registry records. Existing null references
 migrate to `UNRESOLVED`; they are never converted into invented version
 identifiers.
 `StrategyVersion` is the effective-dated canonical contract for later evidence.

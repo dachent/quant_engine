@@ -10,10 +10,13 @@ adapter, performance engine, strategy service, or broker surface.
 - The private specification, real source records, normalized catalog, and
   `CURRENT.json` stay outside Git under the configured portfolio-data root.
 - The current published portfolio-provenance catalog supplies internal account
-  IDs, exactly nine retained strategy registry records (seven REQUIRED active
-  current strategies, Echo as `DEPRECATED_HISTORY_ONLY`, and Composer as
-  `IMMATERIAL_EXCLUDED`), assignments, corrections, assumptions, and evidence
-  routes. The baseline spec pins its generation and catalog hash.
+  IDs, exactly fifteen retained strategy registry records (seven REQUIRED active
+  current strategies, Echo as `DEPRECATED_HISTORY_ONLY`, Composer as
+  `IMMATERIAL_EXCLUDED`, and six retired history-only records), assignments,
+  corrections, assumptions, and evidence routes. The baseline keeps the nine
+  tracker strategies and the version-catalog rows of those nine; each of the six
+  retired records must be named by the governed HWM policy exclusions and is not
+  a baseline strategy. The baseline spec pins its generation and catalog hash.
 - Seventeen tracker/audit inputs are exact-file, SHA-256-bound references. The
   builder never walks a directory, expands a glob, calls a provider, refreshes
   Excel, or copies, edits, moves, or deletes source evidence.

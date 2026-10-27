@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import dataclasses
 from dataclasses import dataclass, replace
 import hashlib
 import json
@@ -2952,15 +2953,72 @@ def _require_sleeve_contract(payload: Mapping[str, Any], provider: str) -> None:
         raise ManifestError("sleeve facts bindings.builder_code is invalid")
 
 
+def provider_ledger_generation_ids(ledger: Mapping[str, Any]) -> dict[str, str]:
+    """Each provider's source generation id as the selected provider ledger records it.
+
+    The provider-ledger catalog names the admitted source generation of every
+    provider under ``provider_generations`` (for IBKR the
+    ``ibkr-account-generation`` segment).  Keys are case-folded provider ids.
+    """
+
+    generations = ledger.get("provider_generations")
+    if not isinstance(generations, list):
+        raise ManifestError("provider ledger provider_generations must be a list")
+    result: dict[str, str] = {}
+    for item in generations:
+        if not isinstance(item, Mapping):
+            raise ManifestError("provider ledger provider generation is invalid")
+        provider_id = _require_nonempty_text(
+            item.get("provider_id"), "provider ledger provider generation provider_id"
+        ).casefold()
+        if provider_id in result:
+            raise ManifestError(
+                f"provider ledger records two generations for provider {provider_id}"
+            )
+        result[provider_id] = _generation_id(
+            item.get("generation_id"), f"provider ledger {provider_id} generation_id"
+        )
+    return result
+
+
+def _require_parent_ledger_generation(
+    payload: Mapping[str, Any],
+    parent: str,
+    provider: str,
+    provider_generation_ids: Mapping[str, str],
+) -> None:
+    """The facts were derived from the generation the selected ledger admits."""
+
+    bindings = _sleeve_object(payload.get("bindings"), "bindings")
+    bound = bindings.get("parent_ledger_generation_id")
+    selected = provider_generation_ids.get(provider.casefold())
+    if selected is None:
+        raise ManifestError(
+            f"selected provider ledger records no {provider} generation, so the "
+            f"sleeve facts of {parent} (parent_ledger_generation_id {bound}) "
+            "cannot be reconciled"
+        )
+    if bound != selected:
+        raise ManifestError(
+            f"sleeve facts of {parent} bind parent_ledger_generation_id {bound}, "
+            f"but the selected provider ledger records {provider} generation "
+            f"{selected}"
+        )
+
+
 def derive_sleeve_manifest_facts(
     snapshots: Sequence[InputSnapshot],
     *,
     account_providers: Mapping[str, str],
+    provider_generation_ids: Mapping[str, str],
 ) -> SleeveManifestFacts:
     """Derive the manifest facts of every selected sleeve-facts artifact.
 
     ``account_providers`` maps each baseline account to its provider; a derived
-    account inherits its parent's provider.  Fails closed on anything the
+    account inherits its parent's provider.  ``provider_generation_ids`` maps
+    each (case-folded) provider id to the source generation id the selected
+    provider ledger records (``provider_ledger_generation_ids``); every artifact
+    must be bound to exactly that generation.  Fails closed on anything the
     artifacts do not state exactly.
     """
 
@@ -3002,6 +3060,9 @@ def derive_sleeve_manifest_facts(
                 f"sleeve facts parent is not a baseline account: {parent}"
             )
         _require_sleeve_contract(payload, provider)
+        _require_parent_ledger_generation(
+            payload, parent, provider, provider_generation_ids
+        )
         if payload.get("base_currency") != "USD":
             raise ManifestError("sleeve facts base_currency must be USD")
         currency = "USD"
@@ -6641,6 +6702,9 @@ class ManifestCandidateSnapshots:
     selected_assignment_keys: tuple[tuple[str, str, str, str | None], ...] | None = None
     supporting_internal_counterparty_source_record_ids: tuple[str, ...] = ()
     sleeve_facts: tuple[InputSnapshot, ...] = ()
+    # provider id (case-folded) -> the source generation id the selected provider
+    # ledger records; every sleeve-facts artifact is reconciled against it
+    provider_generation_ids: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -6707,6 +6771,19 @@ class ManifestCandidateSnapshots:
         if any(type(item) is not InputSnapshot for item in facts):
             raise ManifestError("sleeve_facts must be InputSnapshots")
         object.__setattr__(self, "sleeve_facts", facts)
+        generations = self.provider_generation_ids
+        if not isinstance(generations, Mapping) or any(
+            type(key) is not str or type(value) is not str
+            for key, value in generations.items()
+        ):
+            raise ManifestError("provider_generation_ids must map strings to strings")
+        object.__setattr__(
+            self,
+            "provider_generation_ids",
+            MappingProxyType(
+                {key.casefold(): value for key, value in generations.items()}
+            ),
+        )
 
 
 def _build_manifest_candidate_from_snapshots_impl(
@@ -6763,6 +6840,7 @@ def _build_manifest_candidate_from_snapshots_impl(
                 account_id: str(account.get("provider") or "")
                 for account_id, account in accounts_index.items()
             },
+            provider_generation_ids=inputs.provider_generation_ids,
         )
         for derived_account in sleeve.accounts:
             if derived_account["account_id"] in accounts_index:

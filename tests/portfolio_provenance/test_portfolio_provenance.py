@@ -101,7 +101,7 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         "status": "REFERENCE_ONLY",
         "version_ref": None,
     }
-    for index in range(1, 10):
+    for index in range(1, 16):
         strategies.append(
             {
                 "aliases": [f"Synthetic Strategy {index}"],
@@ -519,17 +519,18 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
     second = provenance.stage_catalog(spec_path, output_root)
 
     assert first == second
-    assert first["strategy_count"] == 9
+    assert first["strategy_count"] == 15
     assert first["source_file_count"] == 4
     assert first["correction_count"] == 1
     assert first["open_gap_count"] == 0
     generation_dir = output_root / "generations" / first["generation_id"]
     generation = json.loads((generation_dir / "generation.json").read_text())
     assert generation["coverage"]["boundary"] == (
-        "explicitly configured portfolio provenance sources, accounts, and nine "
+        "explicitly configured portfolio provenance sources, accounts, and fifteen "
         "retained strategy registry records (seven REQUIRED active current, Echo "
-        "DEPRECATED_HISTORY_ONLY, and Composer IMMATERIAL_EXCLUDED); data completeness "
-        "remains in catalog gaps"
+        "DEPRECATED_HISTORY_ONLY, Composer IMMATERIAL_EXCLUDED, and six retired "
+        "history-only sleeve or fund records); data completeness remains in catalog "
+        "gaps"
     )
     catalog_bytes = (generation_dir / "portfolio-provenance.json").read_bytes()
     catalog = json.loads(catalog_bytes)
@@ -559,7 +560,7 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
     assert {item["version_disposition"] for item in catalog["strategies"]} == {
         "UNRESOLVED"
     }
-    assert len(catalog["strategy_version_catalog"]["strategies"]) == 9
+    assert len(catalog["strategy_version_catalog"]["strategies"]) == 15
     assert {
         item["compatibility_status"]
         for item in catalog["strategy_version_catalog"]["strategies"]
@@ -618,7 +619,7 @@ def test_hash_drift_unknown_labels_and_strategy_count_fail_closed(
     spec_path, spec = _spec(tmp_path / "eight-strategies")
     spec["strategies"].pop()
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
-    with pytest.raises(provenance.ProvenanceValidationError, match="exactly 9"):
+    with pytest.raises(provenance.ProvenanceValidationError, match="exactly 15"):
         provenance.build_catalog(spec_path)
 
 
@@ -629,7 +630,7 @@ def test_strategy_version_catalog_requires_one_row_per_retained_strategy(
     spec["strategy_version_catalog"]["strategies"].pop()
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
-    with pytest.raises(provenance.ProvenanceValidationError, match="exactly 9"):
+    with pytest.raises(provenance.ProvenanceValidationError, match="exactly 15"):
         provenance.build_catalog(spec_path)
 
 
@@ -695,8 +696,8 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     assert spec_schema["additionalProperties"] is False
     assert spec_schema["properties"]["schema_version"]["const"] == 2
     assert "strategy_version_catalog" in spec_schema["required"]
-    assert spec_schema["properties"]["strategies"]["minItems"] == 9
-    assert spec_schema["properties"]["strategies"]["maxItems"] == 9
+    assert spec_schema["properties"]["strategies"]["minItems"] == 15
+    assert spec_schema["properties"]["strategies"]["maxItems"] == 15
     assert (
         set(
             spec_schema["$defs"]["evidence_route"]["properties"]["evidence_layer"][
@@ -708,7 +709,7 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     assert catalog_schema["additionalProperties"] is False
     assert catalog_schema["properties"]["catalog_schema_version"]["const"] == 2
     assert "strategy_version_catalog" in catalog_schema["required"]
-    assert catalog_schema["properties"]["strategies"]["minItems"] == 9
+    assert catalog_schema["properties"]["strategies"]["minItems"] == 15
     assert "strategy_version_catalog" in baseline_schema["required"]
     for parent in (spec_schema, catalog_schema, baseline_schema):
         reference = parent["properties"]["strategy_version_catalog"]["$ref"]
@@ -732,6 +733,6 @@ def test_cli_reports_sanitized_counts_only(
     )
     output = capsys.readouterr().out
     parsed = json.loads(output)
-    assert parsed["strategy_count"] == 9
+    assert parsed["strategy_count"] == 15
     assert str(spec["roots"]["synthetic-root"]) not in output
     assert "Synthetic Strategy" not in output

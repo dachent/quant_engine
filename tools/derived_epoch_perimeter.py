@@ -33,7 +33,7 @@ EpochKey = tuple[str, str, str, str | None]
 DERIVED_SLEEVE_AUTHORITY_KIND: Final = "DERIVED_SLEEVE_COVERAGE_V1"
 # The production specification names each selected sleeve-facts artifact as a node
 # whose id starts with this prefix (the verifier replays need their bytes).
-SLEEVE_FACTS_NODE_PREFIX: Final = "financial-sleeve-facts"
+SLEEVE_FACTS_NODE_PREFIX: Final = "financial-account-manifest-sleeve-facts-"
 _KEY_FIELDS: Final = ("account_id", "strategy_id", "effective_start", "effective_end")
 
 

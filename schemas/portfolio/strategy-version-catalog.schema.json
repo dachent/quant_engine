@@ -11,7 +11,7 @@
     "strategies": {
       "type": "array",
       "minItems": 9,
-      "maxItems": 9,
+      "maxItems": 15,
       "items": {"$ref": "#/$defs/version"}
     }
   },

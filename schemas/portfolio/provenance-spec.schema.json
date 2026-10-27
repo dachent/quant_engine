@@ -35,8 +35,8 @@
     },
     "strategies": {
       "type": "array",
-      "minItems": 9,
-      "maxItems": 9,
+      "minItems": 15,
+      "maxItems": 15,
       "items": {"$ref": "#/$defs/strategy"}
     },
     "strategy_version_catalog": {

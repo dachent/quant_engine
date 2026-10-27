@@ -13,6 +13,7 @@ agree.  All inputs are synthetic.
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from decimal import Decimal
 import hashlib
 import json
@@ -20,10 +21,12 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 import pytest
-from quant_engine.core import InputSnapshot
+from quant_engine.core import InputSnapshot, read_generation_bundle
+from quant_engine.core.contracts import GenerationManifest
 from quant_engine.core.contracts import canonical_json_bytes
 
 import build_sleeve_account_facts as facts_builder
+import portfolio_hwm_selected_inputs as selected_hwm
 from test_account_manifest_generation import (  # noqa: F401
     _generation_manifest_snapshot,
     _mixed_crosswalk_selected_inputs,
@@ -34,6 +37,10 @@ from test_account_manifest_generation import (  # noqa: F401
     _selected_input_kwargs,
     perimeter_module,
     verifier_module,
+)
+from test_stage_current_epoch_manifest import (  # noqa: F401
+    _materialize_inputs,
+    runner_module,
 )
 
 PARENT = "synthetic-account-01"
@@ -48,6 +55,8 @@ DAYS = (
     "2026-02-01",
 )
 FIRST, LAST = DAYS[0], DAYS[-1]
+# the source generation the selected provider ledger records for the provider
+LEDGER_GENERATION = "c" * 64
 
 
 # --------------------------------------------------------------------------
@@ -268,7 +277,7 @@ def _facts(funding: dict[str, Any], rows: Any) -> dict[str, Any]:
         declared_inputs_bytes=json.dumps(declared, sort_keys=True).encode(),
         rows=rows,
         rows_sha256="0" * 64,
-        parent_ledger_generation_id="synthetic-ibkr-generation",
+        parent_ledger_generation_id=LEDGER_GENERATION,
     )
     result: dict[str, Any] = json.loads(data)
     return result
@@ -576,7 +585,7 @@ FUND_NAV = {DAYS[1]: "100", DAYS[2]: "115", DAYS[3]: "0"}
 def _bindings(**extra: Any) -> dict[str, Any]:
     return {
         "tag_map_sha256": "0" * 64,
-        "parent_ledger_generation_id": "synthetic-generation",
+        "parent_ledger_generation_id": LEDGER_GENERATION,
         "declared_inputs_sha256": "1" * 64,
         "builder_code": {
             "files": {"tools/synthetic_builder.py": "5" * 64},
@@ -795,6 +804,10 @@ def test_quantbase_parent_ledger_leg_is_pairing_evidence_not_a_second_flow(
             lambda f: f.__setitem__("provider_id", "other-provider"),
             "provider_id differs from the parent account",
         ),
+        (
+            lambda f: f["bindings"].pop("parent_ledger_generation_id"),
+            "bindings lack parent_ledger_generation_id",
+        ),
     ],
 )
 def test_sleeve_artifact_without_its_governed_bindings_is_refused(
@@ -954,3 +967,326 @@ def test_ledger_hash_is_digest_of_the_snapshot(
 ) -> None:
     snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
     assert snapshot.sha256 == hashlib.sha256(_facts_bytes(reallocate_facts)).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# parent_ledger_generation_id is reconciled with the selected provider ledger
+
+
+def _rebind_generation(facts: dict[str, Any], generation: str) -> bytes:
+    facts = deepcopy(facts)
+    facts["bindings"]["parent_ledger_generation_id"] = generation
+    return _facts_bytes(facts)
+
+
+def test_matching_parent_ledger_generation_is_accepted(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    assert reallocate_facts["bindings"]["parent_ledger_generation_id"] == (
+        LEDGER_GENERATION
+    )
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    ledger = selected.provider_ledger.json_object()
+    assert [row["generation_id"] for row in ledger["provider_generations"]] == [
+        LEDGER_GENERATION
+    ]
+    _, report = _build_and_verify(perimeter_module, verifier_module, selected)
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+
+
+def test_parent_ledger_generation_mismatch_is_refused_naming_both_ids(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    other = "d" * 64
+    snapshot = InputSnapshot.from_bytes(
+        "facts", _rebind_generation(reallocate_facts, other)
+    )
+    selected = _selected(perimeter_module, (snapshot,))
+    with pytest.raises(Exception, match="parent_ledger_generation_id") as raised:
+        perimeter_module.build_account_manifest_payloads(selected)
+    assert other in str(raised.value)
+    assert LEDGER_GENERATION in str(raised.value)
+    # the independent verifier refuses the same selection on its own reading
+    good = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    payloads = perimeter_module.build_account_manifest_payloads(
+        _selected(perimeter_module, (good,))
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+def test_quantbase_parent_ledger_generation_mismatch_is_refused(
+    perimeter_module: Any,
+) -> None:
+    other = "e" * 64
+    snapshot = InputSnapshot.from_bytes(
+        "qb facts", _rebind_generation(_quantbase_facts(), other)
+    )
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=_census([("strategy-crisis", DAYS[1], DAYS[3])]),
+        ledger_edit=_live_fund_receives_the_sweep,
+    )
+    with pytest.raises(Exception, match="parent_ledger_generation_id") as raised:
+        perimeter_module.build_account_manifest_payloads(selected)
+    assert other in str(raised.value)
+    assert LEDGER_GENERATION in str(raised.value)
+
+
+def test_provider_ledger_without_the_parent_provider_generation_is_refused(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    def drop(ledger: dict[str, Any]) -> None:
+        ledger["provider_generations"] = [
+            {**row, "provider_id": "elsewhere"}
+            for row in ledger["provider_generations"]
+        ]
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,), ledger_edit=drop)
+    with pytest.raises(Exception, match="records no SYNTHETIC generation"):
+        perimeter_module.build_account_manifest_payloads(selected)
+    payloads = perimeter_module.build_account_manifest_payloads(
+        _selected(perimeter_module, (snapshot,))
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+def test_provider_ledger_without_any_generation_list_is_refused(
+    perimeter_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        ledger_edit=lambda ledger: ledger.pop("provider_generations"),
+    )
+    with pytest.raises(Exception, match="provider_generations must be a list"):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+def test_ledger_with_two_generations_for_one_provider_is_refused(
+    perimeter_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    def duplicate(ledger: dict[str, Any]) -> None:
+        ledger["provider_generations"].append(
+            {**ledger["provider_generations"][0], "generation_id": "d" * 64}
+        )
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,), ledger_edit=duplicate)
+    with pytest.raises(Exception, match="two generations for provider synthetic"):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+# --------------------------------------------------------------------------
+# the stage runner selects the facts
+
+
+def test_stage_runner_selects_sleeve_facts_and_binds_their_identity(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+) -> None:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts" / "sleeve-account-facts.json"
+    facts_path.parent.mkdir()
+    facts_path.write_bytes(_facts_bytes(reallocate_facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    generation = tmp_path / "output" / "generations" / result["generation_id"]
+    identities = json.loads(
+        (generation / "authority" / "selected-input-identities.json").read_bytes()
+    )
+    assert identities["sleeve_facts"] == [
+        {"sha256": snapshot.sha256, "size_bytes": snapshot.size_bytes}
+    ]
+    manifest = json.loads(
+        (generation / "outputs" / "account-strategy-manifest.json").read_bytes()
+    )
+    assert {row["account_id"] for row in manifest["rows"]} >= {S1, S2}
+    assert PARENT not in {row["account_id"] for row in manifest["rows"]}
+
+    # the same bytes twice, or bytes the ledger does not admit, stage nothing
+    with pytest.raises(Exception, match="repeat an artifact"):
+        runner_module.stage_current_epoch_manifest(
+            **arguments,
+            output_generation_root=tmp_path / "output-dup",
+            sleeve_facts_paths=(facts_path, facts_path),
+        )
+    stray = tmp_path / "facts" / "stray.json"
+    stray.write_bytes(_rebind_generation(reallocate_facts, "d" * 64))
+    with pytest.raises(Exception, match="parent_ledger_generation_id"):
+        runner_module.stage_current_epoch_manifest(
+            **arguments,
+            output_generation_root=tmp_path / "output-stray",
+            sleeve_facts_paths=(stray,),
+        )
+    assert not (tmp_path / "output-stray").exists()
+
+
+# --------------------------------------------------------------------------
+# candidate verification replays the selected facts, hash-checked
+
+
+def _staged_for_replay(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, dict[str, Any], Path]:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts" / "sleeve-account-facts.json"
+    facts_path.parent.mkdir()
+    facts_path.write_bytes(_facts_bytes(facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    bundle = read_generation_bundle(tmp_path / "output", result["generation_id"])
+
+    def source(path: Path, field: str) -> Any:
+        snapshots = {
+            "provider-ledger": (
+                selected.provider_ledger_manifest,
+                "normalized/provider-ledger.json",
+                selected.provider_ledger,
+            ),
+            "baseline": (
+                selected.baseline_manifest,
+                "normalized/portfolio-baseline.json",
+                selected.baseline,
+            ),
+        }
+        manifest, artifact_id, catalog = snapshots[field]
+        return (
+            GenerationManifest.from_json_bytes(manifest.contents),
+            {artifact_id: catalog.contents},
+            manifest.contents,
+        )
+
+    monkeypatch.setattr(selected_hwm, "_source_generation_from_path", source)
+    return bundle, arguments, facts_path
+
+
+def _replay(bundle: Any, arguments: dict[str, Any], facts: tuple[Path, ...]) -> Any:
+    return selected_hwm._verify_account_manifest_replay(
+        bundle,
+        account_manifest_admission_policy_path=arguments["admission_policy_path"],
+        account_manifest_flow_classification_policy_path=arguments["flow_policy_path"],
+        provider_ledger_generation_path=Path("provider/generation.json"),
+        baseline_generation_path=Path("baseline/generation.json"),
+        membership_census_path=arguments["membership_census_path"],
+        sleeve_facts_paths=facts,
+    )
+
+
+def test_replay_resupplies_the_selected_facts_and_refuses_anything_else(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, arguments, facts_path = _staged_for_replay(
+        tmp_path, perimeter_module, runner_module, reallocate_facts, monkeypatch
+    )
+    replayed = _replay(bundle, arguments, (facts_path,))
+    assert replayed[0] == arguments["provider_ledger_generation_id"]
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="was not supplied"):
+        _replay(bundle, arguments, ())
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="supplied twice"):
+        _replay(bundle, arguments, (facts_path, facts_path))
+
+    altered = tmp_path / "facts" / "altered.json"
+    altered.write_bytes(_facts_bytes(reallocate_facts) + b" ")
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (altered,))
+    extra = tmp_path / "facts" / "extra.json"
+    extra.write_bytes(_facts_bytes(_open_and_close_facts()))
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (facts_path, extra))
+
+
+def test_replay_of_a_generation_without_facts_refuses_any_supplied_file(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _selected(perimeter_module, ())
+    arguments = _materialize_inputs(tmp_path, selected)
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments, output_generation_root=tmp_path / "output"
+    )
+    bundle = read_generation_bundle(tmp_path / "output", result["generation_id"])
+    stray = tmp_path / "stray.json"
+    stray.write_bytes(_facts_bytes(reallocate_facts))
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        _replay(bundle, arguments, (stray,))
+
+
+def test_selected_identities_must_be_a_list_of_unique_identities() -> None:
+    check = selected_hwm._selected_sleeve_facts
+    assert check((), {}) == ()
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="identities differ"):
+        check((), {"sleeve_facts": {"sha256": "0" * 64}})
+    twice = {"sha256": "0" * 64, "size_bytes": 3}
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="repeat"):
+        check((), {"sleeve_facts": [twice, twice]})
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="positive integer"):
+        check((), {"sleeve_facts": [{"sha256": "0" * 64, "size_bytes": True}]})
+
+
+def test_panel_candidate_binds_a_generation_that_selected_sleeve_facts(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+) -> None:
+    """The panel reads the verified bundle; the facts' identities are in the report.
+
+    The panel never replays the derivation, so it needs no facts bytes: it binds the
+    bundle's selected-input identities (which name the facts by hash) to the
+    independent verification report, and accepts the sleeve accounts' rows.
+    """
+
+    import portfolio_control_panel as panel
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts.json"
+    facts_path.write_bytes(_facts_bytes(reallocate_facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    generation = tmp_path / "output" / "generations" / result["generation_id"]
+    manifest, identity = panel._verified_bundle_account_manifest(
+        generation / "outputs" / "account-strategy-manifest.json",
+        tmp_path / "output",
+        result["generation_id"],
+    )
+    assert {row["account_id"] for row in manifest["rows"]} >= {S1, S2}
+    assert identity["verification"]["publication_readiness"] in {"READY", "NOT_READY"}

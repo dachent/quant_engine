@@ -150,6 +150,12 @@ def _sha(value: object, field: str) -> str:
     return accepted
 
 
+def _positive_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SelectedHwmInputError(f"{field} must be a positive integer")
+    return value
+
+
 def _day(value: object, field: str) -> date:
     accepted = _text(value, field)
     try:
@@ -402,37 +408,45 @@ def _identity_snapshot(
 
 
 def _selected_sleeve_facts(
-    selected: Mapping[str, Any], paths: Sequence[Path]
+    paths: Sequence[Path], selected: Mapping[str, Any]
 ) -> tuple[InputSnapshot, ...]:
-    """The derived-sleeve facts a generation selected, bound by digest.
+    """Re-supply the sleeve-facts bytes the generation selected, and only those.
 
-    The generation names each sleeve-facts artifact by sha256 and size only; the
-    bytes come from the caller and must be exactly that set, so a replay can
-    neither add facts the generation did not select nor miss one it did.
+    The bundle stores the identity of each selected sleeve-facts artifact, never
+    its bytes (they are an input, like the admission policy).  A replay must
+    hand back exactly that set: every named file is checked against an identity
+    the generation selected, and every selected identity must be supplied once.
+    Missing, extra, repeated and altered files all fail closed.
     """
 
-    named = selected.get("sleeve_facts")
-    if named is None:
-        if paths:
-            raise SelectedHwmInputError(
-                "sleeve facts were supplied but the generation selected none"
-            )
-        return ()
-    identities = _rows(named, "selected sleeve facts")
-    snapshots = tuple(
-        InputSnapshot.from_bytes(
-            "sleeve facts", _filesystem_path(Path(path)).read_bytes()
+    raw = selected.get("sleeve_facts", [])
+    if not isinstance(raw, list):
+        raise SelectedHwmInputError("selected sleeve facts identities differ")
+    expected: dict[tuple[str, int], int] = {}
+    for item in raw:
+        identity = _mapping(item, "sleeve facts identity")
+        key = (
+            _sha(identity.get("sha256"), "sleeve facts sha256"),
+            _positive_int(identity.get("size_bytes"), "sleeve facts size_bytes"),
         )
-        for path in paths
-    )
-    expected = sorted(
-        (_sha(item.get("sha256"), "sleeve facts sha256"), item.get("size_bytes"))
-        for item in identities
-    )
-    actual = sorted((item.sha256, item.size_bytes) for item in snapshots)
-    if not snapshots or expected != actual:
+        if key in expected:
+            raise SelectedHwmInputError("selected sleeve facts identities repeat")
+        expected[key] = 0
+    snapshots: list[InputSnapshot] = []
+    for path in paths:
+        payload = _filesystem_path(path).read_bytes()
+        key = (hashlib.sha256(payload).hexdigest(), len(payload))
+        if key not in expected:
+            raise SelectedHwmInputError(
+                "sleeve facts file is not an input this generation selected"
+            )
+        if expected[key]:
+            raise SelectedHwmInputError("sleeve facts file is supplied twice")
+        expected[key] = 1
+        snapshots.append(InputSnapshot.from_bytes("sleeve facts", payload))
+    if not all(expected.values()):
         raise SelectedHwmInputError(
-            "the supplied sleeve facts differ from the generation's selected facts"
+            "a sleeve facts artifact this generation selected was not supplied"
         )
     return tuple(sorted(snapshots, key=lambda item: item.sha256))
 
@@ -465,6 +479,7 @@ def _verify_account_manifest_replay(
         _mapping(selected.get("membership_census"), "membership census identity"),
         "membership census",
     )
+    sleeve_facts = _selected_sleeve_facts(sleeve_facts_paths, selected)
     report_bytes = payloads["verification/independent-verification.json"]
     strict_json_object(report_bytes, label="independent account-manifest report")
 
@@ -567,7 +582,7 @@ def _verify_account_manifest_replay(
         admission_policy=admission_policy,
         manifest_schema=manifest_schema,
         membership_census=membership_census,
-        sleeve_facts=_selected_sleeve_facts(selected, sleeve_facts_paths),
+        sleeve_facts=sleeve_facts,
     )
     subjects = {
         artifact_id: payload

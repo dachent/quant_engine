@@ -5744,6 +5744,41 @@ def _sleeve_contract_holds(payload: Mapping[str, object], provider: str) -> bool
     )
 
 
+def _bound_parent_generation(payload: Mapping[str, object]) -> str | None:
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return None
+    value = bindings.get("parent_ledger_generation_id")
+    return value if isinstance(value, str) else None
+
+
+def _ledger_provider_generations(ledger: InputSnapshot) -> dict[str, str]:
+    """Each provider's source generation id as the selected provider ledger names it.
+
+    A sleeve-facts artifact is bound to the generation its rows were derived
+    from; it must be the very generation the selected provider ledger admits.
+    """
+
+    rows = _strict_object(ledger.contents).get("provider_generations")
+    if not isinstance(rows, list):
+        _fail()
+    result: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            _fail()
+        provider = row.get("provider_id")
+        generation = row.get("generation_id")
+        if (
+            not isinstance(provider, str)
+            or not isinstance(generation, str)
+            or not provider
+            or provider.casefold() in result
+        ):
+            _fail()
+        result[provider.casefold()] = generation
+    return result
+
+
 def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView | None:
     """Re-derive every derived account, epoch, fact and coverage row."""
 
@@ -5751,6 +5786,7 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
         return None
     baseline = _strict_object(selected.baseline.contents)
     providers = _baseline_account_providers(baseline.get("accounts"))
+    ledger_generations = _ledger_provider_generations(selected.provider_ledger)
     accounts: list[dict[str, object]] = []
     assignments: list[dict[str, object]] = []
     navs: list[dict[str, object]] = []
@@ -5778,6 +5814,10 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
             if parent is None or parent in used_parents or parent not in providers:
                 _fail()
             if not _sleeve_contract_holds(payload, providers[parent]):
+                _fail()
+            if _bound_parent_generation(payload) != ledger_generations.get(
+                providers[parent].casefold()
+            ):
                 _fail()
             used_parents.add(parent)
             if payload.get("base_currency") != "USD":

@@ -107,8 +107,15 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "attribution_baseline_reader": "tools/portfolio_attribution.py",
     "portfolio_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "provider_ledger": "tools/provider_ledger.py",
+    "nested_tag_map": "tools/nested_strategy_tag_map.py",
+    "quantbase_fund_facts": "tools/build_quantbase_fund_facts.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
     "release_builder": "tools/portfolio_release_builder.py",
+    "sleeve_account_facts": "tools/build_sleeve_account_facts.py",
+    "sleeve_facts_release": "tools/build_sleeve_facts_release.py",
+    "sleeve_inputs": "tools/sleeve_inputs.py",
+    "sleeve_ledger": "tools/sleeve_ledger.py",
+    "sleeve_nav": "tools/sleeve_nav.py",
     "stage_current_epoch_manifest": "tools/stage_current_epoch_manifest.py",
     "static_snapshot_coverage_receipts": "tools/static_snapshot_coverage_receipts.py",
     "target_series": "tools/portfolio_target_series.py",
@@ -151,6 +158,13 @@ _PREPARATION_STAGE_CODE = {
         "verify_account_manifest_generation",
         "attribution_baseline_reader",
         "release_builder",
+        "sleeve_facts_release",
+        "sleeve_account_facts",
+        "quantbase_fund_facts",
+        "nested_tag_map",
+        "sleeve_inputs",
+        "sleeve_ledger",
+        "sleeve_nav",
     ),
     "hwm": (
         "attended_preparation",
@@ -202,7 +216,13 @@ _PREPARATION_STAGE_OUTPUTS = {
     "plan-live-plus-backtest": ("plan_root",),
     "ledger": ("ledger_generation", "recipe_path", "stage_result"),
     "baseline": ("baseline_generation", "stage_result"),
-    "epoch": ("crosswalk", "epoch_generation", "receipt_root", "recipe_path"),
+    "epoch": (
+        "crosswalk",
+        "epoch_generation",
+        "receipt_root",
+        "recipe_path",
+        "sleeve_facts",
+    ),
     "hwm": ("hwm_calendar", "hwm_input", "hwm_result"),
     "capital": ("capital_input", "capital_result"),
     "attribution": ("attribution", "stage_result"),
@@ -1241,6 +1261,41 @@ def _layered_history_repository_dependency_identity() -> dict[str, object]:
     return definitions
 
 
+def _build_sleeve_facts(
+    section: object, *, ledger_generation_dir: Path, destination: Path
+) -> tuple[Path, ...]:
+    """Build the release's sleeve facts from the configured governed policy.
+
+    Absent configuration means this release selects no nested strategies.  When
+    configured, the governed policy manifest is a pin, the IBKR generation is
+    the one the staged ledger records (under the configured data root), and the
+    admitted Quantbase source files come from the configured directory; every
+    one of their bytes is checked against the manifest.
+    """
+
+    if section is None:
+        return ()
+    if not isinstance(section, Mapping) or set(section) != {
+        "policy_manifest",
+        "ibkr_generation_root",
+        "quantbase_source_dir",
+    }:
+        raise AttendedPreparationError("sleeve facts configuration differs")
+    import build_sleeve_facts_release as sleeve_release
+
+    try:
+        selection = sleeve_release.build_release_sleeve_facts(
+            policy_manifest_path=_pin(section["policy_manifest"], "sleeve policy"),
+            provider_ledger_generation_dir=ledger_generation_dir,
+            ibkr_generation_root=Path(str(section["ibkr_generation_root"])).resolve(),
+            quantbase_source_dir=Path(str(section["quantbase_source_dir"])).resolve(),
+            output_dir=destination,
+        )
+    except (OSError, sleeve_release.SleeveFactsReleaseError) as exc:
+        raise AttendedPreparationError(f"sleeve facts are refused: {exc}") from exc
+    return sleeve_release.selected_paths(selection, destination)
+
+
 def _preparation_input_identity(
     *,
     preparation_spec_path: Path,
@@ -1319,6 +1374,12 @@ def _preparation_stage_inputs(
         "epoch": {
             "epoch_admission_policy": config["epoch_admission_policy"],
             "epoch_crosswalk_template": config["epoch_crosswalk_template"],
+            **(
+                {"sleeve_policy_manifest": config["sleeve_facts"]["policy_manifest"]}
+                if isinstance(config.get("sleeve_facts"), Mapping)
+                and "policy_manifest" in config["sleeve_facts"]
+                else {}
+            ),
         },
         "hwm": {
             "calendar_authority": config["calendar_authority"],
@@ -1985,6 +2046,10 @@ def _prepare_attended_inputs(
         epoch = dict(epoch_checkpoint["epoch"])
         epoch_root = Path(str(epoch_checkpoint["epoch_root"])).resolve()
         recipe_path = Path(str(epoch_checkpoint["recipe_path"])).resolve()
+        sleeve_facts_paths = tuple(
+            _pin(definition, "selected sleeve facts")
+            for definition in epoch_checkpoint["sleeve_facts"]
+        )
         _verify_epoch_calculation_cutoff(
             crosswalk_path=crosswalk, epoch_root=epoch_root, cutoff=cutoff
         )
@@ -2035,6 +2100,17 @@ def _prepare_attended_inputs(
             )
             _write(path, receipt)
             receipt_paths[artifact_id] = path
+        sleeve_facts_root = root / "preparation" / "sleeve-facts"
+        sleeve_facts_root.mkdir(parents=True, exist_ok=True)
+        sleeve_facts_paths = _build_sleeve_facts(
+            config.get("sleeve_facts"),
+            ledger_generation_dir=root
+            / "stages"
+            / "ledger"
+            / "generations"
+            / str(ledger_result["generation_id"]),
+            destination=sleeve_facts_root,
+        )
         epoch = stage_current_epoch_manifest(
             provider_ledger_generation_root=root / "stages" / "ledger",
             provider_ledger_generation_id=str(ledger_result["generation_id"]),
@@ -2055,6 +2131,7 @@ def _prepare_attended_inputs(
             membership_census_path=epoch_membership_census,
             receipt_paths=receipt_paths,
             output_generation_root=root / "stages" / "epoch",
+            sleeve_facts_paths=sleeve_facts_paths,
         )
         epoch_root = (
             root / "stages" / "epoch" / "generations" / str(epoch["generation_id"])
@@ -2097,12 +2174,14 @@ def _prepare_attended_inputs(
                 "epoch": epoch,
                 "epoch_root": str(epoch_root),
                 "recipe_path": str(recipe_path),
+                "sleeve_facts": [_definition(path) for path in sleeve_facts_paths],
             },
             {
                 "crosswalk": crosswalk,
                 "epoch_generation": epoch_root,
                 "receipt_root": receipt_root,
                 "recipe_path": recipe_path,
+                "sleeve_facts": sleeve_facts_root,
             },
         )
 
@@ -2128,6 +2207,7 @@ def _prepare_attended_inputs(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
             "membership_census_path": epoch_membership_census,
+            "sleeve_facts_paths": sleeve_facts_paths,
             "account_manifest_flow_classification_policy_path": ROOT
             / "contracts"
             / "account-strategy-flow-classification-policy-v1.json",

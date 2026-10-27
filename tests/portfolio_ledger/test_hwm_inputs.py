@@ -143,9 +143,16 @@ def test_policy_extractor_reads_the_admitted_contract() -> None:
         / "portfolio-hwm-policy-v3.json"
     )
     exclusions = hwm_policy_exclusions(json.loads(contract.read_text(encoding="utf-8")))
+    # The day after each retired record's derived epoch ended (R2, registry 9 -> 15).
     assert exclusions == {
         "composer-holy-grail": date(2026, 8, 1),
         "echotrade-growth-pivots": date(2025, 11, 25),
+        "p123-conn-1911998-andreas-sc-ai-mq-live": date(2026, 6, 24),
+        "p123-conn-1951348-higher-beta-earnings": date(2026, 7, 23),
+        "p123-conn-1956961-ai-largecap-ls": date(2026, 7, 28),
+        "p123-conn-1958970-high-octane": date(2026, 7, 28),
+        "quantbase-crisis-factor-investing": date(2024, 12, 14),
+        "quantbase-single-index-leveraged-in-out": date(2025, 5, 7),
     }
     assert _SHA256.fullmatch("a" * 64) is not None
 

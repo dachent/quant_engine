@@ -100,6 +100,32 @@ def admission_policy_row(prepared: Path) -> dict[str, object]:
     return row
 
 
+def sleeve_facts_rows(prepared: Path) -> list[dict[str, object]]:
+    """Build one node per sleeve-facts artifact the account-manifest generation selected.
+
+    The generation stores only the identity of each selected sleeve-facts artifact. A replay
+    needs the bytes back, so each travels as its own node beside the generation, named by its
+    own digest (`portfolio_financial_outcomes.sleeve_facts_node_id`). Preparation recorded the
+    files it consumed in the epoch checkpoint; a row that disagrees with that record binds the
+    wrong bytes, so it is refused here.
+    """
+
+    from portfolio_financial_outcomes import sleeve_facts_node_id
+
+    recorded = json.loads(
+        (prepared / "preparation/checkpoints/epoch.json").read_bytes()
+    )["result"]["sleeve_facts"]
+    rows = []
+    for pin in recorded:
+        row = artifact(sleeve_facts_node_id(pin["sha256"]), Path(pin["path"]))
+        if row["sha256"] != pin["sha256"] or row["size_bytes"] != pin["size_bytes"]:
+            raise SystemExit(
+                "selected sleeve facts differ from the files preparation consumed"
+            )
+        rows.append(row)
+    return rows
+
+
 def history_authority_rows(vertical):
     """Declare the reader authorities the layered-history verification requires.
 
@@ -242,6 +268,7 @@ def main():
     )
     rows.extend(history_authority_rows(vertical))
     rows.append(admission_policy_row(PREPARED))
+    rows.extend(sleeve_facts_rows(PREPARED))
 
     rows.append(
         artifact(

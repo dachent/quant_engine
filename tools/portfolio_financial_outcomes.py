@@ -456,13 +456,49 @@ def _manifest_artifact(
     return path, _verified_file(path, definition.sha256, definition.size_bytes)
 
 
+SLEEVE_FACTS_NODE_PREFIX = "financial-account-manifest-sleeve-facts-"
+
+
+def sleeve_facts_node_id(sha256: str) -> str:
+    """The production-specification node id of one selected sleeve-facts artifact."""
+
+    return f"{SLEEVE_FACTS_NODE_PREFIX}{sha256[:16]}"
+
+
+def selected_sleeve_facts_paths(spec: Any) -> tuple[Path, ...]:
+    """The sleeve-facts files the specification names, each verified against its node.
+
+    The account-manifest generation stores only the identity of the sleeve facts
+    it selected, so they travel as their own nodes beside it, like the admission
+    policy.  A node whose id does not name its own digest is refused.
+    """
+
+    paths: list[Path] = []
+    for node in sorted(
+        (
+            item
+            for item in spec.nodes
+            if isinstance(item, ArtifactNode)
+            and item.node_id.startswith(SLEEVE_FACTS_NODE_PREFIX)
+        ),
+        key=lambda item: item.node_id,
+    ):
+        _verified_file(node.path, node.sha256, node.size_bytes)
+        if node.node_id != sleeve_facts_node_id(node.sha256):
+            raise FinancialOutcomeError(
+                f"selected sleeve facts node does not name its digest: {node.node_id}"
+            )
+        paths.append(node.path)
+    return tuple(paths)
+
+
 def selected_hwm_source_paths(spec: Any) -> dict[str, Any]:
     """Resolve the already selected account, provider and baseline authorities.
 
     A specification that selects derived-sleeve facts (#567) names each artifact
-    as a node ``financial-sleeve-facts*``; their verified paths are returned under
-    ``sleeve_facts_paths`` so the replay can re-derive the sleeve epochs.  A
-    specification without such a node returns no such key.
+    as a node ``financial-account-manifest-sleeve-facts-*``; their verified paths
+    are returned under ``sleeve_facts_paths`` so the replay can re-derive the
+    sleeve epochs.  A specification without such a node returns no such key.
     """
 
     account = [
@@ -500,21 +536,9 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Any]:
     result["account_manifest_flow_classification_policy_path"] = profile[
         "classification_policy_path"
     ]
-    facts = sorted(
-        (
-            node
-            for node in spec.nodes
-            if isinstance(node, ArtifactNode)
-            and node.node_id.startswith(
-                derived_epoch_perimeter.SLEEVE_FACTS_NODE_PREFIX
-            )
-        ),
-        key=lambda node: node.node_id,
-    )
+    facts = selected_sleeve_facts_paths(spec)
     if facts:
-        for node in facts:
-            _verified_file(node.path, node.sha256, node.size_bytes)
-        result["sleeve_facts_paths"] = tuple(node.path for node in facts)
+        result["sleeve_facts_paths"] = facts
     return result
 
 
@@ -567,6 +591,7 @@ def verify_selected_hwm_generation(
     bindings: Mapping[str, Path],
     input_contract_path: Path | None = None,
     policy_bytes: bytes | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> set[str]:
     """Rebuild schema-1 HWM observations from exact account source bytes.
 
@@ -584,8 +609,12 @@ def verify_selected_hwm_generation(
     from portfolio_hwm_selected_inputs import build_selected_hwm_inputs
     from portfolio_pipeline_materialize import HWM_GOVERNED_POLICY
 
+    # The selected source paths already carry the sleeve facts of a specification
+    # that selects them; the explicit argument is the same set, never a second one.
+    replay_paths = dict(source_paths)
+    selected_facts = replay_paths.pop("sleeve_facts_paths", None)
     rebuilt = build_selected_hwm_inputs(
-        **source_paths,
+        **replay_paths,
         financial_contract_path=(
             contract_path if input_contract_path is None else input_contract_path
         ),
@@ -593,6 +622,9 @@ def verify_selected_hwm_generation(
         provider_admission_path=bindings["provider_admission_receipt"],
         hwm_policy_path=HWM_GOVERNED_POLICY,
         hwm_policy_bytes=policy_bytes,
+        sleeve_facts_paths=(
+            tuple(selected_facts) if selected_facts is not None else sleeve_facts_paths
+        ),
     )
     if rebuilt != json.loads(bindings["input_generation"].read_bytes()):
         raise FinancialOutcomeError(
@@ -1344,11 +1376,7 @@ def _rebuild_selected_epochs(
         ],
         provider_ledger_generation_path=sources["provider_ledger_generation_path"],
         baseline_generation_path=sources["baseline_generation_path"],
-        **(
-            {"sleeve_facts_paths": sources["sleeve_facts_paths"]}
-            if sources.get("sleeve_facts_paths")
-            else {}
-        ),
+        sleeve_facts_paths=tuple(sources.get("sleeve_facts_paths", ())),
     )
     result = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
     rows = result["rows"]
@@ -1500,8 +1528,13 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for row in contract["strategies"]
         if row["product_requirement"] == "REQUIRED"
     }
+    from portfolio_financial_mvp_contract import DERIVED_SLEEVE_EPOCH_AUTHORITY
+
+    # A derived product epoch replaces the baseline epoch of its residual parent,
+    # so the census entries of derived epochs add no row to the product count.
     expected_count = sum(
         assignment["strategy_id"] in required
+        and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
         for sleeve in contract["current_census"]["account_sleeves"]
         for assignment in sleeve["assignments"]
     )
@@ -1956,6 +1989,7 @@ def _validate_financial_outcomes(
         selected_sources,
         contract_path=contract_path,
         bindings={key: Path(value["path"]) for key, value in bindings.items()},
+        sleeve_facts_paths=selected_sleeve_facts_paths(spec),
     )
     hwm_node = nodes["financial-outcome-hwm"]
     if (

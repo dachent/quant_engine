@@ -139,7 +139,12 @@ def _governed_case(tmp_path):
     ledger = {"capital_anchors": [], "flows": [], "admissions": []}
     for sleeve in contract["current_census"]["account_sleeves"]:
         chain = sorted(
-            (row for row in sleeve["assignments"] if row["strategy_id"] in required),
+            (
+                row
+                for row in sleeve["assignments"]
+                if row["strategy_id"] in required
+                and row["authority"] != financial.DERIVED_SLEEVE_EPOCH_AUTHORITY
+            ),
             key=lambda row: row["effective_start"],
         )
         if not chain:

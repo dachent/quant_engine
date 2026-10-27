@@ -3,8 +3,8 @@
  "policy_id": "PORT-HWM-4",
  "product_authority": {
   "path": "contracts/portfolio-financial-mvp-source-v1.json",
-  "raw_sha256": "e23990cc6caa7a5e2d4b508f8c2370fe427e7e073198eb36641255fdb779b32e",
-  "semantic_digest": "0b4d2d35db3e265cbe95044ec53a63fdbe4d440d8fcef00fe94d4253bbf1ff1c"
+  "raw_sha256": "636e3954612975fccdc920d504a5637552761616fdd8293c8de220371ee5ca60",
+  "semantic_digest": "c543f245ca6bf3394fe619fe1d44273a1cf7f3b778312fc338e30ea990978787"
  },
  "performance_authority": {
   "path": "contracts/portfolio-performance-policy-v1.json",
@@ -22,7 +22,7 @@
  "material_perimeter_authority": {
   "source": "PRODUCT_AUTHORITY_HWM_REQUIREMENT_AND_ACCEPTED_HWM_EXCLUSIONS",
   "legacy_policy_path": "contracts/portfolio-hwm-policy-v3.json",
-  "legacy_policy_sha256": "713799967883f6940a5effeca8e6b879c0d62a41eeb6c6b843e836fa5dbec79b"
+  "legacy_policy_sha256": "54fe1a1038f793765311206142edaef5873f13b1796b32eba133379c07aa0c7f"
  },
  "calculation": {
   "method": "GEOMETRIC_BEGINNING_CAPITAL_WEIGHTED_AS_HELD",

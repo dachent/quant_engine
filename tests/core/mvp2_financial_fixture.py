@@ -259,6 +259,7 @@ def build_capital_vertical(
         for index, sleeve in enumerate(contract["current_census"]["account_sleeves"])
         for assignment in sleeve["assignments"]
         if assignment["strategy_id"] in REQUIRED_STRATEGIES
+        and assignment["authority"] != "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
     ]
     policy = next(
         row["calculation_contract"]

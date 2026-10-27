@@ -1092,10 +1092,13 @@ def test_the_public_baseline_catalog_is_what_the_report_consumes(
     monkeypatch.setattr(
         baseline_test.baseline,
         "_hwm_policy_exclusions",
-        lambda: {
-            f"strategy-{index}": baseline_test.date(2026, 1, 1)
-            for index in range(4, 10)
-        },
+        lambda: (
+            baseline_test.RETIRED_EXCLUSIONS
+            | {
+                f"strategy-{index}": baseline_test.date(2026, 1, 1)
+                for index in range(4, 10)
+            }
+        ),
     )
     catalog, _manifest, _bytes = baseline_test.baseline.build_catalog(spec_path)
 

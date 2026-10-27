@@ -4212,9 +4212,12 @@ def _is_governed_financial_mvp2_path(
         _text(item.get("strategy_id"), "strategy.strategy_id")
         for item in _objects(catalog.get("strategies"), "strategies")
     }
-    return _history_only_extras(
-        strategy_product_controls
-    ) is not None and catalog_strategy_ids == set(strategy_product_controls)
+    extras = _history_only_extras(strategy_product_controls)
+    perimeter = set(strategy_product_controls)
+    return extras is not None and catalog_strategy_ids in (
+        perimeter,
+        perimeter - set(extras),
+    )
 
 
 def _receipt_end_is_value_basis_bound(
@@ -4810,7 +4813,10 @@ def _report_product_controls(
         raise ReportValidationError(
             "financial MVP contract must contain 7 required strategies"
         )
-    if catalog_ids != set(controls):
+    # The nested history-only records (#567) are retained records of the account
+    # manifest; the baseline registry carries only the tracker strategies.
+    retained = _history_only_extras(controls) or frozenset()
+    if catalog_ids not in (set(controls), set(controls) - retained):
         raise ReportValidationError("financial MVP strategy perimeter differs")
     census = _object(payload.get("current_census"), "financial MVP current_census")
     census_as_of = _date(census.get("as_of"), "financial MVP current_census.as_of")
@@ -8638,7 +8644,9 @@ def _bind_derived_epochs_to_tag_map(
 
     extras = _history_only_extras(controls)
     if tag_map is None:
-        if perimeter.has_derived or extras:
+        # History-only controls alone (no derived epoch in the manifest) are
+        # contract records with nothing to bind; derived epochs need the map.
+        if perimeter.has_derived:
             raise ReportValidationError(
                 "derived sleeve epochs and history-only strategies require "
                 "the nested strategy tag map"

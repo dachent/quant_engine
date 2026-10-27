@@ -51,12 +51,28 @@ def _row(source_key: str, **values: str) -> dict[str, str]:
     return {field: values.get(field, "") for field in baseline._CSV_FIELDS[source_key]}
 
 
+# The retired history-only records the provenance registry carries beyond the nine
+# tracker strategies: the governed HWM policy excludes each of them.
+RETIRED_RECORD_IDS = (
+    "p123-conn-1911998-andreas-sc-ai-mq-live",
+    "p123-conn-1951348-higher-beta-earnings",
+    "p123-conn-1956961-ai-largecap-ls",
+    "p123-conn-1958970-high-octane",
+    "quantbase-crisis-factor-investing",
+    "quantbase-single-index-leveraged-in-out",
+)
+RETIRED_EXCLUSIONS = dict.fromkeys(RETIRED_RECORD_IDS, date(2026, 1, 1))
+
+
 def _published_provenance(
     tmp_path: Path, *, reserve_accounts: tuple[str, ...] = ()
 ) -> tuple[Path, str, str]:
     root = tmp_path / "private-provenance"
     strategies = []
-    for index in range(1, 10):
+    for index in range(1, 16):
+        strategy_id = (
+            f"strategy-{index}" if index <= 9 else RETIRED_RECORD_IDS[index - 10]
+        )
         strategies.append(
             {
                 "aliases": [f"Synthetic Strategy {index}"],
@@ -77,7 +93,7 @@ def _published_provenance(
                 ],
                 "gaps": ["SYNTHETIC incomplete history"],
                 "name": f"Synthetic Strategy {index}",
-                "strategy_id": f"strategy-{index}",
+                "strategy_id": strategy_id,
                 "version_ref": None,
             }
         )
@@ -2567,11 +2583,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "d8a5654f54a3049bccee3aba1c7c513904a431331ac0024036a1a6b8ce044488"
+        == "cd5751c7dd6d70ccd38fdfe4d5c8610d00d094dd7aabac4eea7b7574896f6636"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "655ea8426e8788bb71e02e24cecc0fa95b5ccd0fe3d2dc0e49348b44897f031f"
+        == "2940ca6db27414bb8f0c7fbe9b67d237510009db4b5baa271ac7a245f33534d8"
     )
 
 
@@ -3398,7 +3414,7 @@ CUTOFF = date(2026, 9, 17)
 # sha256 of the catalog / allocations bytes the merge base builds for the
 # synthetic ``_spec`` fixture (captured before the C2-T1 change).
 LEGACY_CATALOG_SHA256 = (
-    "fde46f735538e0cce5246e32e9ce15e9e071ed0d0d992507c954969f8f8e61ce"
+    "289a3e3d173f44252cd804b941d756fc9aa93b09cc6320562a239c327250e706"
 )
 LEGACY_ALLOCATIONS_SHA256 = (
     "22dab8643f6f8f1ccf75b05e6e6759476f31a9dec204865da3eda61df2d7e044"
@@ -3753,7 +3769,8 @@ def test_weights_close_to_exactly_one_with_the_residual_on_the_last_row() -> Non
 
 def test_current_capital_makes_no_strategy_count_assumption() -> None:
     """D9: the registry count is a registry fact; current capital is not 9 or 7."""
-    assert baseline.RETAINED_REGISTRY_STRATEGY_COUNT == 9
+    assert baseline.RETAINED_REGISTRY_STRATEGY_COUNT == 15
+    assert baseline.ALLOCATION_SNAPSHOT_STRATEGY_COUNT == 9
     assert not hasattr(baseline, "CURRENT_STRATEGY_COUNT")
     for count in (1, 2, 8):
         strategies = [f"s{index}" for index in range(1, count + 1)]
@@ -4360,7 +4377,9 @@ def test_excluded_registry_strategy_is_a_retained_row_in_a_built_baseline(
 ) -> None:
     spec_path, _spec_data = _spec(tmp_path)
     monkeypatch.setattr(
-        baseline, "_hwm_policy_exclusions", lambda: {"strategy-9": date(2026, 7, 1)}
+        baseline,
+        "_hwm_policy_exclusions",
+        lambda: RETIRED_EXCLUSIONS | {"strategy-9": date(2026, 7, 1)},
     )
 
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
@@ -4411,7 +4430,10 @@ def test_materializer_verifies_the_catalog_the_real_builder_publishes(
     monkeypatch.setattr(
         baseline,
         "_hwm_policy_exclusions",
-        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
     )
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
 
@@ -4543,7 +4565,10 @@ def _provider_ledger_catalog_for_current_capital(
     monkeypatch.setattr(
         baseline,
         "_hwm_policy_exclusions",
-        lambda: {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
     )
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
     assert isinstance(catalog, dict)
@@ -5399,7 +5424,9 @@ def _n59_catalog(
     spec["schema_version"] = 3
     spec["provider_ledger"] = ref
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
-    exclusions = {"strategy-3": date(2026, 1, 1)} if excluded else {}
+    exclusions = RETIRED_EXCLUSIONS | (
+        {"strategy-3": date(2026, 1, 1)} if excluded else {}
+    )
     monkeypatch.setattr(baseline, "_hwm_policy_exclusions", lambda: exclusions)
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
     return catalog

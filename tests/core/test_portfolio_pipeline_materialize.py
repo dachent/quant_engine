@@ -224,6 +224,9 @@ def test_assessment_two_available_requires_real_selected_source_replay(
                 for account_index, sleeve in enumerate(census["account_sleeves"])
                 for assignment in sleeve["assignments"]
                 if assignment["status"] in {"FUNDED_MEMBERSHIP", "ASSIGNMENT_ONLY"}
+                # Derived epochs exist only in the account manifest.
+                and assignment["authority"]
+                != "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
                 and assignment["effective_start"] <= left
                 and (
                     assignment["effective_end"] is None
@@ -7778,41 +7781,6 @@ def test_admission_policy_artifact_resolves_a_non_canonical_selected_input(tmp_p
     path.write_bytes(payload + b"\n")
     with pytest.raises(materializer.MaterializationError, match="binding differs"):
         materializer._admission_policy_artifact([row])
-
-
-def _sleeve_facts_row(path, payload, node_id="financial-sleeve-facts-ibkr"):
-    return {
-        "kind": "ARTIFACT",
-        "node_id": node_id,
-        "path": str(path),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "size_bytes": len(payload),
-    }
-
-
-def test_selected_sleeve_facts_travel_as_production_nodes_and_are_verified(tmp_path):
-    """#567: the replay needs the bytes of every sleeve-facts artifact the spec selects."""
-
-    first = tmp_path / "facts-b.json"
-    second = tmp_path / "facts-a.json"
-    first.write_bytes(b'{"facts":"b"}')
-    second.write_bytes(b'{"facts":"a"}')
-    rows = [
-        _sleeve_facts_row(first, first.read_bytes(), "financial-sleeve-facts-b"),
-        _sleeve_facts_row(second, second.read_bytes(), "financial-sleeve-facts-a"),
-        {"kind": "ARTIFACT", "node_id": "financial-account-manifest-generation"},
-    ]
-
-    assert materializer._selected_sleeve_facts_paths(rows) == (
-        second.resolve(),
-        first.resolve(),
-    )
-    # a specification that selects none passes none
-    assert materializer._selected_sleeve_facts_paths(rows[2:]) == ()
-
-    first.write_bytes(b'{"facts":"changed"}')
-    with pytest.raises(materializer.MaterializationError, match="sleeve facts binding"):
-        materializer._selected_sleeve_facts_paths(rows)
 
 
 # The retained baseline's audit snapshot is sealed: its replay, and the materializer's

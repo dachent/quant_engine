@@ -147,6 +147,7 @@ def stage_current_epoch_manifest(
     membership_census_path: Path,
     receipt_paths: Mapping[str, Path],
     output_generation_root: Path,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> dict[str, object]:
     """Capture the named bytes once, verify them, and stage one immutable bundle."""
 
@@ -168,6 +169,12 @@ def stage_current_epoch_manifest(
         for artifact_id, path in receipt_paths.items()
     }
     epoch_source, builder_source, verifier_source = _code_snapshots()
+    sleeve_facts = tuple(
+        _capture(path, f"sleeve facts {index}")
+        for index, path in enumerate(sleeve_facts_paths)
+    )
+    if len({snapshot.sha256 for snapshot in sleeve_facts}) != len(sleeve_facts):
+        raise CurrentEpochManifestStageError("sleeve facts repeat an artifact")
     selected = account_manifest_generation.AccountManifestSelectedInputs(
         provider_ledger=_capture(
             provider_generation / "provider-ledger.json", "provider-ledger catalog"
@@ -194,6 +201,7 @@ def stage_current_epoch_manifest(
         admission_policy=_capture(admission_policy_path, "admission policy"),
         membership_census=_capture(membership_census_path, "membership census"),
         manifest_schema=_capture(manifest_schema_path, "account-manifest schema"),
+        sleeve_facts=sleeve_facts,
     )
     if selected.provider_ledger_generation_id != provider_ledger_generation_id:
         raise CurrentEpochManifestStageError(
@@ -286,6 +294,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--receipt", action="append", type=_receipt_argument, required=True
     )
+    parser.add_argument(
+        "--sleeve-facts",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "a sleeve-facts artifact (tools/build_sleeve_facts_release.py); repeat "
+            "for each; every one is reconciled with the selected provider ledger"
+        ),
+    )
     parser.add_argument("--output-generation-root", type=Path, required=True)
     return parser
 
@@ -319,6 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             membership_census_path=args.membership_census,
             receipt_paths=_receipt_mapping(args.receipt),
             output_generation_root=args.output_generation_root,
+            sleeve_facts_paths=tuple(args.sleeve_facts),
         )
     except (GenerationConflictError, OSError, ValueError) as exc:
         print(f"stage-current-epoch-manifest: FAIL: {exc}", file=sys.stderr)

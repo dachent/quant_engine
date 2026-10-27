@@ -2444,7 +2444,12 @@ def _financial_mvp_product_controls(
                 raise ControlPanelValidationError(
                     "nested history-only strategy control differs"
                 )
-    elif len(controls) != 9:
+    elif len(controls) != 9 and not (
+        set(controls) & CURRENT_PRODUCT_STRATEGY_IDS
+        or any("effective_product_interval" in row for row in strategy_rows)
+    ):
+        # An owner-bound contract that lost a pinned strategy is refused by the
+        # identity check below, which names the real defect.
         raise ControlPanelValidationError(
             "financial MVP contract must contain 9 strategy controls"
         )

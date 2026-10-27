@@ -40,7 +40,7 @@ CATALOG_SCHEMA_VERSION: Final = 2
 STRATEGY_VERSION_CATALOG_SCHEMA_VERSION: Final = 2
 BUILDER_VERSION: Final = "2.0.1"
 POLICY_VERSION: Final = "PORT-PERF-1"
-RETAINED_STRATEGY_COUNT: Final = 9
+RETAINED_STRATEGY_COUNT: Final = 15
 SYSTEMATIC_POOL_ID: Final = "systematic-capital"
 RESERVE_POOL_ID: Final = "reserve-capital"
 
@@ -1509,9 +1509,10 @@ def build_catalog(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary=(
                 "explicitly configured portfolio provenance sources, accounts, "
-                "and nine retained strategy registry records (seven REQUIRED active "
-                "current, Echo DEPRECATED_HISTORY_ONLY, and Composer "
-                "IMMATERIAL_EXCLUDED); data completeness remains in catalog gaps"
+                "and fifteen retained strategy registry records (seven REQUIRED active "
+                "current, Echo DEPRECATED_HISTORY_ONLY, Composer "
+                "IMMATERIAL_EXCLUDED, and six retired history-only sleeve or fund "
+                "records); data completeness remains in catalog gaps"
             ),
             fact_types=(
                 "accounts",

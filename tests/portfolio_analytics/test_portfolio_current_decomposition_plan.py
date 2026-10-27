@@ -320,7 +320,11 @@ def _reidentify_public_manifest(manifest: dict[str, Any]) -> None:
 
 def _bind_fixture_source_dispositions(plan: dict[str, Any]) -> None:
     source_keys = tuple(plan["sources"])
-    owner_excluded = {"composer-holy-grail", "echotrade-growth-pivots"}
+    owner_excluded = {
+        row["strategy_id"]
+        for row in json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))["strategies"]
+        if row["product_requirement"] == "EXCLUDED"
+    }
     for strategy in plan["strategies"]:
         if strategy["strategy_id"] in owner_excluded:
             strategy["assignments"] = []
@@ -818,7 +822,10 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     )
     dispositions = json.loads(outputs["candidate-dispositions.json"])
     assert dispositions["schema_version"] == 2
-    assert len(dispositions["candidate_dispositions"]) == 108
+    # Fifteen registry strategies (the nine current-product rows and the six retired
+    # history-only records) times twelve candidates; the six retired ones are all
+    # owner-approved NOT_APPLICABLE.
+    assert len(dispositions["candidate_dispositions"]) == 180
     assert {row["surface"] for row in dispositions["candidate_dispositions"]} == {
         "STATIC",
         "DYNAMIC_FLS",
@@ -845,6 +852,12 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert {row["strategy_id"] for row in excluded_rows} == {
         "composer-holy-grail",
         "echotrade-growth-pivots",
+        "p123-conn-1911998-andreas-sc-ai-mq-live",
+        "p123-conn-1951348-higher-beta-earnings",
+        "p123-conn-1956961-ai-largecap-ls",
+        "p123-conn-1958970-high-octane",
+        "quantbase-crisis-factor-investing",
+        "quantbase-single-index-leveraged-in-out",
     }
     assert {row["disposition"] for row in excluded_rows} == {
         "NOT_APPLICABLE_OWNER_APPROVED"
@@ -1128,7 +1141,16 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
             assert assignment.get("screened_out_candidates", []) == []
             if source_key == "us-industry":
                 assert len(modeled) == len(candidates)
-    for strategy_id in ("composer-holy-grail", "echotrade-growth-pivots"):
+    for strategy_id in (
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+        "p123-conn-1911998-andreas-sc-ai-mq-live",
+        "p123-conn-1951348-higher-beta-earnings",
+        "p123-conn-1956961-ai-largecap-ls",
+        "p123-conn-1958970-high-octane",
+        "quantbase-crisis-factor-investing",
+        "quantbase-single-index-leveraged-in-out",
+    ):
         cells = by_id[strategy_id]["source_dispositions"]
         assert {cell["reason"] for cell in cells.values()} == {
             "NOT_APPLICABLE_OWNER_APPROVED"

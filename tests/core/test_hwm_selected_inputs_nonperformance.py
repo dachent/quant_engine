@@ -1268,15 +1268,17 @@ def test_selected_sleeve_facts_are_bound_by_digest(
 
     snapshot = InputSnapshot.from_bytes("facts", facts.read_bytes())
     selected = {"sleeve_facts": [{"sha256": snapshot.sha256, "size_bytes": 15}]}
-    assert selected_hwm._selected_sleeve_facts(selected, [facts])[0].sha256 == (
+    assert selected_hwm._selected_sleeve_facts([facts], selected)[0].sha256 == (
         snapshot.sha256
     )
     # bytes the generation did not select, none supplied, or facts it never named
     other = tmp_path / "other.json"
     other.write_bytes(b'{"sleeves": [1]}')
     for paths in ([other], []):
-        with pytest.raises(selected_hwm.SelectedHwmInputError, match="differ"):
-            selected_hwm._selected_sleeve_facts(selected, paths)
-    with pytest.raises(selected_hwm.SelectedHwmInputError, match="selected none"):
-        selected_hwm._selected_sleeve_facts({}, [facts])
-    assert selected_hwm._selected_sleeve_facts({}, []) == ()
+        with pytest.raises(
+            selected_hwm.SelectedHwmInputError, match="not an input|was not supplied"
+        ):
+            selected_hwm._selected_sleeve_facts(paths, selected)
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="not an input"):
+        selected_hwm._selected_sleeve_facts([facts], {})
+    assert selected_hwm._selected_sleeve_facts([], {}) == ()

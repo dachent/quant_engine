@@ -3694,7 +3694,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         contract_path=fixture["contract_path"],
     )
     assert result["verification"] == "VALID"
-    assert result["strategy_count"] == 9
+    assert result["strategy_count"] == 15
     coverage = json.loads(artifacts["coverage.json"])
     coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
     epoch_hpr_receipts = coverage["epoch_hpr_receipts"]
