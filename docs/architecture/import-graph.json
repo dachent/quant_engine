@@ -205,6 +205,11 @@
     ],
     [
       "portfolio_control_panel",
+      "portfolio_performance_tab",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "portfolio_private_stage",
       1
     ],
