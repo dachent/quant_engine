@@ -420,3 +420,44 @@ def test_verifier_rejects_a_suppressed_mwr() -> None:
     }
     with pytest.raises(verify.PortfolioTotalsVerificationError, match="unique root"):
         verify.verify_portfolio_totals(report, manifest, crosswalk)
+
+
+def test_a_derived_sleeve_epoch_stands_for_its_residual_parent_in_the_totals() -> None:
+    """#567: sleeves of product strategies join the totals, other sleeves do not."""
+
+    crosswalk = {
+        "rows": [
+            {
+                "account_id": "acct-parent",
+                "strategy_id": "alpha",
+                "effective_start": "2026-01-22",
+                "effective_end": None,
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+            {
+                "account_id": "acct-other",
+                "strategy_id": "beta",
+                "effective_start": "2026-01-05",
+                "effective_end": None,
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            },
+        ]
+    }
+
+    def row(account: str, strategy: str, start: str, end: str | None) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "strategy_id": strategy,
+            "effective_start": start,
+            "effective_end": end,
+        }
+
+    manifest = {
+        "rows": [
+            row("acct-parent-s2", "alpha", "2026-01-30", None),
+            row("acct-parent-s1", "history", "2026-01-26", "2026-06-23"),
+            row("acct-other", "beta", "2026-01-05", None),
+        ]
+    }
+    rows = verify.included_rows(manifest, crosswalk)
+    assert {item["account_id"] for item in rows} == {"acct-parent-s2", "acct-other"}

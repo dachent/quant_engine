@@ -159,7 +159,9 @@
           "retired_on": {"type": ["string", "null"], "format": "date"},
           "closed_on": {"type": ["string", "null"], "format": "date"},
           "parent_assignment_id": {"type": ["string", "null"], "minLength": 1},
-          "sleeve_label": {"type": ["string", "null"], "minLength": 1}
+          "sleeve_label": {"type": ["string", "null"], "minLength": 1},
+          "parent_strategy_id": {"type": "string", "minLength": 1},
+          "sleeve_id": {"type": "string", "minLength": 1}
         }
       }
     },
@@ -1902,6 +1904,8 @@
         "closed_on": {"type": ["string", "null"], "format": "date"},
         "parent_assignment_id": {"type": ["string", "null"], "minLength": 1},
         "sleeve_label": {"type": ["string", "null"], "minLength": 1},
+        "parent_strategy_id": {"type": "string", "minLength": 1},
+        "sleeve_id": {"type": "string", "minLength": 1},
         "mwr_day_count": {"enum": ["ACTUAL_365", null]},
         "mwr_unit": {"enum": ["ANNUALIZED_RETURN", null]},
         "mwr_source_binding": {"enum": ["GOVERNED_SOURCE_IDENTITIES", null]},
@@ -2056,7 +2060,7 @@
     {
       "if": {"required": ["lifecycle_schema_version"]},
       "then": {"required": ["retained_strategies"], "properties": {"strategy_summary": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}, "twr_mwr": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}}},
-      "else": {"not": {"required": ["retained_strategies"]}, "properties": {"strategy_summary": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}, "twr_mwr": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}}}
+      "else": {"not": {"required": ["retained_strategies"]}, "properties": {"strategy_summary": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}, {"required": ["parent_strategy_id"]}, {"required": ["sleeve_id"]}]}}}, "twr_mwr": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}, {"required": ["parent_strategy_id"]}, {"required": ["sleeve_id"]}]}}}}}
     },
     {
       "if": {

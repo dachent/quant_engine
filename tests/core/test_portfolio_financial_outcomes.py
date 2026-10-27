@@ -2138,3 +2138,179 @@ def test_an_unreadable_embedded_report_is_not_masked_by_a_valid_file(
         outcomes.FinancialOutcomeError, match="embedded report is unreadable"
     ):
         world.call()
+
+
+def _derived_epoch_replay_world(tmp_path, *, drop_coverage=False, extra_row=None):
+    """An account generation whose manifest replaced a residual parent by sleeves."""
+
+    import portfolio_hwm_selected_inputs as source_verifier  # noqa: F401
+
+    parent = {
+        "account_id": "account-parent",
+        "strategy_id": "required-strategy",
+        "effective_start": "2026-01-01",
+        "effective_end": None,
+        "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+    }
+    sleeve = {
+        "account_id": "account-parent-s2",
+        "strategy_id": "required-strategy",
+        "effective_start": "2026-01-30",
+        "effective_end": None,
+    }
+    retained = {
+        "account_id": "account-parent-s1",
+        "strategy_id": "history-strategy",
+        "effective_start": "2026-01-26",
+        "effective_end": "2026-06-23",
+    }
+    rows = [sleeve, retained] + ([extra_row] if extra_row else [])
+    coverage = {
+        "rows": [
+            {
+                "assignment": dict(epoch),
+                "authority_kind": "DERIVED_SLEEVE_COVERAGE_V1",
+                "derivation": {
+                    "parent_account_id": "account-parent",
+                    "sleeve_facts_sha256": "1" * 64,
+                },
+            }
+            for epoch in (sleeve, retained)
+        ]
+    }
+    identity = json.dumps(
+        {
+            "admission_policy": {
+                "sha256": hashlib.sha256(b"{}").hexdigest(),
+                "size_bytes": 2,
+            }
+        }
+    ).encode()
+    calculation = {
+        key: {}
+        for key in (
+            "calculation_ledger",
+            "calculation_ledger_identity",
+            "calculation_classified_flows",
+            "calculation_flow_coverage",
+        )
+    }
+    artifacts = {
+        "authority/flow-classification-policy.json": b"{}",
+        "authority/selected-input-identities.json": identity,
+        "authority/mapped-epoch-admission.json": b"{}",
+        "authority/calculation-inputs.json": json.dumps(calculation).encode(),
+        "outputs/account-strategy-manifest.json": json.dumps({"rows": rows}).encode(),
+    }
+    if not drop_coverage:
+        artifacts["authority/account-flow-coverage.json"] = json.dumps(
+            coverage
+        ).encode()
+    spec, _crosswalk = _account_generation_spec(
+        tmp_path / "account", [parent], artifacts
+    )
+    baseline_root = tmp_path / "baseline"
+    baseline_root.mkdir()
+    (baseline_root / "portfolio-baseline.json").write_bytes(b"{}")
+    baseline = pipeline.GenerationNode(
+        "baseline",
+        (),
+        "baseline",
+        "a" * 64,
+        "b" * 64,
+        (
+            pipeline.FileExpectation(
+                "portfolio-baseline.json", hashlib.sha256(b"{}").hexdigest(), 2
+            ),
+        ),
+        baseline_root,
+        False,
+    )
+    selected = {
+        key: b"{}\n"
+        for key in (
+            "account_strategy_ledger",
+            "account_strategy_ledger_identity",
+            "account_strategy_classified_flows",
+            "account_strategy_flow_coverage",
+        )
+    }
+    selected["account_strategy_admission_policy"] = b"{}"
+    return spec, baseline, selected
+
+
+def test_epoch_replay_accepts_derived_sleeves_and_hands_their_facts_to_the_replay(
+    tmp_path, monkeypatch
+):
+    import portfolio_hwm_selected_inputs as source_verifier
+
+    spec, baseline, selected = _derived_epoch_replay_world(tmp_path)
+    facts = (tmp_path / "facts.json",)
+    sources = {
+        key: tmp_path / (key + ".json")
+        for key in (
+            "account_manifest_admission_policy_path",
+            "account_manifest_flow_classification_policy_path",
+            "provider_ledger_generation_path",
+            "baseline_generation_path",
+        )
+    } | {"sleeve_facts_paths": facts}
+    received = []
+    monkeypatch.setattr(
+        source_verifier,
+        "_verify_account_manifest_replay",
+        lambda bundle, **kwargs: received.append(kwargs),
+    )
+    monkeypatch.setattr(outcomes, "selected_hwm_source_paths", lambda spec: sources)
+
+    result = outcomes._rebuild_selected_epochs(spec, baseline, selected)
+
+    assert [row["account_id"] for row in result["rows"]] == [
+        "account-parent-s2",
+        "account-parent-s1",
+    ]
+    assert received[0]["sleeve_facts_paths"] == facts
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        # no coverage rows: the parent's epoch vanished with nothing to explain it
+        ({"drop_coverage": True}, "finalized epoch product perimeter differs"),
+        # a manifest row nothing derived
+        (
+            {
+                "extra_row": {
+                    "account_id": "account-stranger",
+                    "strategy_id": "required-strategy",
+                    "effective_start": "2026-02-01",
+                    "effective_end": None,
+                }
+            },
+            "differ from the effective perimeter",
+        ),
+    ],
+    ids=["no-coverage", "stranger-row"],
+)
+def test_epoch_replay_refuses_a_perimeter_that_derived_sleeves_do_not_explain(
+    tmp_path, monkeypatch, kwargs, message
+):
+    import portfolio_hwm_selected_inputs as source_verifier
+
+    spec, baseline, selected = _derived_epoch_replay_world(tmp_path, **kwargs)
+    sources = {
+        key: tmp_path / (key + ".json")
+        for key in (
+            "account_manifest_admission_policy_path",
+            "account_manifest_flow_classification_policy_path",
+            "provider_ledger_generation_path",
+            "baseline_generation_path",
+        )
+    }
+    monkeypatch.setattr(
+        source_verifier, "_verify_account_manifest_replay", lambda bundle, **kw: None
+    )
+    monkeypatch.setattr(outcomes, "selected_hwm_source_paths", lambda spec: sources)
+
+    with pytest.raises(outcomes.FinancialOutcomeError, match=message):
+        outcomes._rebuild_selected_epochs(spec, baseline, selected)

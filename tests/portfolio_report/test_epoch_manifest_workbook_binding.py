@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
@@ -179,6 +180,7 @@ def _verified_schema9_epoch_bundle(
     all_numeric_candidates: bool = False,
     canonical_selected_policy: bool = False,
     r3_account_id: str | None = None,
+    derived_sleeves: bool = False,
 ) -> tuple[Path, bytes, bytes, bytes, bytes]:
     """Build one verified schema-9 epoch generation around synthetic rows.
 
@@ -193,6 +195,9 @@ def _verified_schema9_epoch_bundle(
     its performance UNAVAILABLE for ZERO_CAPITAL_RETURN_UNDEFINED, an empty
     observation trace, and NAV and flow facts in its calculation row (NAV 50 on
     2026-08-11, 42 on 2026-08-13 after a 10 end-of-day withdrawal).
+    ``derived_sleeves`` replaces the p123-ai-factor epoch (a residual parent) by
+    two derived sleeve epochs, as the manifest carries them after #567: a current
+    one of the same strategy and a retained history-only one of another.
     """
 
     epoch_root = tmp_path
@@ -226,6 +231,41 @@ def _verified_schema9_epoch_bundle(
         for row in crosswalk_payload["rows"]
         if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
     ]
+    derived_epochs_by_key: dict[tuple[object, ...], str] = {}
+    if derived_sleeves:
+        parent_row = next(
+            row for row in included if row["strategy_id"] == "p123-ai-factor"
+        )
+        sleeves = [
+            {
+                **parent_row,
+                "account_id": f"{parent_row['account_id']}-s2",
+                "strategy_id": "p123-ai-factor",
+                "effective_start": "2026-01-30",
+                "effective_end": None,
+            },
+            {
+                **parent_row,
+                "account_id": f"{parent_row['account_id']}-s1",
+                "strategy_id": "p123-conn-one",
+                "effective_start": "2026-01-26",
+                "effective_end": "2026-06-23",
+            },
+        ]
+        for sleeve_row in sleeves:
+            derived_epochs_by_key[
+                tuple(
+                    sleeve_row[field]
+                    for field in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                )
+            ] = str(parent_row["account_id"])
+        included = [row for row in included if row is not parent_row] + sleeves
+    derived_count = len(derived_epochs_by_key)
     rows: list[dict[str, object]] = []
     blocker_chains: list[dict[str, object]] = []
     census_assignments: list[tuple[str, str, str | None, str | None, str]] = []
@@ -686,14 +726,15 @@ def _verified_schema9_epoch_bundle(
         chain["numeric_candidate"] is True for chain in blocker_chains
     )
     blocked_candidate_count = len(blocker_chains) - numeric_candidate_count
+    mapped_count = 15 - (1 if derived_sleeves else 0) + derived_count
     counts = {
         "selected_baseline_account_count": 15,
         "account_count": 15,
-        "assignment_count": 15,
-        "mapped_assignment_count": 15,
+        "assignment_count": mapped_count,
+        "mapped_assignment_count": mapped_count,
         "historical_assignment_count": 0,
         "reserve_assignment_count": 0,
-        "current_product_epoch_count": 13,
+        "current_product_epoch_count": len(included),
         "observed_nav_fact_count": 3,
         "observed_raw_flow_count": 0,
         "classified_event_count": 0,
@@ -703,10 +744,10 @@ def _verified_schema9_epoch_bundle(
         "unmatched_raw_flow_fact_count": 0,
         "unmatched_fact_count": 0,
         "unmatched_projection_count": 0,
-        "calculation_input_row_count": 13,
-        "coverage_row_count": 13,
-        "admission_row_count": 13,
-        "output_row_count": 13,
+        "calculation_input_row_count": len(included),
+        "coverage_row_count": len(included),
+        "admission_row_count": len(included),
+        "output_row_count": len(included),
         "complete_coverage_row_count": numeric_candidate_count,
         "funded_admission_row_count": numeric_candidate_count,
         "ok_output_row_count": numeric_candidate_count,
@@ -719,6 +760,23 @@ def _verified_schema9_epoch_bundle(
             "assignment": chain["assignment"],
             "status": chain["coverage"]["status"],
             "blocker_code": chain["coverage"]["blocker_code"],
+            **(
+                {
+                    "authority_kind": "DERIVED_SLEEVE_COVERAGE_V1",
+                    "derivation": {
+                        "parent_account_id": derived_epochs_by_key[
+                            tuple(
+                                chain["assignment"][field]
+                                for field in chain["assignment"]
+                            )
+                        ],
+                        "sleeve_facts_sha256": "7" * 64,
+                    },
+                }
+                if tuple(chain["assignment"][field] for field in chain["assignment"])
+                in derived_epochs_by_key
+                else {}
+            ),
         }
         for chain in blocker_chains
     ]
@@ -1072,6 +1130,10 @@ def _verified_schema9_epoch_bundle(
             "size_bytes": len(crosswalk_bytes),
         },
     }
+    if derived_sleeves:
+        selected_source_identities["sleeve_facts"] = [
+            {"sha256": "7" * 64, "size_bytes": 8}
+        ]
     if authority_graph_mutation == "manifest_schema":
         selected_source_identities["manifest_schema"]["sha256"] = "0" * 64
     elif authority_graph_mutation == "retrieval_receipt":
@@ -2277,3 +2339,142 @@ def test_epoch_generation_rejects_any_cutoff_authority_mismatch(
         reporter._validate_epoch_generation_authority(
             epoch_root, source, manifest_bytes, crosswalk_bytes
         )
+
+
+# --- derived sleeves (#567, stage 5) ------------------------------------------
+
+
+def _nested_controls(extra: str = "p123-conn-one") -> dict[str, dict[str, str]]:
+    controls = {
+        strategy_id: {
+            "product_requirement": (
+                "REQUIRED"
+                if strategy_id in reporter.CURRENT_REQUIRED_STRATEGY_IDS
+                else "EXCLUDED"
+            ),
+            "lifecycle_status": (
+                "ACTIVE"
+                if strategy_id in reporter.CURRENT_REQUIRED_STRATEGY_IDS
+                else "DEPRECATED_HISTORY_ONLY"
+            ),
+        }
+        for strategy_id in reporter.CURRENT_STRATEGY_CONTROL_IDS
+    }
+    controls[extra] = {
+        "product_requirement": "EXCLUDED",
+        "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+    }
+    return controls
+
+
+def _derived_generation(tmp_path: Path) -> tuple[Path, dict[str, object], Any]:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path, all_numeric_candidates=True, derived_sleeves=True
+        )
+    )
+    source = json.loads(source_bytes)
+    bundle = read_generation_bundle(epoch_root, source["generation_id"])
+    return (
+        epoch_root,
+        {
+            "source": source,
+            "manifest": manifest_bytes,
+            "crosswalk": crosswalk_bytes,
+        },
+        bundle,
+    )
+
+
+def test_a_derived_sleeve_generation_validates_and_names_each_parent(
+    tmp_path: Path,
+) -> None:
+    root, parts, _bundle = _derived_generation(tmp_path)
+    details = reporter._validate_epoch_generation_authority(
+        root, parts["source"], parts["manifest"], parts["crosswalk"]
+    )
+
+    assert len(details) == 14
+    parent = next(
+        row["account_id"]
+        for row in json.loads(parts["crosswalk"])["rows"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    derived = {
+        key: detail["derived_parent_account_id"]
+        for key, detail in details.items()
+        if detail["derived_parent_account_id"] is not None
+    }
+    assert derived == {
+        (f"{parent}-s2", "p123-ai-factor", "2026-01-30", None): parent,
+        (f"{parent}-s1", "p123-conn-one", "2026-01-26", "2026-06-23"): parent,
+    }
+    # the residual parent has no epoch any more, every baseline epoch has no parent
+    assert not any(key[0] == parent for key in details)
+    assert all(
+        detail["derived_parent_account_id"] is None
+        for key, detail in details.items()
+        if key not in derived
+    )
+
+
+def test_a_derived_sleeve_manifest_binds_to_the_crosswalk_through_coverage(
+    tmp_path: Path,
+) -> None:
+    _root, parts, bundle = _derived_generation(tmp_path)
+    manifest = json.loads(parts["manifest"])
+    crosswalk = json.loads(parts["crosswalk"])
+    coverage = reporter._generation_coverage_rows(bundle)
+
+    actual = reporter._validate_report_account_manifest(
+        manifest,
+        _nested_controls(),
+        crosswalk=crosswalk,
+        coverage_rows=coverage,
+    )
+    assert len(actual) == 14
+
+    # without the coverage authority the manifest differs from the crosswalk
+    with pytest.raises(reporter.ReportValidationError, match="strategy is excluded"):
+        reporter._validate_report_account_manifest(
+            manifest, _nested_controls(), crosswalk=crosswalk, coverage_rows=()
+        )
+    # a history-only sleeve of a strategy the controls do not know is refused
+    with pytest.raises(reporter.ReportValidationError, match="strategy is excluded"):
+        reporter._validate_report_account_manifest(
+            manifest,
+            _nested_controls("another-strategy"),
+            crosswalk=crosswalk,
+            coverage_rows=coverage,
+        )
+    # a control beyond the pinned perimeter must be a deprecated exclusion
+    controls = _nested_controls()
+    controls["p123-conn-one"]["product_requirement"] = "REQUIRED"
+    with pytest.raises(reporter.ReportValidationError, match="controls are not exact"):
+        reporter._validate_report_account_manifest(
+            manifest, controls, crosswalk=crosswalk, coverage_rows=coverage
+        )
+    # a derived epoch covered twice is refused
+    twice = next(
+        row
+        for row in coverage
+        if row.get("authority_kind") == "DERIVED_SLEEVE_COVERAGE_V1"
+    )
+    with pytest.raises(reporter.ReportValidationError, match="covered twice"):
+        reporter._validate_report_account_manifest(
+            manifest,
+            _nested_controls(),
+            crosswalk=crosswalk,
+            coverage_rows=[*coverage, twice],
+        )
+
+
+def test_the_epoch_history_evidence_accepts_a_derived_sleeve_generation(
+    tmp_path: Path,
+) -> None:
+    root, parts, _bundle = _derived_generation(tmp_path)
+    source_bytes = canonical_json_bytes(parts["source"])
+
+    reporter._epoch_history_snapshot_evidence(
+        root, source_bytes, parts["manifest"], parts["crosswalk"]
+    )

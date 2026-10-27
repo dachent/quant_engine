@@ -668,3 +668,86 @@ def test_a_wholly_unavailable_593_block_passes_its_reason_through() -> None:
     assert readout["headline_minus_summed_epoch_twr"] is None
     assert readout["summed_epoch_unavailable_reason"] == "NO_GOVERNED_HWM_PROOF"
     tab.verify_performance_tab(block, panel)
+
+
+# ------------------------------------------------ sleeve slices (#567, stage 5)
+
+
+def _sleeve_panel() -> dict[str, Any]:
+    """Strategy a is the current sleeve of a residual parent; w is a retired one."""
+
+    panel = _panel()
+    panel["strategies"] = [
+        {
+            "strategy_id": "a",
+            "lifecycle_state": "ACTIVE",
+            "parent_assignment_id": "assignment-parent",
+            "sleeve_label": "Current sleeve",
+            "parent_strategy_id": "a",
+            "sleeve_id": "s2",
+        },
+        {"strategy_id": "b", "lifecycle_state": "ACTIVE"},
+        {
+            "strategy_id": "w",
+            "record_kind": "RETAINED_HISTORY_ONLY",
+            "lifecycle_state": "RETIRED",
+            "parent_assignment_id": "assignment-parent",
+            "sleeve_label": "Retired sleeve",
+            "parent_strategy_id": "a",
+            "sleeve_id": "s1",
+        },
+    ]
+    panel["account_manifest"]["rows"].append(
+        _epoch("acct-1-s1", "w", "2026-03-01", date(2026, 3, 1), [("20", "21")])
+    )
+    return panel
+
+
+def test_sleeve_slices_carry_the_parent_strategy_and_the_sleeve_id() -> None:
+    panel = _sleeve_panel()
+    slices = tab.build_performance_tab(panel)["slices"]
+    rows = {row["slice_id"]: row for row in slices["rows"]}
+
+    assert (rows["w"]["parent_strategy_id"], rows["w"]["sleeve_id"]) == ("a", "s1")
+    assert (rows["a"]["parent_strategy_id"], rows["a"]["sleeve_id"]) == ("a", "s2")
+    # a strategy that is no sleeve carries neither
+    assert rows["b"]["parent_strategy_id"] is None and rows["b"]["sleeve_id"] is None
+    assert (
+        "unallocated cash of a residual parent"
+        in (slices["reconciliation"]["residual_label"])
+    )
+    tab.verify_performance_tab(tab.build_performance_tab(panel), panel)
+
+
+def test_without_sleeves_the_residual_label_and_ids_are_unchanged() -> None:
+    slices = tab.build_performance_tab(_panel())["slices"]
+    assert "unallocated" not in slices["reconciliation"]["residual_label"]
+    assert all(
+        row["parent_strategy_id"] is None and row["sleeve_id"] is None
+        for row in slices["rows"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _tamper(["slices", "rows", 3, "sleeve_id"], "s9"),
+        _tamper(["slices", "rows", 3, "parent_strategy_id"], "b"),
+        _tamper(["slices", "rows", 0, "sleeve_id"], "s1"),
+    ],
+    ids=["wrong-sleeve", "wrong-parent", "invented-sleeve"],
+)
+def test_the_verifier_rejects_a_forged_sleeve_identity(mutate: Any) -> None:
+    panel = _sleeve_panel()
+    block = copy.deepcopy(tab.build_performance_tab(panel))
+    mutate(block)
+    with pytest.raises(tab.PerformanceTabError, match="sleeve identity"):
+        tab.verify_performance_tab(block, panel)
+
+
+def test_a_sleeve_strategy_without_its_parent_is_refused() -> None:
+    panel = _sleeve_panel()
+    del panel["strategies"][2]["parent_strategy_id"]
+    slices = tab.build_performance_tab(panel)["slices"]
+    assert slices["status"] == "UNAVAILABLE"
+    assert "parent or id" in slices["reason"]

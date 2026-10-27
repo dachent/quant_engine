@@ -23,7 +23,7 @@ import stat
 import sys
 import tempfile
 import zlib
-from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -2429,7 +2429,22 @@ def _financial_mvp_product_controls(
                 "effective_end": end,
             }
         rows_by_id[strategy_id] = row
-    if len(controls) != 9:
+    owner_perimeter_present = CURRENT_PRODUCT_STRATEGY_IDS <= set(controls)
+    if owner_perimeter_present:
+        # Nested history-only strategies (#567) join the pinned nine: each is an
+        # excluded, deprecated record the nested-strategy tag map names.
+        for strategy_id in set(controls) - CURRENT_PRODUCT_STRATEGY_IDS:
+            if {
+                key: controls[strategy_id].get(key)
+                for key in ("lifecycle_status", "product_requirement")
+            } != {
+                "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+                "product_requirement": "EXCLUDED",
+            }:
+                raise ControlPanelValidationError(
+                    "nested history-only strategy control differs"
+                )
+    elif len(controls) != 9:
         raise ControlPanelValidationError(
             "financial MVP contract must contain 9 strategy controls"
         )
@@ -2451,7 +2466,7 @@ def _financial_mvp_product_controls(
         "effective_product_interval" in row for row in strategy_rows
     )
     if owner_bound_contract:
-        if set(controls) != CURRENT_PRODUCT_STRATEGY_IDS:
+        if not owner_perimeter_present:
             raise ControlPanelValidationError(
                 "financial MVP strategy identity perimeter differs"
             )
@@ -2480,7 +2495,7 @@ def _financial_mvp_product_controls(
         "product_requirement": "EXCLUDED",
     }:
         raise ControlPanelValidationError("Composer owner exclusion differs")
-    if set(controls) == CURRENT_PRODUCT_STRATEGY_IDS and any(
+    if owner_perimeter_present and any(
         controls[strategy_id].get("lifecycle_status") != "ACTIVE"
         or controls[strategy_id].get("product_requirement") != "REQUIRED"
         for strategy_id in CURRENT_REQUIRED_STRATEGY_IDS
@@ -2770,6 +2785,13 @@ def _baseline_correlation_strategy_mapping(
                 "baseline correlation strategy mapping contains a duplicate"
             )
         mapping[strategy_id] = strategy_name
+    # Nested history-only strategies (#567) may follow the pinned nine; the
+    # correlation mapping is the nine.
+    if CURRENT_PRODUCT_STRATEGY_IDS <= set(mapping):
+        mapping = {
+            strategy_id: mapping[strategy_id]
+            for strategy_id in sorted(CURRENT_PRODUCT_STRATEGY_IDS)
+        }
     if (
         set(mapping) != set(CURRENT_PRODUCT_STRATEGY_IDS)
         or len(set(mapping.values())) != len(mapping)
@@ -2812,17 +2834,50 @@ def _referenced_current_account_ids(
     return result
 
 
+def _derived_epoch_parent(
+    account_id: str, parent_account_ids: Collection[str]
+) -> str | None:
+    """The one baseline account a derived sleeve account ``<parent>-<sleeve>`` hangs on."""
+
+    parents = [
+        parent for parent in parent_account_ids if account_id.startswith(f"{parent}-")
+    ]
+    return parents[0] if len(parents) == 1 else None
+
+
+def _history_only_strategy_ids(
+    strategy_product_controls: Mapping[str, Mapping[str, str]],
+) -> frozenset[str]:
+    """Nested history-only strategies beyond the pinned perimeter (#567)."""
+
+    if not CURRENT_PRODUCT_STRATEGY_IDS <= set(strategy_product_controls):
+        return frozenset()
+    return frozenset(
+        strategy_id
+        for strategy_id, control in strategy_product_controls.items()
+        if strategy_id not in CURRENT_PRODUCT_STRATEGY_IDS
+        and control.get("product_requirement") == "EXCLUDED"
+        and control.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
+    )
+
+
 def _validate_current_product_account_manifest(
     account_manifest: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]],
     current_account_ids: set[str],
 ) -> None:
-    """Keep the browser manifest inside the owner-governed current perimeter."""
+    """Keep the browser manifest inside the owner-governed current perimeter.
+
+    A derived sleeve epoch (#567) sits on ``<parent>-<sleeve>`` of a current
+    account.  It is a product epoch of a required strategy, or a retained epoch
+    of a nested history-only strategy; nothing else leaves the perimeter.
+    """
 
     enforce_owner_perimeter = {
         "composer-holy-grail",
         "echotrade-growth-pivots",
     }.issubset(strategy_product_controls)
+    history_only = _history_only_strategy_ids(strategy_product_controls)
     for row in _objects(account_manifest.get("rows"), "account_manifest.rows"):
         account_id = row.get("account_id")
         strategy_id = row.get("strategy_id")
@@ -2835,10 +2890,16 @@ def _validate_current_product_account_manifest(
         strategy_id = cast(str, strategy_id)
         if not enforce_owner_perimeter:
             continue
-        if (
-            account_id not in current_account_ids
-            or strategy_product_controls.get(strategy_id, {}).get("product_requirement")
-            != "REQUIRED"
+        derived = account_id not in current_account_ids and (
+            _derived_epoch_parent(account_id, current_account_ids) is not None
+        )
+        required = (
+            strategy_product_controls.get(strategy_id, {}).get("product_requirement")
+            == "REQUIRED"
+        )
+        if not (
+            (account_id in current_account_ids and required)
+            or (derived and (required or strategy_id in history_only))
         ):
             raise ControlPanelValidationError(
                 "current account manifest row is outside the product boundary"
@@ -3060,6 +3121,72 @@ def _current_epoch_crosswalk_included_tuples(
     }
 
 
+def _split_manifest_epoch_rows(
+    rows: Sequence[Mapping[str, Any]],
+    crosswalk_tuples: set[tuple[object, object, object, object]],
+    strategy_product_controls: Mapping[str, Mapping[str, str]],
+) -> tuple[
+    list[Mapping[str, Any]],
+    list[Mapping[str, Any]],
+    set[tuple[object, object, object, object]],
+]:
+    """Split the manifest rows into product rows and retained derived rows (#567).
+
+    A row is a crosswalk epoch, or a derived sleeve epoch on ``<parent>-<sleeve>``
+    of a crosswalk account.  A derived epoch of a required strategy is a product
+    row; one of a nested history-only strategy is retained; any other row is
+    outside the perimeter.  A crosswalk epoch the manifest dropped must belong to
+    an account that is the parent of derived rows.  Returns the product rows, the
+    retained rows and the dropped crosswalk epochs.
+    """
+
+    crosswalk_accounts = {str(key[0]) for key in crosswalk_tuples}
+    history_only = _history_only_strategy_ids(strategy_product_controls)
+    product: list[Mapping[str, Any]] = []
+    retained: list[Mapping[str, Any]] = []
+    present: set[tuple[object, object, object, object]] = set()
+    parents: set[str] = set()
+    for row in rows:
+        key = (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        present.add(key)
+        if key in crosswalk_tuples:
+            product.append(row)
+            continue
+        account_id, strategy_id = key[0], key[1]
+        parent = (
+            _derived_epoch_parent(account_id, crosswalk_accounts)
+            if isinstance(account_id, str) and account_id not in crosswalk_accounts
+            else None
+        )
+        if parent is None or not isinstance(strategy_id, str):
+            raise ControlPanelValidationError(
+                "current manifest and performance identities differ"
+            )
+        parents.add(parent)
+        if (
+            strategy_product_controls.get(strategy_id, {}).get("product_requirement")
+            == "REQUIRED"
+        ):
+            product.append(row)
+        elif strategy_id in history_only:
+            retained.append(row)
+        else:
+            raise ControlPanelValidationError(
+                "current manifest and performance identities differ"
+            )
+    removed = crosswalk_tuples - present
+    if any(str(key[0]) not in parents for key in removed):
+        raise ControlPanelValidationError(
+            "current manifest and performance identities differ"
+        )
+    return product, retained, removed
+
+
 def _validate_current_product_epoch_surface(
     account_manifest: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
@@ -3079,7 +3206,7 @@ def _validate_current_product_epoch_surface(
         crosswalk_tuples = _current_epoch_crosswalk_included_tuples(
             current_epoch_crosswalk
         )
-        if set(strategy_product_controls) == CURRENT_PRODUCT_STRATEGY_IDS:
+        if CURRENT_PRODUCT_STRATEGY_IDS <= set(strategy_product_controls):
             excluded_rows = [
                 row
                 for row in _objects(
@@ -3111,9 +3238,37 @@ def _validate_current_product_epoch_surface(
                     "current crosswalk excluded strategy boundary differs"
                 )
 
+    product_manifest_rows: list[Mapping[str, Any]] | None = None
     if crosswalk_tuples is not None:
+        # Derived sleeves (#567) replace a residual parent's epoch: the product
+        # rows are the crosswalk's epochs that remain plus the sleeve epochs of
+        # required strategies; sleeve epochs of history-only strategies stay in
+        # the manifest as retained rows and are no product surface.
+        product_manifest_rows, _retained_rows, removed = _split_manifest_epoch_rows(
+            _objects(account_manifest.get("rows"), "account_manifest.rows"),
+            crosswalk_tuples,
+            strategy_product_controls,
+        )
+        product_tuples = {
+            tuple(
+                row.get(field)
+                for field in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
+            )
+            for row in product_manifest_rows
+        }
+        if product_tuples != (crosswalk_tuples - removed) | {
+            key for key in product_tuples if key not in crosswalk_tuples
+        }:
+            raise ControlPanelValidationError(
+                "current manifest and performance identities differ"
+            )
         for surface, field_name in (
-            (account_manifest.get("rows"), "account_manifest.rows"),
+            (product_manifest_rows, "account_manifest.rows"),
             (performance, "performance"),
         ):
             surface_rows = _objects(surface, field_name)
@@ -3131,7 +3286,7 @@ def _validate_current_product_epoch_surface(
             }
             if (
                 len(surface_rows) != CURRENT_PRODUCT_EPOCH_COUNT
-                or surface_tuples != crosswalk_tuples
+                or surface_tuples != product_tuples
             ):
                 raise ControlPanelValidationError(
                     "current manifest and performance identities differ"
@@ -3189,7 +3344,11 @@ def _validate_current_product_epoch_surface(
                     "current manifest and performance identities differ"
                 ) from exc
 
-    manifest_rows = _objects(account_manifest.get("rows"), "account_manifest.rows")
+    manifest_rows = (
+        list(product_manifest_rows)
+        if product_manifest_rows is not None
+        else _objects(account_manifest.get("rows"), "account_manifest.rows")
+    )
     if len(manifest_rows) != CURRENT_PRODUCT_EPOCH_COUNT:
         raise ControlPanelValidationError(
             "current account manifest must contain exactly 13 rows"
@@ -3237,7 +3396,7 @@ def _validate_current_product_epoch_surface(
                 row.get("effective_end"),
             )
         )
-    if crosswalk_tuples is not None and expected_epoch_tuples != crosswalk_tuples:
+    if crosswalk_tuples is not None and expected_epoch_tuples != product_tuples:
         raise ControlPanelValidationError(
             "current manifest and performance identities differ"
         )
@@ -5597,7 +5756,7 @@ def _decomposition_lenses_for_mode(
             )
     elif planned_ids != set(strategy_names) and not (
         current_plan
-        and planned_ids == CURRENT_PRODUCT_STRATEGY_IDS
+        and CURRENT_PRODUCT_STRATEGY_IDS <= planned_ids
         and set(strategy_names) == CURRENT_REQUIRED_STRATEGY_IDS
     ):
         # The accepted plan retains the two explicitly excluded historical rows;
@@ -9110,7 +9269,7 @@ def _panel_data(
     )
     _validate_current_product_boundary(report, strategy_product_controls)
     strategies = _current_product_rows(report_strategies, strategy_product_controls)
-    if set(strategy_product_controls) == CURRENT_PRODUCT_STRATEGY_IDS:
+    if CURRENT_PRODUCT_STRATEGY_IDS <= set(strategy_product_controls):
         strategy_ids = [
             _text(row.get("strategy_id"), "strategy.strategy_id") for row in strategies
         ]
@@ -9196,7 +9355,26 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "external account identifiers cannot enter panel data"
             )
-    performance = _current_account_rows(performance, set(account_ids))
+    derived_product_account_ids = (
+        {
+            _text(row.get("account_id"), "account_manifest.account_id")
+            for row in _split_manifest_epoch_rows(
+                _objects(account_manifest.get("rows"), "account_manifest.rows"),
+                _current_epoch_crosswalk_included_tuples(
+                    account_manifest_identity["current_epoch_crosswalk"]
+                ),
+                strategy_product_controls,
+            )[0]
+        }
+        - set(account_ids)
+        if account_manifest is not None
+        and account_manifest_identity is not None
+        and account_manifest_identity.get("current_epoch_crosswalk") is not None
+        else set()
+    )
+    performance = _current_account_rows(
+        performance, set(account_ids) | derived_product_account_ids
+    )
     positions = _current_account_rows(positions, set(account_ids))
     if account_manifest is not None:
         _validate_current_product_epoch_surface(
@@ -9217,7 +9395,9 @@ def _panel_data(
         performance = _suppress_unmatched_report_performance(performance)
     _validate_mwr_perimeter(performance)
     referenced_account_ids = _referenced_current_account_ids((*performance, *positions))
-    missing_account_ids = referenced_account_ids - set(account_ids)
+    missing_account_ids = (
+        referenced_account_ids - set(account_ids) - derived_product_account_ids
+    )
     if missing_account_ids:
         raise ControlPanelValidationError(
             "panel facts reference accounts outside account_summary: "

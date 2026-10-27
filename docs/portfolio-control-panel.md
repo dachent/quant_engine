@@ -203,6 +203,30 @@ crosswalk or the nested-strategy tag map names) and the panel appends them to
 `RETAINED_HISTORY_ONLY`; `counts.strategies` and every current-product check
 read the current rows only.
 
+A sleeve row (a report `twr_mwr` row, a strategy row or a retained record whose
+epoch is a derived sleeve) also carries `parent_strategy_id`, the strategy of
+the parent's assignment, and `sleeve_id`, the tag map's id. The two fields are
+present only on sleeve rows; the Performance tab copies them to the slice of
+that strategy so a chart can nest the slice under its parent. The current
+sleeve of a strategy names that strategy itself as its parent strategy.
+
+## Derived sleeves in the perimeter (#567)
+
+When the account manifest carries derived sleeves, the crosswalk still names the
+baseline perimeter and the manifest differs from it by exactly one rule
+(`tools/derived_epoch_perimeter.py`, shared by the report, the panel, the HWM
+selection and the totals verification): a residual parent account's epoch is
+replaced by the epochs of its sleeves, which the flow-coverage authority
+(`DERIVED_SLEEVE_COVERAGE_V1`) names with their parent. The thirteen product
+epochs stay thirteen: the sleeve of a required strategy stands for the parent's
+epoch. A sleeve of a strategy outside the product is a retained history-only
+epoch: it stays in the manifest and in the Performance tab slices, and it is in
+no product aggregate (HWM, totals, strategy summary, `performance`). The
+report requires the nested-strategy tag map whenever derived epochs exist, binds
+each derived account to a sleeve of it, and requires the contract's history-only
+controls to be exactly the tag map's sleeve strategies the product does not
+require. The custody account of a strategy's capital stays the parent account.
+
 ## Build and verify
 
 From the repository root, set local paths without committing them:
