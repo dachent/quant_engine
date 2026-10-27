@@ -21,9 +21,16 @@ def identity(raw: Mapping[str, Any]) -> Identity:
         raw.get(k)
         for k in ("account_id", "strategy_id", "effective_start", "effective_end")
     )
-    if any(not isinstance(v, str) or not v for v in values[:3]):
-        raise InputError(f"malformed epoch identity {values!r}")
     account, strategy, start, end = values
+    if not (
+        isinstance(account, str)
+        and account
+        and isinstance(strategy, str)
+        and strategy
+        and isinstance(start, str)
+        and start
+    ):
+        raise InputError(f"malformed epoch identity {values!r}")
     try:
         first = dt.date.fromisoformat(start)
         if end is not None and dt.date.fromisoformat(end) < first:
