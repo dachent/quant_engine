@@ -7,10 +7,11 @@ manifest.  It reads
   map and declared inputs, the Quantbase tag map and declared inputs, and the
   pins of the admitted Quantbase source files, every byte checked against the
   policy manifest;
-* the IBKR account generation (catalog schema 7): the parent account's rows;
 * the selected provider-ledger generation: its catalog records, per provider, the
   source generation the ledger admitted.  Each artifact binds that id as its
-  ``parent_ledger_generation_id`` and the IBKR generation read here must be it;
+  ``parent_ledger_generation_id``;
+* the IBKR account generation (catalog schema 7) that id names, found under an
+  explicit generation root: the parent account's rows;
 * the admitted Quantbase source files, located by an explicit directory;
 
 and writes one ``sleeve-account-facts`` and one ``quantbase-fund-facts``
@@ -191,7 +192,7 @@ def build_release_sleeve_facts(
     *,
     policy_manifest_path: Path,
     provider_ledger_generation_dir: Path,
-    ibkr_generation_dir: Path,
+    ibkr_generation_root: Path,
     quantbase_source_dir: Path,
     output_dir: Path,
 ) -> dict[str, Any]:
@@ -237,20 +238,23 @@ def build_release_sleeve_facts(
     ledger_generation, ledger_bytes = _selected_catalog(
         provider_ledger_generation_dir, *_LEDGER_CATALOG
     )
-    ibkr_generation, ibkr_catalog_bytes = _selected_catalog(
-        ibkr_generation_dir, *_IBKR_CATALOG
-    )
     catalog = _object(_load_json(ledger_bytes, "provider-ledger catalog"), "catalog")
     try:
         ibkr_map = tag_map_module.validate_tag_map(ibkr_tag_map)
         ibkr_decl = ibkr_builder.load_declared_inputs(ibkr_declared, ibkr_map)
         ibkr_parent = ibkr_map.parent(ibkr_decl.parent_account_id)
         parent_generation = provider_generation_id(catalog, ibkr_parent.provider_id)
-        if parent_generation != ibkr_generation:
+        ibkr_dir = ibkr_generation_root / "generations" / parent_generation
+        if not ibkr_dir.is_dir():
             raise SleeveFactsReleaseError(
-                f"the IBKR generation read is {ibkr_generation}, but the selected "
-                f"provider ledger records {ibkr_parent.provider_id} generation "
-                f"{parent_generation}"
+                f"the selected provider ledger records {ibkr_parent.provider_id} "
+                f"generation {parent_generation}, which is absent under "
+                f"{ibkr_generation_root}"
+            )
+        ibkr_generation, ibkr_catalog_bytes = _selected_catalog(ibkr_dir, *_IBKR_CATALOG)
+        if ibkr_generation != parent_generation:
+            raise SleeveFactsReleaseError(
+                "the IBKR generation read differs from the id the ledger records"
             )
         rows, rows_sha256 = ibkr_builder.rows_from_catalog(
             ibkr_catalog_bytes,
@@ -335,10 +339,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="the selected provider-ledger generation directory (<root>/generations/<id>)",
     )
     parser.add_argument(
-        "--ibkr-generation",
+        "--ibkr-generation-root",
         type=Path,
         required=True,
-        help="the IBKR account generation directory (<root>/generations/<id>)",
+        help="the IBKR data root holding generations/<id>; the id is the ledger's",
     )
     parser.add_argument(
         "--quantbase-source-dir",
@@ -352,7 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         selection = build_release_sleeve_facts(
             policy_manifest_path=args.policy_manifest,
             provider_ledger_generation_dir=args.provider_ledger_generation,
-            ibkr_generation_dir=args.ibkr_generation,
+            ibkr_generation_root=args.ibkr_generation_root,
             quantbase_source_dir=args.quantbase_source_dir,
             output_dir=args.output_dir,
         )

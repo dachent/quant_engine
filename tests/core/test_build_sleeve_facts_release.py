@@ -157,8 +157,9 @@ class World:
             "positions": list(rows.positions),
             "change_in_nav_observations": list(rows.change_in_nav),
         }
+        self.ibkr_root = tmp_path / "ibkr"
         self.ibkr_dir = _generation(
-            tmp_path / "ibkr",
+            self.ibkr_root,
             "ibkr-catalog.json",
             "normalized/ibkr-catalog.json",
             "ibkr-catalog",
@@ -201,7 +202,7 @@ class World:
         arguments: dict[str, Any] = {
             "policy_manifest_path": self.manifest_path,
             "provider_ledger_generation_dir": self.ledger_dir,
-            "ibkr_generation_dir": self.ibkr_dir,
+            "ibkr_generation_root": self.ibkr_root,
             "quantbase_source_dir": self.sources,
             "output_dir": output or self.tmp_path / "out",
         }
@@ -249,13 +250,24 @@ def test_a_second_build_is_byte_identical_and_create_only(world: World) -> None:
         world.build()
 
 
-def test_the_ibkr_generation_must_be_the_one_the_ledger_records(world: World) -> None:
+def test_the_ibkr_generation_is_the_one_the_ledger_records(world: World) -> None:
     ledger = world.make_ledger(world.tmp_path / "ledger-b", ibkr_id="a" * 64)
-    with pytest.raises(release.SleeveFactsReleaseError) as raised:
+    with pytest.raises(release.SleeveFactsReleaseError, match="is absent") as raised:
         world.build(provider_ledger_generation_dir=ledger)
-    assert world.ibkr_dir.name in str(raised.value)
     assert "a" * 64 in str(raised.value)
     assert not (world.tmp_path / "out").exists()
+
+
+def test_a_generation_directory_that_is_not_its_manifest_id_is_refused(
+    world: World,
+) -> None:
+    liar = world.ibkr_root / "generations" / ("a" * 64)
+    liar.mkdir()
+    for item in world.ibkr_dir.iterdir():
+        (liar / item.name).write_bytes(item.read_bytes())
+    ledger = world.make_ledger(world.tmp_path / "ledger-d", ibkr_id="a" * 64)
+    with pytest.raises(release.SleeveFactsReleaseError, match="manifest id"):
+        world.build(provider_ledger_generation_dir=ledger)
 
 
 def test_a_ledger_without_the_provider_generation_is_refused(world: World) -> None:
@@ -325,7 +337,7 @@ def test_the_cli_reports_the_selection_and_refuses_with_exit_one(
     args = [
         "--policy-manifest", str(world.manifest_path),
         "--provider-ledger-generation", str(world.ledger_dir),
-        "--ibkr-generation", str(world.ibkr_dir),
+        "--ibkr-generation-root", str(world.ibkr_root),
         "--quantbase-source-dir", str(world.sources),
         "--output-dir", str(out),
     ]  # fmt: skip

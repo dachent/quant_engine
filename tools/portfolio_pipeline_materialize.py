@@ -367,6 +367,41 @@ def _admission_policy_artifact(artifact_rows: Sequence[Mapping[str, Any]]) -> Pa
     return path
 
 
+def _production_sleeve_facts_paths(
+    artifact_rows: Sequence[Mapping[str, Any]],
+) -> tuple[Path, ...]:
+    """Resolve the selected sleeve-facts files from the production artifact inventory.
+
+    The account-manifest generation names the facts it selected by identity only.
+    Each travels as its own node, ``financial-account-manifest-sleeve-facts-<sha256
+    [:16]>``, exactly as the admission policy does.  The node id must name the
+    digest of the file it binds, and the bytes are re-read here.
+    """
+
+    prefix = "financial-account-manifest-sleeve-facts-"
+    paths: list[Path] = []
+    for row in sorted(
+        (
+            item
+            for item in artifact_rows
+            if item.get("kind") == "ARTIFACT"
+            and str(item.get("node_id", "")).startswith(prefix)
+        ),
+        key=lambda item: str(item["node_id"]),
+    ):
+        path = Path(_text(row.get("path"), "HWM sleeve facts path"))
+        definition = _file_definition(path)
+        if (
+            definition["sha256"] != row.get("sha256")
+            or definition["size_bytes"] != row.get("size_bytes")
+            or Path(cast(str, definition["path"])).resolve() != path.resolve()
+            or row.get("node_id") != f"{prefix}{str(definition['sha256'])[:16]}"
+        ):
+            raise MaterializationError("selected HWM sleeve facts binding differs")
+        paths.append(path)
+    return tuple(paths)
+
+
 def _production_hwm_source_paths(
     sources: Mapping[str, Path],
     artifact_rows: Sequence[Mapping[str, Any]],
@@ -2168,6 +2203,7 @@ def _hwm_input_authority_assessment(
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
+    hwm_sleeve_facts_paths: Sequence[Path] = (),
     assessment_path: Path | None = None,
     input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -2331,6 +2367,7 @@ def _hwm_input_authority_assessment(
             bindings=paths,
             input_contract_path=input_contract_path,
             policy_bytes=governed_policy_bytes,
+            sleeve_facts_paths=hwm_sleeve_facts_paths,
         )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         raise MaterializationError(
@@ -2365,6 +2402,7 @@ def _product_gate_rows(
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
+    hwm_sleeve_facts_paths: Sequence[Path] = (),
     input_contract_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     payload = _product_gate_payload(authority)
@@ -2392,6 +2430,7 @@ def _product_gate_rows(
             authority,
             hwm_bindings=hwm_bindings,
             hwm_source_paths=hwm_source_paths,
+            hwm_sleeve_facts_paths=hwm_sleeve_facts_paths,
             assessment_path=hwm_path,
             input_contract_path=input_contract_path,
         )
@@ -5636,6 +5675,11 @@ def build_production_spec(
             )
             if hwm_bindings is not None
             else None
+        ),
+        hwm_sleeve_facts_paths=(
+            _production_sleeve_facts_paths(artifact_rows)
+            if hwm_bindings is not None
+            else ()
         ),
     )
     manifest_gates = _financial_epoch_manifest_gate_rows(

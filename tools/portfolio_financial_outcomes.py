@@ -455,6 +455,42 @@ def _manifest_artifact(
     return path, _verified_file(path, definition.sha256, definition.size_bytes)
 
 
+SLEEVE_FACTS_NODE_PREFIX = "financial-account-manifest-sleeve-facts-"
+
+
+def sleeve_facts_node_id(sha256: str) -> str:
+    """The production-specification node id of one selected sleeve-facts artifact."""
+
+    return f"{SLEEVE_FACTS_NODE_PREFIX}{sha256[:16]}"
+
+
+def selected_sleeve_facts_paths(spec: Any) -> tuple[Path, ...]:
+    """The sleeve-facts files the specification names, each verified against its node.
+
+    The account-manifest generation stores only the identity of the sleeve facts
+    it selected, so they travel as their own nodes beside it, like the admission
+    policy.  A node whose id does not name its own digest is refused.
+    """
+
+    paths: list[Path] = []
+    for node in sorted(
+        (
+            item
+            for item in spec.nodes
+            if isinstance(item, ArtifactNode)
+            and item.node_id.startswith(SLEEVE_FACTS_NODE_PREFIX)
+        ),
+        key=lambda item: item.node_id,
+    ):
+        _verified_file(node.path, node.sha256, node.size_bytes)
+        if node.node_id != sleeve_facts_node_id(node.sha256):
+            raise FinancialOutcomeError(
+                f"selected sleeve facts node does not name its digest: {node.node_id}"
+            )
+        paths.append(node.path)
+    return tuple(paths)
+
+
 def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     """Resolve the already selected account, provider and baseline authorities."""
 
@@ -545,6 +581,7 @@ def verify_selected_hwm_generation(
     bindings: Mapping[str, Path],
     input_contract_path: Path | None = None,
     policy_bytes: bytes | None = None,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> set[str]:
     """Rebuild schema-1 HWM observations from exact account source bytes.
 
@@ -571,6 +608,7 @@ def verify_selected_hwm_generation(
         provider_admission_path=bindings["provider_admission_receipt"],
         hwm_policy_path=HWM_GOVERNED_POLICY,
         hwm_policy_bytes=policy_bytes,
+        sleeve_facts_paths=sleeve_facts_paths,
     )
     if rebuilt != json.loads(bindings["input_generation"].read_bytes()):
         raise FinancialOutcomeError(
@@ -1322,6 +1360,7 @@ def _rebuild_selected_epochs(
         ],
         provider_ledger_generation_path=sources["provider_ledger_generation_path"],
         baseline_generation_path=sources["baseline_generation_path"],
+        sleeve_facts_paths=selected_sleeve_facts_paths(spec),
     )
     result = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
     rows = result["rows"]
@@ -1915,6 +1954,7 @@ def _validate_financial_outcomes(
         selected_sources,
         contract_path=contract_path,
         bindings={key: Path(value["path"]) for key, value in bindings.items()},
+        sleeve_facts_paths=selected_sleeve_facts_paths(spec),
     )
     hwm_node = nodes["financial-outcome-hwm"]
     if (

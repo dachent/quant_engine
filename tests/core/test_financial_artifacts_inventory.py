@@ -335,3 +335,100 @@ def test_main_appends_the_authority_rows_to_the_inventory():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "history_authority_rows" in called
+
+
+def _epoch_checkpoint_with_facts(tmp_path: Path, files: dict[str, bytes]) -> Path:
+    checkpoint = tmp_path / "run" / "preparation" / "checkpoints"
+    checkpoint.mkdir(parents=True)
+    pins = []
+    for name, payload in sorted(files.items()):
+        path = tmp_path / "facts" / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(payload)
+        pins.append(
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    (checkpoint / "epoch.json").write_bytes(
+        json.dumps({"result": {"sleeve_facts": pins}}).encode()
+    )
+    return tmp_path / "run"
+
+
+def test_sleeve_facts_rows_name_every_file_preparation_consumed(tmp_path):
+    from types import SimpleNamespace
+
+    import portfolio_financial_outcomes as outcomes
+    import portfolio_pipeline_materialize as materializer
+
+    from quant_engine.core import pipeline as core_pipeline
+
+    module = _load_module()
+    files = {"a.json": b'{"a":1}\n', "b.json": b'{"b":2}\n'}
+    run = _epoch_checkpoint_with_facts(tmp_path, files)
+    rows = module.sleeve_facts_rows(run)
+
+    assert len(rows) == 2
+    assert {row["node_id"] for row in rows} == {
+        outcomes.sleeve_facts_node_id(hashlib.sha256(payload).hexdigest())
+        for payload in files.values()
+    }
+    assert all(row["kind"] == "ARTIFACT" and row["depends_on"] == [] for row in rows)
+    # producer and both consumers agree, with nothing fabricated on either side
+    assert {path.name for path in materializer._production_sleeve_facts_paths(rows)} == set(
+        files
+    )
+    nodes = tuple(
+        core_pipeline.ArtifactNode(
+            str(row["node_id"]),
+            (),
+            Path(str(row["path"])),
+            str(row["sha256"]),
+            int(row["size_bytes"]),
+        )
+        for row in rows
+    )
+    assert {
+        path.name for path in outcomes.selected_sleeve_facts_paths(SimpleNamespace(nodes=nodes))
+    } == set(files)
+
+
+def test_a_run_without_sleeve_facts_adds_no_row(tmp_path):
+    module = _load_module()
+    assert module.sleeve_facts_rows(_epoch_checkpoint_with_facts(tmp_path, {})) == []
+
+
+def test_sleeve_facts_rows_refuse_a_file_that_drifted_from_the_record(tmp_path):
+    module = _load_module()
+    run = _epoch_checkpoint_with_facts(tmp_path, {"a.json": b'{"a":1}\n'})
+    (tmp_path / "facts" / "a.json").write_bytes(b'{"a":2}\n')
+    with pytest.raises(SystemExit, match="differ from the files preparation consumed"):
+        module.sleeve_facts_rows(run)
+
+
+def test_consumers_refuse_a_sleeve_facts_node_that_does_not_name_its_digest(tmp_path):
+    from types import SimpleNamespace
+
+    import portfolio_financial_outcomes as outcomes
+    import portfolio_pipeline_materialize as materializer
+
+    from quant_engine.core import pipeline as core_pipeline
+
+    module = _load_module()
+    run = _epoch_checkpoint_with_facts(tmp_path, {"a.json": b'{"a":1}\n'})
+    (row,) = module.sleeve_facts_rows(run)
+    row = {**row, "node_id": "financial-account-manifest-sleeve-facts-0123456789abcdef"}
+    with pytest.raises(materializer.MaterializationError, match="binding differs"):
+        materializer._production_sleeve_facts_paths([row])
+    node = core_pipeline.ArtifactNode(
+        str(row["node_id"]),
+        (),
+        Path(str(row["path"])),
+        str(row["sha256"]),
+        int(row["size_bytes"]),
+    )
+    with pytest.raises(outcomes.FinancialOutcomeError, match="does not name its digest"):
+        outcomes.selected_sleeve_facts_paths(SimpleNamespace(nodes=(node,)))
