@@ -8766,6 +8766,155 @@ def _cash_label(
     return oldest.isoformat(), None
 
 
+# ---------------------------------------------------- derived sleeve epochs (R2)
+#
+# The two derivations (A and B) read the raw executions and the owner's tag map and
+# declare, per derived sleeve or retired fund, its epoch and capital and, for the
+# perimeter, which accounts carry epochs at all.  These views read the SAME facts
+# from the published panel, so the oracle compares A = B with the manifest the
+# report was built from.
+
+DERIVED_EPOCH_FIELDS: dict[str, str] = {
+    "date.epoch.start": "effective_start",
+    "date.epoch.end": "effective_end",
+    "capital.epoch.opening": "opening_capital",
+    "capital.epoch.net_capital": "net_capital",
+    "capital.epoch.closing": "current_value",
+}
+DERIVED_EPOCH_METRICS = frozenset(DERIVED_EPOCH_FIELDS)
+DERIVED_UNIVERSE_METRICS = frozenset(
+    {
+        "universe.derived_epoch_ids",
+        "universe.derived_epoch_count",
+        "universe.retained_strategy_ids",
+        "universe.retained_strategy_count",
+        "universe.registry_strategy_count",
+        "universe.residual_parent_ids",
+    }
+)
+OPEN_EPOCH = "open"
+RETAINED_RECORD_KIND = "RETAINED_HISTORY_ONLY"
+
+
+def _derived_epoch_views(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
+    key = DERIVED_EPOCH_FIELDS[metric_id]
+    out: list[Observed] = []
+    for position, row in manifest_rows(ctx):
+        if str(row.get("account_id")) != entity:
+            continue
+        value = row.get(key)
+        if metric_id == "date.epoch.end" and value is None:
+            value = OPEN_EPOCH
+        label = "|".join(epoch_key(row))
+        out.append(
+            Observed(
+                f"panel:account_manifest.{key}[{label}]",
+                value,
+                None,
+                None,
+                None,
+                PANEL,
+                f"$.account_manifest.rows[{position}].{key}",
+            )
+        )
+    return out
+
+
+def expected_derived_accounts(ctx: Context) -> frozenset[str]:
+    """The derived epoch accounts the expected baseline declares (entities of the
+    ``date.epoch.start`` rows)."""
+
+    return frozenset(
+        str(row.get("entity"))
+        for row in ctx.expected or []
+        if row.get("metric_id") == "date.epoch.start"
+    )
+
+
+def _derived_parents(accounts: Iterable[str]) -> frozenset[str]:
+    """A derived account is ``<parent>-<sleeve>``: the parent is what precedes the
+    last hyphen."""
+
+    return frozenset(
+        account.rsplit("-", 1)[0] for account in accounts if "-" in account
+    )
+
+
+def _epoch_id(row: Mapping[str, Any]) -> str:
+    end = row.get("effective_end")
+    return "|".join(
+        (
+            str(row.get("account_id")),
+            str(row.get("strategy_id")),
+            str(row.get("effective_start")),
+            OPEN_EPOCH if end is None else str(end),
+        )
+    )
+
+
+def _derived_universe_views(ctx: Context, metric_id: str) -> list[Observed]:
+    accounts = expected_derived_accounts(ctx)
+    if not accounts:
+        return []
+    parents = _derived_parents(accounts)
+    derived = [
+        (position, row)
+        for position, row in manifest_rows(ctx)
+        if str(row.get("account_id")) in accounts
+        or any(
+            str(row.get("account_id")).startswith(f"{parent}-") for parent in parents
+        )
+    ]
+    manifest_accounts = {str(row.get("account_id")) for _, row in manifest_rows(ctx)}
+    panel_strategies = [
+        row for row in rows(ctx.panel, "strategies") if row.get("strategy_id")
+    ]
+    value: Any
+    if metric_id == "universe.derived_epoch_ids":
+        value = sorted(_epoch_id(row) for _, row in derived)
+        path = "$.account_manifest.rows"
+    elif metric_id == "universe.derived_epoch_count":
+        value = len(derived)
+        path = "$.account_manifest.rows"
+    elif metric_id == "universe.retained_strategy_ids":
+        value = sorted(
+            str(row.get("strategy_id"))
+            for row in panel_strategies
+            if row.get("record_kind") == RETAINED_RECORD_KIND
+            and str(row.get("strategy_id"))
+            in {str(item.get("strategy_id")) for _, item in derived}
+        )
+        path = "$.strategies"
+    elif metric_id == "universe.retained_strategy_count":
+        value = len(
+            [
+                row
+                for row in panel_strategies
+                if row.get("record_kind") == RETAINED_RECORD_KIND
+                and str(row.get("strategy_id"))
+                in {str(item.get("strategy_id")) for _, item in derived}
+            ]
+        )
+        path = "$.strategies"
+    elif metric_id == "universe.registry_strategy_count":
+        value = len({str(row.get("strategy_id")) for row in panel_strategies})
+        path = "$.strategies"
+    else:
+        value = sorted(parent for parent in parents if parent not in manifest_accounts)
+        path = "$.account_manifest.rows"
+    return [
+        Observed(
+            f"panel:{metric_id}",
+            value,
+            None,
+            None,
+            None,
+            PANEL,
+            path,
+        )
+    ]
+
+
 def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
     report, panel = ctx.report, ctx.panel
     out: list[Observed] = []
@@ -9324,6 +9473,10 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                         f"$.strategy_summary[{position}].account_live_cumulative_return",
                     )
                 )
+    elif metric_id in DERIVED_EPOCH_METRICS:
+        out.extend(_derived_epoch_views(ctx, metric_id, entity))
+    elif metric_id in DERIVED_UNIVERSE_METRICS:
+        out.extend(_derived_universe_views(ctx, metric_id))
     return out
 
 
