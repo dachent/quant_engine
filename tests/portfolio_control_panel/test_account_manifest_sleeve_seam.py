@@ -13,6 +13,7 @@ agree.  All inputs are synthetic.
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from decimal import Decimal
 import hashlib
 import json
@@ -34,6 +35,10 @@ from test_account_manifest_generation import (  # noqa: F401
     _selected_input_kwargs,
     perimeter_module,
     verifier_module,
+)
+from test_stage_current_epoch_manifest import (  # noqa: F401
+    _materialize_inputs,
+    runner_module,
 )
 
 PARENT = "synthetic-account-01"
@@ -1076,3 +1081,55 @@ def test_ledger_with_two_generations_for_one_provider_is_refused(
     selected = _selected(perimeter_module, (snapshot,), ledger_edit=duplicate)
     with pytest.raises(Exception, match="two generations for provider synthetic"):
         perimeter_module.build_account_manifest_payloads(selected)
+
+
+# --------------------------------------------------------------------------
+# the stage runner selects the facts
+
+
+def test_stage_runner_selects_sleeve_facts_and_binds_their_identity(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+) -> None:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts" / "sleeve-account-facts.json"
+    facts_path.parent.mkdir()
+    facts_path.write_bytes(_facts_bytes(reallocate_facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    generation = tmp_path / "output" / "generations" / result["generation_id"]
+    identities = json.loads(
+        (generation / "authority" / "selected-input-identities.json").read_bytes()
+    )
+    assert identities["sleeve_facts"] == [
+        {"sha256": snapshot.sha256, "size_bytes": snapshot.size_bytes}
+    ]
+    manifest = json.loads(
+        (generation / "outputs" / "account-strategy-manifest.json").read_bytes()
+    )
+    assert {row["account_id"] for row in manifest["rows"]} >= {S1, S2}
+    assert PARENT not in {row["account_id"] for row in manifest["rows"]}
+
+    # the same bytes twice, or bytes the ledger does not admit, stage nothing
+    with pytest.raises(Exception, match="repeat an artifact"):
+        runner_module.stage_current_epoch_manifest(
+            **arguments,
+            output_generation_root=tmp_path / "output-dup",
+            sleeve_facts_paths=(facts_path, facts_path),
+        )
+    stray = tmp_path / "facts" / "stray.json"
+    stray.write_bytes(_rebind_generation(reallocate_facts, "d" * 64))
+    with pytest.raises(Exception, match="parent_ledger_generation_id"):
+        runner_module.stage_current_epoch_manifest(
+            **arguments,
+            output_generation_root=tmp_path / "output-stray",
+            sleeve_facts_paths=(stray,),
+        )
+    assert not (tmp_path / "output-stray").exists()
