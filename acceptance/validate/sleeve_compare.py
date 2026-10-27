@@ -275,7 +275,9 @@ def compare_with_manifest(
     ``strategy_id``, ``effective_start``, ``effective_end``, ``opening_capital``,
     ``net_capital``, ``current_value``.  A derived account with no row, a row of a
     derived account the derivation does not declare, and a residual parent that still
-    carries a row are all differences.
+    carries a row are all differences.  A parent the combined derivation keeps an
+    epoch-keyed ``twr.account`` row for is a live parent (perimeter rule): its own row is
+    expected.
     """
 
     differences: list[Difference] = []
@@ -283,6 +285,11 @@ def compare_with_manifest(
     differences.extend(_refusals(block, "derivation"))
     epochs = {str(row["account_id"]): row for row in block["epochs"]}
     parents = {account.rsplit("-", 1)[0] for account in epochs}
+    live_parents = {
+        str(row.get("entity")).split("|")[0]
+        for row in document.get("metrics") or []
+        if isinstance(row, Mapping) and row.get("metric_id") == "twr.account"
+    } & parents
     by_account: dict[str, list[Mapping[str, Any]]] = {}
     for row in manifest_rows:
         by_account.setdefault(str(row.get("account_id")), []).append(row)
@@ -338,6 +345,10 @@ def compare_with_manifest(
                 )
     for account, found in sorted(by_account.items()):
         if account in epochs:
+            continue
+        if account in live_parents:
+            # the combined derivation applies the perimeter rule: a parent it emits
+            # epoch-keyed rows for keeps its own epoch (a live parent, nothing dropped)
             continue
         if account in parents:
             differences.append(

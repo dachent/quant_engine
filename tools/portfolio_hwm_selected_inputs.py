@@ -822,6 +822,8 @@ def _source_rows(
                 "provider": _text(
                     output_rows[key].get("provider"), "derived output provider"
                 ),
+                # positive evidence from the DERIVED_SLEEVE_COVERAGE_V1 authority
+                DERIVED_PARENT_FIELD: effective.parents[key],
             }
     if len(crosswalk_by_key) != 13:
         raise SelectedHwmInputError(
@@ -1198,8 +1200,16 @@ def _validate_hwm_return_parity(
     *,
     declared_nav_gap_dates_by_strategy: Mapping[str, frozenset[date]] | None = None,
     recompute_gap_interval: Callable[[str, date, date], Decimal] | None = None,
+    derived_strategies: frozenset[str] = frozenset(),
 ) -> None:
-    """Reconcile HWM observed intervals to ACCOUNT_LIVE ledger coverage."""
+    """Reconcile HWM observed intervals to ACCOUNT_LIVE ledger coverage.
+
+    ``derived_strategies`` are strategies whose governed epoch is a derived sleeve: the
+    ledger's ACCOUNT_LIVE series for such a strategy is the whole parent account's NAV
+    path, a different series from the sleeve's own, so there is nothing to reconcile it
+    to.  The sleeve's own series is verified by the account manifest's independent
+    verifier and the acceptance derivations.
+    """
 
     account_live = [
         row
@@ -1219,6 +1229,8 @@ def _validate_hwm_return_parity(
     tolerance = Decimal("1e-12")
     declared_gaps = declared_nav_gap_dates_by_strategy or {}
     for strategy_id, rows in sorted(hwm_by_strategy.items()):
+        if strategy_id in derived_strategies:
+            continue
         start = min(
             _day(row.get("interval_start"), "HWM return interval_start") for row in rows
         )
@@ -1320,6 +1332,24 @@ def _validate_hwm_return_parity(
             )
 
 
+DERIVED_PARENT_FIELD = "derived_from_parent"
+
+
+def _derived_sleeve_strategies(crosswalk: Mapping[EpochKey, Row]) -> frozenset[str]:
+    """Strategies whose every governed epoch is a derived sleeve.
+
+    Identified by the shared perimeter rule (a ``DERIVED_SLEEVE_COVERAGE_V1`` coverage
+    row names the parent account), never by an account missing from the ledger.
+    """
+
+    derived: dict[str, bool] = {}
+    for key, row in crosswalk.items():
+        derived[key[1]] = derived.get(key[1], True) and bool(
+            row.get(DERIVED_PARENT_FIELD)
+        )
+    return frozenset(strategy for strategy, flag in derived.items() if flag)
+
+
 def _declared_nav_gap_dates_by_strategy(
     provider_ledger: Mapping[str, Any],
     crosswalk: Mapping[EpochKey, Row],
@@ -1368,9 +1398,20 @@ def _declared_nav_gap_dates_by_strategy(
                 continue
             account_provider = provider_by_account.get(key[0])
             if account_provider is None:
-                raise SelectedHwmInputError(
-                    "parity not derivable: selected account lacks ledger provider identity"
+                # A derived sleeve account has no NAV row in the provider ledger: its
+                # values come from the sleeve facts.  It carries the NAV omissions the
+                # ledger declares for the provider of the parent account its coverage
+                # authority names.  Any other account without a ledger NAV refuses.
+                parent = crosswalk[key].get(DERIVED_PARENT_FIELD)
+                account_provider = (
+                    provider_by_account.get(str(parent))
+                    if isinstance(parent, str) and parent
+                    else None
                 )
+                if account_provider is None:
+                    raise SelectedHwmInputError(
+                        "parity not derivable: selected account lacks ledger provider identity"
+                    )
             providers.add(account_provider)
         result[strategy_id] = frozenset(
             gap
@@ -1932,6 +1973,7 @@ def _selected_hwm_source_rows(
             declared_nav_gap_dates_by_strategy=_declared_nav_gap_dates_by_strategy(
                 provider_ledger, crosswalk
             ),
+            derived_strategies=_derived_sleeve_strategies(crosswalk),
             recompute_gap_interval=lambda strategy_id, start, end: (
                 _recompute_gap_interval_return(
                     strategy_id,

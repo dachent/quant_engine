@@ -3955,6 +3955,21 @@ def derive(
             )
         layout = manifest.layout
         expected_sha256 = manifest.pins
+    sleeve_document: dict[str, Any] | None = None
+    sleeve_parents: dict[str, str] = {}
+    sleeve_members: dict[str, Member] = {}
+    if sleeve_inputs is not None and manifest is not None:
+        from .sleeves import append_sleeves
+
+        sleeve_document = append_sleeves(
+            {},
+            sleeve_inputs,
+            qe_root,
+            repo_root,
+            cutoff,
+            parents_out=sleeve_parents,
+            members_out=sleeve_members,
+        )
     with localcontext() as context:
         context.prec = PRECISION
         document = _derive(
@@ -3967,8 +3982,27 @@ def derive(
             layout,
             declared_cutoff,
             manifest,
+            sleeve_document,
+            sleeve_parents,
+            sleeve_members,
         )
-    if sleeve_inputs is not None:
+    if sleeve_document is not None:
+        for key in ("metrics", "not_derivable"):
+            document[key].extend(sleeve_document[key])
+        existing = {record["path"] for record in document.get("inputs", [])}
+        document.setdefault("inputs", []).extend(
+            record
+            for record in sleeve_document["inputs"]
+            if record["path"] not in existing
+        )
+        document["sleeve_derivation"] = sleeve_document["sleeve_derivation"]
+        document["sleeve_derivation"]["assumptions"].append(
+            "COMBINED: declared rows are compared as four-part identity sets; "
+            "derived identity and parent authority come from raw sleeve derivation. "
+            "Dropped parents lose all baseline epochs. Only strategy MWR uses "
+            "the effective funded-epoch pool; other strategy rows stay canonical."
+        )
+    elif sleeve_inputs is not None:
         from .sleeves import append_sleeves
 
         return append_sleeves(document, sleeve_inputs, qe_root, repo_root, cutoff)
@@ -4033,7 +4067,14 @@ def _derive(
     layout: Mapping[str, str] | None,
     declared_cutoff: dt.date,
     manifest: InputsManifest | None,
+    sleeve_document: dict[str, Any] | None = None,
+    sleeve_parents: Mapping[str, str] | None = None,
+    sleeve_members: Mapping[str, Member] | None = None,
 ) -> dict[str, Any]:
+    if sleeve_document is not None and (
+        manifest is None or manifest.epoch_metadata is None
+    ):
+        raise InputError("combined run requires declared_cutoff_date metadata")
     pins = PINNED_SHA256 if expected_sha256 is None else expected_sha256
     moved = layout or {}
     v3 = manifest is not None and manifest.schema == V3_INPUTS_MANIFEST_SCHEMA
@@ -4076,6 +4117,33 @@ def _derive(
         contract_bytes[relative] = repo_root.joinpath(*relative.split("/")).read_bytes()
         contract_paths[relative] = relative
     crosswalk = parse_crosswalk(files[CROSSWALK].data)
+    residual: set[str] = set()
+    if sleeve_document is not None:
+        from .combined import perimeter
+
+        assert manifest is not None and manifest.epoch_metadata is not None
+        if "declared_cutoff_date" not in files:
+            path, digest, size = manifest.epoch_metadata
+            metadata = read_input(qe_root, path, {path: digest})
+            if size is not None and metadata.size != size:
+                raise InputError("epoch metadata byte count differs from manifest")
+            files["declared_cutoff_date"] = metadata
+        try:
+            declared = json.loads(files["declared_cutoff_date"].data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InputError("declared epoch manifest is not JSON") from exc
+        if not isinstance(declared, dict) or not isinstance(declared.get("rows"), list):
+            raise InputError("declared epoch manifest lacks rows")
+        if any(not isinstance(row, dict) for row in declared["rows"]):
+            raise InputError("declared epoch manifest has malformed row")
+        if iso_date(declared.get("calculation_cutoff_date")) != cutoff:
+            raise InputError("epoch metadata cutoff differs from selected cutoff")
+        residual = perimeter(
+            crosswalk,
+            sleeve_document["sleeve_derivation"]["epochs"],
+            sleeve_parents or {},
+            declared["rows"],
+        )
     if (
         v3
         and authority is not None
@@ -4150,6 +4218,19 @@ def _derive(
             _derive_accounts(output, crosswalk, membership, sources, cutoff, ledger)
             _derive_strategies_and_portfolio(
                 output, crosswalk, membership, sources, cutoff
+            )
+        if sleeve_document is not None:
+            from .combined import apply
+
+            apply(
+                output,
+                crosswalk,
+                membership,
+                sources,
+                cutoff,
+                sleeve_document,
+                sleeve_members or {},
+                residual,
             )
     if manifest is not None:
         # Per-row source provenance: every inputs_used reference names the actual

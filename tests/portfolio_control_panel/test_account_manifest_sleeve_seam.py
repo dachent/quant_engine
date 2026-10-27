@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 import json
 from typing import Any
@@ -1290,3 +1290,54 @@ def test_panel_candidate_binds_a_generation_that_selected_sleeve_facts(
     )
     assert {row["account_id"] for row in manifest["rows"]} >= {S1, S2}
     assert identity["verification"]["publication_readiness"] in {"READY", "NOT_READY"}
+
+
+def test_settlement_pair_carries_one_canonical_nine_decimal_amount(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A cumulative allocated cost of more than 28 digits settles as one nine-decimal amount.
+
+    The generation builder reads amounts under the default 28-digit context and the
+    independent verifier under a wider one.  Both settlement legs of an exited sleeve
+    must therefore carry the same canonical nine-decimal amount, so that both readers
+    pair them (INTERNAL, reciprocal) and classify them identically.
+    """
+
+    facts = _open_and_close_facts()
+    sleeve = next(item for item in facts["sleeves"] if item["account_id"] == S2)
+    carrying = [row for row in sleeve["days"] if row["day"] <= DAYS[2]][:2]
+    assert len(carrying) == 2
+    carrying[0]["alloc_total"] = "12.345678901234567890123456789"
+    carrying[1]["alloc_total"] = "0.000000000000000000001234567"
+    with localcontext() as context:
+        context.prec = 60
+        exact = sum((Decimal(row["alloc_total"]) for row in sleeve["days"]), Decimal(0))
+    assert len(exact.as_tuple().digits) > 28
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(facts))
+    census = _census(
+        [("strategy-s1", DAYS[0], None), ("strategy-s2", DAYS[1], DAYS[3])]
+    )
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=census,
+        parent_nav=OPEN_CLOSE_PARENT_NAV,
+    )
+    # verify() raises unless the verifier's own classified-flows artifact equals the
+    # builder's, so a clean report is the identical-classification proof
+    payloads, report = _build_and_verify(perimeter_module, verifier_module, selected)
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    settle = [
+        event
+        for event in classified["events"]
+        if ":settle-s2:" in str(event["source_record_id"])
+    ]
+    assert {event["account_id"] for event in settle} == {S2, POOL}
+    assert {event["disposition"] for event in settle} == {"INTERNAL"}
+    amounts = [Decimal(event["amount"]["value"]) for event in settle]
+    assert amounts[0] == -amounts[1]
+    assert abs(amounts[0]) == abs(exact).quantize(Decimal("0.000000001"))
+    for event in settle:
+        assert Decimal(event["amount"]["value"]).as_tuple().exponent >= -9

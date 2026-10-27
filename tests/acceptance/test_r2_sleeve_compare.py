@@ -183,3 +183,14 @@ def test_a_refusal_on_either_side_fails_the_comparison_and_the_manifest_check() 
     assert [
         d.where for d in compare.compare_with_manifest(refused, [_manifest_row()])
     ] == ["derivation.refusals"]
+
+
+def test_a_live_parent_with_an_epoch_keyed_row_keeps_its_own_manifest_row() -> None:
+    document = _document()
+    document["metrics"].append(_metric("twr.account", PARENT, "0.1", "ratio"))
+    parent = {**_manifest_row(), "account_id": PARENT}
+    rows = [_manifest_row(), parent]
+    assert compare.compare_with_manifest(document, rows) == []
+    # without the epoch-keyed row the same manifest row is still a residual parent that kept one
+    where = [d.where for d in compare.compare_with_manifest(_document(), rows)]
+    assert where == [f"manifest {PARENT}"]

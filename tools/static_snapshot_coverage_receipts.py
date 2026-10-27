@@ -375,8 +375,15 @@ def issue_static_snapshot_receipts(
     baseline_path: Path,
     crosswalk_path: Path,
     issuer_code_path: Path,
+    parent_window_starts: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-    """Return one canonical authority and all included-epoch static receipts."""
+    """Return one canonical authority and all included-epoch static receipts.
+
+    ``parent_window_starts`` maps a sleeve parent account to the first day of its
+    earliest governed sleeve.  When that day precedes the parent's own earliest included
+    epoch, one more receipt covers the earlier window through the parent's last
+    included epoch: the flow-completeness evidence those sleeves cite.
+    """
     ledger, ledger_bytes = _read_object(ledger_path, "provider ledger")
     manifest, _manifest_bytes = _read_object(
         provider_ledger_manifest_path, "provider ledger generation"
@@ -396,6 +403,23 @@ def issue_static_snapshot_receipts(
     if cutoff > _date(ledger.get("as_of_date"), "provider ledger.as_of_date"):
         raise StaticSnapshotReceiptError("calculation cutoff exceeds provider ledger")
     assignments = _included_assignments(baseline, crosswalk, cutoff)
+    for account_id, window_start in sorted((parent_window_starts or {}).items()):
+        own = sorted(
+            (item for item in assignments if item["account_id"] == account_id),
+            key=lambda item: str(item["requested_start"]),
+        )
+        if not own:
+            continue
+        window_start = _date(window_start, "parent window start")
+        if window_start >= str(own[0]["requested_start"]):
+            continue
+        assignments.append(
+            {
+                **own[0],
+                "requested_start": window_start,
+                "requested_end": max(str(item["requested_end"]) for item in own),
+            }
+        )
     receipts = {
         _receipt_id(item): _receipt_for_assignment(
             item,

@@ -1229,7 +1229,7 @@ tfoot td {
   .nav-stack { flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 6px; -webkit-overflow-scrolling: touch; }
   .nav-item { flex: 0 0 auto; white-space: nowrap; scroll-snap-align: start; min-height: 44px; padding: 8px 12px; }
   .topbar { padding: 10px 14px; }
-  .topbar .eyebrow { font-size: 10px; }
+  .topbar .eyebrow { font-size: 11px; }
   .topbar-meta { gap: 6px 10px; }
   .topbar-meta .as-of { padding: 4px 8px; }
   .topbar-meta .as-of strong { font-size: 11px; letter-spacing: 0; text-transform: none; }
@@ -1245,3 +1245,18 @@ tfoot td {
 @media (min-width: 761px) and (max-width: 1100px) { .exposure-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) 96px; } }
 /* later than the shared chip rule so cards can wrap long gate names */
 .model-card .status-text { white-space: normal; max-width: 100%; overflow-wrap: anywhere; border-radius: 10px; }
+/* Data tab (QA lint): long unbreakable evidence ids wrap inside their column; the observed-records note wraps; the glossary superscript stays readable. */
+#coverage-table th:first-child { overflow-wrap: anywhere; }
+#observation-windows-table td:nth-child(5), #observation-windows-table td:nth-child(5) .cell-secondary { white-space: normal; }
+.return-glossary sup { font-size: 11px; }
+/* Phone cards (QA lint): a long unbreakable token wraps inside its card instead of spilling out of it. */
+@media (max-width: 760px) {
+  #underwriting-table :is(th, td),
+  #fact-coverage-matrix-table :is(th, td),
+  #observation-windows-table :is(th, td),
+  #attribution-dispositions-table :is(th, td) { overflow-wrap: anywhere; }
+  #underwriting-table .status-text,
+  #fact-coverage-matrix-table .status-text,
+  #observation-windows-table .status-text,
+  #attribution-dispositions-table .status-text { white-space: normal; max-width: 100%; overflow-wrap: anywhere; border-radius: 10px; }
+}

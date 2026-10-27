@@ -148,7 +148,10 @@ const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
 const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
 const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
-const expectedCurrentStrategies = dashboardData.strategies.length;
+// The strategy rows include the retained history-only records (#567); the current strategies are the rest.
+const expectedCurrentStrategies = dashboardData.strategies.filter((strategy) => strategy.record_kind !== "RETAINED_HISTORY_ONLY").length;
+// The core benchmarks the weekly payload carries (SPY and SPXL joined the nine in R2).
+const expectedCoreBenchmarks = (dashboardData.weekly_returns?.series || []).filter((row) => (row.display_groups || []).includes("CORE_BENCHMARK")).length;
 const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
 const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
@@ -414,10 +417,16 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
     && epochDom.headers.join("|") === epochHeaders.join("|")
     && rowMatches;
 }
-const manifestStrategyIds = new Set((epochManifest?.rows || []).map((row) => row.strategy_id));
+// Derived sleeves (#567) add retained history-only epochs beside the 13 product epochs; a
+// retained epoch is one of a strategy the panel marks RETAINED_HISTORY_ONLY.
+const retainedStrategyIds = new Set((dashboardData.strategies || [])
+  .filter((strategy) => strategy.record_kind === "RETAINED_HISTORY_ONLY")
+  .map((strategy) => strategy.strategy_id));
+const productManifestRows = (epochManifest?.rows || []).filter((row) => !retainedStrategyIds.has(row.strategy_id));
+const manifestStrategyIds = new Set(productManifestRows.map((row) => row.strategy_id));
 const currentManifestShapeMatch = !epochManifest || !Array.isArray(epochManifest.rows)
   ? false
-  : epochManifest.rows.length === 13
+  : productManifestRows.length === 13
     && manifestStrategyIds.size === 7
     && epochManifest.rows.every((row) => !/echo|composer/i.test(`${row.strategy_id || ""} ${row.account_label || ""}`));
 const manifestCutoff = epochManifest?.calculation_cutoff_date;
@@ -1007,7 +1016,7 @@ if (!weeklyHybridDisabled) {
 checks.push(check(
   "Weekly returns show the source-bound current week by default",
   weeklyRows === expectedCurrentStrategies
-    && benchmarkRows === 9
+    && benchmarkRows === expectedCoreBenchmarks
     && weeklyDefaultVisible === true
     && currentWeekIncluded === weeklyDefaultVisible
     && (!weeklyCurrentIsPartial || (weeklyDataThrough != null && weeklyTableTitle.includes(`PARTIAL · data through ${weeklyDataThrough}`)))
@@ -1062,6 +1071,10 @@ const firstPositionAccount = await page.evaluate(() => {
   return (classified ? rows.find((row) => row.position_class === "CURRENT_AT_CUTOFF") : rows[0])?.account_id;
 });
 await page.locator("#context-account").selectOption(firstPositionAccount);
+// A derived sleeve account (#567) hangs on the selected account: the manifest names it and its label.
+const derivedAccountLabels = new Map((dashboardData.account_manifest?.rows || [])
+  .filter((row) => typeof row.account_id === "string" && row.account_id.startsWith(`${firstPositionAccount}-`))
+  .map((row) => [row.account_id, row.account_label]));
 const selectedAccountLabel = await page.locator("#context-account option:checked").textContent();
 const accountContextSummary = await page.locator("#context-summary").textContent();
 const filteredPositionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
@@ -1083,7 +1096,8 @@ checks.push(check(
     && lifecycleAccountRows.length > 0
     && positionAccountRows.length > 0
     && riskAccountRows.length > 0
-    && [...lifecycleAccountRows, ...positionAccountRows, ...riskAccountRows].every((row) => row.account === firstPositionAccount && row.label === selectedAccountLabel),
+    && [...lifecycleAccountRows, ...positionAccountRows, ...riskAccountRows].every((row) => (row.account === firstPositionAccount && row.label === selectedAccountLabel)
+      || (derivedAccountLabels.get(row.account) !== undefined && row.label === derivedAccountLabels.get(row.account))),
   {
     account_options: accountOptions.length,
     account_options_expected: expectedAccountOptions,

@@ -2365,3 +2365,100 @@ def test_rejects_mutated_ordinary_admission_payload(tmp_path: Path) -> None:
     receipt.write_bytes(receipt.read_bytes() + b"\n")
     with pytest.raises(SelectedHwmInputError, match="artifact identity"):
         selected_hwm._source_generation_from_path(path, "provider-ledger")
+
+
+# ---- derived sleeve strategies in the HWM return parity (D4, D5; #567) ----
+
+_PARENT = "account-parent"
+
+
+def _derived_crosswalk() -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
+    """One derived strategy (on the parent), one baseline strategy, one mixed strategy."""
+    return {
+        (f"{_PARENT}-s2", "derived-only", "2026-01-30", None): {
+            "provider": "IBKR",
+            selected_hwm.DERIVED_PARENT_FIELD: _PARENT,
+        },
+        ("account-other", "baseline-only", "2026-01-02", None): {"provider": "IBKR"},
+        (f"{_PARENT}-s3", "mixed", "2026-01-30", None): {
+            "provider": "IBKR",
+            selected_hwm.DERIVED_PARENT_FIELD: _PARENT,
+        },
+        ("account-other", "mixed", "2026-01-02", "2026-01-29"): {"provider": "IBKR"},
+    }
+
+
+def _ledger_with_gap() -> dict[str, Any]:
+    return {
+        "nav_observations": [
+            {"account_id": _PARENT, "provider_id": "ibkr"},
+            {"account_id": "account-other", "provider_id": "ibkr"},
+        ],
+        "provider_coverage": [
+            {
+                "provider_id": "ibkr",
+                "coverage": {
+                    "declared_exclusions": [{"item": "nav_missing_date:2026-01-03"}]
+                },
+            }
+        ],
+    }
+
+
+def test_only_a_strategy_whose_every_epoch_is_derived_is_a_derived_strategy() -> None:
+    assert selected_hwm._derived_sleeve_strategies(_derived_crosswalk()) == {
+        "derived-only"
+    }
+
+
+def test_parity_skips_a_derived_sleeve_strategy_and_refuses_the_same_series_otherwise() -> (
+    None
+):
+    hwm_rows = [
+        {
+            "strategy_id": "derived-only",
+            "interval_start": "2026-01-01",
+            "interval_end": "2026-01-02",
+            "net_return": "0.1",
+        }
+    ]
+    ledger_rows = [
+        {
+            "strategy_id": "derived-only",
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.2",
+        }
+    ]
+    with pytest.raises(SelectedHwmInputError, match="HWM return parity differs"):
+        selected_hwm._validate_hwm_return_parity(hwm_rows, ledger_rows)
+    selected_hwm._validate_hwm_return_parity(
+        hwm_rows, ledger_rows, derived_strategies=frozenset({"derived-only"})
+    )
+
+
+def test_a_derived_account_takes_the_declared_gaps_of_its_parents_provider() -> None:
+    gaps = selected_hwm._declared_nav_gap_dates_by_strategy(
+        _ledger_with_gap(), _derived_crosswalk()
+    )
+    assert gaps["derived-only"] == frozenset({date(2026, 1, 3)})
+    assert gaps["baseline-only"] == frozenset({date(2026, 1, 3)})
+
+
+def test_a_non_derived_account_missing_from_the_ledger_still_refuses() -> None:
+    crosswalk = {
+        ("account-missing", "baseline-only", "2026-01-02", None): {"provider": "IBKR"}
+    }
+    with pytest.raises(SelectedHwmInputError, match="lacks ledger provider identity"):
+        selected_hwm._declared_nav_gap_dates_by_strategy(_ledger_with_gap(), crosswalk)
+
+
+def test_a_derived_account_whose_named_parent_is_not_in_the_ledger_refuses() -> None:
+    crosswalk = {
+        ("account-ghost-s1", "derived-only", "2026-01-30", None): {
+            "provider": "IBKR",
+            selected_hwm.DERIVED_PARENT_FIELD: "account-ghost",
+        }
+    }
+    with pytest.raises(SelectedHwmInputError, match="lacks ledger provider identity"):
+        selected_hwm._declared_nav_gap_dates_by_strategy(_ledger_with_gap(), crosswalk)

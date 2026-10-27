@@ -16,6 +16,7 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localco
 import hashlib
 import json
 import re
+import sys
 from types import MappingProxyType
 from typing import Final, NoReturn
 
@@ -30,6 +31,8 @@ from quant_engine.core.strict_json import strict_json_loads
 
 class IndependentVerificationError(ValueError):
     """A verifier input, subject set, or transport violates its contract."""
+
+    check: str | None = None
 
 
 EXACT_SUBJECT_PATHS: Final[tuple[str, ...]] = (
@@ -178,10 +181,15 @@ _PORTABLE_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 
 
 def _fail() -> NoReturn:
-    # Keep errors independent of caller labels, paths, and source contents.
-    raise IndependentVerificationError(
-        "independent verification input is invalid"
-    ) from None
+    # Keep the message independent of caller labels, paths, and source contents.  The
+    # failing check (its function and line in this module, nothing from the inputs) is
+    # attached as a note and an attribute, so a failure is traceable without changing
+    # the message every caller and test compares.
+    caller = sys._getframe(1)
+    error = IndependentVerificationError("independent verification input is invalid")
+    error.check = f"{caller.f_code.co_name}:{caller.f_lineno}"
+    error.add_note(f"failing check: {error.check}")
+    raise error from None
 
 
 def _require_snapshot(value: object) -> InputSnapshot:
@@ -5124,7 +5132,7 @@ def _verify_mixed_authority_and_coverage_many(
 
     tail_keys = _independent_tail_keys(selected)
     sleeve_view = _independent_sleeve_view(selected)
-    residual_parents = frozenset() if sleeve_view is None else sleeve_view.residual
+    residual_parents = frozenset() if sleeve_view is None else sleeve_view.parents
     authority_snapshot = _require_snapshot(selected.receipt_authority)
     if normalized[_MIXED_AUTHORITY_PATH] != authority_snapshot.contents:
         _fail()
@@ -5641,6 +5649,7 @@ class _SleeveView:
     accounts: tuple[dict[str, object], ...]
     assignments: tuple[dict[str, object], ...]
     residual: frozenset[str]
+    parents: frozenset[str]
     sleeve_accounts: frozenset[str]
     perimeter_accounts: frozenset[str]
     navs: tuple[dict[str, object], ...]
@@ -5975,7 +5984,10 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                         ),
                     }
                 )
-                if exit_day is not None and carried != 0:
+                settled = abs(carried).quantize(
+                    Decimal("0.000000001"), rounding=ROUND_HALF_EVEN
+                )
+                if exit_day is not None and settled != 0:
                     pair = f"{exit_day}:settle-{sleeve_id}"
                     for leg_account, leg_class in (
                         (account, "INTERNAL_OUT" if carried > 0 else "INTERNAL_IN"),
@@ -5988,7 +6000,7 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                                 "class": leg_class,
                                 "event_date": exit_day,
                                 "nav_recognition_date": exit_day,
-                                "amount": _format_decimal(abs(carried)),
+                                "amount": _format_decimal(settled),
                             }
                         )
             if not mine:
@@ -6025,6 +6037,7 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                             "pair_id": pair_id,
                             "account_id": account,
                             "event_date": event_day,
+                            "nav_recognition_date": recognition,
                             "class": flow_class,
                             "amount": _format_decimal(amount),
                         }
@@ -6073,6 +6086,7 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
             )
         ),
         residual=frozenset(residual),
+        parents=frozenset(used_parents),
         sleeve_accounts=frozenset(sleeve_accounts),
         perimeter_accounts=frozenset(perimeter_accounts),
         navs=tuple(sorted(navs, key=lambda row: str(row["record_id"]))),
@@ -6219,8 +6233,21 @@ def _ledger_with_derived(selected: IndependentVerifierInputs) -> dict[str, objec
                 and row["amount"].get("status") == "AVAILABLE"
                 and _parse_retained_source_decimal(row["amount"].get("value")) == wanted
             ]
-            if len(found) != 1 or not str(found[0].get("flow_type")).startswith(
-                "TRANSFER:INTERNAL:"
+            anchor_found = [
+                row
+                for row in (ledger.get("capital_anchors") or [])
+                if isinstance(row, dict)
+                and reference["class"] == "INTERNAL_IN"
+                and row.get("account_id") == reference["account_id"]
+                and row.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+                and row.get("nav_recognition_date") == reference["nav_recognition_date"]
+                and isinstance(row.get("amount"), dict)
+                and row["amount"].get("status") == "AVAILABLE"
+                and _parse_retained_source_decimal(row["amount"].get("value")) == wanted
+            ]
+            if len(found) + len(anchor_found) != 1 or (
+                found
+                and not str(found[0].get("flow_type")).startswith("TRANSFER:INTERNAL:")
             ):
                 _fail()
     merged = dict(ledger)

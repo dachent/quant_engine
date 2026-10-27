@@ -1904,9 +1904,17 @@ def _require_sleeve_reconciliation(
 
 
 def _require_sleeve_references(
-    flows: Sequence[Mapping[str, object]], sleeve: SleeveManifestFacts
+    flows: Sequence[Mapping[str, object]],
+    sleeve: SleeveManifestFacts,
+    anchors: Sequence[Mapping[str, object]] = (),
 ) -> None:
-    """A parent-ledger leg is pairing evidence: it must already be one ledger flow."""
+    """A parent-ledger leg is pairing evidence: it must already be one ledger record.
+
+    The live fund's allocation lives in the ledger as a strategy capital allocation
+    anchor, dated by the provider transaction, while the facts date the leg by the fill
+    day. The two are the same record when the amount agrees and both are recognised in
+    the NAV on the same day, so an INTERNAL_IN reference also matches an anchor.
+    """
 
     for reference in sleeve.references:
         sign = 1 if reference["class"] == "INTERNAL_IN" else -1
@@ -1920,14 +1928,28 @@ def _require_sleeve_references(
             and flow["amount"].get("status") == "AVAILABLE"
             and Decimal(str(flow["amount"].get("value"))) == wanted
         ]
-        if len(matches) != 1:
+        anchor_matches = [
+            anchor
+            for anchor in anchors
+            if reference["class"] == "INTERNAL_IN"
+            and anchor["account_id"] == reference["account_id"]
+            and anchor["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
+            and anchor["nav_recognition_date"] == reference["nav_recognition_date"]
+            and isinstance(anchor["amount"], Mapping)
+            and anchor["amount"].get("status") == "AVAILABLE"
+            and Decimal(str(anchor["amount"].get("value"))) == wanted
+        ]
+        if len(matches) + len(anchor_matches) != 1:
             raise AccountAssignmentPerimeterError(
                 f"parent-ledger reference {reference['pair_id']} "
                 f"({reference['class']} {reference['amount']} on "
                 f"{reference['event_date']} for {reference['account_id']}) matches "
-                f"{len(matches)} ledger flows, not exactly one"
+                f"{len(matches)} ledger flows and {len(anchor_matches)} capital "
+                "anchors, not exactly one record"
             )
-        if not str(matches[0]["flow_type"]).startswith("TRANSFER:INTERNAL:"):
+        if matches and not str(matches[0]["flow_type"]).startswith(
+            "TRANSFER:INTERNAL:"
+        ):
             raise AccountAssignmentPerimeterError(
                 f"parent-ledger reference {reference['pair_id']} is ledger flow "
                 f"{matches[0]['record_id']} of type {matches[0]['flow_type']}, "
@@ -2208,7 +2230,7 @@ def _c3_ledger(
     normalized_ledger["capital_anchors"] = normalized_anchors
     if sleeve is not None:
         _require_sleeve_reconciliation(normalized_navs, sleeve)
-        _require_sleeve_references(normalized_flows, sleeve)
+        _require_sleeve_references(normalized_flows, sleeve, normalized_anchors)
         if (
             {str(item["record_id"]) for item in sleeve.navs} & nav_ids
             or {str(item["record_id"]) for item in sleeve.flows} & flow_ids
@@ -3053,7 +3075,13 @@ def _mixed_receipt_routes(
     mapped: list[dict[str, object]],
     residual_parents: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Route every selected receipt to one distinct mapped interval."""
+    """Route every selected receipt to one distinct mapped interval.
+
+    ``residual_parents`` here are the accounts that may carry a receipt no mapped
+    interval claims: every sleeve parent.  A live parent's own interval starts after
+    its retired sleeves began, so a receipt for the earlier window is the evidence
+    those sleeves cite, exactly like a residual parent's receipt.
+    """
     _validate_mixed_receipt_cardinality(selected_inputs.retrieval_receipts)
     authority = selected_inputs.receipt_authority
     assert authority is not None
@@ -3931,7 +3959,7 @@ def _build_mixed_account_manifest_payloads(
     routes = _mixed_receipt_routes(
         selected_inputs,
         mapped,
-        frozenset() if sleeve is None else sleeve.residual_parents,
+        frozenset() if sleeve is None else sleeve.parents,
     )
     fixed_mixed_paths = {
         *(path.casefold() for path in _NINE_BLOCKED_PATHS),

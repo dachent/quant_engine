@@ -39,17 +39,17 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "6b9719c8dcce51000e0852624856e0a39062ef51"
-CURRENT_AGREE_COUNT = 100
+CURRENT_SUCCESSOR_HEAD = "74dc3fa65cf51d0b70d68c8f21f539f40688de5b"
+CURRENT_AGREE_COUNT = 165
 CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "58e63c32236ef726130d4665c159588c178612bc0c3e65d6c754fedf04e240c5",
-    "b": "a9fd8b0c5a380b3d8150b1073b93035e2282172854e1393032e865689a45b9ef",
+    "a": "5a4c5f0369c09ac866d8b207f880093d0f362176eb4d2d0a8b4bd300c2371d32",
+    "b": "0cccd3abd50c003eb904f143039910a5618272914cac14dd2ec4bd30724e461b",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R1: each deriver ran its own copy of the same inputs (separate contract path).
-    "a": "f4e11cdc6e534e12c772b424ddc3edd2d143419a8c069b533a9156c4f5ba64c0",
-    "b": "f7bc9a3743ca947c33951a2c342e13fbaf9f4c742dbc3c8fc9b6d3c092c37ce4",
+    # R2: both derivers read the same acceptance-inputs manifest (oracle-manifest-r2.json).
+    "a": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
+    "b": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
@@ -305,17 +305,17 @@ def test_current_successor_identity_and_authority_coverage() -> None:
     rows = _rows(doc)
     assert doc["head"] == CURRENT_SUCCESSOR_HEAD
     assert doc["inventory_sha256"] == (
-        "2593811724ce4c2bf52d1039d7edabdee72b590b53d326bfe2a4167bd313c74d"
+        "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
     )
     assert doc["pointer_map_sha256"] == (
-        "fca86572166ee4b422d104587c3397b48757250f5a629e44d584b2a3e1d8de8a"
+        "81e00a815e5f3c83c75f5d84301f653dbeac405fb970806fe1d3249fe3567756"
     )
     assert doc["admission_decision_sha256"] == (
-        "7c43d6740c8d077d2d7d13330439699115cc1f84555f967574cd4f0526547278"
+        "5b71e04ab7e4bf321a294e5e4e0eb3d701ae8342285ebe64fb226f77f7dad272"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
-    assert len(rows) == 118
+    assert len(rows) == 183
     for side in ("a", "b"):
         assert doc["derivations"][side]["code_commit"] == CURRENT_SUCCESSOR_HEAD
         assert (

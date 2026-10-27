@@ -401,6 +401,37 @@ def current_accounts_by_strategy(ctx: Context) -> dict[str, list[str]]:
     return mapping
 
 
+def derived_account_parents(ctx: Context) -> dict[str, str]:
+    """Derived sleeve account -> the listed provider account it hangs on (#567).
+
+    A derived account is a manifest epoch the panel names (``account_manifest.rows``) on
+    ``<parent>-<sleeve>``; it is not a provider account of its own, so the report's
+    ``account_summary`` has no row for it.  Only an account the manifest names that hangs
+    on exactly one listed account counts; nothing is inferred from a name alone.
+    """
+
+    listed = {str(row.get("account_id")) for row in rows(ctx.report, "account_summary")}
+    parents: dict[str, str] = {}
+    for _, row in manifest_rows(ctx):
+        account = row.get("account_id")
+        if not isinstance(account, str) or account in listed:
+            continue
+        hanging = [parent for parent in listed if account.startswith(f"{parent}-")]
+        if len(hanging) == 1:
+            parents[account] = hanging[0]
+    return parents
+
+
+def retained_strategy_ids(ctx: Context) -> set[str]:
+    """Strategies the panel marks as retained history-only records (#567)."""
+
+    return {
+        str(row.get("strategy_id"))
+        for row in rows(ctx.panel, "strategies")
+        if row.get("record_kind") == "RETAINED_HISTORY_ONLY"
+    }
+
+
 def strategy_names(ctx: Context) -> dict[str, str]:
     names: dict[str, str] = {}
     for row in rows(ctx.report, "strategy_summary"):
@@ -4385,11 +4416,20 @@ def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[st
         for row in rows(ctx.report, "account_summary")
     }
     cash = derived_cash_by_strategy(ctx)
+    parents = derived_account_parents(ctx)
     totals: dict[str, tuple[Decimal, list[str]]] = {}
     for strategy, accounts in current_accounts_by_strategy(ctx).items():
         amount = cash.get(strategy, Decimal(0))
+        counted: set[str] = set()
         for account in accounts:
-            amount += values.get(account) or Decimal(0)
+            # a derived sleeve epoch's strategy capital is on the account basis of the
+            # provider account it hangs on, counted once however many sleeves it has
+            holder = parents.get(account)
+            if holder is None:
+                amount += values.get(account) or Decimal(0)
+            elif holder not in counted:
+                counted.add(holder)
+                amount += values.get(holder) or Decimal(0)
         totals[strategy] = (amount, sorted(accounts))
     return totals
 
@@ -4452,6 +4492,14 @@ def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
     # declares this cross-table universe and must account for each funded epoch.
     if isinstance(node(ctx.panel, "account_manifest", "rows"), list):
         blocked = blocked_epochs(ctx)
+        retained = retained_strategy_ids(ctx)
+
+        def manifest_skip(row: Mapping[str, Any]) -> bool:
+            # a retained history-only epoch is carried by the manifest alone (#567)
+            return blocked.skips_manifest_row(row) or (
+                str(row.get("strategy_id")) in retained
+            )
+
         for entries, match, skip, file, path in (
             (
                 twr_rows(ctx),
@@ -4463,7 +4511,7 @@ def check_epoch_identity(ctx: Context) -> Iterator[Finding]:
             (
                 manifest_rows(ctx),
                 _report_epoch,
-                blocked.skips_manifest_row,
+                manifest_skip,
                 PANEL,
                 "$.account_manifest.rows",
             ),
@@ -6021,10 +6069,16 @@ def check_flow_admission(ctx: Context) -> Iterator[Finding]:
         for position, row in enumerate(rows(ctx.report, "fact_coverage_matrix"))
         if row.get("fact_type") == "flows"
     }
+    derived_accounts = derived_account_parents(ctx)
     for position, row in twr_rows(ctx):
         if row.get("effective_end") is not None:
             continue
         account = str(row.get("account_id"))
+        # a derived sleeve epoch's legs are derived from tagged executions and its parent's
+        # admitted flows (the derived-sleeve coverage); they are not provider flow records
+        # and are verified against the two independent derivations, not against FLOW rows
+        if account in derived_accounts:
+            continue
         if used.get(account, 0) > admitted.get(account, 0):
             yield _finding(
                 "flows.admission_consistency",
@@ -8915,6 +8969,55 @@ def _derived_universe_views(ctx: Context, metric_id: str) -> list[Observed]:
     ]
 
 
+def _retained_epoch_views(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
+    """Production views of a derived epoch the report has no row for (#567).
+
+    A retained history-only epoch is carried by the account manifest alone; the
+    manifest row holds its return, money-weighted return, net flows and flow trace, so
+    those metrics are read from it rather than left unchecked.  Only a manifest row of a
+    derived account with no report row of its own is read this way.
+    """
+
+    out: list[Observed] = []
+    for position, row in manifest_rows(ctx):
+        if row.get("account_id") != entity or report_match(ctx, row) is not None:
+            continue
+        start, end = to_date(row.get("start")), to_date(row.get("end"))
+        label = "|".join(epoch_key(row))
+        where = f"$.account_manifest.rows[{position}]"
+        if metric_id == "twr.account":
+            value: Any = row.get("observation_linked_return")
+            source = "observation_linked_return"
+        elif metric_id == "mwr.account":
+            value = row.get("mwr_xirr")
+            source = "mwr_xirr"
+            start, end = (
+                to_date(row.get("mwr_opening_date")),
+                to_date(row.get("mwr_terminal_date")),
+            )
+        elif metric_id == "flows.account.net":
+            value = _flows_net(row)
+            source = "net_capital-opening_capital"
+        elif metric_id == "flows.account.count":
+            trace = row.get("capital_flow_trace")
+            value = len(trace) if isinstance(trace, list) else None
+            source = "len(capital_flow_trace)"
+        else:
+            continue
+        out.append(
+            Observed(
+                f"panel:account_manifest.{source}[{label}]",
+                value,
+                start,
+                end,
+                None,
+                PANEL,
+                f"{where}.{source}",
+            )
+        )
+    return out
+
+
 def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
     report, panel = ctx.report, ctx.panel
     out: list[Observed] = []
@@ -9384,6 +9487,11 @@ def resolve_metric(ctx: Context, metric_id: str, entity: str) -> list[Observed]:
                             f"$.twr_mwr[{position}].observed_end",
                         )
                     )
+        if (
+            metric_id != "date.source_last_observation"
+            and entity in derived_account_parents(ctx)
+        ):
+            out.extend(_retained_epoch_views(ctx, metric_id, entity))
         if metric_id == "date.source_last_observation":
             for position, row in enumerate(rows(report, "account_summary")):
                 if row.get("account_id") == entity:
