@@ -263,6 +263,10 @@ def load_declared_inputs(raw: bytes, tag_map: tag_map_module.TagMap) -> Declared
     funding_raw = top["funding_events"]
     if not isinstance(funding_raw, Mapping) or not funding_raw:
         raise SleeveFactsError("no funding events are declared")
+    if missing := sleeve_ids - set(funding_raw):
+        raise SleeveFactsError(
+            f"funding events are not declared for sleeves: {sorted(missing)}"
+        )
     funding: dict[str, dict[str, nav_module.FundingEvent]] = {}
     for sleeve, events_raw in funding_raw.items():
         if sleeve not in sleeve_ids:

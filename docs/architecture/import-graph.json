@@ -69,6 +69,11 @@
   ],
   "tools_edges": [
     [
+      "build_quantbase_fund_facts",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
       "build_sleeve_account_facts",
       "nested_strategy_tag_map",
       1

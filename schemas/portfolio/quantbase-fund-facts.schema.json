@@ -1,0 +1,388 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/quantbase-fund-facts.schema.json",
+  "title": "Quantbase fund facts",
+  "description": "Hash-bound facts of the retired Quantbase funds nested inside one linked account, in the vocabulary of sleeve-account-facts: one derived account per fund with daily dashboard NAV, flows and own P&L, paired INTERNAL_IN/INTERNAL_OUT legs (flow_type TRANSFER:INTERNAL:SLEEVE, provenance in trace) for every fund funding step, a perimeter pseudo-account for what cannot be paired, closure of every fund to the vendor cost basis and of the account to the vendor total and to the provider cash, and the open items the source bytes cannot settle, each with its evidence class. The flow object is the sleeve-account-facts flow plus leg_source and trace.pair_amount_difference. No flow class is added; deposits and fees stay account-level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact_id", "parent_account_id", "provider_id", "base_currency",
+    "data_cutoff", "window", "bindings", "conventions", "sleeves", "perimeter_account",
+    "flows", "closure", "open_items", "disclosures"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_id": {"const": "quantbase-fund-facts"},
+    "parent_account_id": {"$ref": "#/$defs/internal_id"},
+    "provider_id": {"$ref": "#/$defs/internal_id"},
+    "base_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "data_cutoff": {"$ref": "#/$defs/date"},
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_day", "last_day"],
+      "properties": {"first_day": {"$ref": "#/$defs/date"}, "last_day": {"$ref": "#/$defs/date"}}
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag_map_sha256", "parent_ledger_generation_id", "declared_inputs_sha256", "source_sha256", "builder_code"],
+      "properties": {
+        "tag_map_sha256": {"$ref": "#/$defs/sha256"},
+        "parent_ledger_generation_id": {"type": "string", "pattern": "^[A-Za-z0-9._:@+-]{1,200}$"},
+        "declared_inputs_sha256": {"$ref": "#/$defs/sha256"},
+        "source_sha256": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account_activity", "accounts", "dashboards"],
+          "properties": {
+            "account_activity": {"$ref": "#/$defs/sha256"},
+            "accounts": {"$ref": "#/$defs/sha256"},
+            "dashboards": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+              "additionalProperties": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        },
+        "builder_code": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["files", "sha256"],
+          "properties": {
+            "files": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"$ref": "#/$defs/sha256"},
+              "propertyNames": {"pattern": "^tools/[a-z_]+\\.py$"}
+            },
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "conventions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nav", "recognition", "interval_return", "pairing_rule", "pairing_window_seconds", "deposits", "fees", "fee_funding_sells"],
+      "properties": {
+        "nav": {"const": "DASHBOARD_VALUE"},
+        "recognition": {"const": "FILL_DAY_PLUS_ONE_OPENING_SAME_DAY"},
+        "interval_return": {"const": "OWN_PNL_OVER_PRIOR_NAV"},
+        "pairing_rule": {"const": "EXACT_AMOUNT_DAY_AND_TIME_ELSE_UNALLOCATED"},
+        "pairing_window_seconds": {"type": "integer", "minimum": 1},
+        "deposits": {"const": "ACCOUNT_LEVEL_NOT_ATTRIBUTED_TO_A_FUND"},
+        "fees": {"const": "ACCOUNT_LEVEL_NOT_ATTRIBUTED_TO_A_FUND"},
+        "fee_funding_sells": {"const": "IN_FUND_COST_NOT_A_FLOW"}
+      }
+    },
+    "sleeves": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sleeve_id", "account_id", "strategy_id", "fund_id", "fund_title", "first_day", "last_day", "last_nonzero_day", "days"],
+        "properties": {
+          "sleeve_id": {"type": "string", "pattern": "^[a-z][a-z0-9]{0,15}$"},
+          "account_id": {"$ref": "#/$defs/internal_id"},
+          "strategy_id": {"$ref": "#/$defs/internal_id"},
+          "fund_id": {"type": "string", "pattern": "^[0-9]{1,12}$"},
+          "fund_title": {"type": "string", "minLength": 1},
+          "first_day": {"$ref": "#/$defs/date"},
+          "last_day": {"$ref": "#/$defs/date"},
+          "last_nonzero_day": {"$ref": "#/$defs/date"},
+          "days": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["day", "event", "nav_prev", "flow_in", "flow_out", "nav_end", "own_pnl", "interval_return"],
+              "properties": {
+                "day": {"$ref": "#/$defs/date"},
+                "event": {"enum": ["", "OPEN", "IN", "OUT", "BOTH", "EXIT"]},
+                "nav_prev": {"$ref": "#/$defs/decimal"},
+                "flow_in": {"$ref": "#/$defs/decimal"},
+                "flow_out": {"$ref": "#/$defs/decimal"},
+                "nav_end": {"$ref": "#/$defs/decimal"},
+                "own_pnl": {"$ref": "#/$defs/decimal"},
+                "interval_return": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+              }
+            }
+          }
+        }
+      }
+    },
+    "perimeter_account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "scope", "days"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/internal_id"},
+        "scope": {"const": "LEG_COUNTERPARTY_ONLY"},
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "internal_flow_net"],
+            "properties": {"day": {"$ref": "#/$defs/date"}, "internal_flow_net": {"$ref": "#/$defs/decimal"}}
+          }
+        }
+      }
+    },
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pair_id", "account_id", "class", "flow_type", "event_date", "nav_recognition_date",
+          "amount", "counterparty_account_id", "leg_source", "trace"
+        ],
+        "properties": {
+          "pair_id": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}$"},
+          "account_id": {"$ref": "#/$defs/internal_id"},
+          "class": {"enum": ["INTERNAL_IN", "INTERNAL_OUT"]},
+          "flow_type": {"const": "TRANSFER:INTERNAL:SLEEVE"},
+          "event_date": {"$ref": "#/$defs/date"},
+          "nav_recognition_date": {"$ref": "#/$defs/date"},
+          "amount": {"$ref": "#/$defs/positive_decimal"},
+          "counterparty_account_id": {"$ref": "#/$defs/internal_id"},
+          "leg_source": {
+            "description": "PARENT_LEDGER_REFERENCE marks the leg of a counterparty that already has its own flow in the parent ledger; it is the pairing evidence, not an additional flow.",
+            "enum": ["ARTIFACT", "PARENT_LEDGER_REFERENCE"]
+          },
+          "trace": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "pairing", "from_sleeve", "to_sleeve", "evidence_refs", "pair_amount_difference"],
+            "properties": {
+              "kind": {"enum": ["REALLOCATION", "UNALLOCATED_CASH"]},
+              "pairing": {"enum": ["SLEEVE_PAIR", "COUNTERPARTY_PAIR", "UNALLOCATED_REMAINDER"]},
+              "from_sleeve": {"type": ["string", "null"]},
+              "to_sleeve": {"type": ["string", "null"]},
+              "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+              "pair_amount_difference": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tolerances", "funds", "fund_summaries", "account"],
+      "properties": {
+        "tolerances": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/decimal"},
+          "propertyNames": {"pattern": "^[a-z_]+$"}
+        },
+        "funds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sleeve_id", "fund_id", "net_fills", "net_external_flow", "fee_sells_net",
+              "dashboard_cost_basis", "declared_cost_basis", "difference", "exit_proceeds", "last_nonzero_value"
+            ],
+            "properties": {
+              "sleeve_id": {"type": "string"},
+              "fund_id": {"type": "string"},
+              "net_fills": {"$ref": "#/$defs/decimal"},
+              "net_external_flow": {"$ref": "#/$defs/decimal"},
+              "fee_sells_net": {"$ref": "#/$defs/decimal"},
+              "dashboard_cost_basis": {"$ref": "#/$defs/decimal"},
+              "declared_cost_basis": {"$ref": "#/$defs/decimal"},
+              "difference": {"$ref": "#/$defs/decimal"},
+              "exit_proceeds": {"$ref": "#/$defs/decimal"},
+              "last_nonzero_value": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "fund_summaries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "first_day", "last_nonzero_day", "exit_recognition_day", "net_external_flow",
+              "fee_sells_net", "own_pnl_total", "twr", "rebalance_count", "rebalance_net_amount"
+            ],
+            "properties": {
+              "first_day": {"$ref": "#/$defs/date"},
+              "last_nonzero_day": {"$ref": "#/$defs/date"},
+              "exit_recognition_day": {"$ref": "#/$defs/date"},
+              "net_external_flow": {"$ref": "#/$defs/decimal"},
+              "fee_sells_net": {"$ref": "#/$defs/decimal"},
+              "own_pnl_total": {"$ref": "#/$defs/decimal"},
+              "twr": {"$ref": "#/$defs/decimal"},
+              "rebalance_count": {"type": "integer", "minimum": 0},
+              "rebalance_net_amount": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "account": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nav_total", "cash", "dividends", "rows_after_cutoff_excluded"],
+          "properties": {
+            "nav_total": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["days", "max_abs_difference", "component_days_before_first_row_treated_as_zero", "exempt_days"],
+              "properties": {
+                "days": {"type": "integer", "minimum": 1},
+                "max_abs_difference": {"$ref": "#/$defs/decimal"},
+                "component_days_before_first_row_treated_as_zero": {"type": "integer", "minimum": 0},
+                "exempt_days": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["day", "difference", "note"],
+                    "properties": {
+                      "day": {"$ref": "#/$defs/date"},
+                      "difference": {"$ref": "#/$defs/decimal"},
+                      "note": {"type": "string", "minLength": 1}
+                    }
+                  }
+                }
+              }
+            },
+            "cash": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "scope", "deposits", "deposit_count", "ignored_transfers", "net_fund_flows_by_fund",
+                "net_fund_flows", "dividends", "aum_fees", "partner_subscription_fees", "derived_cash",
+                "provider_settled_cash", "residual", "declared_residual", "residual_tolerance"
+              ],
+              "properties": {
+                "scope": {"const": "ACCOUNT_LEVEL"},
+                "deposits": {"$ref": "#/$defs/decimal"},
+                "deposit_count": {"type": "integer", "minimum": 0},
+                "ignored_transfers": {"type": "integer", "minimum": 0},
+                "net_fund_flows_by_fund": {"type": "object", "additionalProperties": {"$ref": "#/$defs/decimal"}},
+                "net_fund_flows": {"$ref": "#/$defs/decimal"},
+                "dividends": {"$ref": "#/$defs/decimal"},
+                "aum_fees": {"$ref": "#/$defs/decimal"},
+                "partner_subscription_fees": {"$ref": "#/$defs/decimal"},
+                "derived_cash": {"$ref": "#/$defs/decimal"},
+                "provider_settled_cash": {"$ref": "#/$defs/decimal"},
+                "residual": {"$ref": "#/$defs/decimal"},
+                "declared_residual": {"$ref": "#/$defs/decimal"},
+                "residual_tolerance": {"$ref": "#/$defs/decimal"}
+              }
+            },
+            "dividends": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["total", "attributed_to_sleeves", "attributed_to_counterparty_funds", "unattributed", "booked_once"],
+              "properties": {
+                "total": {"$ref": "#/$defs/decimal"},
+                "attributed_to_sleeves": {"type": "object", "additionalProperties": {"$ref": "#/$defs/decimal"}},
+                "attributed_to_counterparty_funds": {"type": "object", "additionalProperties": {"$ref": "#/$defs/decimal"}},
+                "unattributed": {"$ref": "#/$defs/decimal"},
+                "booked_once": {"const": true}
+              }
+            },
+            "rows_after_cutoff_excluded": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "open_items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["funding_attribution", "cash_residual", "dividend_nav_treatment"],
+      "properties": {
+        "funding_attribution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence_class", "owner_ruling_ref", "treatment", "note", "unallocated_remainder_pairs"],
+          "properties": {
+            "evidence_class": {"$ref": "#/$defs/evidence_class"},
+            "owner_ruling_ref": {"type": ["string", "null"]},
+            "treatment": {"const": "UNALLOCATED_REMAINDER"},
+            "note": {"type": "string", "minLength": 1},
+            "unallocated_remainder_pairs": {"type": "integer", "minimum": 0}
+          }
+        },
+        "cash_residual": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence_class", "owner_ruling_ref", "declared_amount", "tolerance", "note"],
+          "properties": {
+            "evidence_class": {"$ref": "#/$defs/evidence_class"},
+            "owner_ruling_ref": {"type": ["string", "null"]},
+            "declared_amount": {"$ref": "#/$defs/decimal"},
+            "tolerance": {"$ref": "#/$defs/decimal"},
+            "note": {"type": "string", "minLength": 1}
+          }
+        },
+        "dividend_nav_treatment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence_class", "owner_ruling_ref", "treatment", "note"],
+          "properties": {
+            "evidence_class": {"$ref": "#/$defs/evidence_class"},
+            "owner_ruling_ref": {"type": ["string", "null"]},
+            "treatment": {"const": "NOT_FOLDED_INTO_NAV"},
+            "note": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "disclosures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fee_funding_sells", "attributed_income"],
+      "properties": {
+        "fee_funding_sells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sleeve_id", "day", "amount", "record_id"],
+            "properties": {
+              "sleeve_id": {"type": "string"},
+              "day": {"$ref": "#/$defs/date"},
+              "amount": {"$ref": "#/$defs/decimal"},
+              "record_id": {"type": "string"}
+            }
+          }
+        },
+        "attributed_income": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sleeve_id", "day", "symbol", "amount", "record_id", "after_exit"],
+            "properties": {
+              "sleeve_id": {"type": "string"},
+              "day": {"$ref": "#/$defs/date"},
+              "symbol": {"type": "string"},
+              "amount": {"$ref": "#/$defs/positive_decimal"},
+              "record_id": {"type": "string"},
+              "after_exit": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "date": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"},
+    "internal_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$"},
+    "positive_decimal": {"type": "string", "pattern": "^[0-9]*[1-9][0-9]*(\\.[0-9]+)?$|^0\\.[0-9]*[1-9][0-9]*$"},
+    "evidence_class": {"enum": ["NOT_IN_SOURCE_BYTES", "UNEXPLAINED_RESIDUAL", "OWNER_RULED"]}
+  }
+}

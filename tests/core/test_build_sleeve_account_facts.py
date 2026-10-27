@@ -507,7 +507,12 @@ def _flat(days: list[str]) -> tuple[dict[str, Any], builder.AccountRows]:
     """One sleeve opened by an IN event with nothing traded, on the given days."""
 
     declared = _declared(
-        {"s1": {days[0]: _event("IN", "flex:open")}}, days[0], days[-1]
+        {
+            "s1": {days[0]: _event("IN", "flex:open")},
+            "s2": {days[0]: _event("IN", "flex:open-2")},
+        },
+        days[0],
+        days[-1],
     )
     changes = [_change(day, "1000", "1000") for day in days]
     return declared, _rows([], [], changes)
@@ -549,3 +554,11 @@ def test_a_tag_field_the_rows_do_not_carry_is_refused() -> None:
     other["parents"][0]["tag_field"] = "clientReference"
     with pytest.raises(builder.SleeveFactsError, match="clientReference"):
         _build(declared, rows, other)
+
+
+def test_a_configured_sleeve_without_funding_events_is_refused() -> None:
+    declared, rows = _reallocate()
+    omitted = copy.deepcopy(declared)
+    del omitted["funding_events"]["s2"]
+    with pytest.raises(builder.SleeveFactsError, match="not declared for sleeves"):
+        _build(omitted, rows)
