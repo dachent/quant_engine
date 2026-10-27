@@ -198,7 +198,20 @@ def _plan_fixture(
             {"BIL": "0.0001", "IWX": "0.03"},
         ),
         "inputs/lenses/multi-asset-style-factors.csv": (
-            ["date", "BIL", "ITOT", "IEFA", "IEMG", "IEF", "HYG", "GLD", "DBC", "UUP"],
+            [
+                "date",
+                "BIL",
+                "ITOT",
+                "IEFA",
+                "IEMG",
+                "IEF",
+                "HYG",
+                "GLD",
+                "DBC",
+                "UUP",
+                "SPY",
+                "SPXL",
+            ],
             {
                 "BIL": "0.0001",
                 "ITOT": "0.01",
@@ -209,6 +222,8 @@ def _plan_fixture(
                 "GLD": "0.01",
                 "DBC": "0.01",
                 "UUP": "0.01",
+                "SPY": "0.01",
+                "SPXL": "0.03",
             },
         ),
         "inputs/lenses/us-sector-factors.csv": (
@@ -351,7 +366,8 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
         strategy["observation_meta_by_mode"]["LIVE_ONLY"]
     )
     assert (
-        sum("CORE_BENCHMARK" in row["display_groups"] for row in payload["series"]) == 9
+        sum("CORE_BENCHMARK" in row["display_groups"] for row in payload["series"])
+        == 11
     )
 
     published = weekly.publish(
