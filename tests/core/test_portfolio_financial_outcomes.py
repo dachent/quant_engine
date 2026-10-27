@@ -578,6 +578,36 @@ def test_hwm_replay_uses_the_admitted_input_authority(tmp_path, monkeypatch):
     assert observed[-1]["hwm_policy_bytes"] is None
 
 
+def test_hwm_replay_passes_selected_sleeve_facts_once(tmp_path, monkeypatch):
+    """Codex: the source paths already carry the facts; no duplicate keyword."""
+    import portfolio_hwm_selected_inputs as builder
+
+    product = tmp_path / "product-contract.json"
+    product.write_bytes(b"{}")
+    generation = tmp_path / "input-generation.json"
+    generation.write_bytes(b'{"rebuilt": true}')
+    bindings = {
+        "calendar_authority": tmp_path / "calendar.json",
+        "input_generation": generation,
+        "provider_admission_receipt": tmp_path / "receipt.json",
+    }
+    facts = (tmp_path / "facts.json",)
+    observed: list[dict[str, object]] = []
+
+    def _build(**kwargs):
+        observed.append(kwargs)
+        return {"rebuilt": True}
+
+    monkeypatch.setattr(builder, "build_selected_hwm_inputs", _build)
+    outcomes.verify_selected_hwm_generation(
+        {"sleeve_facts_paths": facts},
+        contract_path=product,
+        bindings=bindings,
+        sleeve_facts_paths=facts,
+    )
+    assert observed[-1]["sleeve_facts_paths"] == facts
+
+
 def test_artifact_node_binds_exactly_one_named_production_node(tmp_path):
     """The runtime reads the admission policy from the specification, by node id.
 

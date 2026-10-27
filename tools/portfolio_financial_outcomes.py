@@ -609,8 +609,12 @@ def verify_selected_hwm_generation(
     from portfolio_hwm_selected_inputs import build_selected_hwm_inputs
     from portfolio_pipeline_materialize import HWM_GOVERNED_POLICY
 
+    # The selected source paths already carry the sleeve facts of a specification
+    # that selects them; the explicit argument is the same set, never a second one.
+    replay_paths = dict(source_paths)
+    selected_facts = replay_paths.pop("sleeve_facts_paths", None)
     rebuilt = build_selected_hwm_inputs(
-        **source_paths,
+        **replay_paths,
         financial_contract_path=(
             contract_path if input_contract_path is None else input_contract_path
         ),
@@ -618,7 +622,9 @@ def verify_selected_hwm_generation(
         provider_admission_path=bindings["provider_admission_receipt"],
         hwm_policy_path=HWM_GOVERNED_POLICY,
         hwm_policy_bytes=policy_bytes,
-        sleeve_facts_paths=sleeve_facts_paths,
+        sleeve_facts_paths=(
+            tuple(selected_facts) if selected_facts is not None else sleeve_facts_paths
+        ),
     )
     if rebuilt != json.loads(bindings["input_generation"].read_bytes()):
         raise FinancialOutcomeError(
