@@ -212,7 +212,7 @@
       "portfolio_financial_mvp_contract._validate_owner_decision_receipts": 1,
       "portfolio_pipeline_materialize._provider_admission_authority": 2,
       "provider_ledger._financial_mvp_authority": 1,
-      "provider_ledger._provenance": 2
+      "provider_ledger._provenance": 1
     },
     "tools/portfolio_pipeline_materialize.py": {
       "tools:portfolio_control_panel._current_analytics": 1,

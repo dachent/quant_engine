@@ -24,6 +24,9 @@ Three additive report blocks, each carrying its own ``schema_version``:
     rows would count a closed epoch's hand-off twice) and the governed
     invested capital, split into named components that each come from governed
     facts and sum to the difference exactly.  A non-zero residual raises.
+    The governed epochs are the product epochs: a derived sleeve epoch (R2) stands
+    for its residual parent's epoch, with capital measured gross from the sleeve
+    facts' allocations, so the rows and the governed epochs agree by construction.
 
 Nothing here changes an accepted TWR, MWR or capital value: the blocks only
 read them.

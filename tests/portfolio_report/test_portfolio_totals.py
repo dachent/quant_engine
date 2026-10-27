@@ -461,3 +461,52 @@ def test_a_derived_sleeve_epoch_stands_for_its_residual_parent_in_the_totals() -
     }
     rows = verify.included_rows(manifest, crosswalk)
     assert {item["account_id"] for item in rows} == {"acct-parent-s2", "acct-other"}
+
+
+def test_a_derived_product_epoch_reconciles_and_the_verifier_agrees() -> None:
+    """R2: capital is the product epochs' capital, so the totals close over them.
+
+    Account B is a residual parent; its sleeve ``B-s2`` carries strategy S3 as the
+    derived product epoch and ``B-s1`` is retained history.  The governed capital
+    names the derived epoch (gross allocations into it), the manifest rows the
+    producer reads are the product rows, and the independent verifier re-derives
+    the same product rows from the manifest and the crosswalk.
+    """
+
+    case = _case()
+    derived = deepcopy(case["rows"][2])
+    derived["account_id"] = "B-s2"
+    retained = deepcopy(case["rows"][2])
+    retained.update(account_id="B-s1", strategy_id="history", end="2026-01-20")
+    retained["effective_end"] = "2026-01-20"
+    product_rows = [case["rows"][0], case["rows"][1], derived]
+    case["rows"] = product_rows
+    case["capital"]["required_epochs"][2]["account_id"] = "B-s2"
+
+    block = _build(case)["capital_reconciliation"]
+    assert block["status"] == "RECONCILED"
+    assert block["epoch_count"] == 3
+    assert {line["account_id"] for c in block["components"] for line in c["lines"]} == {
+        "A",
+        "B-s2",
+    }
+
+    report, _manifest, _crosswalk = _verification_inputs(case)
+    manifest = {"rows": [*product_rows, retained]}
+    baseline = [
+        {
+            "account_id": r["account_id"],
+            "strategy_id": r["strategy_id"],
+            "effective_start": r["effective_start"],
+            "effective_end": r["effective_end"],
+            "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+        }
+        for r in (*case["rows"][:2], {**derived, "account_id": "B"})
+    ]
+    crosswalk = {"calculation_cutoff_date": CUTOFF, "rows": baseline}
+    assert [r["account_id"] for r in verify.included_rows(manifest, crosswalk)] == [
+        "A",
+        "A",
+        "B-s2",
+    ]
+    verify.verify_portfolio_totals(report, manifest, crosswalk)
