@@ -584,6 +584,41 @@ def verify_selected_capital_ledger(
     return selected_root
 
 
+def verify_selected_capital_sleeve_facts(
+    input_generation_path: Path, sleeve_facts_paths: Sequence[Path]
+) -> None:
+    """Bind capital's derived sleeve epochs to the facts this candidate selected.
+
+    The epoch manifest derived its sleeve epochs from the selected sleeve facts;
+    capital must have measured those same artifacts, no more and no fewer, or a
+    residual parent's epoch and its sleeves would be counted from different
+    sources.
+    """
+
+    from portfolio_invested_capital import (
+        SLEEVE_FACTS_ROLE_PREFIX,
+        sleeve_facts_role,
+    )
+
+    inputs = json.loads(input_generation_path.read_bytes())
+    bindings = inputs.get("source_bindings")
+    if not isinstance(bindings, Mapping):
+        raise FinancialOutcomeError("capital source bindings are absent")
+    bound = {
+        role: binding
+        for role, binding in bindings.items()
+        if str(role).startswith(SLEEVE_FACTS_ROLE_PREFIX)
+    }
+    selected = {}
+    for path in sleeve_facts_paths:
+        content = path.read_bytes()
+        selected[sleeve_facts_role(hashlib.sha256(content).hexdigest())] = len(content)
+    if {role: binding.get("size_bytes") for role, binding in bound.items()} != selected:
+        raise FinancialOutcomeError(
+            "capital sleeve facts differ from the sleeve facts this candidate selected"
+        )
+
+
 def verify_selected_hwm_generation(
     source_paths: Mapping[str, Any],
     *,
@@ -1320,8 +1355,13 @@ def _rebuild_selected_epochs(
     spec: Any,
     baseline: GenerationNode,
     selected_bytes: Mapping[str, bytes],
+    perimeter_out: list[derived_epoch_perimeter.EffectivePerimeter] | None = None,
 ) -> dict[str, Any]:
-    """Verify the finalized account product against its selected source bytes."""
+    """Verify the finalized account product against its selected source bytes.
+
+    The effective perimeter the manifest was bound to (baseline epochs, less a
+    residual parent's, plus derived epochs) is appended to ``perimeter_out``.
+    """
 
     from portfolio_hwm_selected_inputs import _verify_account_manifest_replay
 
@@ -1388,11 +1428,13 @@ def _rebuild_selected_epochs(
     try:
         # The crosswalk names the baseline perimeter; derived sleeves replace a
         # residual parent's epoch (#567), and nothing else may differ.
-        derived_epoch_perimeter.effective_perimeter(
+        perimeter = derived_epoch_perimeter.effective_perimeter(
             selected_keys,
             [tuple(row[field] for field in fields) for row in rows],
             coverage["rows"],
         )
+        if perimeter_out is not None:
+            perimeter_out.append(perimeter)
     except derived_epoch_perimeter.PerimeterError as exc:
         raise FinancialOutcomeError(
             f"finalized epoch product perimeter differs: {exc}"
@@ -1522,7 +1564,10 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         raise FinancialOutcomeError("financial epoch consumer generations differ")
     baseline, panel = baselines[0], panels[0]
     assert baseline.source_dir is not None and panel.source_dir is not None
-    rebuilt = _rebuild_selected_epochs(spec, baseline, selected_bytes)
+    perimeters: list[derived_epoch_perimeter.EffectivePerimeter] = []
+    rebuilt = _rebuild_selected_epochs(
+        spec, baseline, selected_bytes, perimeter_out=perimeters
+    )
     required = {
         row["strategy_id"]
         for row in contract["strategies"]
@@ -1530,8 +1575,10 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
     }
     from portfolio_financial_mvp_contract import DERIVED_SLEEVE_EPOCH_AUTHORITY
 
-    # A derived product epoch replaces the baseline epoch of its residual parent,
-    # so the census entries of derived epochs add no row to the product count.
+    # A derived product epoch replaces the baseline epochs of its residual
+    # parent: the census baseline, less the epochs the manifest dropped, plus the
+    # derived product epochs.  A retained derived epoch (a strategy outside the
+    # product) is history, not a product row.
     expected_count = sum(
         assignment["strategy_id"] in required
         and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
@@ -1539,6 +1586,16 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for assignment in sleeve["assignments"]
     )
     rows = rebuilt["rows"]
+    if perimeters:
+        perimeter = perimeters[0]
+        expected_count += len(perimeter.derived & perimeter.product) - len(
+            perimeter.removed
+        )
+        rows = [
+            row
+            for row in rows
+            if derived_epoch_perimeter.epoch_key(row, "epoch row") in perimeter.product
+        ]
     if len(rows) != expected_count:
         raise FinancialOutcomeError(
             "all required financial epochs must be numerically OK"
@@ -1762,7 +1819,14 @@ def _verify_consumers(
         )
         for row in capital["required_epochs"]
     }
-    if capital_epochs != exact_epochs:
+    # Capital is the capital of the product epochs: a derived epoch of a strategy
+    # outside the product is retained history and carries no governed capital.
+    product_epochs = {
+        key
+        for key in exact_epochs
+        if controls.get(key[1], {}).get("product_requirement", "REQUIRED") == "REQUIRED"
+    }
+    if capital_epochs != product_epochs:
         raise FinancialOutcomeError(
             "capital and account-manifest epoch identities differ"
         )
@@ -2034,6 +2098,9 @@ def _validate_financial_outcomes(
     verify_selected_capital_ledger(
         capital_input_node.path,
         selected_sources["provider_ledger_generation_path"],
+    )
+    verify_selected_capital_sleeve_facts(
+        capital_input_node.path, selected_sleeve_facts_paths(spec)
     )
     capital = verify_governed_capital_result(
         capital, capital_input_node.path, contract_path

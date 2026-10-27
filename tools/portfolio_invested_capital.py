@@ -12,6 +12,7 @@ import argparse
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 import hashlib
@@ -1120,6 +1121,7 @@ def _verify_selected_facts(
     arguments: Mapping[str, Any],
     snapshots: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
+    derived: DerivedSleeveCapital | None = None,
 ) -> None:
     """Tie every admitted amount, classification, FX and coverage to selected rows.
 
@@ -1135,6 +1137,21 @@ def _verify_selected_facts(
         for name in ("capital_anchors", "flows")
         for row in ledger.get(name, [])
     }
+    if derived is not None:
+        if policy is not None:
+            fund_scoped = _fund_scoped_providers(policy)
+            if any(
+                derived.provider_by_parent[
+                    derived.epochs[key]["parent_account_id"]
+                ].upper()
+                in fund_scoped
+                for key in derived.product
+            ):
+                raise CapitalValidationError(
+                    "a derived product epoch of a fund-scoped provider has no "
+                    "capital rule"
+                )
+        source_rows.update(derived.source_rows())
     epoch_by_id = {
         row["epoch_id"]: row
         for row in [
@@ -1400,6 +1417,7 @@ def _verify_selected_facts(
     for source in [
         *ledger.get("flows", []),
         *ledger.get("capital_anchors", []),
+        *(derived.rows if derived is not None else ()),
     ]:
         evidence = _digest(source)
         if evidence in consumed:
@@ -1442,9 +1460,16 @@ def _verify_selected_facts(
     for coverage in arguments["flow_coverage"]:
         evidence = admissions.get(coverage.get("evidence_sha256"))
         epoch = epoch_by_id[coverage["epoch_id"]]
+        # The flows of a derived sleeve are the parent account's own flows,
+        # partitioned: the parent's authoritative flow admission covers them.
+        covered_account = (
+            epoch["derivation"].get("parent_account_id")
+            if "derivation" in epoch
+            else epoch.get("account_id")
+        )
         if (
             evidence is None
-            or evidence.get("account_id") != epoch.get("account_id")
+            or evidence.get("account_id") != covered_account
             or evidence.get("fact_type") != "flows"
             or evidence.get("disposition") != "AUTHORITATIVE"
         ):
@@ -1780,6 +1805,394 @@ def governed_hwm_input_policy(
     return preserved
 
 
+EpochKey = tuple[str, str, str, str | None]
+SLEEVE_FACTS_ROLE_PREFIX: Final = "sleeve_facts:"
+DERIVED_EPOCH_KIND: Final = "DERIVED_SLEEVE"
+_SLEEVE_FLOW_PREFIX: Final = "sleeve-flow:"
+_SOURCE_ROLES: Final = frozenset(
+    {
+        "account_crosswalk",
+        "provider_ledger",
+        "provider_ledger_spec",
+        "strategy_registry",
+    }
+)
+
+
+def sleeve_facts_role(sha256: str) -> str:
+    """The source-binding role of one selected sleeve-facts artifact."""
+
+    return f"{SLEEVE_FACTS_ROLE_PREFIX}{_sha(sha256, 'sleeve facts identity')}"
+
+
+def _is_source_role(role: str) -> bool:
+    if role in _SOURCE_ROLES:
+        return True
+    return role.startswith(SLEEVE_FACTS_ROLE_PREFIX) and bool(
+        re.fullmatch(r"[0-9a-f]{64}", role[len(SLEEVE_FACTS_ROLE_PREFIX) :])
+    )
+
+
+@dataclass(frozen=True)
+class DerivedSleeveCapital:
+    """What the selected sleeve-facts artifacts say about invested capital (R2).
+
+    Capital of a derived sleeve is measured gross, from the sleeve facts' own
+    declared funding events and REALLOCATION legs, each evidenced by the facts'
+    ``evidence_ref``: an allocation into the sleeve is a contribution and one out
+    of it a withdrawal, exactly as a fund-scoped provider's allocations are the
+    fund's capital (owner decision, #536).  The residual parent is not an epoch,
+    so nothing is counted twice between the parent and its sleeves.  Every figure
+    here is re-derived by the account-manifest producer's own function from the
+    hash-bound facts; this class holds no policy, amount or account name.
+    """
+
+    epochs: Mapping[EpochKey, Mapping[str, str]]
+    product: frozenset[EpochKey]
+    parents: frozenset[str]
+    accounts: frozenset[str]
+    provider_by_parent: Mapping[str, str]
+    rows: tuple[dict[str, Any], ...]
+
+    def source_rows(self) -> dict[str, dict[str, Any]]:
+        """The derived flows as capital sources, keyed by their evidence digest."""
+
+        return {_digest(row): row for row in self.rows}
+
+
+def derive_sleeve_capital(
+    facts: Sequence[bytes],
+    ledger: Mapping[str, Any],
+    required_strategy_ids: frozenset[str] | set[str],
+) -> DerivedSleeveCapital:
+    """Derive the sleeve epochs and their capital flows from selected facts bytes."""
+
+    from account_strategy_manifest import (
+        ManifestError,
+        derive_sleeve_manifest_facts,
+        provider_ledger_generation_ids,
+    )
+    from quant_engine.core import InputSnapshot
+
+    snapshots = tuple(
+        InputSnapshot.from_bytes("sleeve facts", content) for content in facts
+    )
+    if not snapshots:
+        raise CapitalValidationError("sleeve facts selection is empty")
+    providers: dict[str, str] = {}
+    for snapshot in snapshots:
+        try:
+            payload = json.loads(snapshot.contents)
+        except ValueError as exc:
+            raise CapitalValidationError("sleeve facts are not JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise CapitalValidationError("sleeve facts are not an object")
+        parent = _text(payload.get("parent_account_id"), "sleeve facts parent")
+        claimed = _text(payload.get("provider_id"), "sleeve facts provider")
+        seen = {
+            str(row["provider_id"]).casefold()
+            for section in (
+                "flows",
+                "capital_anchors",
+                "nav_observations",
+                "admissions",
+            )
+            for row in ledger.get(section, [])
+            if isinstance(row, Mapping)
+            and row.get("account_id") == parent
+            and isinstance(row.get("provider_id"), str)
+        }
+        known = any(
+            isinstance(row, Mapping) and row.get("account_id") == parent
+            for section in (
+                "flows",
+                "capital_anchors",
+                "nav_observations",
+                "admissions",
+            )
+            for row in ledger.get(section, [])
+        )
+        if not known or (seen and seen != {claimed.casefold()}):
+            raise CapitalValidationError(
+                f"sleeve facts parent is not a selected ledger account of {claimed}: "
+                f"{parent}"
+            )
+        if parent in providers:
+            raise CapitalValidationError("two sleeve facts name one parent account")
+        providers[parent] = claimed
+    try:
+        sleeve = derive_sleeve_manifest_facts(
+            snapshots,
+            account_providers=providers,
+            provider_generation_ids=provider_ledger_generation_ids(ledger),
+        )
+    except ManifestError as exc:
+        raise CapitalValidationError(f"sleeve facts are invalid: {exc}") from exc
+    accounts = sleeve.sleeve_accounts | sleeve.perimeter_accounts
+    for section in ("flows", "capital_anchors"):
+        for row in ledger.get(section, []):
+            if isinstance(row, Mapping) and row.get("account_id") in accounts:
+                raise CapitalValidationError(
+                    "the selected provider ledger already carries a derived account"
+                )
+    epochs: dict[EpochKey, dict[str, str]] = {}
+    parent_of_account: dict[str, str] = {}
+    for item in sleeve.coverage:
+        assignment = item["assignment"]
+        key = (
+            str(assignment["account_id"]),
+            str(assignment["strategy_id"]),
+            str(assignment["effective_start"]),
+            assignment["effective_end"],
+        )
+        if key in epochs:
+            raise CapitalValidationError("a derived epoch is covered twice")
+        epochs[key] = {
+            "parent_account_id": str(item["parent_account_id"]),
+            "sleeve_facts_sha256": str(item["sleeve_facts_sha256"]),
+        }
+        parent_of_account[key[0]] = str(item["parent_account_id"])
+    by_digest = {snapshot.sha256[:16]: snapshot.sha256 for snapshot in snapshots}
+    if len(by_digest) != len(snapshots):
+        raise CapitalValidationError("sleeve facts identities collide")
+    parent_by_perimeter = {f"{parent}-unallocated": parent for parent in providers}
+    rows: list[dict[str, Any]] = []
+    for record in sleeve.flows:
+        record_id = str(record["record_id"])
+        digest16, _, remainder = record_id[len(_SLEEVE_FLOW_PREFIX) :].partition(":")
+        pair_id = remainder.rsplit(":", 2)[0]
+        facts_sha = by_digest.get(digest16)
+        owner = parent_of_account.get(str(record["account_id"])) or (
+            parent_by_perimeter.get(str(record["account_id"]))
+        )
+        if (
+            not record_id.startswith(_SLEEVE_FLOW_PREFIX)
+            or facts_sha is None
+            or not pair_id
+            or owner is None
+        ):
+            raise CapitalValidationError("derived sleeve flow identity differs")
+        rows.append(
+            {
+                **record,
+                "provider_id": providers[owner],
+                "provider_activity_id_sha256": _digest(
+                    {
+                        "kind": "SLEEVE_PAIR",
+                        "sleeve_facts_sha256": facts_sha,
+                        "pair_id": pair_id,
+                    }
+                ),
+            }
+        )
+    return DerivedSleeveCapital(
+        epochs=epochs,
+        product=frozenset(
+            key for key in epochs if key[1] in set(required_strategy_ids)
+        ),
+        parents=frozenset(providers),
+        accounts=frozenset(accounts),
+        provider_by_parent=providers,
+        rows=tuple(rows),
+    )
+
+
+def sleeve_facts_bindings(
+    paths: Sequence[Path],
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Source bindings and this machine's locators of the selected sleeve facts."""
+
+    bindings: dict[str, dict[str, Any]] = {}
+    locators: dict[str, str] = {}
+    for path in paths:
+        binding, _content = _file_binding(Path(path))
+        role = sleeve_facts_role(binding["sha256"])
+        bindings[role] = binding
+        locators[role] = _local_binding(Path(path))
+    return bindings, locators
+
+
+def derived_epoch_record(
+    key: EpochKey, derivation: Mapping[str, str], sleeve_alias: str
+) -> dict[str, Any]:
+    """The one required-epoch row a derived product epoch must be, field for field."""
+
+    account_id, strategy_id, start, end = key
+    return {
+        "account_id": account_id,
+        "derivation": {"kind": DERIVED_EPOCH_KIND, **derivation},
+        "effective_end": end,
+        "effective_start": start,
+        "epoch_id": f"{sleeve_alias}|{strategy_id}|{start}",
+        "sleeve_alias": sleeve_alias,
+        "strategy_id": strategy_id,
+    }
+
+
+def census_derived_aliases(
+    census: Mapping[str, Any],
+) -> dict[tuple[str, str, str | None], str]:
+    """Census alias of each derived-authority assignment, by its own identity."""
+
+    result: dict[tuple[str, str, str | None], str] = {}
+    for sleeve in census["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            if assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY:
+                continue
+            key = (
+                assignment["strategy_id"],
+                assignment["effective_start"],
+                assignment["effective_end"],
+            )
+            if key in result:
+                raise CapitalValidationError("derived census identity is ambiguous")
+            result[key] = sleeve["sleeve_alias"]
+    return result
+
+
+def census_baseline_identities(
+    census: Mapping[str, Any], required_strategy_ids: set[str] | frozenset[str]
+) -> set[tuple[str, str, str, str | None]]:
+    """The baseline (non-derived) census epochs of the required strategies."""
+
+    return {
+        (
+            sleeve["sleeve_alias"],
+            assignment["strategy_id"],
+            assignment["effective_start"],
+            assignment["effective_end"],
+        )
+        for sleeve in census["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["strategy_id"] in required_strategy_ids
+        and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
+    }
+
+
+def census_baseline_alias_accounts(
+    census: Mapping[str, Any], provenance: Mapping[str, Any]
+) -> dict[str, str]:
+    """Resolve each baseline census sleeve to its private account.
+
+    A census sleeve names no account: candidates are the accounts that carry
+    every assignment in a sleeve's signature, then sorted-to-sorted within a
+    group of sleeves that share one signature (the owner-accepted crosswalk is
+    the tie-break the verifier checks).  Derived census entries are resolved from
+    their sleeve facts, never from provenance.
+    """
+
+    account_ids = {row["account_id"] for row in provenance["accounts"]}
+    groups: dict[tuple[tuple[Any, ...], ...], list[str]] = {}
+    for sleeve in census["account_sleeves"]:
+        assignments = [
+            item
+            for item in sleeve["assignments"]
+            if item.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
+        ]
+        if not assignments:
+            continue
+        signature = tuple(
+            sorted(
+                (
+                    item["strategy_id"],
+                    item["effective_start"],
+                    item.get("effective_end"),
+                )
+                for item in assignments
+            )
+        )
+        groups.setdefault(signature, []).append(sleeve["sleeve_alias"])
+    alias_accounts: dict[str, str] = {}
+    for signature, aliases in groups.items():
+        candidates: set[str] | None = None
+        for strategy_id, start, end in signature:
+            matches = {
+                str(row["account_id"])
+                for row in provenance["assignments"]
+                if row.get("strategy_id") == strategy_id
+                and row.get("effective_start") == start
+                and row.get("effective_end") == end
+                and row.get("account_id") in account_ids
+                and row.get("mapping_status") == "MAPPED"
+                and row.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+            }
+            candidates = matches if candidates is None else candidates & matches
+        if not candidates:
+            continue
+        if len(candidates) != len(aliases):
+            raise CapitalValidationError(
+                f"sleeve/account cardinality differs for {sorted(aliases)}"
+            )
+        for alias, account_id in zip(sorted(aliases), sorted(candidates), strict=True):
+            alias_accounts[alias] = account_id
+    return alias_accounts
+
+
+def _verify_required_epoch_identities(
+    required_epochs: Sequence[Mapping[str, Any]],
+    census: Mapping[str, Any],
+    required_strategy_ids: set[str],
+    derived: DerivedSleeveCapital | None,
+    provenance: Mapping[str, Any] | None,
+) -> list[Mapping[str, Any]]:
+    """The required epochs are the census baseline plus the facts' product epochs.
+
+    A residual parent drops every baseline epoch of its account and its derived
+    product epochs join, as the account-manifest perimeter does; with no facts
+    the identities are the census baseline exactly.  Returns the baseline
+    claims, the epochs the provenance mapping still has to prove.
+    """
+
+    claims = [row for row in required_epochs if "derivation" in row]
+    baseline = [row for row in required_epochs if "derivation" not in row]
+    baseline_expected = census_baseline_identities(census, required_strategy_ids)
+    actual = [
+        (
+            row.get("sleeve_alias"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        for row in baseline
+    ]
+    if len(actual) != len(set(actual)) or not set(actual) <= baseline_expected:
+        raise CapitalValidationError("capital exact required epoch identities differ")
+    removed = baseline_expected - set(actual)
+    if derived is None:
+        if claims or removed:
+            raise CapitalValidationError(
+                "capital exact required epoch identities differ"
+            )
+        return baseline
+    aliases = census_derived_aliases(census)
+    expected_claims = []
+    for key in sorted(derived.product, key=lambda item: (item[0], item[2])):
+        alias = aliases.get((key[1], key[2], key[3]))
+        if alias is None:
+            raise CapitalValidationError(
+                f"no census entry names the derived epoch {key[0]}/{key[1]}"
+            )
+        expected_claims.append(derived_epoch_record(key, derived.epochs[key], alias))
+    if sorted(claims, key=lambda row: (row["account_id"], row["effective_start"])) != (
+        expected_claims
+    ):
+        raise CapitalValidationError("derived required epochs differ from the facts")
+    if any(row.get("account_id") in derived.parents for row in baseline):
+        raise CapitalValidationError(
+            "a residual parent keeps a baseline epoch beside its derived epochs"
+        )
+    if provenance is not None:
+        alias_accounts = census_baseline_alias_accounts(census, provenance)
+        if any(alias_accounts.get(item[0]) not in derived.parents for item in removed):
+            raise CapitalValidationError(
+                "a baseline epoch is dropped although its account is not a "
+                "residual parent"
+            )
+    elif removed and not claims:
+        raise CapitalValidationError("capital exact required epoch identities differ")
+    return baseline
+
+
 def _verify_epoch_accounts(
     required_epochs: Sequence[Mapping[str, Any]],
     provenance: Mapping[str, Any],
@@ -1868,17 +2281,29 @@ def _verify_epoch_accounts(
             raise CapitalValidationError("required epoch account mapping differs")
 
 
+def _selected_provenance_identity(spec: Mapping[str, Any]) -> tuple[Any, Any]:
+    from provider_ledger import _provenance
+
+    return _provenance(spec)
+
+
+def _selected_provenance(spec: Mapping[str, Any]) -> Mapping[str, Any]:
+    provenance, _identity = _selected_provenance_identity(spec)
+    result: Mapping[str, Any] = provenance
+    return result
+
+
 def _verify_required_epoch_accounts(
-    arguments: Mapping[str, Any], snapshots: Mapping[str, Any]
+    arguments: Mapping[str, Any],
+    snapshots: Mapping[str, Any],
+    baseline_epochs: Sequence[Mapping[str, Any]],
 ) -> None:
     spec = snapshots.get("provider_ledger_spec")
     crosswalk = snapshots.get("account_crosswalk")
     if not isinstance(spec, Mapping) or not isinstance(crosswalk, Mapping):
         raise CapitalValidationError("capital account selection authority is absent")
-    from provider_ledger import _provenance
-
-    provenance, _identity = _provenance(spec)
-    _verify_epoch_accounts(arguments["required_epochs"], provenance, crosswalk)
+    provenance = _selected_provenance(spec)
+    _verify_epoch_accounts(baseline_epochs, provenance, crosswalk)
 
 
 def _same_account_remaps(
@@ -1894,9 +2319,7 @@ def _same_account_remaps(
     spec = snapshots.get("provider_ledger_spec")
     if spec is None:
         return []
-    from provider_ledger import _provenance
-
-    provenance, identity = _provenance(spec)
+    provenance, identity = _selected_provenance_identity(spec)
     accounts = {row["account_id"] for row in provenance["accounts"]}
     epoch_keys = ("strategy_id", "effective_start", "effective_end")
     selected = {
@@ -2002,21 +2425,23 @@ def build_governed_capital_result(
     }:
         raise CapitalValidationError("capital input generation fields differ")
     arguments = {key: inputs[key] for key in argument_keys}
-    if set(arguments["source_bindings"]) - {
-        "account_crosswalk",
-        "provider_ledger",
-        "provider_ledger_spec",
-        "strategy_registry",
-    }:
+    if not all(_is_source_role(role) for role in arguments["source_bindings"]):
         raise CapitalValidationError(
             "capital source roles differ from canonical provider authority"
         )
     locators = read_local_sidecar(input_generation_path)
     snapshots = {}
+    sleeve_facts_bytes: list[bytes] = []
     for role, binding in arguments["source_bindings"].items():
         actual, content = _file_binding(_bound_source_path(locators, role))
         if not _binding_matches(actual, binding):
             raise CapitalValidationError(f"capital source binding differs: {role}")
+        if role.startswith(SLEEVE_FACTS_ROLE_PREFIX):
+            # The role names the artifact by its own digest: one role, one file.
+            if role != sleeve_facts_role(actual["sha256"]):
+                raise CapitalValidationError("sleeve facts role differs from bytes")
+            sleeve_facts_bytes.append(content)
+            continue
         snapshots[role] = json.loads(content)
     if "provider_ledger" not in snapshots:
         raise CapitalValidationError("selected provider ledger is absent")
@@ -2041,32 +2466,31 @@ def build_governed_capital_result(
         for row in contract["strategies"]
         if row["product_requirement"] == "REQUIRED"
     }
-    expected = {
-        (
-            sleeve["sleeve_alias"],
-            assignment["strategy_id"],
-            assignment["effective_start"],
-            assignment["effective_end"],
+    # Capital is the capital of the product epochs: the census baseline, with a
+    # residual parent's epochs replaced by the derived product epochs of its
+    # sleeve facts (gross allocations, evidenced by the facts' evidence_ref).
+    derived = (
+        derive_sleeve_capital(
+            sleeve_facts_bytes, snapshots["provider_ledger"], required_strategies
         )
-        for sleeve in contract["current_census"]["account_sleeves"]
-        for assignment in sleeve["assignments"]
-        # Capital is custody capital of the baseline perimeter: an epoch derived
-        # from a nested-strategy tag map is a manifest epoch of an account whose
-        # capital its parent epoch already carries.
-        if assignment["strategy_id"] in required_strategies
-        and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
-    }
-    actual_epochs = [
-        (
-            row.get("sleeve_alias"),
-            row.get("strategy_id"),
-            row.get("effective_start"),
-            row.get("effective_end"),
-        )
-        for row in arguments["required_epochs"]
-    ]
-    if len(actual_epochs) != len(expected) or set(actual_epochs) != expected:
-        raise CapitalValidationError("capital exact required epoch identities differ")
+        if sleeve_facts_bytes
+        else None
+    )
+    provenance: Mapping[str, Any] | None = None
+    if profile == "ACCEPTED_GOVERNED":
+        spec = snapshots.get("provider_ledger_spec")
+        if not isinstance(spec, Mapping):
+            raise CapitalValidationError(
+                "capital provider source specification is absent"
+            )
+        provenance = _selected_provenance(spec)
+    baseline_epochs = _verify_required_epoch_identities(
+        arguments["required_epochs"],
+        contract["current_census"],
+        required_strategies,
+        derived,
+        provenance,
+    )
     if profile == "ACCEPTED_GOVERNED":
         # Reuse the existing product/provider admission verifier, rather than
         # treating this input document's own status or hash as admission.
@@ -2094,8 +2518,8 @@ def build_governed_capital_result(
             contract_semantic_sha256=contract_digest(contract),
             census_sha256=census_digest(contract["current_census"]),
         )
-        _verify_required_epoch_accounts(arguments, snapshots)
-    _verify_selected_facts(arguments, snapshots, policy)
+        _verify_required_epoch_accounts(arguments, snapshots, baseline_epochs)
+    _verify_selected_facts(arguments, snapshots, policy, derived)
     result = calculate_invested_capital(
         policy=policy,
         identity_remaps=_same_account_remaps(arguments, snapshots, contract),

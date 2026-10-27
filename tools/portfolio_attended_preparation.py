@@ -2344,6 +2344,7 @@ def _prepare_attended_inputs(
             ),
             requested_as_of=cutoff,
             evaluated_on=evaluated_on,
+            sleeve_facts_paths=sleeve_facts_paths,
         )
         # The builder returns the portable generation and this machine's
         # locators for it. The generation is written and hashed; the locators
