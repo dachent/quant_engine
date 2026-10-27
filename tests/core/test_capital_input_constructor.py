@@ -52,6 +52,7 @@ def test_import_does_not_read_sources_or_resolve_machine_paths(monkeypatch):
         "account_crosswalk_path",
         "requested_as_of",
         "evaluated_on",
+        "sleeve_facts_paths",
     ]
     # Pin the RETURN as well. Every caller unpacks it, including the stub in
     # tests/core/test_attended_preparation.py::_preparation_function_fixture, and a

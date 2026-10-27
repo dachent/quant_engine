@@ -5,7 +5,11 @@ admitted. Nothing is copied from an earlier cycle and nothing is asserted:
 
 * `required_epochs` are the epoch-manifest generation's own epochs, with the
   sleeve alias resolved through the contract census assignment that names the
-  same account, strategy and start.
+  same account, strategy and start.  A residual parent's epoch is replaced by
+  the derived product epochs of the selected sleeve facts, whose capital is the
+  gross allocation into the sleeve, evidenced by the facts' `evidence_ref`
+  (`DerivedSleeveCapital`); a derived epoch of a strategy outside the product
+  is retained history and carries no governed capital.
 * `opening_basis` is one AVAILABLE_ACCOUNT_LEDGER_NET row per epoch, built by
   the exact recipe `_verify_account_ledger_opening` re-derives: every
   owner-capital ledger fact for that account dated before the epoch opens,
@@ -23,6 +27,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
@@ -55,6 +60,7 @@ def build_input_generation(
     account_crosswalk_path: Path,
     requested_as_of: str,
     evaluated_on: str,
+    sleeve_facts_paths: Sequence[Path] = (),
 ) -> tuple[dict, dict[str, str]]:
     """Build the capital input generation and this machine's locators for it."""
 
@@ -101,10 +107,10 @@ def build_input_generation(
     # --- epochs -------------------------------------------------------------
     # A census sleeve names no account: the private sleeve -> account mapping is
     # resolved from the provider spec's own provenance, exactly as
-    # `_verify_epoch_accounts` re-resolves it -- candidates that carry every
-    # assignment in a sleeve's signature, then sorted-to-sorted within a group
-    # of sleeves that share one signature. The owner-accepted crosswalk is the
-    # tie-break the verifier then checks, so it must agree by construction.
+    # `_verify_epoch_accounts` re-resolves it (`census_baseline_alias_accounts`).
+    # The owner-accepted crosswalk is the tie-break the verifier then checks, so
+    # it must agree by construction.  A derived sleeve names its account in its
+    # own hash-bound facts instead.
     from provider_ledger import _provenance
 
     manifest = json.loads(
@@ -114,43 +120,10 @@ def build_input_generation(
     )
     spec = json.loads(provider_ledger_spec_path.read_bytes())
     provenance, _identity = _provenance(spec)
-    account_ids = {row["account_id"] for row in provenance["accounts"]}
-    groups = {}
-    for sleeve in contract_raw["current_census"]["account_sleeves"]:
-        if not sleeve["assignments"]:
-            continue
-        signature = tuple(
-            sorted(
-                (
-                    item["strategy_id"],
-                    item["effective_start"],
-                    item.get("effective_end"),
-                )
-                for item in sleeve["assignments"]
-            )
-        )
-        groups.setdefault(signature, []).append(sleeve["sleeve_alias"])
-    alias_by_account = {}
-    for signature, aliases in groups.items():
-        candidates = None
-        for strategy_id, start, end in signature:
-            matches = {
-                str(row["account_id"])
-                for row in provenance["assignments"]
-                if row.get("strategy_id") == strategy_id
-                and row.get("effective_start") == start
-                and row.get("effective_end") == end
-                and row.get("account_id") in account_ids
-                and row.get("mapping_status") == "MAPPED"
-                and row.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
-            }
-            candidates = matches if candidates is None else candidates & matches
-        if not candidates:
-            continue
-        if len(candidates) != len(aliases):
-            raise SystemExit("sleeve/account cardinality differs for %s" % (aliases,))
-        for alias, account_id in zip(sorted(aliases), sorted(candidates)):
-            alias_by_account[account_id] = alias
+    alias_accounts = capital.census_baseline_alias_accounts(
+        contract_raw["current_census"], provenance
+    )
+    alias_by_account = {account: alias for alias, account in alias_accounts.items()}
     crosswalk = json.loads(account_crosswalk_path.read_bytes())
     for row in crosswalk["bindings"]:
         bound = alias_by_account.get(row["account_id"])
@@ -159,8 +132,55 @@ def build_input_generation(
                 "derived sleeve mapping contradicts the accepted crosswalk: %s"
                 % row["account_id"]
             )
+    required_strategy_ids = {
+        row["strategy_id"]
+        for row in contract["strategies"]
+        if row["product_requirement"] == "REQUIRED"
+    }
+    sleeve_facts_paths = tuple(Path(item) for item in sleeve_facts_paths)
+    derived = (
+        capital.derive_sleeve_capital(
+            [path.read_bytes() for path in sleeve_facts_paths],
+            ledger,
+            required_strategy_ids,
+        )
+        if sleeve_facts_paths
+        else None
+    )
+    derived_aliases = (
+        capital.census_derived_aliases(contract_raw["current_census"])
+        if derived is not None
+        else {}
+    )
+    manifest_keys = {
+        (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"],
+        )
+        for row in manifest["rows"]
+    }
+    if derived is not None and not set(derived.epochs) <= manifest_keys:
+        raise SystemExit("a derived epoch is absent from the epoch manifest")
     epochs = []
     for row in manifest["rows"]:
+        key = (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"],
+        )
+        if derived is not None and key in derived.epochs:
+            if key not in derived.product:
+                continue
+            alias = derived_aliases.get((key[1], key[2], key[3]))
+            if alias is None:
+                raise SystemExit(
+                    "no census entry names the derived epoch %s/%s" % (key[0], key[1])
+                )
+            epochs.append(capital.derived_epoch_record(key, derived.epochs[key], alias))
+            continue
         alias = alias_by_account.get(row["account_id"])
         if alias is None:
             raise SystemExit("no census sleeve names account %s" % row["account_id"])
@@ -176,6 +196,10 @@ def build_input_generation(
             }
         )
     print("epochs", len(epochs))
+    if derived is not None:
+        # The derived accounts' flows are the sleeve facts' own, re-derived by
+        # the manifest producer's function; the provider ledger carries none.
+        source_rows.update(derived.source_rows())
 
     required_account_ids = {row["account_id"] for row in epochs}
     capital_policy = next(
@@ -355,10 +379,17 @@ def build_input_generation(
     coverage = []
     for epoch in epochs:
         epoch_end = epoch["effective_end"] or complete_through
+        # A derived sleeve's flows are its parent account's own flows,
+        # partitioned: the parent's authoritative flow admission covers them.
+        covered_account = (
+            epoch["derivation"]["parent_account_id"]
+            if "derivation" in epoch
+            else epoch["account_id"]
+        )
         matches = [
             row
             for row in ledger["admissions"]
-            if row.get("account_id") == epoch["account_id"]
+            if row.get("account_id") == covered_account
             and row.get("fact_type") == "flows"
             and row.get("disposition") == "AUTHORITATIVE"
             and row.get("effective_start") <= epoch["effective_start"]
@@ -377,6 +408,9 @@ def build_input_generation(
             }
         )
 
+    sleeve_facts_bindings, sleeve_facts_locators = capital.sleeve_facts_bindings(
+        sleeve_facts_paths
+    )
     generation = {
         "authority_profile": "ACCEPTED_GOVERNED",
         "complete_through": complete_through,
@@ -400,6 +434,7 @@ def build_input_generation(
             "provider_ledger_spec": capital._file_binding(provider_ledger_spec_path)[0],
             "account_crosswalk": capital._file_binding(account_crosswalk_path)[0],
             "strategy_registry": capital._file_binding(strategy_registry_path)[0],
+            **sleeve_facts_bindings,
         },
     }
     # The generation binds bytes by identity only, so it is the same document
@@ -411,6 +446,7 @@ def build_input_generation(
         "provider_ledger_spec": capital._local_binding(provider_ledger_spec_path),
         "account_crosswalk": capital._local_binding(account_crosswalk_path),
         "strategy_registry": capital._local_binding(strategy_registry_path),
+        **sleeve_facts_locators,
     }
     return generation, locators
 
@@ -435,6 +471,13 @@ def main(argv=None):
     parser.add_argument("--account-crosswalk", type=Path, required=True)
     parser.add_argument("--requested-as-of", required=True)
     parser.add_argument("--evaluated-on", required=True)
+    parser.add_argument(
+        "--sleeve-facts",
+        type=Path,
+        action="append",
+        default=[],
+        help="a selected sleeve-facts artifact (repeat for each parent account)",
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -449,6 +492,7 @@ def main(argv=None):
         account_crosswalk_path=args.account_crosswalk,
         requested_as_of=args.requested_as_of,
         evaluated_on=args.evaluated_on,
+        sleeve_facts_paths=args.sleeve_facts,
     )
     args.output_root.mkdir(parents=True, exist_ok=True)
     input_path = args.output_root / "capital-input-generation.json"

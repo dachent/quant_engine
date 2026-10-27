@@ -291,7 +291,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_invested_capital",
-      1
+      2
     ],
     [
       "portfolio_financial_outcomes",
@@ -331,7 +331,7 @@
     [
       "portfolio_invested_capital",
       "account_strategy_manifest",
-      2
+      3
     ],
     [
       "portfolio_invested_capital",
@@ -346,7 +346,7 @@
     [
       "portfolio_invested_capital",
       "provider_ledger",
-      4
+      3
     ],
     [
       "portfolio_pipeline_materialize",

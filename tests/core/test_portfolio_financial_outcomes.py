@@ -2066,16 +2066,14 @@ def test_seam_predicate_agrees_with_the_acceptance_n26_classifier_on_smoke9():
     )
 
 
-def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignment_only(
-    monkeypatch, tmp_path
-):
-    """`_verify_epochs` keeps `epoch_count == len(rows)` and discloses the exempt set."""
+def _verify_epochs_spec(tmp_path, monkeypatch, rebuilt):
+    """A specification whose panel carries ``rebuilt`` as its account manifest."""
 
-    rebuilt = {
-        "rows": _smoke9_rows(),
-        "calculation_cutoff_date": _T0A_CUTOFF.isoformat(),
-    }
-    monkeypatch.setattr(outcomes, "_rebuild_selected_epochs", lambda *a, **k: rebuilt)
+    monkeypatch.setattr(
+        outcomes,
+        "_rebuild_selected_epochs",
+        lambda *a, **k: rebuilt,
+    )
     panel_root = tmp_path / "panel"
     panel_root.mkdir()
     data_dir = panel_root / "data"
@@ -2108,6 +2106,19 @@ def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignm
     monkeypatch.setattr(
         outcomes, "_epoch_manifest_profile", lambda _spec: {"selected_bytes": {}}
     )
+    return spec
+
+
+def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignment_only(
+    monkeypatch, tmp_path
+):
+    """`_verify_epochs` keeps `epoch_count == len(rows)` and discloses the exempt set."""
+
+    rebuilt = {
+        "rows": _smoke9_rows(),
+        "calculation_cutoff_date": _T0A_CUTOFF.isoformat(),
+    }
+    spec = _verify_epochs_spec(tmp_path, monkeypatch, rebuilt)
     proof = outcomes._verify_epochs(spec, _assignment_only_contract())
     assert proof["epoch_count"] == 13
     assert proof["assignment_only_epochs"] == [
@@ -2124,6 +2135,70 @@ def test_verify_epochs_disclosure_keeps_epoch_count_at_len_rows_and_adds_assignm
             "effective_end": _TT_END,
         },
     ]
+
+
+def test_verify_epochs_counts_the_product_rows_of_a_derived_perimeter(
+    monkeypatch, tmp_path
+):
+    """R2: a residual parent's epoch is replaced by its derived product epoch.
+
+    The manifest then also carries a retained derived epoch of a strategy outside
+    the product.  Only the product rows are counted and scored; the retained row
+    is history and neither raises the count nor demands a numerically OK
+    required strategy.
+    """
+
+    import derived_epoch_perimeter as perimeter_module
+
+    rows = _smoke9_rows()
+    parent = next(row for row in rows if row["strategy_id"] == "p123-ai-factor")
+    rows.remove(parent)
+    derived = {
+        **parent,
+        "account_id": "parent-s2",
+        "effective_start": "2026-01-30",
+        "effective_end": None,
+    }
+    retained = {
+        **parent,
+        "account_id": "parent-s1",
+        "strategy_id": "history-only",
+        "effective_start": "2026-01-26",
+        "effective_end": "2026-06-23",
+    }
+    rows.extend([derived, retained])
+    rebuilt = {"rows": rows, "calculation_cutoff_date": _T0A_CUTOFF.isoformat()}
+    spec = _verify_epochs_spec(tmp_path, monkeypatch, rebuilt)
+    fields = ("account_id", "strategy_id", "effective_start", "effective_end")
+    baseline = {tuple(row[name] for name in fields) for row in _smoke9_rows()}
+    perimeter = perimeter_module.bind_perimeter(
+        baseline,
+        {tuple(row[name] for name in fields) for row in rows},
+        {
+            tuple(derived[name] for name in fields): parent["account_id"],
+            tuple(retained[name] for name in fields): parent["account_id"],
+        },
+    )
+
+    def rebuild(*_args, perimeter_out=None, **_kwargs):
+        assert perimeter_out is not None
+        perimeter_out.append(perimeter)
+        return rebuilt
+
+    monkeypatch.setattr(outcomes, "_rebuild_selected_epochs", rebuild)
+    proof = outcomes._verify_epochs(spec, _assignment_only_contract())
+    assert proof["epoch_count"] == 13
+    assert {row["account_id"] for row in rows} >= {"parent-s1", "parent-s2"}
+    # the consumer validation is told which epochs are derived and whose they are
+    # (Codex P1): without it the derived and retained rows would be refused
+    assert {
+        (row["assignment"]["account_id"], row["derivation"]["parent_account_id"])
+        for row in proof["coverage_rows"]
+    } == {("parent-s1", parent["account_id"]), ("parent-s2", parent["account_id"])}
+    assert all(
+        row["authority_kind"] == "DERIVED_SLEEVE_COVERAGE_V1"
+        for row in proof["coverage_rows"]
+    )
 
 
 def test_shipped_census_refuses_the_blocked_tt_predecessor_rows():
