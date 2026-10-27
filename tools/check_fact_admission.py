@@ -15,6 +15,7 @@ on any dropped fact.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
@@ -62,15 +63,33 @@ def dropped_facts(
     return findings
 
 
-def _provider_layout(workspace: Path) -> dict[str, tuple[Path, str]]:
-    """Provider id -> (data root, catalog filename).
+def _catalog_filenames() -> dict[str, str]:
+    """Provider id -> catalog filename, read from provider_ledger's own table.
 
-    Catalog filenames come from provider_ledger's own table (imported lazily, so
-    the two cannot drift); the data root is the workspace directory named
-    ``data<provider id>`` (case-insensitive).
+    The table is parsed from source (no import of the large module and no private
+    reach-in), so the two cannot drift.
     """
 
-    import provider_ledger  # lazy: large module, only needed for workspace mode
+    tree = ast.parse(
+        (Path(__file__).with_name("provider_ledger.py")).read_text("utf-8")
+    )
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_PROVIDER_CATALOGS"
+            and isinstance(node.value, ast.Dict)
+        ):
+            return {
+                str(ast.literal_eval(key)): str(ast.literal_eval(value.elts[0]))
+                for key, value in zip(node.value.keys, node.value.values, strict=True)
+                if key is not None and isinstance(value, ast.Tuple)
+            }
+    raise RuntimeError("provider_ledger._PROVIDER_CATALOGS not found")
+
+
+def _provider_layout(workspace: Path) -> dict[str, tuple[Path, str]]:
+    """Provider id -> (data root, catalog filename); the root is ``data<id>``."""
 
     roots = {
         path.name.lower(): path
@@ -79,10 +98,7 @@ def _provider_layout(workspace: Path) -> dict[str, tuple[Path, str]]:
     }
     return {
         provider: (roots["data" + provider], filename)
-        for provider, (
-            filename,
-            _versions,
-        ) in provider_ledger._PROVIDER_CATALOGS.items()  # noqa: SLF001
+        for provider, filename in _catalog_filenames().items()
         if "data" + provider in roots
     }
 
