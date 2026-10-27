@@ -2596,7 +2596,16 @@ def check_counts(ctx: Context) -> Iterator[Finding]:
             (),
         ),
         "accounts": (len(rows(ctx.panel, "account_summary")), ()),
-        "strategies": (len(rows(ctx.panel, "strategies")), ("D9",)),
+        # Retained history-only records (#592) follow the current strategy rows in
+        # the panel; the count is of the current strategies.
+        "strategies": (
+            sum(
+                1
+                for row in rows(ctx.panel, "strategies")
+                if row.get("record_kind") != "RETAINED_HISTORY_ONLY"
+            ),
+            ("D9",),
+        ),
         # The count is the current holdings: a classified panel counts the rows at the
         # cutoff, not the accepted history beside them (N62).
         "positions": (
@@ -4691,10 +4700,14 @@ def _view_ids(
     value = node(document, *path)
     if not isinstance(value, list):
         return None
+    # Retained history-only records (#592) are marked non-current; they sit after
+    # the current rows in the panel and belong to no current view.
     return [
         str(row.get(key))
         for row in value
-        if isinstance(row, dict) and row.get(key) is not None
+        if isinstance(row, dict)
+        and row.get(key) is not None
+        and row.get("record_kind") != "RETAINED_HISTORY_ONLY"
     ]
 
 

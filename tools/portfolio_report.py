@@ -81,6 +81,15 @@ from quant_engine.portfolio_ledger.returns import (
     summed_value_composite,
     value_periods,
 )
+from lifecycle_fields import (
+    LIFECYCLE_SCHEMA_VERSION,
+    RETAINED_HISTORY_ONLY,
+    LifecycleError,
+    epoch_lifecycle,
+    parent_assignment_id,
+    strategy_lifecycle,
+)
+from nested_strategy_tag_map import TagMap, TagMapError, validate_tag_map
 from portfolio_private_stage import validate_private_stage_target
 from holdings_identity import build_holdings_identity
 from verify_holdings_identity import (
@@ -251,6 +260,9 @@ WORKBOOK_DELIVERY_EVIDENCE_VERSION: Final = 1
 EPOCH_MANIFEST_WORKBOOK_NAME: Final = "account-strategy-manifest.json"
 EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME: Final = "epoch-manifest-source.json"
 EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk.json"
+# The nested-strategy tag map a candidate was built with (#592), kept beside the
+# report so verification and publication rebuild from the same bytes.
+NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -8501,6 +8513,215 @@ def _crosswalk_epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str, str | N
     )
 
 
+def _load_nested_tag_map(path: Path) -> tuple[TagMap, bytes]:
+    try:
+        raw = path.read_bytes()
+        return validate_tag_map(raw), raw
+    except (OSError, TagMapError) as exc:
+        raise ReportValidationError(
+            f"nested strategy tag map is invalid: {exc}"
+        ) from exc
+
+
+def _lifecycle_sleeves(
+    tag_map: TagMap | None, assignments: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Sleeve links by derived account id and by strategy id (#592).
+
+    A sleeve's parent is the parent account's assignment its window overlaps; a
+    window no assignment overlaps has no provable parent and stops the report.
+    """
+
+    by_account: dict[str, dict[str, Any]] = {}
+    by_strategy: dict[str, dict[str, Any]] = {}
+    if tag_map is None:
+        return by_account, by_strategy
+    mapped = [
+        assignment
+        for assignment in assignments
+        if assignment.get("mapping_status") == "MAPPED"
+        and assignment.get("strategy_id") is not None
+    ]
+    for parent in tag_map.parents:
+        for sleeve in parent.sleeves:
+            try:
+                parent_id = parent_assignment_id(
+                    mapped,
+                    parent.parent_account_id,
+                    sleeve.effective_start.isoformat(),
+                    None
+                    if sleeve.effective_end is None
+                    else sleeve.effective_end.isoformat(),
+                )
+            except LifecycleError as exc:
+                raise ReportValidationError(
+                    f"nested sleeve {sleeve.sleeve_id} has no provable parent: {exc}"
+                ) from exc
+            link = {
+                "sleeve": sleeve,
+                "parent_assignment_id": parent_id,
+                "sleeve_label": sleeve.label,
+            }
+            by_account[parent.sleeve_account_id(sleeve.sleeve_id)] = link
+            by_strategy[sleeve.strategy_id] = link
+    return by_account, by_strategy
+
+
+def _with_epoch_lifecycle(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    dispositions: Mapping[tuple[str, str, str, str | None], str],
+    sleeves_by_account: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add the lifecycle fields to each epoch row from governed facts (#592)."""
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        key = cast(
+            tuple[str, str, str, str | None],
+            (
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
+            ),
+        )
+        detail = details.get(key)
+        try:
+            fields = epoch_lifecycle(
+                effective_end=row.get("effective_end"),
+                closed_on=(
+                    None if detail is None else detail.get("performance_closed_on")
+                ),
+                product_disposition=dispositions.get(key),
+            )
+        except LifecycleError as exc:
+            raise ReportValidationError(f"epoch lifecycle is invalid: {exc}") from exc
+        link = sleeves_by_account.get(str(row.get("account_id")))
+        if link is not None:
+            fields["parent_assignment_id"] = link["parent_assignment_id"]
+            fields["sleeve_label"] = link["sleeve_label"]
+        result.append({**row, **fields})
+    return result
+
+
+def _lifecycle_strategy_fields(
+    *,
+    current_required: bool,
+    effective_ends: Sequence[object],
+    closed_ons: Sequence[object],
+    link: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        fields = strategy_lifecycle(
+            current_required=current_required,
+            effective_ends=effective_ends,
+            closed_ons=closed_ons,
+        )
+    except LifecycleError as exc:
+        raise ReportValidationError(f"strategy lifecycle is invalid: {exc}") from exc
+    if link is not None:
+        fields["parent_assignment_id"] = link["parent_assignment_id"]
+        fields["sleeve_label"] = link["sleeve_label"]
+    return fields
+
+
+def _lifecycle_strategy_rows(
+    summary: Sequence[Mapping[str, Any]],
+    *,
+    controls: Mapping[str, Mapping[str, Any]],
+    crosswalk_rows: Sequence[Mapping[str, Any]],
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    sleeves_by_strategy: Mapping[str, Mapping[str, Any]],
+    strategy_names: Mapping[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lifecycle fields for the current strategies and the retained records.
+
+    The retained records are the strategies the report does not carry as current
+    but that the current-epoch crosswalk or the nested-strategy tag map names:
+    history-only, effective-dated, with no live product outcome (#592, #567).
+    """
+
+    epochs_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
+    for crosswalk_row in crosswalk_rows:
+        epochs_by_strategy.setdefault(str(crosswalk_row["strategy_id"]), []).append(
+            crosswalk_row
+        )
+
+    def closed_ons(strategy_id: str) -> list[object]:
+        return [
+            details.get(_crosswalk_epoch_key(item), {}).get("performance_closed_on")
+            for item in epochs_by_strategy.get(strategy_id, [])
+        ]
+
+    current: list[dict[str, Any]] = []
+    current_ids: set[str] = set()
+    for row in summary:
+        strategy_id = str(row["strategy_id"])
+        current_ids.add(strategy_id)
+        control = controls.get(strategy_id, {})
+        fields = _lifecycle_strategy_fields(
+            current_required=control.get("product_requirement") == "REQUIRED"
+            and control.get("lifecycle_status") == "ACTIVE",
+            effective_ends=[
+                item["effective_end"]
+                for item in epochs_by_strategy.get(strategy_id, [])
+            ],
+            closed_ons=closed_ons(strategy_id),
+            link=sleeves_by_strategy.get(strategy_id),
+        )
+        current.append({**row, **fields})
+
+    retained: dict[str, dict[str, Any]] = {}
+    for strategy_id, items in epochs_by_strategy.items():
+        if strategy_id in current_ids:
+            continue
+        control = controls.get(strategy_id, {})
+        ends = [item["effective_end"] for item in items]
+        retained[strategy_id] = {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_names.get(strategy_id, strategy_id),
+            "record_kind": RETAINED_HISTORY_ONLY,
+            "lifecycle_status": control.get("lifecycle_status")
+            or "DEPRECATED_HISTORY_ONLY",
+            "product_requirement": "EXCLUDED",
+            "source": "CURRENT_EPOCH_CROSSWALK",
+            "effective_start": min(str(item["effective_start"]) for item in items),
+            "effective_end": (
+                None if any(end is None for end in ends) else max(map(str, ends))
+            ),
+            **_lifecycle_strategy_fields(
+                current_required=False,
+                effective_ends=ends,
+                closed_ons=closed_ons(strategy_id),
+                link=sleeves_by_strategy.get(strategy_id),
+            ),
+        }
+    for strategy_id, link in sleeves_by_strategy.items():
+        if strategy_id in current_ids or strategy_id in retained:
+            continue
+        sleeve = link["sleeve"]
+        end = None if sleeve.effective_end is None else sleeve.effective_end.isoformat()
+        retained[strategy_id] = {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_names.get(strategy_id, sleeve.label),
+            "record_kind": RETAINED_HISTORY_ONLY,
+            "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+            "product_requirement": "EXCLUDED",
+            "source": "NESTED_STRATEGY_TAG_MAP",
+            "effective_start": sleeve.effective_start.isoformat(),
+            "effective_end": end,
+            **_lifecycle_strategy_fields(
+                current_required=False,
+                effective_ends=[end],
+                closed_ons=[None],
+                link=link,
+            ),
+        }
+    return current, [retained[key] for key in sorted(retained)]
+
+
 def _current_epoch_detail(
     row: Mapping[str, Any], verified: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -8696,6 +8917,7 @@ def build_report_data(
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -8728,10 +8950,18 @@ def build_report_data(
     excluded_epoch_account_ids: set[str] = set()
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
+    epoch_crosswalk_rows: list[dict[str, Any]] = []
+    epoch_verified_details: Mapping[
+        tuple[str, str, str, str | None], Mapping[str, Any]
+    ] = {}
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
     _require_epoch_generation_root(epoch_supplied, epoch_manifest_generation_root)
+    if nested_tag_map_path is not None and not epoch_supplied:
+        raise ReportValidationError(
+            "nested strategy tag map requires the current epoch evidence"
+        )
     if (
         _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
         and not epoch_supplied
@@ -8779,6 +9009,8 @@ def build_report_data(
         ]
         crosswalk_payload = json.loads(_crosswalk_bytes.decode("utf-8"))
         calculation_cutoff_date = crosswalk_payload["calculation_cutoff_date"]
+        epoch_crosswalk_rows = list(crosswalk_payload["rows"])
+        epoch_verified_details = verified_epoch_details
         current_epoch_tuples = {
             (
                 row["account_id"],
@@ -9515,6 +9747,50 @@ def build_report_data(
     }
     if calculation_cutoff_date is not None:
         report["calculation_cutoff_date"] = calculation_cutoff_date
+    if current_epoch_details is not None:
+        # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
+        # close and the tag map only.  A report built without a current-epoch
+        # crosswalk keeps the previous schema: no marker, no fields.
+        tag_map: TagMap | None = None
+        if nested_tag_map_path is not None:
+            tag_map, tag_map_bytes = _load_nested_tag_map(nested_tag_map_path)
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "nested-strategy-tag-map",
+                    "as_of_date": tag_map.as_of_date.isoformat(),
+                    "schema": "nested-strategy-tag-map/1",
+                    "sha256": hashlib.sha256(tag_map_bytes).hexdigest(),
+                },
+            ]
+        sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
+            tag_map, _objects(catalog.get("assignments"), "assignments")
+        )
+        report["twr_mwr"] = _with_epoch_lifecycle(
+            performance,
+            details=current_epoch_details,
+            dispositions={
+                _crosswalk_epoch_key(row): row["product_epoch_disposition"]
+                for row in epoch_crosswalk_rows
+            },
+            sleeves_by_account=sleeves_by_account,
+        )
+        report["strategy_summary"], report["retained_strategies"] = (
+            _lifecycle_strategy_rows(
+                strategy_summary,
+                controls=strategy_product_controls,
+                crosswalk_rows=epoch_crosswalk_rows,
+                details=epoch_verified_details,
+                sleeves_by_strategy=sleeves_by_strategy,
+                strategy_names={
+                    _text(item.get("strategy_id"), "strategy.strategy_id"): _text(
+                        item.get("name"), "strategy.name"
+                    )
+                    for item in _objects(catalog.get("strategies"), "strategies")
+                },
+            )
+        )
+        report["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
     if history_contract_ref is not None:
         report["strategy_history_contract"] = history_contract_ref
     if implementation_contract_ref is not None:
@@ -10420,6 +10696,7 @@ def build_candidate(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     include_workbook: bool = False,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -10451,6 +10728,7 @@ def build_candidate(
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
+        nested_tag_map_path=nested_tag_map_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -10459,6 +10737,11 @@ def build_candidate(
     excel_input_path = candidate / "excel-input" / WORKBOOK_NAME
     excel_path = candidate / "excel" / WORKBOOK_NAME
     _write_exact(data_path, report_bytes)
+    if nested_tag_map_path is not None:
+        _write_exact(
+            candidate / NESTED_TAG_MAP_EVIDENCE_NAME,
+            _regular_file_bytes(nested_tag_map_path, "nested strategy tag map"),
+        )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
         capital_result_bytes = (
@@ -11424,6 +11707,13 @@ def _workbook_evidence_binding_from_snapshots(
         binding[f"{name}_sha256"] = hashlib.sha256(content).hexdigest()
         binding[f"{name}_size_bytes"] = len(content)
     return binding
+
+
+def _candidate_nested_tag_map(candidate_dir: Path) -> Path | None:
+    """The tag map a candidate was built with, when it carries one (#592)."""
+
+    path = candidate_dir / NESTED_TAG_MAP_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
 
 
 def _epoch_manifest_workbook_snapshots(
@@ -13553,6 +13843,7 @@ def verify_candidate(
         attribution_generation_id=attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -14604,6 +14895,7 @@ def publish_report(
         attribution_generation_id=snapshot_attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -15028,6 +15320,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--epoch-manifest-source", type=Path)
     build.add_argument("--epoch-crosswalk", type=Path)
     build.add_argument("--epoch-manifest-generation-root", type=Path)
+    build.add_argument("--nested-tag-map", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -15184,6 +15477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 source_clock_path=args.source_clock,
+                nested_tag_map_path=args.nested_tag_map,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
