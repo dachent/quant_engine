@@ -160,7 +160,7 @@ const launchOptions = {
     : {}),
 };
 const excludeCandidates = options["exclude-candidates"] === "true";
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"]
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "performance", "candidates", "data"]
   .filter((view) => !excludeCandidates || view !== "candidates");
 const viewports = [
   { name: "desktop", viewport: { width: 1440, height: 900 } },
