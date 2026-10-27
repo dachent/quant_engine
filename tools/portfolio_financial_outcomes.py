@@ -456,9 +456,6 @@ def _manifest_artifact(
     return path, _verified_file(path, definition.sha256, definition.size_bytes)
 
 
-_SLEEVE_FACTS_NODE_PREFIX = "financial-sleeve-facts"
-
-
 def selected_hwm_source_paths(spec: Any) -> dict[str, Any]:
     """Resolve the already selected account, provider and baseline authorities.
 
@@ -508,7 +505,9 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Any]:
             node
             for node in spec.nodes
             if isinstance(node, ArtifactNode)
-            and node.node_id.startswith(_SLEEVE_FACTS_NODE_PREFIX)
+            and node.node_id.startswith(
+                derived_epoch_perimeter.SLEEVE_FACTS_NODE_PREFIX
+            )
         ),
         key=lambda node: node.node_id,
     )

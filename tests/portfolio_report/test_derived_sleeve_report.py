@@ -23,6 +23,7 @@ from quant_engine.portfolio_ledger.returns import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
+from nested_strategy_tag_map import validate_tag_map
 from test_returns_engine_consumption import (
     REPOSITORY_ROOT,
     _full_report_fixture,
@@ -82,12 +83,16 @@ def _epoch(start: date, ending: str) -> Any:
 
 
 def _detail(
-    key: tuple[str, str, str, str | None], links: list[dict[str, Any]], twr: str
+    key: tuple[str, str, str, str | None],
+    links: list[dict[str, Any]],
+    twr: str,
+    tag_map_sha256: str | None,
 ) -> dict[str, Any]:
     return {
         "account_label": f"Account A / {key[0].rsplit('-', 1)[-1]}",
         "last_four": "4321",
         "derived_parent_account_id": PARENT,
+        "derived_tag_map_sha256": tag_map_sha256,
         "epoch_admission_status": "FUNDED",
         "epoch_output_status": "OK",
         "epoch_blocking_reason": None,
@@ -121,6 +126,7 @@ def _build(
     *,
     tag_map: bytes | None,
     details_edit: Any = None,
+    tag_map_sha256: str | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
     retained = _epoch(date(2026, 7, 1), "104")
@@ -165,9 +171,13 @@ def _build(
             for day, value in (("2026-07-01", "0"), ("2026-07-30", twr))
         ],
     }
+    # the facts were built from the very map the report is given, unless a test says not
+    digest = tag_map_sha256 or (
+        None if tag_map is None else validate_tag_map(tag_map).sha256
+    )
     details = {
-        CURRENT: _detail(CURRENT, _manifest_trace_links(current), twr),
-        RETAINED: _detail(RETAINED, _manifest_trace_links(retained), twr),
+        CURRENT: _detail(CURRENT, _manifest_trace_links(current), twr, digest),
+        RETAINED: _detail(RETAINED, _manifest_trace_links(retained), twr, digest),
     }
     if details_edit is not None:
         details_edit(details)
@@ -287,6 +297,21 @@ def test_a_derived_epoch_before_its_sleeve_window_is_refused(
     ):
         _build(
             full, tmp_path, monkeypatch, tag_map=_tag_map(), details_edit=start_earlier
+        )
+
+
+def test_a_tag_map_other_than_the_one_the_facts_were_built_from_is_refused(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="differs from the one the sleeve"
+    ):
+        _build(
+            full,
+            tmp_path,
+            monkeypatch,
+            tag_map=_tag_map(),
+            tag_map_sha256="0" * 64,
         )
 
 

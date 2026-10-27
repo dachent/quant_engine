@@ -8607,9 +8607,14 @@ def _report_epoch_perimeter(
         for key, detail in verified_details.items()
         if detail.get("derived_parent_account_id") is not None
     }
+    digests = {
+        key: str(detail["derived_tag_map_sha256"])
+        for key, detail in verified_details.items()
+        if detail.get("derived_tag_map_sha256") is not None
+    }
     try:
         return derived_epoch_perimeter.bind_perimeter(
-            baseline, verified_details, parents
+            baseline, verified_details, parents, digests
         )
     except derived_epoch_perimeter.PerimeterError as exc:
         raise ReportValidationError(
@@ -8645,6 +8650,13 @@ def _bind_derived_epochs_to_tag_map(
         for sleeve in parent.sleeves
     }
     for key, parent_account in perimeter.parents.items():
+        # The sleeve facts were built from one policy; the report may speak for
+        # no other.  Every derived epoch names the digest of that policy.
+        if perimeter.tag_map_digests.get(key) != tag_map.sha256:
+            raise ReportValidationError(
+                "the tag map differs from the one the sleeve facts were built "
+                f"from: {key[0]}"
+            )
         found = sleeves.get(key[0])
         if (
             found is None
@@ -13286,6 +13298,7 @@ def _verified_epoch_authority_details(
             # PRIVATE sibling: the parent account of a derived sleeve epoch
             # (None for a baseline epoch), from the flow-coverage authority.
             "derived_parent_account_id": perimeter.parents.get(key),
+            "derived_tag_map_sha256": perimeter.tag_map_digests.get(key),
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],

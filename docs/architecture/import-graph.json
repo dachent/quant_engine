@@ -325,6 +325,11 @@
     ],
     [
       "portfolio_pipeline_materialize",
+      "derived_epoch_perimeter",
+      1
+    ],
+    [
+      "portfolio_pipeline_materialize",
       "portfolio_attended_preparation",
       1
     ],
