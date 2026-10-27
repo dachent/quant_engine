@@ -34,25 +34,38 @@ def test_the_sleeve_label_depends_on_the_governed_capital_result() -> None:
 
 
 def test_the_separate_report_claim_only_appears_when_the_input_was_supplied() -> None:
-    sentence = (
-        "Governed invested capital (for fund-scoped providers, the gross allocations "
-        "to the fund; account deposits are not capital) is reported separately."
+    general = (
+        "Governed invested capital (the deposits) and the strategy cash line are "
+        "reported separately."
     )
-    assert APP_JS.count(sentence) == 1
-    assert f'governedCapitalSupplied ? "{sentence}"' in APP_JS
-
-
-def test_the_sleeve_legend_does_not_call_deposits_capital_or_name_a_cash_line() -> None:
-    """Owner decision B on #330: fund-scoped capital is the gross allocation at fill dates."""
-
-    assert "(the deposits)" not in APP_JS
-    assert "and the strategy cash line are reported separately" not in APP_JS
-    assert "not the deposits into the provider cash or wallet account" not in APP_JS
+    fund_scoped = (
+        "Governed invested capital is reported separately (for fund-scoped providers, "
+        "the gross allocations to the fund; account deposits are not capital)."
+    )
+    assert APP_JS.count(general) == 1 and APP_JS.count(fund_scoped) == 1
     assert (
-        "the gross amount allocated to the strategy sleeve at fill dates; account "
-        "deposits and wallet conversions are not capital, and no derived strategy "
-        "cash line exists for these rows."
-    ) in APP_JS
+        f'governedCapitalSupplied ? (hasFundScopedRows ? "{fund_scoped}" : "{general}")'
+        in APP_JS
+    )
+
+
+def test_the_fund_scoped_wording_is_limited_to_fund_scoped_rows() -> None:
+    """Owner decision B on #330 applies to fund-scoped providers (Quantbase) only."""
+
+    assert 'String(row.provider || "").toLowerCase() === "quantbase"' in APP_JS
+    assert "const hasFundScopedRows = manifest.rows.some(fundScopedRow);" in APP_JS
+    clause = (
+        "For fund-scoped providers (Quantbase) that amount is the gross allocation to "
+        "the fund at fill dates; account deposits and wallet conversions are not "
+        "capital and no derived strategy cash line exists."
+    )
+    assert f'hasFundScopedRows ? " {clause}" : ""' in APP_JS
+    # The sleeve tooltip only uses the fund wording for fund-scoped rows.
+    assert (
+        "the gross amount allocated to the fund from its provider capital anchor"
+        in APP_JS
+    )
+    assert "const sleeveTitleFor = (row) => (fundScopedRow(row)" in APP_JS
 
 
 def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
