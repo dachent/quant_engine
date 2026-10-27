@@ -1,0 +1,56 @@
+{
+  "artifact_id": "sleeve-policy-manifest",
+  "ibkr": {
+    "declared_inputs": {
+      "path": "sleeve-declared-inputs.json",
+      "sha256": "1ae9ec2a4865cdf8854ec6335c7b6758cc66d2843a3a8c5d574ba028452600a5",
+      "size_bytes": 9164
+    },
+    "tag_map": {
+      "path": "nested-strategy-tag-map.json",
+      "sha256": "b5982a3b4162fd9c27b87a84742909e115ede48c64eccf75ae11ef8d53db729e",
+      "size_bytes": 2422
+    }
+  },
+  "quantbase": {
+    "declared_inputs": {
+      "path": "quantbase/declared-inputs.json",
+      "sha256": "aacd82f71793fa1fdeb094e62b5c6bfee7814dc3e5e9d5121e89d7a239290913",
+      "size_bytes": 2266
+    },
+    "sources": {
+      "account_activity": {
+        "file": "account_activity.csv",
+        "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc"
+      },
+      "accounts": {
+        "file": "accounts.csv",
+        "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675"
+      },
+      "dashboards": {
+        "crisis": {
+          "file": "dashboard_Crisis_Factor_Investing_pricehistory.csv",
+          "sha256": "fab913f91ca653018e045953e4454af7ffffde5038c2547e52ae01cf03c92bbc"
+        },
+        "singleindex": {
+          "file": "dashboard_Single_Index_Leveraged_In_and_Out_pricehistory.csv",
+          "sha256": "aab2ecd4523db165718a7d5713d327f19d66aadd287cb43485c00e652e67d33f"
+        },
+        "total": {
+          "file": "dashboard_Total_pricehistory.csv",
+          "sha256": "3009a4cdc7db6adf89c3c1e13c86af47e66dfcb85b1bff77fea91762e1880fd9"
+        },
+        "volatis": {
+          "file": "dashboard_Volatis_Strategy_pricehistory.csv",
+          "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7"
+        }
+      }
+    },
+    "tag_map": {
+      "path": "quantbase/tag-map.json",
+      "sha256": "066e6fd0625927f4eba5a1d703ff08b5e468b96104f27ae0f79ba85f36ff8167",
+      "size_bytes": 833
+    }
+  },
+  "schema_version": 1
+}

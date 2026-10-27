@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "artifact_id": "quantbase-fund-declared-inputs",
+  "parent_account_id": "account-58e75e8d952fa1b8",
+  "base_currency": "USD",
+  "data_cutoff": "2026-09-17",
+  "closure_tolerance": {"cost_basis": "0.01", "nav_total": "0.02", "pairing_amount": "0.01", "exit_relative": "0.01"},
+  "pairing": {"rule": "EXACT_AMOUNT_DAY_AND_TIME_ELSE_UNALLOCATED", "window_seconds": 120},
+  "total_dashboard": "total",
+  "nav_total_exempt_days": {"2026-09-17": "The vendor total value of the cutoff day and the separately captured live-fund value of that day disagree; both retired funds are zero, so the disagreement lies wholly in the live fund."},
+  "funds": {
+    "crisis": {"fund_id": "56", "fund_title": "Crisis Factor Investing", "dashboard": "crisis", "first_nonzero_day": "2024-07-24", "last_nonzero_day": "2024-12-12", "vendor_cost_basis": "-104.78", "opening_tolerance": "0.05"},
+    "singleindex": {"fund_id": "14", "fund_title": "Single-Index Leveraged In & Out", "dashboard": "singleindex", "first_nonzero_day": "2024-07-24", "last_nonzero_day": "2025-05-05", "vendor_cost_basis": "2180.22", "opening_tolerance": "0.05"}
+  },
+  "out_of_scope_funds": {
+    "107": {"fund_title": "Volatis Strategy", "dashboard": "volatis", "counterparty_account_id": "account-58e75e8d952fa1b8"}
+  },
+  "open_items": {
+    "funding_attribution": {"evidence_class": "NOT_IN_SOURCE_BYTES", "owner_ruling_ref": null, "treatment": "UNALLOCATED_REMAINDER", "note": "The activity carries no link from a deposit or from fund proceeds to a fund purchase. Only an exact equal-amount pair seconds apart is a reallocation; every other amount is paired with the perimeter pseudo-account."},
+    "cash_residual": {"evidence_class": "UNEXPLAINED_RESIDUAL", "owner_ruling_ref": null, "amount": "36.49", "tolerance": "0.01", "note": "Deposits less net fund flows plus dividends less fee journals, against the provider settled cash. The activity does not explain it."},
+    "dividend_nav_treatment": {"evidence_class": "NOT_IN_SOURCE_BYTES", "owner_ruling_ref": null, "treatment": "NOT_FOLDED_INTO_NAV", "note": "Whether the dashboard value includes dividends cannot be told from the bytes; they are booked once as attributed income and are neither a flow nor added to NAV."}
+  }
+}

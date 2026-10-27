@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "artifact_id": "nested-strategy-tag-map",
+  "as_of_date": "2026-09-17",
+  "parents": [
+    {
+      "parent_account_id": "account-58e75e8d952fa1b8",
+      "provider_id": "quantbase",
+      "tag_field": "fund_id",
+      "tag_normalization": "NONE",
+      "sleeves": [
+        {"sleeve_id": "crisis", "strategy_id": "quantbase-crisis-factor-investing", "label": "Crisis Factor Investing", "effective_start": "2024-07-24", "effective_end": "2024-12-12", "tags": [{"match": "exact", "pattern": "56"}]},
+        {"sleeve_id": "singleindex", "strategy_id": "quantbase-single-index-leveraged-in-out", "label": "Single-Index Leveraged In & Out", "effective_start": "2024-07-24", "effective_end": "2025-05-05", "tags": [{"match": "exact", "pattern": "14"}]}
+      ],
+      "unmatched": {"mode": "BLOCK"}
+    }
+  ]
+}
