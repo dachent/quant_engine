@@ -225,6 +225,11 @@
     ],
     [
       "portfolio_financial_outcomes",
+      "derived_epoch_perimeter",
+      1
+    ],
+    [
+      "portfolio_financial_outcomes",
       "portfolio_control_panel",
       3
     ],
@@ -266,6 +271,11 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_report",
+      1
+    ],
+    [
+      "portfolio_hwm_selected_inputs",
+      "derived_epoch_perimeter",
       1
     ],
     [
@@ -376,6 +386,11 @@
     [
       "portfolio_release_builder",
       "portfolio_private_stage",
+      1
+    ],
+    [
+      "portfolio_report",
+      "derived_epoch_perimeter",
       1
     ],
     [
