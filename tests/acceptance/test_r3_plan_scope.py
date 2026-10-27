@@ -97,7 +97,7 @@ def test_the_real_plan_pins_exactly_the_two_kinds_and_every_pair_is_confirmed() 
     }
     assert set(out_of_scope.values()) == {METHOD, OWNER}
     assert (
-        sorted(kind for kind in out_of_scope.values() if kind == OWNER) == [OWNER] * 12
+        sorted(kind for kind in out_of_scope.values() if kind == OWNER) == [OWNER] * 48
     )
     assert len(plan["strategies"]) > 0
     for (series_id, source_key), kind in out_of_scope.items():

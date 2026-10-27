@@ -1046,7 +1046,7 @@ def cr2_custody_native_recipe(
     ]
     mapping = {f"strategy-{i + 1}": sid for i, sid in enumerate(ids)}
     for s in pc["strategies"]:
-        s["strategy_id"] = mapping[s["strategy_id"]]
+        s["strategy_id"] = mapping.get(s["strategy_id"], s["strategy_id"])
     for a in pc["assignments"]:
         if a["strategy_id"]:
             a["strategy_id"] = mapping[a["strategy_id"]]

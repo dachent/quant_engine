@@ -165,6 +165,12 @@ def _controls() -> dict[str, dict[str, Any]]:
         for row in contract["strategies"]
         if row["strategy_id"] == "echotrade-growth-pivots"
     )
+    # Only the pinned nine: the shipped contract also names the retired records.
+    contract["strategies"] = [
+        row
+        for row in contract["strategies"]
+        if row["strategy_id"] in panel.CURRENT_PRODUCT_STRATEGY_IDS
+    ]
     for strategy_id in NESTED:
         row = copy.deepcopy(template)
         row["strategy_id"] = strategy_id
@@ -180,10 +186,19 @@ def test_the_controls_accept_nested_history_only_strategies_beyond_the_nine() ->
 
     assert len(controls) == 9 + len(NESTED)
     assert panel._history_only_strategy_ids(controls) == frozenset(NESTED)
-    # the pinned perimeter alone has no nested strategy
-    assert (
-        panel._history_only_strategy_ids(panel._financial_mvp_product_controls())
-        == frozenset()
+    # the shipped contract names exactly the six retired history-only records
+    # beyond the pinned perimeter
+    assert panel._history_only_strategy_ids(
+        panel._financial_mvp_product_controls()
+    ) == frozenset(
+        {
+            "p123-conn-1911998-andreas-sc-ai-mq-live",
+            "p123-conn-1951348-higher-beta-earnings",
+            "p123-conn-1956961-ai-largecap-ls",
+            "p123-conn-1958970-high-octane",
+            "quantbase-crisis-factor-investing",
+            "quantbase-single-index-leveraged-in-out",
+        }
     )
 
 

@@ -1532,10 +1532,7 @@ def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> 
     }
     sleeve_root = ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
     seen: set[str] = set()
-    for tag_map_path in (
-        sleeve_root / "nested-strategy-tag-map.json",
-        sleeve_root / "quantbase" / "tag-map.json",
-    ):
+    for tag_map_path in (sleeve_root / "nested-strategy-tag-map.json",):
         tag_map = json.loads(tag_map_path.read_bytes())
         for parent in tag_map["parents"]:
             provider = parent["provider_id"].upper()

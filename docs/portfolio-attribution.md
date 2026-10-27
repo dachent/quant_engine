@@ -52,7 +52,7 @@ uv run --frozen --no-sync python tools/portfolio_attribution.py publish `
 ## Strategy return-source attribution contract
 
 `contracts/strategy-return-sources-v1.json` records the per-strategy economic
-return-source attribution for all nine retained strategy registry records. The
+return-source attribution for all fifteen retained strategy registry records. The
 contract is the single authoritative record of what economic source of excess
 return (if any)
 each strategy is deemed to exploit, grounded in the analysis at
@@ -76,11 +76,12 @@ The schema at `schemas/portfolio/strategy-return-sources.schema.json` validates
 required fields, enum validity, and the consistency constraint
 `no_identified_source == (sources.primary == null)`. The tests at
 `tests/portfolio_attribution/test_strategy_return_sources.py` enforce exact
-strategy coverage (all nine registry strategies, in registry order) and
+strategy coverage (all fifteen registry strategies, in registry order) and
 text-field quality (non-placeholder, minimum length) against the registry.
 
-All nine retained registry records have `no_identified_source: true` — no
+All fifteen retained registry records have `no_identified_source: true` — no
 admitted economic source of excess return has been established. Six carry
-`weak` confidence (hypotheses pending admitted evidence); three carry `none` because
-the evidence is not sufficient for a current source hypothesis. Those evidence
+`weak` confidence (hypotheses pending admitted evidence); nine carry `none` because
+the evidence is not sufficient for a current source hypothesis (the EU strategy,
+Echo, Composer and the six retired history-only records). Those evidence
 states do not override the financial-MVP product perimeter.

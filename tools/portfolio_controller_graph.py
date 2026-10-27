@@ -157,6 +157,30 @@ _PATH_STAGES = {
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose
     # own path carries the stage impact); no producer imports them.
+    # The provenance builder and its schemas write the retained registry the
+    # baseline is built from (the baseline embeds the strategy version catalog).
+    "tools/portfolio_provenance.py": [
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ],
+    "schemas/portfolio/provenance-catalog.schema.json": [
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ],
+    "schemas/portfolio/provenance-spec.schema.json": [],
+    "schemas/portfolio/strategy-version-catalog.schema.json": [
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ],
     "contracts/strategy-return-sources-v1.json": [],
     "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its

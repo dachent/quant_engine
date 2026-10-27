@@ -54,6 +54,9 @@ def test_explicit_crosswalk_intervals_exactly_match_independent_current_census()
         )
         for sleeve in financial_mvp["current_census"]["account_sleeves"]
         for assignment in sleeve["assignments"]
+        # The crosswalk names the baseline perimeter; derived epochs exist only in
+        # the account manifest.
+        if assignment["authority"] != "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
     )
 
     assert crosswalk_intervals == census_intervals

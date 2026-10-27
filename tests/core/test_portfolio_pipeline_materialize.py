@@ -224,6 +224,9 @@ def test_assessment_two_available_requires_real_selected_source_replay(
                 for account_index, sleeve in enumerate(census["account_sleeves"])
                 for assignment in sleeve["assignments"]
                 if assignment["status"] in {"FUNDED_MEMBERSHIP", "ASSIGNMENT_ONLY"}
+                # Derived epochs exist only in the account manifest.
+                and assignment["authority"]
+                != "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
                 and assignment["effective_start"] <= left
                 and (
                     assignment["effective_end"] is None

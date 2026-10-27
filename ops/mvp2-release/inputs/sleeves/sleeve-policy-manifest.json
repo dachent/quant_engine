@@ -35,9 +35,9 @@
       }
     },
     "tag_map": {
-      "path": "quantbase/tag-map.json",
-      "sha256": "066e6fd0625927f4eba5a1d703ff08b5e468b96104f27ae0f79ba85f36ff8167",
-      "size_bytes": 833
+      "path": "nested-strategy-tag-map.json",
+      "sha256": "10befe29ae13aeeb57e26eec0a1bec46316beae78bdf67d5e8578f1be3ac8d8e",
+      "size_bytes": 3796
     }
   },
   "schema_version": 1,
@@ -49,8 +49,8 @@
     },
     "tag_map": {
       "path": "nested-strategy-tag-map.json",
-      "sha256": "b5982a3b4162fd9c27b87a84742909e115ede48c64eccf75ae11ef8d53db729e",
-      "size_bytes": 2422
+      "sha256": "10befe29ae13aeeb57e26eec0a1bec46316beae78bdf67d5e8578f1be3ac8d8e",
+      "size_bytes": 3796
     }
   }
 }

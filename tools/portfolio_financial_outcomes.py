@@ -1370,7 +1370,7 @@ def _rebuild_selected_epochs(
         ],
         provider_ledger_generation_path=sources["provider_ledger_generation_path"],
         baseline_generation_path=sources["baseline_generation_path"],
-        sleeve_facts_paths=selected_sleeve_facts_paths(spec),
+        sleeve_facts_paths=tuple(sources.get("sleeve_facts_paths", ())),
     )
     result = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
     rows = result["rows"]
@@ -1522,8 +1522,13 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for row in contract["strategies"]
         if row["product_requirement"] == "REQUIRED"
     }
+    from portfolio_financial_mvp_contract import DERIVED_SLEEVE_EPOCH_AUTHORITY
+
+    # A derived product epoch replaces the baseline epoch of its residual parent,
+    # so the census entries of derived epochs add no row to the product count.
     expected_count = sum(
         assignment["strategy_id"] in required
+        and assignment.get("authority") != DERIVED_SLEEVE_EPOCH_AUTHORITY
         for sleeve in contract["current_census"]["account_sleeves"]
         for assignment in sleeve["assignments"]
     )

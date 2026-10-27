@@ -15,7 +15,12 @@
           "label": "P123 connection 1911998 (owner live book 1911997, Andreas SC AI+MQ Live)",
           "effective_start": "2026-01-26",
           "effective_end": "2026-06-23",
-          "tags": [{"match": "startswith", "pattern": "BasedonAndreasSCAIMQLive"}]
+          "tags": [
+            {
+              "match": "startswith",
+              "pattern": "BasedonAndreasSCAIMQLive"
+            }
+          ]
         },
         {
           "sleeve_id": "s2",
@@ -23,7 +28,12 @@
           "label": "P123 connection 1913284 (book 1853536, AI Factor Small and Micro Cap Index 125)",
           "effective_start": "2026-01-30",
           "effective_end": null,
-          "tags": [{"match": "startswith", "pattern": "AndreasAIFactorSnMCIndex125Sto"}]
+          "tags": [
+            {
+              "match": "startswith",
+              "pattern": "AndreasAIFactorSnMCIndex125Sto"
+            }
+          ]
         },
         {
           "sleeve_id": "s3",
@@ -31,7 +41,12 @@
           "label": "P123 connection 1951348 (designer model 1765750, Higher Beta + Earnings)",
           "effective_start": "2026-06-22",
           "effective_end": "2026-07-22",
-          "tags": [{"match": "startswith", "pattern": "BasedonHigherBeta"}]
+          "tags": [
+            {
+              "match": "startswith",
+              "pattern": "BasedonHigherBeta"
+            }
+          ]
         },
         {
           "sleeve_id": "s4",
@@ -39,7 +54,12 @@
           "label": "P123 connection 1956961 (book 1906462, AI Large Cap Long-Short TWM 25%)",
           "effective_start": "2026-07-15",
           "effective_end": "2026-07-27",
-          "tags": [{"match": "startswith", "pattern": "BasedonAILargeCapStrategyBookL"}]
+          "tags": [
+            {
+              "match": "startswith",
+              "pattern": "BasedonAILargeCapStrategyBookL"
+            }
+          ]
         },
         {
           "sleeve_id": "s5",
@@ -48,12 +68,58 @@
           "effective_start": "2026-07-22",
           "effective_end": "2026-07-27",
           "tags": [
-            {"match": "contains", "pattern": "HighOctaneMicrocapsYuvalTaylor"},
-            {"match": "contains", "pattern": "BasedonHighOctaneMicrocapsCopy"}
+            {
+              "match": "contains",
+              "pattern": "HighOctaneMicrocapsYuvalTaylor"
+            },
+            {
+              "match": "contains",
+              "pattern": "BasedonHighOctaneMicrocapsCopy"
+            }
           ]
         }
       ],
-      "unmatched": {"mode": "ASSIGN_BY_HOLDING_SYMBOL", "fallback_sleeve_id": "s4"}
+      "unmatched": {
+        "mode": "ASSIGN_BY_HOLDING_SYMBOL",
+        "fallback_sleeve_id": "s4"
+      }
+    },
+    {
+      "parent_account_id": "account-58e75e8d952fa1b8",
+      "provider_id": "quantbase",
+      "tag_field": "fund_id",
+      "tag_normalization": "NONE",
+      "sleeves": [
+        {
+          "sleeve_id": "crisis",
+          "strategy_id": "quantbase-crisis-factor-investing",
+          "label": "Crisis Factor Investing",
+          "effective_start": "2024-07-24",
+          "effective_end": "2024-12-12",
+          "tags": [
+            {
+              "match": "exact",
+              "pattern": "56"
+            }
+          ]
+        },
+        {
+          "sleeve_id": "singleindex",
+          "strategy_id": "quantbase-single-index-leveraged-in-out",
+          "label": "Single-Index Leveraged In & Out",
+          "effective_start": "2024-07-24",
+          "effective_end": "2025-05-05",
+          "tags": [
+            {
+              "match": "exact",
+              "pattern": "14"
+            }
+          ]
+        }
+      ],
+      "unmatched": {
+        "mode": "BLOCK"
+      }
     }
   ]
 }
