@@ -511,6 +511,9 @@
         }
       ]
     },
+    "portfolio_twr_cumulative": {"$ref": "#/$defs/portfolio_twr_cumulative"},
+    "portfolio_mwr_annualised": {"$ref": "#/$defs/portfolio_mwr_annualised"},
+    "capital_reconciliation": {"$ref": "#/$defs/capital_reconciliation"},
     "hwm_portable_proof": { "$ref": "#/$defs/portable_hwm_proof" },
     "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "performance_tab": { "$ref": "#/$defs/performance_tab" },
@@ -2000,6 +2003,125 @@
         "unavailable_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "portfolio_totals_schema_version": {"const": 1},
+    "portfolio_twr_cumulative": {
+      "$comment": "PANEL-VIS-002: headline portfolio return is the governed HWM index series (base 100); the summed-epoch TWR and the difference are published beside it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/portfolio_totals_schema_version"},
+        "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "reason": {"type": "string"},
+        "basis": {"const": "GOVERNED_HWM_INDEX"},
+        "financial_acceptance": {"type": ["string", "null"]},
+        "return_basis": {"type": ["string", "null"]},
+        "value": {"$ref": "#/$defs/decimal"},
+        "index_base": {"$ref": "#/$defs/decimal"},
+        "current_index": {"$ref": "#/$defs/decimal"},
+        "window_start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "window_days": {"type": "integer", "minimum": 0},
+        "source": {"type": "object"},
+        "summed_epoch_twr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "basis"],
+          "properties": {
+            "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+            "basis": {"type": "string"},
+            "reason": {"type": "string"},
+            "detail": {"type": "string"},
+            "member_epoch_count": {"type": "integer", "minimum": 0},
+            "excluded_epochs": {"type": "array", "items": {"type": "object"}},
+            "value": {"$ref": "#/$defs/decimal"},
+            "window_start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+            "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+          }
+        },
+        "headline_minus_summed_epoch_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
+          "then": {"required": ["basis", "value", "index_base", "current_index", "window_start", "window_end", "window_days", "source", "summed_epoch_twr", "headline_minus_summed_epoch_twr"]},
+          "else": {"required": ["reason"]}
+        }
+      ]
+    },
+    "portfolio_mwr_annualised": {
+      "$comment": "PANEL-VIS-002: one XIRR over governed external flows; value is null (with the window-equivalent cumulative) when the window is under 365 days.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/portfolio_totals_schema_version"},
+        "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "reason": {"type": "string"},
+        "basis": {"type": "string"},
+        "day_count": {"const": "ACTUAL_365"},
+        "window_start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "window_days": {"type": "integer", "minimum": 0},
+        "flow_count": {"type": "integer", "minimum": 0},
+        "terminal_value_usd": {"$ref": "#/$defs/decimal"},
+        "value": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "annualisation_basis": {"type": ["string", "null"]},
+        "window_equivalent_cumulative": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
+          "then": {"required": ["basis", "day_count", "window_start", "window_end", "window_days", "flow_count", "terminal_value_usd", "value", "annualisation_basis", "window_equivalent_cumulative"]},
+          "else": {"required": ["reason"]}
+        }
+      ]
+    },
+    "capital_reconciliation_component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_id", "label", "amount_usd", "lines"],
+      "properties": {
+        "component_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "label": {"type": "string"},
+        "amount_usd": {"$ref": "#/$defs/decimal"},
+        "lines": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "capital_reconciliation": {
+      "$comment": "PANEL-VIS-002: derived total net capital minus governed invested capital, split into named components that sum to the difference with a zero residual.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/portfolio_totals_schema_version"},
+        "status": {"enum": ["RECONCILED", "UNAVAILABLE"]},
+        "reason": {"type": "string"},
+        "not_ok_epoch_count": {"type": "integer", "minimum": 0},
+        "epoch_row_count": {"type": "integer", "minimum": 0},
+        "governed_epoch_count": {"type": "integer", "minimum": 0},
+        "currency": {"const": "USD"},
+        "calculation_cutoff_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "derivation_rule": {"type": "string"},
+        "current_of_open_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "gain_of_all_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "open_epoch_count": {"type": "integer", "minimum": 0},
+        "epoch_count": {"type": "integer", "minimum": 0},
+        "derived_total_net_capital_usd": {"$ref": "#/$defs/decimal"},
+        "governed_invested_capital_usd": {"$ref": "#/$defs/decimal"},
+        "difference_usd": {"$ref": "#/$defs/decimal"},
+        "components": {"type": "array", "items": {"$ref": "#/$defs/capital_reconciliation_component"}},
+        "residual_usd": {"const": "0"},
+        "memo": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "RECONCILED"}}, "required": ["status"]},
+          "then": {"required": ["currency", "calculation_cutoff_date", "derivation_rule", "current_of_open_epochs_usd", "gain_of_all_epochs_usd", "open_epoch_count", "epoch_count", "derived_total_net_capital_usd", "governed_invested_capital_usd", "difference_usd", "components", "residual_usd", "memo"]},
+          "else": {"required": ["reason"]}
+        }
+      ]
+    },
     "performance_tab_origin_runs": {
       "type": "array",
       "minItems": 1,
@@ -2017,17 +2139,24 @@
     "performance_tab_line": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "tri", "origin"],
+      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "tri"],
       "properties": {
         "series_id": { "type": "string", "minLength": 1 },
         "display_name": { "type": ["string", "null"] },
-        "kind": { "enum": ["STRATEGY", "PORTFOLIO"] },
+        "kind": { "enum": ["STRATEGY", "PORTFOLIO", "BENCHMARK"] },
         "basis": { "type": "string", "minLength": 1 },
         "definition": { "type": "string", "minLength": 1 },
-        "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK"] },
+        "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK", "WEEKLY_RETURNS_SINGLE_MODE"] },
         "tri": { "type": "array", "minItems": 1, "items": { "type": "number" } },
         "origin": { "$ref": "#/$defs/performance_tab_origin_runs" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "BENCHMARK" } }, "required": ["kind"] },
+          "then": { "not": { "required": ["origin"] } },
+          "else": { "required": ["origin"] }
+        }
+      ]
     },
     "performance_tab_unavailable": {
       "type": "object",
@@ -2044,7 +2173,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "lines"],
+          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "benchmarks_unavailable", "lines"],
           "properties": {
             "status": { "const": "AVAILABLE" },
             "grid": { "const": "ISO_WEEK_START_MONDAY" },
@@ -2072,6 +2201,15 @@
             "last_week_partial": { "type": "boolean" },
             "stale_before_current_week": { "type": "boolean" },
             "data_through_date": { "type": ["string", "null"] },
+            "benchmarks_unavailable": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["series_id", "reason"],
+                "properties": { "series_id": { "type": "string" }, "reason": { "type": "string" } }
+              }
+            },
             "lines": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/performance_tab_line" } }
           }
         }
@@ -2080,15 +2218,23 @@
     "performance_tab_benchmark": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "ticker", "status", "reason", "substitute", "required_pull"],
+      "required": ["series_id", "ticker", "status", "reason", "substitute", "source", "required_pull"],
       "properties": {
         "series_id": { "type": "string" },
         "ticker": { "type": "string" },
-        "status": { "const": "UNAVAILABLE" },
-        "reason": { "type": "string" },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "reason": { "type": ["string", "null"] },
         "substitute": { "type": "null" },
-        "required_pull": { "type": "object" }
-      }
+        "source": { "type": ["string", "null"] },
+        "required_pull": { "type": ["object", "null"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "AVAILABLE" } }, "required": ["status"] },
+          "then": { "properties": { "source": { "type": "string" }, "required_pull": { "type": "null" } } },
+          "else": { "properties": { "source": { "type": "null" }, "required_pull": { "type": "object" } } }
+        }
+      ]
     },
     "performance_tab_slices": {
       "oneOf": [
@@ -2149,7 +2295,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "as_of", "scope", "modes", "benchmarks", "slices", "readout"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "as_of": { "type": ["string", "null"] },
         "scope": { "const": "SYSTEMATIC_EX_RESERVE" },
         "modes": {

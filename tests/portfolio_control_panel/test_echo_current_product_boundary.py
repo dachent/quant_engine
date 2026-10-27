@@ -1222,7 +1222,7 @@ def test_weekly_current_surface_accepts_nine_plan_bound_strategy_series() -> Non
             "series_id": f"market:Benchmark {index}",
             "values": {},
         }
-        for index in range(9)
+        for index in range(11)
     ]
     weekly = {
         "analytics_schema_version": 2,

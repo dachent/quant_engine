@@ -39,7 +39,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 from typing import Any, Final, Mapping, Sequence
 
-PERFORMANCE_TAB_SCHEMA_VERSION: Final = 1
+PERFORMANCE_TAB_SCHEMA_VERSION: Final = 2
 SCOPE: Final = "SYSTEMATIC_EX_RESERVE"
 MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 TRI_DECIMALS: Final = 8
@@ -99,6 +99,23 @@ _BENCHMARKS: Final = (
     ("market:SPY", "SPY", "2007-01-03", "SPY"),
     ("market:SPXL", "SPXL", "2008-11-05", "SPXL (its own total return, not 3x SPY)"),
 )
+
+
+BENCHMARK_DEFINITION: Final = (
+    "Weekly total return of the benchmark ETF from the governed weekly returns "
+    "(adjusted-close total return from the admitted yahoo-adjusted-etf-daily source), "
+    "compounded from 1.0 immediately before the first common week.  It has no "
+    "live or backtest origin."
+)
+
+
+def _benchmark_row(
+    weekly: Mapping[str, Any], series_id: str
+) -> Mapping[str, Any] | None:
+    for row in _sequence(weekly.get("series")):
+        if isinstance(row, Mapping) and row.get("series_id") == series_id:
+            return row
+    return None
 
 
 class PerformanceTabError(ValueError):
@@ -337,6 +354,34 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
                 ),
             }
         )
+    benchmark_gaps: list[dict[str, str]] = []
+    for series_id, ticker, _since, _note in _BENCHMARKS:
+        bench_source = _benchmark_row(weekly, series_id)
+        if bench_source is None:
+            continue
+        values = _mapping(bench_source.get("values"))
+        absent = next((key for key in week_keys if key not in values), None)
+        if absent is not None:
+            benchmark_gaps.append(
+                {"series_id": series_id, "reason": f"MISSING_WEEK:{series_id}:{absent}"}
+            )
+            continue
+        with localcontext() as context:
+            context.prec = _PRECISION
+            bench_returns = [
+                _dec(values[key], f"{series_id} {key}") for key in week_keys
+            ]
+            lines.append(
+                {
+                    "series_id": series_id,
+                    "display_name": bench_source.get("display_name"),
+                    "kind": "BENCHMARK",
+                    "basis": bench_source.get("return_basis"),
+                    "definition": BENCHMARK_DEFINITION,
+                    "source_mode": "WEEKLY_RETURNS_SINGLE_MODE",
+                    "tri": _index_path(bench_returns),
+                }
+            )
     current = _mapping(weekly.get("current_week"))
     return {
         "status": "AVAILABLE",
@@ -354,6 +399,7 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
         "stale_before_current_week": bool(current.get("week_start"))
         and week_keys[-1] < str(current.get("week_start")),
         "data_through_date": ends[-1],
+        "benchmarks_unavailable": benchmark_gaps,
         "lines": lines,
     }
 
@@ -548,7 +594,11 @@ def _build_readout(panel: Mapping[str, Any]) -> dict[str, Any]:
         difference = totals.get("headline_minus_summed_epoch_twr")
         reason = None
         if summed is None or summed.get("status") != "AVAILABLE":
-            reason = str((summed or {}).get("reason") or "SUMMED_EPOCH_TWR_UNAVAILABLE")
+            reason = str(
+                (summed or {}).get("reason")
+                or totals.get("reason")
+                or "SUMMED_EPOCH_TWR_UNAVAILABLE"
+            )
             difference = None
     return {
         "headline": "HWM_GOVERNED_INDEX",
@@ -560,6 +610,30 @@ def _build_readout(panel: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- builder
+
+
+def _benchmark_entry(
+    weekly: Mapping[str, Any], series_id: str, ticker: str, since: str, note: str
+) -> dict[str, Any]:
+    if _benchmark_row(weekly, series_id) is not None:
+        return {
+            "series_id": series_id,
+            "ticker": ticker,
+            "status": "AVAILABLE",
+            "reason": None,
+            "substitute": None,
+            "source": "weekly_returns.series",
+            "required_pull": None,
+        }
+    return {
+        "series_id": series_id,
+        "ticker": ticker,
+        "status": "UNAVAILABLE",
+        "reason": "NOT_ADMITTED_NO_GOVERNED_PULL",
+        "substitute": None,
+        "source": None,
+        "required_pull": {**REQUIRED_PULL, "from_date": since, "note": note},
+    }
 
 
 def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
@@ -589,14 +663,7 @@ def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
         "scope": SCOPE,
         "modes": modes,
         "benchmarks": [
-            {
-                "series_id": series_id,
-                "ticker": ticker,
-                "status": "UNAVAILABLE",
-                "reason": "NOT_ADMITTED_NO_GOVERNED_PULL",
-                "substitute": None,
-                "required_pull": {**REQUIRED_PULL, "from_date": since, "note": note},
-            }
+            _benchmark_entry(weekly, series_id, ticker, since, note)
             for series_id, ticker, since, note in _BENCHMARKS
         ],
         "slices": slices,
@@ -745,8 +812,50 @@ def _verify_mode(
     by_id = {str(line["series_id"]): line for line in block["lines"]}
     if len(by_id) != len(block["lines"]) or EW_SERIES_ID not in by_id:
         raise _fail(f"{mode} lines are duplicated or lack the equal-weight line")
-    if len(by_id) != len(rows) + 1:
+    benchmark_lines = {k: v for k, v in by_id.items() if v["kind"] == "BENCHMARK"}
+    if len(by_id) - len(benchmark_lines) != len(rows) + 1:
         raise _fail(f"{mode} line count differs from the strategy count")
+    for bench_id in ("market:SPY", "market:SPXL"):
+        bench_row = next(
+            (
+                r
+                for r in _sequence(weekly.get("series"))
+                if isinstance(r, Mapping) and r.get("series_id") == bench_id
+            ),
+            None,
+        )
+        gap = [g for g in block["benchmarks_unavailable"] if g["series_id"] == bench_id]
+        if bench_row is None:
+            if bench_id in benchmark_lines or gap:
+                raise _fail(f"{mode} {bench_id} is published without a source row")
+            continue
+        bench_values = _mapping(bench_row.get("values"))
+        if any(key not in bench_values for key in dates):
+            if bench_id in benchmark_lines or not gap:
+                raise _fail(f"{mode} {bench_id} gap is not named")
+            continue
+        if gap or bench_id not in benchmark_lines:
+            raise _fail(f"{mode} {bench_id} line is absent")
+        bench_line = benchmark_lines[bench_id]
+        if "origin" in bench_line or len(bench_line["tri"]) != length:
+            raise _fail(f"{mode} {bench_id} shape differs")
+        level = Fraction(1)
+        for index, key in enumerate(dates):
+            level *= 1 + Fraction(str(bench_values[key]))
+            if abs(Fraction(bench_line["tri"][index]) - level) > Fraction(6, 10**9):
+                raise _fail(f"{mode} {bench_id} index differs at {key}")
+    derivable = {
+        bench_id
+        for bench_id in ("market:SPY", "market:SPXL")
+        if any(
+            isinstance(r, Mapping)
+            and r.get("series_id") == bench_id
+            and all(key in _mapping(r.get("values")) for key in dates)
+            for r in _sequence(weekly.get("series"))
+        )
+    }
+    if set(benchmark_lines) != derivable:
+        raise _fail(f"{mode} benchmark lines differ from the derivable pair")
     component_origin: list[list[str]] = []
     component_returns: list[list[Fraction]] = []
     for row in rows:
@@ -964,7 +1073,9 @@ def _verify_readout(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             raise _fail("summed-epoch figure differs from portfolio_twr_cumulative")
         if source is None or source.get("status") != "AVAILABLE":
             expected_reason = str(
-                (source or {}).get("reason") or "SUMMED_EPOCH_TWR_UNAVAILABLE"
+                (source or {}).get("reason")
+                or totals.get("reason")
+                or "SUMMED_EPOCH_TWR_UNAVAILABLE"
             )
             expected_difference = None
         else:
@@ -980,7 +1091,7 @@ def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -
     """Re-derive the block from the panel inputs; raise on any difference."""
 
     if (
-        block.get("schema_version") != 1
+        block.get("schema_version") != PERFORMANCE_TAB_SCHEMA_VERSION
         or block.get("scope") != "SYSTEMATIC_EX_RESERVE"
     ):
         raise _fail("schema_version or scope differs")
@@ -993,19 +1104,26 @@ def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
         _verify_mode(_mapping(modes[mode]), weekly, mode)
     benchmarks = _sequence(block.get("benchmarks"))
-    if [
-        (b.get("series_id"), b.get("status"), b.get("substitute")) for b in benchmarks
-    ] != [
-        ("market:SPY", "UNAVAILABLE", None),
-        ("market:SPXL", "UNAVAILABLE", None),
-    ]:
-        raise _fail("benchmarks must be explicit UNAVAILABLE entries")
+    expected_ids = ["market:SPY", "market:SPXL"]
+    if [b.get("series_id") for b in benchmarks] != expected_ids:
+        raise _fail("benchmarks differ from SPY and SPXL")
     for benchmark in benchmarks:
+        present = any(
+            isinstance(row, Mapping) and row.get("series_id") == benchmark["series_id"]
+            for row in _sequence(weekly.get("series"))
+        )
+        if benchmark.get("substitute") is not None:
+            raise _fail("a benchmark is substituted")
+        if present:
+            if benchmark.get("status") != "AVAILABLE" or benchmark.get("required_pull"):
+                raise _fail("an admitted benchmark must be AVAILABLE with no pull")
+            continue
         pull = _mapping(benchmark.get("required_pull"))
         if (
-            pull.get("source_id") != "yahoo-adjusted-etf-daily"
+            benchmark.get("status") != "UNAVAILABLE"
+            or pull.get("source_id") != "yahoo-adjusted-etf-daily"
             or pull.get("to_date") != "2026-09-17"
         ):
-            raise _fail("benchmark required_pull differs")
+            raise _fail("benchmark must be an explicit UNAVAILABLE entry with its pull")
     _verify_slices(_mapping(block.get("slices")), panel)
     _verify_readout(_mapping(block.get("readout")), panel)

@@ -106,7 +106,14 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
+PORTFOLIO_TOTALS_KEYS: Final = (
+    "portfolio_twr_cumulative",
+    "portfolio_mwr_annualised",
+    "capital_reconciliation",
+)
 PANEL_SCHEMA_VERSION: Final = 24
+# BIL DBC GLD HYG IEF IEFA IEMG ITOT UUP plus SPY and SPXL (weekly returns CORE_BENCHMARKS).
+CORE_BENCHMARK_COUNT: Final = 11
 # A panel built from a version-3 report (custody cash dated by its admission coverage)
 # is version 25; every other panel is 24.  Versions 22 and 23 (the same split before
 # the position snapshot split and the governed HWM candidate) stay readable.
@@ -6100,7 +6107,7 @@ def _weekly_return_analysis(
     }
     if strategy_count != 7:
         raise ControlPanelValidationError("weekly return strategy count must be 7")
-    if benchmark_count != 9:
+    if benchmark_count != CORE_BENCHMARK_COUNT:
         raise ControlPanelValidationError(
             "weekly strategy or benchmark boundary differs"
         )
@@ -10415,7 +10422,6 @@ def _panel_data(
         panel_data["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
         panel_data["hwm_governed_proof"] = governed_hwm_proof
-    panel_data["performance_tab"] = build_performance_tab(panel_data)
     return panel_data
 
 
@@ -11732,6 +11738,13 @@ def _rendered_files(
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital
+    # PANEL-VIS-002: the report's portfolio-level totals ride along unchanged.
+    for totals_key in PORTFOLIO_TOTALS_KEYS:
+        if totals_key in report:
+            data[totals_key] = report[totals_key]
+    # The Performance tab reads the totals above (summed-epoch TWR and difference),
+    # so it is built after they are attached.
+    data["performance_tab"] = build_performance_tab(data)
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
@@ -12644,7 +12657,7 @@ def verify_candidate(
                     "CORE_BENCHMARK" in row.get("display_groups", [])
                     for row in weekly_series
                 )
-                == 9
+                == CORE_BENCHMARK_COUNT
                 and weekly_payload.get("default_evidence_mode") == "LIVE_ONLY"
                 and _object(
                     weekly_payload.get("current_week"), "weekly current_week"
