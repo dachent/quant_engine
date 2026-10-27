@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import csv
 import datetime as dt
 import hashlib
 import json
+import subprocess
 import sys
 from decimal import Decimal as D, localcontext
 from pathlib import Path
@@ -21,6 +23,154 @@ import test_derive_a as original
 CUTOFF = dt.date(2026, 9, 17)
 FIRST = "2026-09-16"
 LAST = "2026-09-17"
+
+
+@pytest.mark.parametrize("root_name", ["qe", "repo"])
+@pytest.mark.parametrize("kind", ["absolute", "escape", "drive", "anchor"])
+def test_input_path_rejected_with_role_and_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    root_name: str,
+    kind: str,
+) -> None:
+    path = manifest_tree(tmp_path)
+    manifest = json.loads(path.read_bytes())
+    paths = {
+        "absolute": str(tmp_path / "crosswalk.json"),
+        "escape": "../outside.json",
+        "drive": tmp_path.drive + "crosswalk.json",
+        "anchor": str(tmp_path / "crosswalk.json")[len(tmp_path.drive) :],
+    }
+    manifest["inputs"]["crosswalk"].update(root=root_name, path=paths[kind])
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(InputError, match="crosswalk:.*root"):
+        sleeves.load_sleeve_inputs(path, tmp_path, tmp_path, CUTOFF)
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
+    output = tmp_path / "result.json"
+    assert (
+        cli.main(
+            [
+                "--qe-root",
+                str(tmp_path),
+                "--out",
+                str(output),
+                "--sleeve-inputs",
+                str(path),
+                "--sleeves-only",
+            ]
+        )
+        == 2
+    )
+    assert "input error: crosswalk:" in capsys.readouterr().err
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("root_name", ["qe", "repo"])
+def test_nested_input_path_stays_in_declared_root(
+    tmp_path: Path, root_name: str
+) -> None:
+    path = manifest_tree(tmp_path)
+    manifest = json.loads(path.read_bytes())
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    raw = (tmp_path / "crosswalk.json").read_bytes()
+    (nested / "crosswalk.json").write_bytes(raw)
+    manifest["inputs"]["crosswalk"].update(
+        root=root_name, path="nested/../nested/crosswalk.json"
+    )
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    records, data = sleeves.load_sleeve_inputs(path, tmp_path, tmp_path, CUTOFF)
+    assert data["crosswalk"] == raw
+    assert records["crosswalk"]["path"] == "nested/../nested/crosswalk.json"
+
+
+@pytest.mark.parametrize("root_name", ["qe", "repo"])
+def test_link_escape_is_rejected(tmp_path: Path, root_name: str) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = manifest_tree(root)
+    (outside / "crosswalk.json").write_bytes((root / "crosswalk.json").read_bytes())
+    link = root / "linked"
+    if sys.platform == "win32":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    manifest = json.loads(path.read_bytes())
+    manifest["inputs"]["crosswalk"].update(root=root_name, path="linked/crosswalk.json")
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(InputError, match="crosswalk:.*root"):
+        sleeves.load_sleeve_inputs(path, root, root, CUTOFF)
+
+
+@pytest.mark.parametrize(
+    "declared,accepted",
+    [("10", True), ("9.99", True), ("9.989", False)],
+)
+def test_cash_residual_declaration_controls_refusal(
+    tmp_path: Path, declared: str, accepted: bool
+) -> None:
+    # Cash-only account: deposit 100 - fees 10 = derived cash 90;
+    # 90 - provider settled cash 80 = residual 10. Declarations differ by
+    # 0, 0.01 (inclusive tolerance boundary), and 0.011 (outside tolerance).
+    dec = {
+        "data_cutoff": LAST,
+        "parent_account_id": "qb",
+        "funds": {},
+        "nav_total_exempt_days": [],
+        "closure_tolerance": {"nav_total": "0.02"},
+        "open_items": {"cash_residual": {"amount": declared, "tolerance": "0.01"}},
+    }
+    tags = {"sleeves": []}
+    documents = {
+        "accounts.csv": "type,settled_balance\nalpaca,80\n",
+        "account_activity.csv": (
+            "activity_type,id,type,status,amount,created_at\n"
+            "transfer,deposit,DEPOSIT,C,100,2026-09-17T12:00:00Z\n"
+            "journal,fee,AUM_FEE,COMPLETE,10,2026-09-17T12:00:00Z\n"
+        ),
+    }
+    for stem in (
+        "Crisis_Factor_Investing",
+        "Single_Index_Leveraged_In_and_Out",
+        "Volatis_Strategy",
+        "Total",
+    ):
+        documents[f"dashboard_{stem}_pricehistory.csv"] = (
+            "time,value,cost_basis,profit_loss\n09/17/2026,0,0,0\n"
+        )
+    data = {}
+    for name, contents in documents.items():
+        path = tmp_path / name
+        path.write_text(contents, encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as source:
+            data[name] = list(csv.DictReader(source))
+    with localcontext() as context:
+        context.prec = 28
+        facts = sleeves.quantbase_facts(dec, tags, data)
+    assert facts["closure"]["cash"]["derived_cash"] == D("90")
+    assert facts["closure"]["cash"]["residual"] == D("10")
+    cash_refusals = [r for r in facts["refusals"] if "cash residual" in r.lower()]
+    assert facts["refusals"] == cash_refusals
+    if accepted:
+        assert cash_refusals == []
+        assert facts["disclosures"]["cash_residual"] == {
+            "derived_cash": D("90"),
+            "provider_settled_cash": D("80"),
+            "residual": D("10"),
+            "declared_amount": D(declared),
+            "tolerance": D("0.01"),
+            "status": "DECLARED_WITHIN_TOLERANCE",
+        }
+    else:
+        assert any("differs from declaration" in r for r in cash_refusals)
+        assert "cash_residual" not in facts.get("disclosures", {})
 
 
 def ib_tag() -> dict[str, Any]:

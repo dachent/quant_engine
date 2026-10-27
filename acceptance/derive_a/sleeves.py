@@ -15,7 +15,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D, DecimalException, localcontext
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from .sources import AccountFlows, Flow, InputError
@@ -1022,7 +1022,7 @@ def quantbase_facts(
         refusals.append(
             f"Cash residual differs from declaration: actual {residual}, declared {expected}"
         )
-    if abs(residual) > tolerance:
+    if abs(residual - expected) > tolerance and abs(residual) > tolerance:
         refusals.append(
             f"Unexplained account cash residual {residual} (declared {expected})"
         )
@@ -1152,6 +1152,20 @@ def quantbase_facts(
         ),
         refusals=refusals,
         assumptions=assumptions,
+        disclosures=(
+            {
+                "cash_residual": {
+                    "derived_cash": derived,
+                    "provider_settled_cash": provider,
+                    "residual": residual,
+                    "declared_amount": expected,
+                    "tolerance": tolerance,
+                    "status": "DECLARED_WITHIN_TOLERANCE",
+                }
+            }
+            if abs(residual - expected) <= tolerance
+            else {}
+        ),
     )
 
 
@@ -1234,13 +1248,14 @@ def load_sleeve_inputs(
             raise InputError(f"{role}: bad sha256 form")
         if root_name not in ("qe", "repo") or not isinstance(relative, str):
             raise InputError(f"{role}: invalid root/path")
-        base = (qe_root if root_name == "qe" else repo_root).resolve()
-        target = (base / relative).resolve()
-        if (
-            not relative
-            or Path(relative).is_absolute()
-            or not target.is_relative_to(base)
-        ):
+        if not relative or Path(relative).anchor or PureWindowsPath(relative).anchor:
+            raise InputError(f"{role}: path must stay relative to its root")
+        try:
+            base = (qe_root if root_name == "qe" else repo_root).resolve()
+            target = (base / relative).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise InputError(f"{role}: cannot resolve path within its root") from exc
+        if not target.is_relative_to(base):
             raise InputError(f"{role}: path must stay relative to its root")
         try:
             raw = target.read_bytes()
@@ -1701,6 +1716,7 @@ def append_sleeves(
                 "quantbase": qb["closure"],
             },
             "disclosures": {
+                **qb.get("disclosures", {}),
                 "ibkr": ib["disclosures"],
                 "quantbase_dividends": qb["dividends"],
                 "quantbase_volatis_fills": qb["volatis_fills"],
