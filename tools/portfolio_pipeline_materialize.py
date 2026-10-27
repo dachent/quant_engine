@@ -36,6 +36,7 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
+from derived_epoch_perimeter import SLEEVE_FACTS_NODE_PREFIX
 from portfolio_invested_capital import (
     CapitalValidationError,
     governed_hwm_input_policy,
@@ -367,11 +368,44 @@ def _admission_policy_artifact(artifact_rows: Sequence[Mapping[str, Any]]) -> Pa
     return path
 
 
+def _selected_sleeve_facts_paths(
+    artifact_rows: Sequence[Mapping[str, Any]],
+) -> tuple[Path, ...]:
+    """The derived-sleeve facts the production spec selected, each verified (#567).
+
+    The account-manifest generation names its sleeve-facts artifacts by digest only;
+    the replay needs their bytes, which travel as ``financial-sleeve-facts*`` nodes
+    beside the generation.  A specification without such a node selects none.
+    """
+
+    rows = sorted(
+        (
+            row
+            for row in artifact_rows
+            if row.get("kind") == "ARTIFACT"
+            and str(row.get("node_id", "")).startswith(SLEEVE_FACTS_NODE_PREFIX)
+        ),
+        key=lambda row: str(row.get("node_id")),
+    )
+    paths: list[Path] = []
+    for row in rows:
+        path = Path(_text(row.get("path"), "HWM sleeve facts path"))
+        definition = _file_definition(path)
+        if (
+            definition["sha256"] != row.get("sha256")
+            or definition["size_bytes"] != row.get("size_bytes")
+            or Path(cast(str, definition["path"])).resolve() != path.resolve()
+        ):
+            raise MaterializationError("selected HWM sleeve facts binding differs")
+        paths.append(path.resolve())
+    return tuple(paths)
+
+
 def _production_hwm_source_paths(
     sources: Mapping[str, Path],
     artifact_rows: Sequence[Mapping[str, Any]],
     manifest_inputs: Mapping[str, Any] | None,
-) -> dict[str, Path]:
+) -> dict[str, Any]:
     """Resolve the selected ledger authorities already present in the production spec."""
 
     account_rows = [
@@ -408,7 +442,7 @@ def _production_hwm_source_paths(
         baseline_path = sources["portfolio-baseline"] / "generation.json"
     except KeyError as exc:
         raise MaterializationError("selected HWM generation source is absent") from exc
-    return {
+    resolved: dict[str, Any] = {
         "account_manifest_generation_path": account_path.resolve(),
         "account_manifest_admission_policy_path": admission_path.resolve(),
         "account_manifest_flow_classification_policy_path": (
@@ -417,6 +451,10 @@ def _production_hwm_source_paths(
         "provider_ledger_generation_path": provider_path.resolve(),
         "baseline_generation_path": baseline_path.resolve(),
     }
+    facts = _selected_sleeve_facts_paths(artifact_rows)
+    if facts:
+        resolved["sleeve_facts_paths"] = facts
+    return resolved
 
 
 FINANCIAL_MVP_SCHEMA = (
@@ -2167,7 +2205,7 @@ def _hwm_input_authority_assessment(
     authority: Mapping[str, Any],
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
-    hwm_source_paths: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Any] | None = None,
     assessment_path: Path | None = None,
     input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -2364,7 +2402,7 @@ def _product_gate_rows(
     product_path: Path,
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
-    hwm_source_paths: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Any] | None = None,
     input_contract_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     payload = _product_gate_payload(authority)

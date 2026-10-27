@@ -36,6 +36,7 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
+    GenerationBundle,
     GenerationConflictError,
     GenerationManifest,
     SourceArtifact,
@@ -81,6 +82,7 @@ from quant_engine.portfolio_ledger.returns import (
     summed_value_composite,
     value_periods,
 )
+import derived_epoch_perimeter
 from lifecycle_fields import (
     LIFECYCLE_SCHEMA_VERSION,
     RETAINED_HISTORY_ONLY,
@@ -2789,6 +2791,22 @@ def _reconcile_multi_account_strategy_composite(
     boundary, a repeated date, value on zero capital) fails closed here.
     """
 
+    members = [
+        detail
+        for (_account, member_strategy_id, _start, _end), detail in (
+            current_epoch_details.items()
+        )
+        if member_strategy_id == strategy_id
+        and detail.get("epoch_admission_status") != "BLOCKED"
+    ]
+    if members and all(
+        detail.get("derived_parent_account_id") is not None for detail in members
+    ):
+        # Every funded member is a derived sleeve (#567).  The canonical strategy
+        # path is the provider ledger's account-level series, which is not the
+        # sleeves' composite, so there is nothing to reconcile it against; each
+        # member's own trace still has to equal its epoch TWR.
+        return
     periods: list[ValuePeriod] = []
     with localcontext() as context:
         context.prec = 34
@@ -3931,31 +3949,59 @@ def _current_product_account_ids(
     }
 
 
+def _history_only_extras(
+    strategy_product_controls: Mapping[str, Mapping[str, Any]],
+) -> frozenset[str] | None:
+    """Control ids beyond the pinned product perimeter, or None when not exact.
+
+    The pinned perimeter (seven required strategies and the two owner exclusions)
+    must be present.  Any further control is a nested history-only strategy
+    (#567): excluded from the product and deprecated, never required.  The
+    nested-strategy tag map names them; the report binds the two.
+    """
+
+    if not CURRENT_STRATEGY_CONTROL_IDS <= set(strategy_product_controls):
+        return None
+    extras = set(strategy_product_controls) - CURRENT_STRATEGY_CONTROL_IDS
+    for strategy_id in extras:
+        control = strategy_product_controls[strategy_id]
+        if (
+            control.get("product_requirement") != "EXCLUDED"
+            or control.get("lifecycle_status") != "DEPRECATED_HISTORY_ONLY"
+        ):
+            return None
+    return frozenset(extras)
+
+
 def _validate_report_account_manifest(
     account_manifest: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, Any]],
     *,
     current_account_ids: set[str] | None = None,
     crosswalk: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+    coverage_rows: Sequence[Mapping[str, Any]] = (),
 ) -> set[tuple[str, str, str, str | None]]:
     """Validate exact current account-strategy epoch identity.
 
     The explicit current-product crosswalk is the join authority.  A pair-only
     check is insufficient because the same account may legitimately have two
     adjacent strategy epochs, and date changes would otherwise pass unnoticed.
+
+    Derived sleeves (#567) change the manifest by exactly one rule, shared with
+    every other consumer (``derived_epoch_perimeter``): a residual parent's epoch
+    is replaced by its sleeves' epochs, which the flow-coverage authority names.
+    The thirteen product epochs stay thirteen; the sleeves of strategies outside
+    the product are retained history-only epochs beside them.
     """
 
-    if set(strategy_product_controls) != CURRENT_STRATEGY_CONTROL_IDS:
+    extras = _history_only_extras(strategy_product_controls)
+    if extras is None:
         raise ReportValidationError("report account manifest controls are not exact")
     if crosswalk is None:
         raise ReportValidationError(
             "report account manifest requires an explicit current epoch crosswalk"
         )
     rows = _objects(account_manifest.get("rows"), "account_manifest.rows")
-    if len(rows) != CURRENT_PRODUCT_EPOCH_COUNT:
-        raise ReportValidationError(
-            "report account manifest must contain exactly 13 rows"
-        )
 
     crosswalk_rows = (
         _objects(crosswalk.get("rows"), "account crosswalk.rows")
@@ -3973,15 +4019,14 @@ def _validate_report_account_manifest(
         )
 
     def epoch_tuple(
-        row: Mapping[str, Any], field_name: str
+        row: Mapping[str, Any], field_name: str, allowed: frozenset[str] | None = None
     ) -> tuple[str, str, str, str | None]:
         account_id = row.get("account_id")
         strategy_id = row.get("strategy_id")
         if not isinstance(account_id, str) or not account_id:
             raise ReportValidationError(f"{field_name} account_id must be text")
-        if (
-            not isinstance(strategy_id, str)
-            or strategy_id not in CURRENT_REQUIRED_STRATEGY_IDS
+        if not isinstance(strategy_id, str) or strategy_id not in (
+            CURRENT_REQUIRED_STRATEGY_IDS if allowed is None else allowed
         ):
             raise ReportValidationError(f"{field_name} strategy is excluded or invalid")
         if "effective_start" not in row or "effective_end" not in row:
@@ -4028,20 +4073,45 @@ def _validate_report_account_manifest(
             if previous[1] is None or current[0] <= previous[1]:
                 raise ReportValidationError("account crosswalk epochs overlap")
 
+    try:
+        derived = derived_epoch_perimeter.derived_epochs(coverage_rows)
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise ReportValidationError(
+            f"derived sleeve coverage is invalid: {exc}"
+        ) from exc
     actual: set[tuple[str, str, str, str | None]] = set()
     for row in rows:
-        key = epoch_tuple(row, "report account manifest")
-        account_id = key[0]
-        if current_account_ids is not None and account_id not in current_account_ids:
-            raise ReportValidationError("report account manifest account is unknown")
+        try:
+            raw_key = derived_epoch_perimeter.epoch_key(row, "report account manifest")
+        except derived_epoch_perimeter.PerimeterError as exc:
+            raise ReportValidationError(str(exc)) from exc
+        if raw_key in derived:
+            # A derived epoch is a product epoch of a required strategy or a
+            # retained history-only epoch of one the controls exclude.
+            key = epoch_tuple(
+                row, "report account manifest", CURRENT_REQUIRED_STRATEGY_IDS | extras
+            )
+        else:
+            key = epoch_tuple(row, "report account manifest")
+            if current_account_ids is not None and key[0] not in current_account_ids:
+                raise ReportValidationError(
+                    "report account manifest account is unknown"
+                )
         if key in actual:
             raise ReportValidationError(
                 "report account manifest identities are duplicated"
             )
         actual.add(key)
-    if actual != expected:
+    try:
+        effective = derived_epoch_perimeter.bind_perimeter(expected, actual, derived)
+    except derived_epoch_perimeter.PerimeterError as exc:
         raise ReportValidationError(
             "report account manifest differs from admitted crosswalk"
+            + (f": {exc}" if derived else "")
+        ) from exc
+    if len(effective.product) != CURRENT_PRODUCT_EPOCH_COUNT:
+        raise ReportValidationError(
+            "report account manifest must contain exactly 13 product epochs"
         )
     return actual
 
@@ -4142,10 +4212,9 @@ def _is_governed_financial_mvp2_path(
         _text(item.get("strategy_id"), "strategy.strategy_id")
         for item in _objects(catalog.get("strategies"), "strategies")
     }
-    return (
-        catalog_strategy_ids == CURRENT_STRATEGY_CONTROL_IDS
-        and set(strategy_product_controls) == CURRENT_STRATEGY_CONTROL_IDS
-    )
+    return _history_only_extras(
+        strategy_product_controls
+    ) is not None and catalog_strategy_ids == set(strategy_product_controls)
 
 
 def _receipt_end_is_value_basis_bound(
@@ -4731,7 +4800,7 @@ def _report_product_controls(
     synthetic_ids = all(
         re.fullmatch(r"strategy-[0-9]+", strategy_id) for strategy_id in controls
     )
-    if set(controls) != CURRENT_STRATEGY_CONTROL_IDS and not synthetic_ids:
+    if _history_only_extras(controls) is None and not synthetic_ids:
         raise ReportValidationError(
             "financial MVP contract must contain exact financial MVP strategy control IDs"
         )
@@ -8518,6 +8587,149 @@ def _crosswalk_epoch_key(row: Mapping[str, Any]) -> tuple[str, str, str, str | N
     )
 
 
+def _report_epoch_perimeter(
+    crosswalk_rows: Sequence[Mapping[str, Any]],
+    verified_details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+) -> derived_epoch_perimeter.EffectivePerimeter:
+    """The effective perimeter of the verified epochs (#567).
+
+    The verified details carry, for each derived sleeve epoch, the parent the
+    flow-coverage authority named; every other epoch must be a crosswalk epoch.
+    """
+
+    baseline = {
+        _crosswalk_epoch_key(row)
+        for row in crosswalk_rows
+        if row.get("product_epoch_disposition") == "INCLUDED_PRODUCT_EPOCH"
+    }
+    parents = {
+        key: str(detail["derived_parent_account_id"])
+        for key, detail in verified_details.items()
+        if detail.get("derived_parent_account_id") is not None
+    }
+    digests = {
+        key: str(detail["derived_tag_map_sha256"])
+        for key, detail in verified_details.items()
+        if detail.get("derived_tag_map_sha256") is not None
+    }
+    try:
+        return derived_epoch_perimeter.bind_perimeter(
+            baseline, verified_details, parents, digests
+        )
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise ReportValidationError(
+            f"epoch details differ from the effective perimeter: {exc}"
+        ) from exc
+
+
+def _bind_derived_epochs_to_tag_map(
+    tag_map: TagMap | None,
+    perimeter: derived_epoch_perimeter.EffectivePerimeter,
+    controls: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Every derived epoch is a sleeve of the tag map, and the controls agree.
+
+    The sleeve-facts artifacts bind the tag map by hash; this report binds the
+    same policy by identity: the derived account is ``<parent>-<sleeve>``, its
+    strategy is the sleeve's, its parent is the map's parent, and the epoch does
+    not start before the sleeve does.  The history-only controls of the contract
+    are exactly the tag map's sleeve strategies the product does not require.
+    """
+
+    extras = _history_only_extras(controls)
+    if tag_map is None:
+        if perimeter.has_derived or extras:
+            raise ReportValidationError(
+                "derived sleeve epochs and history-only strategies require "
+                "the nested strategy tag map"
+            )
+        return
+    sleeves = {
+        parent.sleeve_account_id(sleeve.sleeve_id): (parent, sleeve)
+        for parent in tag_map.parents
+        for sleeve in parent.sleeves
+    }
+    for key, parent_account in perimeter.parents.items():
+        # The sleeve facts were built from one policy; the report may speak for
+        # no other.  Every derived epoch names the digest of that policy.
+        if perimeter.tag_map_digests.get(key) != tag_map.sha256:
+            raise ReportValidationError(
+                "the tag map differs from the one the sleeve facts were built "
+                f"from: {key[0]}"
+            )
+        found = sleeves.get(key[0])
+        if (
+            found is None
+            or found[0].parent_account_id != parent_account
+            or found[1].strategy_id != key[1]
+        ):
+            raise ReportValidationError(
+                f"derived epoch is not a sleeve of the tag map: {key[0]}/{key[1]}"
+            )
+        sleeve = found[1]
+        if key[2] < sleeve.effective_start.isoformat() or (
+            sleeve.effective_end is not None and key[3] is None
+        ):
+            raise ReportValidationError(
+                f"derived epoch lies outside its sleeve window: {key[0]}"
+            )
+    if extras is not None:
+        named = {
+            sleeve.strategy_id for _parent, sleeve in sleeves.values()
+        } - CURRENT_REQUIRED_STRATEGY_IDS
+        if named != extras:
+            raise ReportValidationError(
+                "history-only controls differ from the tag map's sleeve strategies"
+            )
+
+
+def _effective_performance_catalog(
+    catalog: Mapping[str, Any],
+    perimeter: derived_epoch_perimeter.EffectivePerimeter,
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    tag_map: TagMap | None,
+) -> dict[str, Any]:
+    """The catalog whose assignments are the effective product perimeter's.
+
+    A residual parent's assignment leaves; each derived product epoch joins as the
+    one-strategy assignment of its sleeve account.  Retained sleeve epochs belong
+    to strategies outside the product and publish no performance row.
+    """
+
+    labels: dict[str, str] = {}
+    if tag_map is not None:
+        for parent in tag_map.parents:
+            for sleeve in parent.sleeves:
+                labels[parent.sleeve_account_id(sleeve.sleeve_id)] = sleeve.label
+    removed = perimeter.removed
+    assignments = [
+        dict(row)
+        for row in _objects(catalog.get("assignments"), "assignments")
+        if (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        not in removed
+    ]
+    for key in sorted(perimeter.derived & perimeter.product):
+        assignments.append(
+            {
+                "account_id": key[0],
+                "assignment_id": f"derived-sleeve:{key[0]}:{key[2]}",
+                "effective_end": key[3],
+                "effective_start": key[2],
+                "mapping_status": "MAPPED",
+                "observed_label": labels.get(key[0], key[0]),
+                "source_classification": "DERIVED_SLEEVE",
+                "source_id": f"sleeve-facts:{perimeter.parents[key]}",
+                "strategy_id": key[1],
+            }
+        )
+    return {**catalog, "assignments": assignments}
+
+
 def _load_nested_tag_map(path: Path) -> tuple[TagMap, bytes]:
     try:
         raw = path.read_bytes()
@@ -8566,6 +8778,14 @@ def _lifecycle_sleeves(
                 "sleeve": sleeve,
                 "parent_assignment_id": parent_id,
                 "sleeve_label": sleeve.label,
+                # the strategy of the parent's assignment and the sleeve's own
+                # id: the facts the Performance tab nests a sleeve slice by
+                "parent_strategy_id": next(
+                    str(assignment["strategy_id"])
+                    for assignment in mapped
+                    if assignment.get("assignment_id") == parent_id
+                ),
+                "sleeve_id": sleeve.sleeve_id,
             }
             by_account[parent.sleeve_account_id(sleeve.sleeve_id)] = link
             by_strategy[sleeve.strategy_id] = link
@@ -8605,10 +8825,20 @@ def _with_epoch_lifecycle(
             raise ReportValidationError(f"epoch lifecycle is invalid: {exc}") from exc
         link = sleeves_by_account.get(str(row.get("account_id")))
         if link is not None:
-            fields["parent_assignment_id"] = link["parent_assignment_id"]
-            fields["sleeve_label"] = link["sleeve_label"]
+            fields.update(_sleeve_link_fields(link))
         result.append({**row, **fields})
     return result
+
+
+def _sleeve_link_fields(link: Mapping[str, Any]) -> dict[str, Any]:
+    """The sleeve identity a lifecycle row carries: present only on a sleeve row."""
+
+    return {
+        "parent_assignment_id": link["parent_assignment_id"],
+        "sleeve_label": link["sleeve_label"],
+        "parent_strategy_id": link["parent_strategy_id"],
+        "sleeve_id": link["sleeve_id"],
+    }
 
 
 def _lifecycle_strategy_fields(
@@ -8627,9 +8857,36 @@ def _lifecycle_strategy_fields(
     except LifecycleError as exc:
         raise ReportValidationError(f"strategy lifecycle is invalid: {exc}") from exc
     if link is not None:
-        fields["parent_assignment_id"] = link["parent_assignment_id"]
-        fields["sleeve_label"] = link["sleeve_label"]
+        fields.update(_sleeve_link_fields(link))
     return fields
+
+
+def _lifecycle_epoch_rows(
+    crosswalk_rows: Sequence[Mapping[str, Any]],
+    perimeter: derived_epoch_perimeter.EffectivePerimeter | None,
+) -> list[dict[str, Any]]:
+    """The crosswalk rows with a residual parent's epochs replaced by sleeve epochs.
+
+    Only the derived epochs of the current product join (disposition INCLUDED); the
+    retained sleeve epochs are history-only records built from the tag map and the
+    verified details, never crosswalk rows.
+    """
+
+    rows = [dict(row) for row in crosswalk_rows]
+    if perimeter is None or not perimeter.has_derived:
+        return rows
+    rows = [row for row in rows if _crosswalk_epoch_key(row) not in perimeter.removed]
+    for key in sorted(perimeter.derived & perimeter.product):
+        rows.append(
+            {
+                "account_id": key[0],
+                "strategy_id": key[1],
+                "effective_start": key[2],
+                "effective_end": key[3],
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+            }
+        )
+    return rows
 
 
 def _lifecycle_strategy_rows(
@@ -8640,6 +8897,7 @@ def _lifecycle_strategy_rows(
     details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     sleeves_by_strategy: Mapping[str, Mapping[str, Any]],
     strategy_names: Mapping[str, str],
+    derived_epochs: Sequence[tuple[str, str, str, str | None]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Lifecycle fields for the current strategies and the retained records.
 
@@ -8707,7 +8965,23 @@ def _lifecycle_strategy_rows(
         if strategy_id in current_ids or strategy_id in retained:
             continue
         sleeve = link["sleeve"]
-        end = None if sleeve.effective_end is None else sleeve.effective_end.isoformat()
+        # A funded sleeve is dated by its own verified epochs (its first day with
+        # capital to its exit); a sleeve with none keeps the tag map's window.
+        own = [key for key in derived_epochs if key[1] == strategy_id]
+        if own:
+            start = min(key[2] for key in own)
+            ends = [key[3] for key in own]
+            end = None if any(item is None for item in ends) else max(map(str, ends))
+            closed = [details.get(key, {}).get("performance_closed_on") for key in own]
+        else:
+            start = sleeve.effective_start.isoformat()
+            end = (
+                None
+                if sleeve.effective_end is None
+                else sleeve.effective_end.isoformat()
+            )
+            ends = [end]
+            closed = [None]
         retained[strategy_id] = {
             "strategy_id": strategy_id,
             "strategy_name": strategy_names.get(strategy_id, sleeve.label),
@@ -8715,12 +8989,12 @@ def _lifecycle_strategy_rows(
             "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
             "product_requirement": "EXCLUDED",
             "source": "NESTED_STRATEGY_TAG_MAP",
-            "effective_start": sleeve.effective_start.isoformat(),
+            "effective_start": start,
             "effective_end": end,
             **_lifecycle_strategy_fields(
                 current_required=False,
-                effective_ends=[end],
-                closed_ons=[None],
+                effective_ends=ends,
+                closed_ons=closed,
                 link=link,
             ),
         }
@@ -8750,6 +9024,8 @@ def _current_epoch_detail(
         "epoch_output_status": verified["epoch_output_status"],
         "epoch_blocking_reason": verified["epoch_blocking_reason"],
         "own_path_links": verified["own_path_links"],
+        # PRIVATE: the parent account of a derived sleeve epoch, else None (#567)
+        "derived_parent_account_id": verified.get("derived_parent_account_id"),
         "performance_status": verified.get("performance_status"),
         "performance_reason": verified.get("performance_reason"),
         "performance_opening_date": verified.get("performance_opening_date"),
@@ -8956,6 +9232,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
     epoch_verified_details: Mapping[
         tuple[str, str, str, str | None], Mapping[str, Any]
@@ -8968,6 +9245,10 @@ def build_report_data(
         raise ReportValidationError(
             "nested strategy tag map requires the current epoch evidence"
         )
+    tag_map_early: TagMap | None = None
+    tag_map_bytes_early = b""
+    if nested_tag_map_path is not None:
+        tag_map_early, tag_map_bytes_early = _load_nested_tag_map(nested_tag_map_path)
     if (
         _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
         and not epoch_supplied
@@ -9017,22 +9298,27 @@ def build_report_data(
         calculation_cutoff_date = crosswalk_payload["calculation_cutoff_date"]
         epoch_crosswalk_rows = list(crosswalk_payload["rows"])
         epoch_verified_details = verified_epoch_details
-        current_epoch_tuples = {
-            (
-                row["account_id"],
-                row["strategy_id"],
-                row["effective_start"],
-                row["effective_end"],
-            )
+        # The effective perimeter (#567): a residual parent's epoch is replaced by
+        # its derived sleeve epochs.  The product epochs (13) feed every current
+        # surface; retained sleeve epochs of other strategies are history only.
+        epoch_perimeter = _report_epoch_perimeter(
+            epoch_crosswalk_rows, verified_epoch_details
+        )
+        _bind_derived_epochs_to_tag_map(
+            tag_map_early, epoch_perimeter, strategy_product_controls
+        )
+        baseline_epoch_rows = {
+            _crosswalk_epoch_key(row): row
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
         }
+        current_epoch_tuples = set(epoch_perimeter.product)
         current_epoch_details = {
-            _crosswalk_epoch_key(row): _current_epoch_detail(
-                row, verified_epoch_details[_crosswalk_epoch_key(row)]
+            key: _current_epoch_detail(
+                baseline_epoch_rows.get(key) or verified_epoch_details[key],
+                verified_epoch_details[key],
             )
-            for row in crosswalk_payload["rows"]
-            if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+            for key in sorted(epoch_perimeter.product)
         }
         current_epoch_account_details = {}
         for row in crosswalk_payload["rows"]:
@@ -9056,7 +9342,9 @@ def build_report_data(
             )
             in current_epoch_tuples
         ]
-        current_account_ids = {row[0] for row in current_epoch_tuples}
+        # The account perimeter stays the crosswalk's: a residual parent is still
+        # the custody account of its strategy's capital.
+        current_account_ids = {key[0] for key in baseline_epoch_rows}
         excluded_epoch_account_ids = {
             row["account_id"]
             for row in crosswalk_payload["rows"]
@@ -9116,7 +9404,13 @@ def build_report_data(
         value_basis_bounds=value_basis_bounds,
     )
     performance = _account_strategy_performance(
-        catalog,
+        (
+            _effective_performance_catalog(
+                catalog, epoch_perimeter, epoch_verified_details, tag_map_early
+            )
+            if epoch_perimeter is not None and epoch_perimeter.has_derived
+            else catalog
+        ),
         strategy_product_controls,
         current_epoch_tuples,
         current_epoch_details,
@@ -9493,7 +9787,15 @@ def build_report_data(
     performance = _current_product_fact_rows(
         performance,
         strategy_product_controls,
-        current_account_ids,
+        # a derived product epoch's account is no baseline account (#567)
+        None
+        if current_account_ids is None
+        else current_account_ids
+        | (
+            {key[0] for key in epoch_perimeter.product}
+            if epoch_perimeter is not None
+            else set()
+        ),
         "twr_mwr",
     )
     strategy_returns = _current_product_fact_rows(
@@ -9772,27 +10074,29 @@ def build_report_data(
         # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
         # close and the tag map only.  A report built without a current-epoch
         # crosswalk keeps the previous schema: no marker, no fields.
-        tag_map: TagMap | None = None
-        if nested_tag_map_path is not None:
-            tag_map, tag_map_bytes = _load_nested_tag_map(nested_tag_map_path)
+        tag_map = tag_map_early
+        if tag_map is not None:
             report["provenance"] = [
                 *report["provenance"],
                 {
                     "artifact": "nested-strategy-tag-map",
                     "as_of_date": tag_map.as_of_date.isoformat(),
                     "schema": "nested-strategy-tag-map/1",
-                    "sha256": hashlib.sha256(tag_map_bytes).hexdigest(),
+                    "sha256": hashlib.sha256(tag_map_bytes_early).hexdigest(),
                 },
             ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
+        )
+        lifecycle_epoch_rows = _lifecycle_epoch_rows(
+            epoch_crosswalk_rows, epoch_perimeter
         )
         report["twr_mwr"] = _with_epoch_lifecycle(
             performance,
             details=current_epoch_details,
             dispositions={
                 _crosswalk_epoch_key(row): row["product_epoch_disposition"]
-                for row in epoch_crosswalk_rows
+                for row in lifecycle_epoch_rows
             },
             sleeves_by_account=sleeves_by_account,
         )
@@ -9800,9 +10104,14 @@ def build_report_data(
             _lifecycle_strategy_rows(
                 strategy_summary,
                 controls=strategy_product_controls,
-                crosswalk_rows=epoch_crosswalk_rows,
+                crosswalk_rows=lifecycle_epoch_rows,
                 details=epoch_verified_details,
                 sleeves_by_strategy=sleeves_by_strategy,
+                derived_epochs=(
+                    sorted(epoch_perimeter.retained)
+                    if epoch_perimeter is not None
+                    else ()
+                ),
                 strategy_names={
                     _text(item.get("strategy_id"), "strategy.strategy_id"): _text(
                         item.get("name"), "strategy.name"
@@ -11918,11 +12227,19 @@ def _validate_epoch_manifest_input(
         baseline_ref=baseline_ref,
         baseline_catalog_path=baseline_catalog_path,
     )
+    generation_id = source.get("generation_id")
+    if not isinstance(generation_id, str):
+        raise ReportValidationError("epoch generation root is not verified")
+    try:
+        bundle = read_generation_bundle(epoch_manifest_generation_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ReportValidationError("epoch generation root is not verified") from exc
     _validate_report_account_manifest(
         manifest,
         strategy_product_controls,
         current_account_ids=current_account_ids,
         crosswalk=crosswalk,
+        coverage_rows=_generation_coverage_rows(bundle),
     )
     if manifest.get("schema_version") in {9, 10} and manifest.get(
         "calculation_cutoff_date"
@@ -11940,6 +12257,7 @@ def _validate_epoch_manifest_input(
         source,
         manifest_bytes,
         crosswalk_bytes,
+        bundle=bundle,
     )
     return (
         manifest,
@@ -12047,6 +12365,47 @@ def _blocked_static_receipt_facts_bind(
         if not nav[1] <= nav_day <= nav[2]:
             return False
     return True
+
+
+def _verified_epoch_perimeter(
+    manifest: Mapping[str, Any],
+    subject_object: Callable[[str], dict[str, Any]],
+) -> derived_epoch_perimeter.EffectivePerimeter:
+    """Bind the manifest's epochs to the baseline crosswalk plus derived sleeves."""
+
+    try:
+        crosswalk_rows = _objects(
+            subject_object("authority/account-assignment-crosswalk.json").get("rows"),
+            "epoch crosswalk rows",
+        )
+        baseline = [
+            derived_epoch_perimeter.epoch_key(row, "epoch crosswalk")
+            for row in crosswalk_rows
+            if row.get("product_epoch_disposition") == "INCLUDED_PRODUCT_EPOCH"
+        ]
+        manifest_keys = [
+            derived_epoch_perimeter.epoch_key(row, "epoch manifest")
+            for row in _objects(manifest.get("rows"), "epoch manifest rows")
+        ]
+        coverage_rows = _objects(
+            subject_object("authority/account-flow-coverage.json").get("rows"),
+            "epoch coverage rows",
+        )
+        if len(manifest_keys) != len(set(manifest_keys)):
+            raise ReportValidationError("epoch manifest tuple authority differs")
+        perimeter = derived_epoch_perimeter.effective_perimeter(
+            baseline, manifest_keys, coverage_rows
+        )
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise ReportValidationError(
+            f"epoch manifest differs from the effective perimeter: {exc}"
+        ) from exc
+    if (
+        len(baseline) != CURRENT_PRODUCT_EPOCH_COUNT
+        or len(perimeter.product) != CURRENT_PRODUCT_EPOCH_COUNT
+    ):
+        raise ReportValidationError("epoch verification semantic partition differs")
+    return perimeter
 
 
 def _verified_epoch_authority_details(
@@ -12661,6 +13020,7 @@ def _verified_epoch_authority_details(
     if not graph_is_consistent:
         raise ReportValidationError("epoch manifest selected authority graph differs")
     counts = verification.get("counts")
+    perimeter = _verified_epoch_perimeter(manifest, subject_object)
     required_counts = {
         "selected_baseline_account_count",
         "account_count",
@@ -12693,10 +13053,11 @@ def _verified_epoch_authority_details(
         not isinstance(counts, dict)
         or set(counts) != required_counts
         or any(type(value) is not int or value < 0 for value in counts.values())
-        or counts["mapped_assignment_count"] != 15
-        or counts["current_product_epoch_count"] != 13
+        or counts["mapped_assignment_count"]
+        != 15 - len(perimeter.removed) + len(perimeter.derived)
+        or counts["current_product_epoch_count"] != len(perimeter.included)
         or any(
-            counts[field] != 13
+            counts[field] != len(perimeter.included)
             for field in (
                 "calculation_input_row_count",
                 "coverage_row_count",
@@ -12809,7 +13170,9 @@ def _verified_epoch_authority_details(
     assert_calculation_dates(calculation_ledger)
     assert_calculation_dates(calculation_inputs.get("rows"))
     chains = _objects(verification.get("blocker_chains"), "epoch blocker chains")
-    if len(manifest_rows) != 13 or len(chains) != 13:
+    if len(manifest_rows) != len(perimeter.included) or len(chains) != len(
+        perimeter.included
+    ):
         raise ReportValidationError("epoch verification semantic partition differs")
     tuple_fields = ("account_id", "strategy_id", "effective_start", "effective_end")
     by_key: dict[tuple[str, str, str, str | None], Mapping[str, Any]] = {}
@@ -12932,6 +13295,10 @@ def _verified_epoch_authority_details(
         details[key] = {
             "account_label": manifest_row.get("account_label"),
             "last_four": manifest_row.get("last_four"),
+            # PRIVATE sibling: the parent account of a derived sleeve epoch
+            # (None for a baseline epoch), from the flow-coverage authority.
+            "derived_parent_account_id": perimeter.parents.get(key),
+            "derived_tag_map_sha256": perimeter.tag_map_digests.get(key),
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
@@ -13050,21 +13417,42 @@ def _verified_epoch_authority_details(
     return details
 
 
+def _generation_coverage_rows(bundle: GenerationBundle) -> list[dict[str, Any]]:
+    """The flow-coverage authority rows of a verified account-manifest generation."""
+
+    payload = bundle.payloads.get("authority/account-flow-coverage.json")
+    if type(payload) is not bytes:
+        raise ReportValidationError("epoch generation lacks its flow coverage")
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("epoch generation flow coverage differs") from exc
+    rows = decoded.get("rows") if isinstance(decoded, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ReportValidationError("epoch generation flow coverage differs")
+    return cast(list[dict[str, Any]], rows)
+
+
 def _validate_epoch_generation_authority(
     generation_root: Path,
     source: Mapping[str, Any],
     manifest_bytes: bytes,
     crosswalk_bytes: bytes,
+    *,
+    bundle: GenerationBundle | None = None,
 ) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
     """Require the triplet to be an exact payload of an immutable generation."""
 
     generation_id = source.get("generation_id")
     if not isinstance(generation_id, str):
         raise ReportValidationError("epoch generation root is not verified")
-    try:
-        bundle = read_generation_bundle(generation_root, generation_id)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ReportValidationError("epoch generation root is not verified") from exc
+    if bundle is None:
+        try:
+            bundle = read_generation_bundle(generation_root, generation_id)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ReportValidationError(
+                "epoch generation root is not verified"
+            ) from exc
     generation_manifest_bytes = bundle.manifest.to_json_bytes()
     if (
         hashlib.sha256(generation_manifest_bytes).hexdigest()
@@ -14426,7 +14814,6 @@ def _epoch_history_snapshot_evidence(
         or not isinstance(crosswalk_rows, list)
         or len(crosswalk_rows) != 15
         or not isinstance(manifest_rows, list)
-        or len(manifest_rows) != 13
     ):
         raise ReportValidationError("epoch history subject cardinality differs")
     expected_row_keys = {
@@ -14457,7 +14844,21 @@ def _epoch_history_snapshot_evidence(
         for row in manifest_rows
         if isinstance(row, dict)
     }
-    if len(included) != 13 or manifest_tuples != included:
+    try:
+        effective = derived_epoch_perimeter.effective_perimeter(
+            [
+                derived_epoch_perimeter.epoch_key(dict(zip(tuple_fields, key)))
+                for key in included
+            ],
+            [
+                derived_epoch_perimeter.epoch_key(dict(zip(tuple_fields, key)))
+                for key in manifest_tuples
+            ],
+            _generation_coverage_rows(bundle),
+        )
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise ReportValidationError("epoch history subject tuples differ") from exc
+    if len(included) != 13 or len(effective.product) != 13:
         raise ReportValidationError("epoch history subject tuples differ")
     artifact = next(
         (

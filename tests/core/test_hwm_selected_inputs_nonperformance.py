@@ -1166,3 +1166,117 @@ def test_funded_member_contributing_to_no_emitted_interval_fails_closed(
     assert f"strategy_id={TT_LIKE}" in message
     assert f"effective_start={D2}" in message
     assert "effective_end=None" in message
+
+
+# --- derived sleeves (#567): the product perimeter is the baseline strategies ---
+
+
+def _derived_world() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]
+]:
+    """Account 00 (strategy alpha) is a residual parent: its epoch is replaced by
+    a current sleeve epoch of alpha and a retained sleeve of a history-only
+    strategy; the other twelve epochs stay."""
+
+    calculation, output, crosswalk = _documents()
+    parent = output["rows"][0]
+    sleeve_current = {
+        "account_id": "synthetic-account-00-s2",
+        "strategy_id": "alpha",
+        "effective_start": "2026-01-30",
+        "effective_end": None,
+    }
+    sleeve_history = {
+        "account_id": "synthetic-account-00-s1",
+        "strategy_id": "history-only",
+        "effective_start": "2026-01-26",
+        "effective_end": "2026-06-23",
+    }
+    for rows in (calculation["rows"], output["rows"]):
+        rows.pop(0)
+    for epoch in (sleeve_current, sleeve_history):
+        calculation["rows"].append({"epoch": dict(epoch), "provider": "synthetic"})
+        output["rows"].append({**parent, **epoch})
+    coverage = [
+        {
+            "assignment": dict(epoch),
+            "authority_kind": "DERIVED_SLEEVE_COVERAGE_V1",
+            "derivation": {
+                "parent_account_id": "synthetic-account-00",
+                "sleeve_facts_sha256": "0" * 64,
+            },
+        }
+        for epoch in (sleeve_current, sleeve_history)
+    ]
+    return calculation, output, crosswalk, coverage
+
+
+def test_a_sleeve_epoch_stands_for_its_residual_parent_in_the_hwm(
+    selected_hwm: Any,
+) -> None:
+    calculation, output, crosswalk, coverage = _derived_world()
+
+    members, calculation_by_key, funded, excluded = selected_hwm._source_rows(
+        calculation, output, crosswalk, coverage
+    )
+
+    assert len(members) == 13
+    assert ("synthetic-account-00-s2", "alpha", "2026-01-30", None) in members
+    assert (
+        members[("synthetic-account-00-s2", "alpha", "2026-01-30", None)]["provider"]
+        == "synthetic"
+    )
+    # the retained sleeve of a history-only strategy is no HWM member
+    assert not any(key[1] == "history-only" for key in members)
+    assert not any(key[1] == "history-only" for key in funded)
+    assert not any(key[1] == "history-only" for key in calculation_by_key)
+    assert excluded == []
+
+
+def test_without_coverage_rows_the_manifest_must_equal_the_crosswalk(
+    selected_hwm: Any,
+) -> None:
+    calculation, output, crosswalk, _coverage = _derived_world()
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="derived|missing"):
+        selected_hwm._source_rows(calculation, output, crosswalk, [])
+
+
+def test_a_product_perimeter_that_lost_a_current_strategy_epoch_fails_closed(
+    selected_hwm: Any,
+) -> None:
+    calculation, output, crosswalk, coverage = _derived_world()
+    # the current sleeve vanishes: only the history-only sleeve replaces account 00
+    for rows in (calculation["rows"], output["rows"]):
+        rows[:] = [
+            row
+            for row in rows
+            if (row.get("epoch") or row)["account_id"] != "synthetic-account-00-s2"
+        ]
+    coverage = coverage[1:]
+
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="exactly 13"):
+        selected_hwm._source_rows(calculation, output, crosswalk, coverage)
+
+
+def test_selected_sleeve_facts_are_bound_by_digest(
+    selected_hwm: Any, tmp_path: Any
+) -> None:
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(b'{"sleeves": []}')
+    from quant_engine.core import InputSnapshot
+
+    snapshot = InputSnapshot.from_bytes("facts", facts.read_bytes())
+    selected = {"sleeve_facts": [{"sha256": snapshot.sha256, "size_bytes": 15}]}
+    assert selected_hwm._selected_sleeve_facts(selected, [facts])[0].sha256 == (
+        snapshot.sha256
+    )
+    # bytes the generation did not select, none supplied, or facts it never named
+    other = tmp_path / "other.json"
+    other.write_bytes(b'{"sleeves": [1]}')
+    for paths in ([other], []):
+        with pytest.raises(selected_hwm.SelectedHwmInputError, match="differ"):
+            selected_hwm._selected_sleeve_facts(selected, paths)
+    with pytest.raises(selected_hwm.SelectedHwmInputError, match="selected none"):
+        selected_hwm._selected_sleeve_facts({}, [facts])
+    assert selected_hwm._selected_sleeve_facts({}, []) == ()

@@ -154,6 +154,9 @@ _PATH_STAGES = {
     # change affects the report and the panel built from it.
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
+    # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
+    # derived sleeves); the report, the panel and the HWM selection bind to it.
+    "tools/derived_epoch_perimeter.py": ["report", "panel"],
     "tools/sleeve_ledger.py": [],
     "tools/sleeve_nav.py": [],
     # #567 stage 5: the post-ledger sleeve-facts builder; nothing imports it yet.
