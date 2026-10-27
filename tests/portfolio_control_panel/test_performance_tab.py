@@ -438,7 +438,7 @@ def _tamper(path: list[Any], value: Any) -> Any:
         _tamper(
             ["readout", "summed_epoch_twr"], {"status": "AVAILABLE", "value": "0.5"}
         ),
-        _tamper(["schema_version"], 2),
+        _tamper(["schema_version"], 1),
         _tamper(["modes", "LIVE_ONLY", "data_through_date"], "2026-12-31"),
         _tamper(["modes", "LIVE_ONLY", "stale_before_current_week"], True),
     ],
@@ -641,3 +641,15 @@ def test_the_verifier_rejects_a_tampered_or_invented_benchmark_line() -> None:
     plain = _panel()
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(block, plain)
+
+
+def test_the_verifier_rejects_a_benchmark_line_outside_the_admitted_pair() -> None:
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel)
+    bad = copy.deepcopy(block)
+    invented = copy.deepcopy(_line(bad, "LIVE_ONLY", "market:SPY"))
+    invented["series_id"] = "market:FAKE"
+    bad["modes"]["LIVE_ONLY"]["lines"].append(invented)
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
+    assert block["schema_version"] == 2

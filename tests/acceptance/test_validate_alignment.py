@@ -3448,7 +3448,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.census is not None
     assert (
         state.census.sha256
-        == "89c78abb39472da2fefed362f899bc7e119b35b5ea3a62d42654975f9615de16"
+        == "e23990cc6caa7a5e2d4b508f8c2370fe427e7e073198eb36641255fdb779b32e"
     )
     census = json.loads(
         (

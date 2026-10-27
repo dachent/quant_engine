@@ -2167,7 +2167,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "as_of", "scope", "modes", "benchmarks", "slices", "readout"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "as_of": { "type": ["string", "null"] },
         "scope": { "const": "SYSTEMATIC_EX_RESERVE" },
         "modes": {

@@ -39,7 +39,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 from typing import Any, Final, Mapping, Sequence
 
-PERFORMANCE_TAB_SCHEMA_VERSION: Final = 1
+PERFORMANCE_TAB_SCHEMA_VERSION: Final = 2
 SCOPE: Final = "SYSTEMATIC_EX_RESERVE"
 MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 TRI_DECIMALS: Final = 8
@@ -840,6 +840,18 @@ def _verify_mode(
             level *= 1 + Fraction(str(bench_values[key]))
             if abs(Fraction(bench_line["tri"][index]) - level) > Fraction(6, 10**9):
                 raise _fail(f"{mode} {bench_id} index differs at {key}")
+    derivable = {
+        bench_id
+        for bench_id in ("market:SPY", "market:SPXL")
+        if any(
+            isinstance(r, Mapping)
+            and r.get("series_id") == bench_id
+            and all(key in _mapping(r.get("values")) for key in dates)
+            for r in _sequence(weekly.get("series"))
+        )
+    }
+    if set(benchmark_lines) != derivable:
+        raise _fail(f"{mode} benchmark lines differ from the derivable pair")
     component_origin: list[list[str]] = []
     component_returns: list[list[Fraction]] = []
     for row in rows:
@@ -1073,7 +1085,7 @@ def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -
     """Re-derive the block from the panel inputs; raise on any difference."""
 
     if (
-        block.get("schema_version") != 1
+        block.get("schema_version") != PERFORMANCE_TAB_SCHEMA_VERSION
         or block.get("scope") != "SYSTEMATIC_EX_RESERVE"
     ):
         raise _fail("schema_version or scope differs")
