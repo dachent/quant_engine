@@ -6478,13 +6478,36 @@ def _backslash(*parts: str) -> str:
     return "\\".join(part for part in parts if part)
 
 
+def _derived_only_strategy_ids() -> frozenset[str]:
+    """Strategies whose every census epoch is derived from a nested-strategy tag map.
+
+    A derived epoch sits inside its parent account's retrieval window and has no
+    receipt of its own, so such a strategy writes no static-snapshot receipt.
+    """
+
+    try:
+        census = json.loads(ACCOUNT_STRATEGY_GOVERNED_MEMBERSHIP_CENSUS.read_bytes())
+        authority = _financial_mvp_module().DERIVED_SLEEVE_EPOCH_AUTHORITY
+        derived: set[str] = set()
+        other: set[str] = set()
+        for sleeve in census["current_census"]["account_sleeves"]:
+            for assignment in sleeve["assignments"]:
+                (
+                    derived if assignment.get("authority") == authority else other
+                ).add(str(assignment["strategy_id"]))
+        return frozenset(derived - other)
+    except (MaterializationError, OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+
+
 def _registry_strategy_ids() -> list[str]:
     try:
         registry = json.loads(CURRENT_STRATEGY_REGISTRY.read_bytes())
+        derived_only = _derived_only_strategy_ids()
         return [
             str(row["strategy_id"])
             for row in registry["strategies"]
-            if isinstance(row, dict)
+            if isinstance(row, dict) and str(row["strategy_id"]) not in derived_only
         ]
     except (OSError, ValueError, KeyError, TypeError):
         return []

@@ -852,6 +852,12 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert {row["strategy_id"] for row in excluded_rows} == {
         "composer-holy-grail",
         "echotrade-growth-pivots",
+        "p123-conn-1911998-andreas-sc-ai-mq-live",
+        "p123-conn-1951348-higher-beta-earnings",
+        "p123-conn-1956961-ai-largecap-ls",
+        "p123-conn-1958970-high-octane",
+        "quantbase-crisis-factor-investing",
+        "quantbase-single-index-leveraged-in-out",
     }
     assert {row["disposition"] for row in excluded_rows} == {
         "NOT_APPLICABLE_OWNER_APPROVED"
@@ -1135,7 +1141,16 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
             assert assignment.get("screened_out_candidates", []) == []
             if source_key == "us-industry":
                 assert len(modeled) == len(candidates)
-    for strategy_id in ("composer-holy-grail", "echotrade-growth-pivots"):
+    for strategy_id in (
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+        "p123-conn-1911998-andreas-sc-ai-mq-live",
+        "p123-conn-1951348-higher-beta-earnings",
+        "p123-conn-1956961-ai-largecap-ls",
+        "p123-conn-1958970-high-octane",
+        "quantbase-crisis-factor-investing",
+        "quantbase-single-index-leveraged-in-out",
+    ):
         cells = by_id[strategy_id]["source_dispositions"]
         assert {cell["reason"] for cell in cells.values()} == {
             "NOT_APPLICABLE_OWNER_APPROVED"

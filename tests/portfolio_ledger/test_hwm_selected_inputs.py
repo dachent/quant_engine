@@ -42,6 +42,8 @@ from quant_engine.portfolio_ledger.hwm import AS_HELD_HWM_RETURN_BASIS
 REPO = Path(__file__).resolve().parents[2]
 DAY = date(2026, 9, 4)
 _INCLUDED = {"FUNDED_MEMBERSHIP", "ASSIGNMENT_ONLY"}
+# Epochs derived from a nested-strategy tag map exist only in the account manifest.
+_DERIVED_EPOCH_AUTHORITY = "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP"
 
 
 def _sha(value: bytes | str) -> str:
@@ -68,6 +70,8 @@ def _epoch_specs(contract: dict[str, Any]) -> list[dict[str, Any]]:
     ):
         for assignment in sleeve["assignments"]:
             if assignment["status"] not in _INCLUDED:
+                continue
+            if assignment["authority"] == _DERIVED_EPOCH_AUTHORITY:
                 continue
             rows.append(
                 {
@@ -289,6 +293,8 @@ def _all_contract_specs(contract: dict[str, Any]) -> list[dict[str, Any]]:
                 "DEPRECATED_HISTORY_ONLY",
                 "EXCLUDED_IMMATERIAL",
             }:
+                continue
+            if assignment["authority"] == _DERIVED_EPOCH_AUTHORITY:
                 continue
             rows.append(
                 {
