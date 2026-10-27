@@ -212,6 +212,25 @@ rm -rf "$E/receipts"
   --crosswalk "$E/current-epoch-crosswalk.json" \
   --output-dir "$E/receipts"
 
+# The nested strategies (#567): the facts are built from the governed policy under
+# ops/mvp2-release/inputs/sleeves, the staged ledger generation (which names the
+# IBKR generation its rows come from) and the admitted Quantbase source files.
+echo "== build the sleeve facts the epoch manifest selects =="
+: "${IBKR_GENERATION_ROOT:?the IBKR data root holding generations/<id> is required}"
+: "${QUANTBASE_SOURCE_DIR:?the admitted Quantbase csv directory is required}"
+SLEEVE_DIR="$E/sleeve-facts"
+rm -rf "$SLEEVE_DIR"
+"$PY" tools/build_sleeve_facts_release.py \
+  --policy-manifest ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json \
+  --provider-ledger-generation "$LEDGER_GEN" \
+  --ibkr-generation-root "$IBKR_GENERATION_ROOT" \
+  --quantbase-source-dir "$QUANTBASE_SOURCE_DIR" \
+  --output-dir "$SLEEVE_DIR" > "$CYCLE/sleeve-facts.json"
+sleeve_facts=()
+while IFS= read -r f; do
+  sleeve_facts+=(--sleeve-facts "$f")
+done < <(find "$SLEEVE_DIR" -type f -name '*-facts.json' | sort)
+
 echo "== stage current-epoch manifest =="
 # The epoch-manifest generation is a retained artifact the recipe pins by
 # absolute path, so it cannot live in scratch. It needs a shallow OneDrive
@@ -233,6 +252,7 @@ done < <(find "$E/receipts/receipt" -type f -name '*.json' | sort)
   --receipt-authority "$RECEIPT_AUTHORITY" \
   --admission-policy "$LIVE/epoch-inputs/mapped-epoch-admission.json" \
   "${receipts[@]}" \
+  "${sleeve_facts[@]}" \
   --output-generation-root "$EPOCH_ROOT" > "$CYCLE/epoch-manifest.json"
 EPOCH_ID="$(json_field "$CYCLE/epoch-manifest.json" generation_id)"
 echo "epoch manifest $EPOCH_ID"

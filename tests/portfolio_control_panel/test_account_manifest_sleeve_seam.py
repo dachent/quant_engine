@@ -1254,3 +1254,38 @@ def test_selected_identities_must_be_a_list_of_unique_identities() -> None:
         check((), {"sleeve_facts": [twice, twice]})
     with pytest.raises(selected_hwm.SelectedHwmInputError, match="positive integer"):
         check((), {"sleeve_facts": [{"sha256": "0" * 64, "size_bytes": True}]})
+
+
+def test_panel_candidate_binds_a_generation_that_selected_sleeve_facts(
+    tmp_path: Path,
+    perimeter_module: Any,
+    runner_module: Any,
+    reallocate_facts: dict[str, Any],
+) -> None:
+    """The panel reads the verified bundle; the facts' identities are in the report.
+
+    The panel never replays the derivation, so it needs no facts bytes: it binds the
+    bundle's selected-input identities (which name the facts by hash) to the
+    independent verification report, and accepts the sleeve accounts' rows.
+    """
+
+    import portfolio_control_panel as panel
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    arguments = _materialize_inputs(tmp_path, selected)
+    facts_path = tmp_path / "facts.json"
+    facts_path.write_bytes(_facts_bytes(reallocate_facts))
+    result = runner_module.stage_current_epoch_manifest(
+        **arguments,
+        output_generation_root=tmp_path / "output",
+        sleeve_facts_paths=(facts_path,),
+    )
+    generation = tmp_path / "output" / "generations" / result["generation_id"]
+    manifest, identity = panel._verified_bundle_account_manifest(
+        generation / "outputs" / "account-strategy-manifest.json",
+        tmp_path / "output",
+        result["generation_id"],
+    )
+    assert {row["account_id"] for row in manifest["rows"]} >= {S1, S2}
+    assert identity["verification"]["publication_readiness"] in {"READY", "NOT_READY"}
