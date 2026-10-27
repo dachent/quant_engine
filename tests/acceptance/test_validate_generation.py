@@ -6308,6 +6308,62 @@ def test_n62_a_panel_without_position_classes_still_counts_every_row() -> None:
     assert list(checks.check_counts(_counts_context(panel))) == []
 
 
+def test_592_retained_strategy_records_are_not_counted_as_current_strategies() -> None:
+    """#592: retained history-only records follow the current rows in the panel."""
+
+    current = [{"strategy_id": f"strategy-{index}"} for index in range(7)]
+    retained = [
+        {"strategy_id": "fund-retired", "record_kind": "RETAINED_HISTORY_ONLY"},
+        {"strategy_id": "sleeve-inactive", "record_kind": "RETAINED_HISTORY_ONLY"},
+    ]
+    panel = {"counts": {"strategies": 7}, "strategies": [*current, *retained]}
+
+    assert list(checks.check_counts(_counts_context(panel))) == []
+
+    panel["counts"]["strategies"] = 9
+    findings = list(checks.check_counts(_counts_context(panel)))
+    assert [(item.check_id, item.entity) for item in findings] == [
+        ("preservation.counts", "strategies")
+    ]
+
+
+def _universe_context(panel: dict[str, Any]) -> checks.Context:
+    context = _counts_context(panel)
+    context.gen = type("G", (), {"panel": panel, "report": {}})()  # type: ignore[assignment]
+    context._cache["universe"] = checks.Universe(
+        source="test",
+        active_strategies=frozenset({"strategy-a", "strategy-b"}),
+        active_accounts=frozenset(),
+        excluded_accounts={},
+        excluded_strategies={"fund-retired": "EXCLUDED_DEPRECATED_HISTORY_ONLY"},
+        known_accounts=frozenset(),
+    )
+    return context
+
+
+def test_592_retained_records_belong_to_no_current_strategy_view() -> None:
+    retained = {"strategy_id": "fund-retired", "record_kind": "RETAINED_HISTORY_ONLY"}
+    panel = {
+        "strategies": [
+            {"strategy_id": "strategy-a"},
+            {"strategy_id": "strategy-b"},
+            retained,
+        ]
+    }
+
+    assert list(checks.check_retired_strategies(_universe_context(panel))) == []
+    assert list(checks.check_active_universe(_universe_context(panel))) == []
+
+    # The same id without the marker is a retired strategy in a current view.
+    unmarked = {
+        "strategies": [*panel["strategies"][:2], {"strategy_id": "fund-retired"}]
+    }
+    findings = list(checks.check_retired_strategies(_universe_context(unmarked)))
+    assert [(item.check_id, item.entity) for item in findings] == [
+        ("universe.retired_strategies_in_current", "panel.strategies")
+    ]
+
+
 # ------------------------------------------------------- period-aware acceptance
 
 
