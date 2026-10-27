@@ -51,7 +51,11 @@ def _document() -> dict[str, Any]:
             _metric("twr.account", SLEEVE, "0.0123456789", "ratio"),
             _metric("twr.account", "unrelated", "0.5", "ratio"),
         ],
-        "sleeve_derivation": {"epochs": [_epoch()]},
+        "sleeve_derivation": {
+            "epochs": [_epoch()],
+            "inputs": {"tag_map": {"path": "t.json", "sha256": "a" * 64}},
+            "refusals": [],
+        },
     }
 
 
@@ -153,3 +157,29 @@ def test_leg_amounts_agree_within_the_money_tolerance_not_digit_for_digit() -> N
         "10.0000000000000000000000000001"
     )
     assert compare.compare_derivations(_document(), other) == []
+
+
+def test_derivations_that_read_different_pinned_inputs_are_not_comparable() -> None:
+    other = _document()
+    other["sleeve_derivation"]["inputs"]["tag_map"]["sha256"] = "b" * 64
+    found = compare.compare_derivations(_document(), other)
+    assert [d.where for d in found] == ["inputs.tag_map"]
+    no_pins = _document()
+    del no_pins["sleeve_derivation"]["inputs"]
+    assert [d.where for d in compare.compare_derivations(_document(), no_pins)] == [
+        "inputs"
+    ]
+
+
+def test_a_refusal_on_either_side_fails_the_comparison_and_the_manifest_check() -> None:
+    refused = _document()
+    refused["sleeve_derivation"]["refusals"] = ["NAV continuity break 2026-02-01"]
+    assert [d.where for d in compare.compare_derivations(refused, _document())] == [
+        "A.refusals"
+    ]
+    assert [d.where for d in compare.compare_derivations(_document(), refused)] == [
+        "B.refusals"
+    ]
+    assert [
+        d.where for d in compare.compare_with_manifest(refused, [_manifest_row()])
+    ] == ["derivation.refusals"]

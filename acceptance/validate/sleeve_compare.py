@@ -137,6 +137,34 @@ def _legs_agree(
     return True
 
 
+def _pins(block: Mapping[str, Any]) -> dict[str, str] | None:
+    """Role -> sha256 of the inputs a derivation says it read; ``None`` if it says none."""
+
+    inputs = block.get("inputs")
+    if not isinstance(inputs, Mapping) or not inputs:
+        return None
+    return {
+        str(role): str(entry.get("sha256")) if isinstance(entry, Mapping) else ""
+        for role, entry in inputs.items()
+    }
+
+
+def _refusals(block: Mapping[str, Any], label: str) -> list[Difference]:
+    """A refusal is a source condition the derivation could not accept (a missing
+    mark, a NAV continuity break, a conflicting duplicate, an unreconciled figure):
+    a derivation that has one is not evidence, whatever the other side says."""
+
+    items = block.get("refusals")
+    if not isinstance(items, list):
+        return [Difference(f"{label}.refusals", "a list", items, "no refusals list")]
+    return [
+        Difference(
+            f"{label}.refusals", item, None, "the derivation refused a source condition"
+        )
+        for item in items
+    ]
+
+
 def compare_derivations(
     left: Mapping[str, Any], right: Mapping[str, Any]
 ) -> list[Difference]:
@@ -144,6 +172,29 @@ def compare_derivations(
 
     differences: list[Difference] = []
     left_block, right_block = _block(left, "A"), _block(right, "B")
+    differences.extend(_refusals(left_block, "A"))
+    differences.extend(_refusals(right_block, "B"))
+    pins_left, pins_right = _pins(left_block), _pins(right_block)
+    if pins_left is None or pins_right is None:
+        differences.append(
+            Difference(
+                "inputs",
+                pins_left,
+                pins_right,
+                "a derivation records no input pins: the two cannot be shown to read one input set",
+            )
+        )
+    elif pins_left != pins_right:
+        for role in sorted(set(pins_left) | set(pins_right)):
+            if pins_left.get(role) != pins_right.get(role):
+                differences.append(
+                    Difference(
+                        f"inputs.{role}",
+                        pins_left.get(role),
+                        pins_right.get(role),
+                        "the two derivations did not read the same pinned input",
+                    )
+                )
     left_epochs = {str(row["account_id"]): row for row in left_block["epochs"]}
     right_epochs = {str(row["account_id"]): row for row in right_block["epochs"]}
     for account in sorted(set(left_epochs) | set(right_epochs)):
@@ -229,6 +280,7 @@ def compare_with_manifest(
 
     differences: list[Difference] = []
     block = _block(document, "derivation")
+    differences.extend(_refusals(block, "derivation"))
     epochs = {str(row["account_id"]): row for row in block["epochs"]}
     parents = {account.rsplit("-", 1)[0] for account in epochs}
     by_account: dict[str, list[Mapping[str, Any]]] = {}
