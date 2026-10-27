@@ -106,6 +106,11 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
+PORTFOLIO_TOTALS_KEYS: Final = (
+    "portfolio_twr_cumulative",
+    "portfolio_mwr_annualised",
+    "capital_reconciliation",
+)
 PANEL_SCHEMA_VERSION: Final = 24
 # BIL DBC GLD HYG IEF IEFA IEMG ITOT UUP plus SPY and SPXL (weekly returns CORE_BENCHMARKS).
 CORE_BENCHMARK_COUNT: Final = 11
@@ -11734,6 +11739,10 @@ def _rendered_files(
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital
+    # PANEL-VIS-002: the report's portfolio-level totals ride along unchanged.
+    for totals_key in PORTFOLIO_TOTALS_KEYS:
+        if totals_key in report:
+            data[totals_key] = report[totals_key]
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
