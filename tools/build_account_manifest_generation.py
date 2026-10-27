@@ -40,6 +40,7 @@ from tools.account_strategy_manifest import (
     SleeveManifestFacts,
     apply_sleeve_assignments,
     derive_sleeve_manifest_facts,
+    provider_ledger_generation_ids,
     build_manifest_candidate_from_snapshots,
     json_ready,
     load_flow_classification_policy,
@@ -1017,7 +1018,11 @@ def _sleeve_manifest_facts(
     _, providers, _ = _baseline_payload(selected_inputs.baseline)
     try:
         return derive_sleeve_manifest_facts(
-            selected_inputs.sleeve_facts, account_providers=providers
+            selected_inputs.sleeve_facts,
+            account_providers=providers,
+            provider_generation_ids=provider_ledger_generation_ids(
+                selected_inputs.provider_ledger.json_object("selected provider ledger")
+            ),
         )
     except ManifestError as exc:
         raise AccountAssignmentPerimeterError(str(exc)) from exc
@@ -4217,6 +4222,15 @@ def _build_mixed_account_manifest_payloads(
                 projection["supporting_internal_counterparty_source_record_ids"]
             ),
             sleeve_facts=selected_inputs.sleeve_facts,
+            provider_generation_ids=(
+                provider_ledger_generation_ids(
+                    selected_inputs.provider_ledger.json_object(
+                        "selected provider ledger"
+                    )
+                )
+                if selected_inputs.sleeve_facts
+                else {}
+            ),
         )
     )
     candidate_rows = candidate.get("rows")

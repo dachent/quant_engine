@@ -48,6 +48,8 @@ DAYS = (
     "2026-02-01",
 )
 FIRST, LAST = DAYS[0], DAYS[-1]
+# the source generation the selected provider ledger records for the provider
+LEDGER_GENERATION = "c" * 64
 
 
 # --------------------------------------------------------------------------
@@ -268,7 +270,7 @@ def _facts(funding: dict[str, Any], rows: Any) -> dict[str, Any]:
         declared_inputs_bytes=json.dumps(declared, sort_keys=True).encode(),
         rows=rows,
         rows_sha256="0" * 64,
-        parent_ledger_generation_id="synthetic-ibkr-generation",
+        parent_ledger_generation_id=LEDGER_GENERATION,
     )
     result: dict[str, Any] = json.loads(data)
     return result
@@ -575,7 +577,7 @@ FUND_NAV = {DAYS[1]: "100", DAYS[2]: "115", DAYS[3]: "0"}
 def _bindings(**extra: Any) -> dict[str, Any]:
     return {
         "tag_map_sha256": "0" * 64,
-        "parent_ledger_generation_id": "synthetic-generation",
+        "parent_ledger_generation_id": LEDGER_GENERATION,
         "declared_inputs_sha256": "1" * 64,
         "builder_code": {
             "files": {"tools/synthetic_builder.py": "5" * 64},
@@ -794,6 +796,10 @@ def test_quantbase_parent_ledger_leg_is_pairing_evidence_not_a_second_flow(
             lambda f: f.__setitem__("provider_id", "other-provider"),
             "provider_id differs from the parent account",
         ),
+        (
+            lambda f: f["bindings"].pop("parent_ledger_generation_id"),
+            "bindings lack parent_ledger_generation_id",
+        ),
     ],
 )
 def test_sleeve_artifact_without_its_governed_bindings_is_refused(
@@ -953,3 +959,120 @@ def test_ledger_hash_is_digest_of_the_snapshot(
 ) -> None:
     snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
     assert snapshot.sha256 == hashlib.sha256(_facts_bytes(reallocate_facts)).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# parent_ledger_generation_id is reconciled with the selected provider ledger
+
+
+def _rebind_generation(facts: dict[str, Any], generation: str) -> bytes:
+    facts = deepcopy(facts)
+    facts["bindings"]["parent_ledger_generation_id"] = generation
+    return _facts_bytes(facts)
+
+
+def test_matching_parent_ledger_generation_is_accepted(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    assert reallocate_facts["bindings"]["parent_ledger_generation_id"] == (
+        LEDGER_GENERATION
+    )
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,))
+    ledger = selected.provider_ledger.json_object()
+    assert [row["generation_id"] for row in ledger["provider_generations"]] == [
+        LEDGER_GENERATION
+    ]
+    _, report = _build_and_verify(perimeter_module, verifier_module, selected)
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+
+
+def test_parent_ledger_generation_mismatch_is_refused_naming_both_ids(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    other = "d" * 64
+    snapshot = InputSnapshot.from_bytes(
+        "facts", _rebind_generation(reallocate_facts, other)
+    )
+    selected = _selected(perimeter_module, (snapshot,))
+    with pytest.raises(Exception, match="parent_ledger_generation_id") as raised:
+        perimeter_module.build_account_manifest_payloads(selected)
+    assert other in str(raised.value)
+    assert LEDGER_GENERATION in str(raised.value)
+    # the independent verifier refuses the same selection on its own reading
+    good = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    payloads = perimeter_module.build_account_manifest_payloads(
+        _selected(perimeter_module, (good,))
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+def test_quantbase_parent_ledger_generation_mismatch_is_refused(
+    perimeter_module: Any,
+) -> None:
+    other = "e" * 64
+    snapshot = InputSnapshot.from_bytes(
+        "qb facts", _rebind_generation(_quantbase_facts(), other)
+    )
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=_census([("strategy-crisis", DAYS[1], DAYS[3])]),
+        ledger_edit=_live_fund_receives_the_sweep,
+    )
+    with pytest.raises(Exception, match="parent_ledger_generation_id") as raised:
+        perimeter_module.build_account_manifest_payloads(selected)
+    assert other in str(raised.value)
+    assert LEDGER_GENERATION in str(raised.value)
+
+
+def test_provider_ledger_without_the_parent_provider_generation_is_refused(
+    perimeter_module: Any, verifier_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    def drop(ledger: dict[str, Any]) -> None:
+        ledger["provider_generations"] = [
+            {**row, "provider_id": "elsewhere"}
+            for row in ledger["provider_generations"]
+        ]
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,), ledger_edit=drop)
+    with pytest.raises(Exception, match="records no SYNTHETIC generation"):
+        perimeter_module.build_account_manifest_payloads(selected)
+    payloads = perimeter_module.build_account_manifest_payloads(
+        _selected(perimeter_module, (snapshot,))
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+def test_provider_ledger_without_any_generation_list_is_refused(
+    perimeter_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        ledger_edit=lambda ledger: ledger.pop("provider_generations"),
+    )
+    with pytest.raises(Exception, match="provider_generations must be a list"):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+def test_ledger_with_two_generations_for_one_provider_is_refused(
+    perimeter_module: Any, reallocate_facts: dict[str, Any]
+) -> None:
+    def duplicate(ledger: dict[str, Any]) -> None:
+        ledger["provider_generations"].append(
+            {**ledger["provider_generations"][0], "generation_id": "d" * 64}
+        )
+
+    snapshot = InputSnapshot.from_bytes("facts", _facts_bytes(reallocate_facts))
+    selected = _selected(perimeter_module, (snapshot,), ledger_edit=duplicate)
+    with pytest.raises(Exception, match="two generations for provider synthetic"):
+        perimeter_module.build_account_manifest_payloads(selected)
