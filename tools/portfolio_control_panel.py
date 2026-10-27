@@ -86,6 +86,21 @@ else:
     build_manifest_candidate = _manifest_module.build_manifest_candidate
     validate_manifest_schema = _manifest_module.validate_manifest_schema
 
+if TYPE_CHECKING:
+    from portfolio_performance_tab import (
+        build_performance_tab,
+        verify_performance_tab,
+    )
+else:
+    try:
+        _performance_tab_module = import_module("tools.portfolio_performance_tab")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _performance_tab_module = import_module("portfolio_performance_tab")
+    build_performance_tab = _performance_tab_module.build_performance_tab
+    verify_performance_tab = _performance_tab_module.verify_performance_tab
+
 ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
     build_manifest_candidate.__code__.co_filename
 ).resolve()
@@ -10370,6 +10385,7 @@ def _panel_data(
         panel_data["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
         panel_data["hwm_governed_proof"] = governed_hwm_proof
+    panel_data["performance_tab"] = build_performance_tab(panel_data)
     return panel_data
 
 
@@ -12562,6 +12578,21 @@ def verify_candidate(
                 "generation": replication_analysis.get("generation_id"),
                 "unavailable": replication_analysis.get("unavailable_count"),
             },
+        )
+    )
+    performance_tab = data.get("performance_tab")
+    performance_tab_error: str | None = None
+    try:
+        if not isinstance(performance_tab, Mapping):
+            raise ValueError("performance_tab is absent")
+        verify_performance_tab(performance_tab, data)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        performance_tab_error = str(exc)
+    checks.append(
+        _check(
+            "Performance tab re-derives from the panel inputs",
+            performance_tab_error is None,
+            performance_tab_error,
         )
     )
     weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
