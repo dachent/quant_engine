@@ -428,6 +428,11 @@ def test_liquidate_and_reallocate_builds_verifies_and_pairs(
     assert rows[S1]["status"] == rows[S2]["status"] == "OK"
     assert rows[S1]["effective_end"] == DAYS[2]
     assert rows[S2]["effective_end"] is None
+    # lifecycle (#592): an open derived epoch is ACTIVE, an ended one is retired
+    assert rows[S2]["lifecycle_state"] == "ACTIVE"
+    assert rows[S2]["retired_on"] is None
+    assert rows[S1]["lifecycle_state"] in {"RETIRED", "CLOSED"}
+    assert rows[S1]["retired_on"] == DAYS[2]
     # twelve other included epochs stay, two sleeves join, the parent leaves
     assert len(rows) == 13 - 1 + 2
     assert report["numeric_verification"]["discrepancy_count"] == 0
