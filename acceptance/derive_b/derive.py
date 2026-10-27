@@ -794,6 +794,70 @@ def strategy_member_epochs(
     }
 
 
+def _epoch_identity_key(
+    account_id: object, strategy_id: object, start: object, end: object
+) -> tuple[str, str, str, str | None]:
+    return (
+        str(account_id),
+        str(strategy_id),
+        str(start),
+        None if end is None else str(end),
+    )
+
+
+def _format_epoch_key(key: tuple[str, str, str, str | None]) -> str:
+    return "{}|{}|{}|{}".format(
+        key[0], key[1], key[2], key[3] if key[3] is not None else "null"
+    )
+
+
+def _manifest_row_closure(
+    row: dict[str, object],
+    closures: dict[tuple[str, date], dict[str, object]],
+) -> None:
+    """Parse one declared manifest row's optional epoch closure evidence."""
+    raw_closed = row.get("performance_closed_on")
+    if raw_closed is None:
+        return
+    try:
+        closed_on = parse_date(str(raw_closed))
+        epoch_start = parse_date(str(row.get("effective_start")))
+    except ValueError as error:
+        raise ManifestError(
+            "declared account-strategy manifest carries an invalid "
+            f"performance_closed_on: {error}"
+        ) from error
+    raw_income = row.get("post_liquidation_income")
+    try:
+        income = None if raw_income is None else Decimal(str(raw_income))
+    except DecimalException as error:
+        raise ManifestError(
+            "declared account-strategy manifest carries an invalid "
+            f"post_liquidation_income: {error}"
+        ) from error
+    raw_epoch_end = row.get("effective_end")
+    epoch_end = None if raw_epoch_end is None else parse_date(str(raw_epoch_end))
+    if epoch_end is not None and closed_on > epoch_end:
+        raise ManifestError(
+            "declared performance_closed_on is after the epoch's effective_end: "
+            f"{raw_closed!r}"
+        )
+    if not epoch_start <= closed_on <= CUTOFF:
+        raise ManifestError(
+            "declared performance_closed_on is outside the epoch or after "
+            f"the cutoff: {raw_closed!r}"
+        )
+    closure_key = (str(row.get("account_id")), epoch_start)
+    if closure_key in closures:
+        raise ManifestError(
+            "declared account-strategy manifest repeats an epoch closure"
+        )
+    closures[closure_key] = {
+        "funded_end": closed_on,
+        "post_liquidation_income": income,
+    }
+
+
 def declared_epoch_closures(
     account_manifest: dict[str, object], crosswalk_rows: list[dict[str, object]]
 ) -> dict[tuple[str, date], dict[str, object]]:
@@ -809,18 +873,8 @@ def declared_epoch_closures(
     if not isinstance(rows, list):
         raise ManifestError("declared account-strategy manifest lacks rows")
 
-    def epoch_key(
-        account_id: object, strategy_id: object, start: object, end: object
-    ) -> tuple[str, str, str, str | None]:
-        return (
-            str(account_id),
-            str(strategy_id),
-            str(start),
-            None if end is None else str(end),
-        )
-
     crosswalk_keys = {
-        epoch_key(
+        _epoch_identity_key(
             row["account_id"],
             row["strategy_id"],
             row["effective_start"],
@@ -836,59 +890,163 @@ def declared_epoch_closures(
             raise ManifestError(
                 "declared account-strategy manifest row is not an object"
             )
-        key = epoch_key(
-            row.get("account_id"),
-            row.get("strategy_id"),
-            row.get("effective_start"),
-            row.get("effective_end"),
+        declared_keys.add(
+            _epoch_identity_key(
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
+            )
         )
-        declared_keys.add(key)
-        raw_closed = row.get("performance_closed_on")
-        if raw_closed is None:
-            continue
-        try:
-            closed_on = parse_date(str(raw_closed))
-            epoch_start = parse_date(str(row.get("effective_start")))
-        except ValueError as error:
-            raise ManifestError(
-                "declared account-strategy manifest carries an invalid "
-                f"performance_closed_on: {error}"
-            ) from error
-        raw_income = row.get("post_liquidation_income")
-        try:
-            income = None if raw_income is None else Decimal(str(raw_income))
-        except DecimalException as error:
-            raise ManifestError(
-                "declared account-strategy manifest carries an invalid "
-                f"post_liquidation_income: {error}"
-            ) from error
-        raw_epoch_end = row.get("effective_end")
-        epoch_end = None if raw_epoch_end is None else parse_date(str(raw_epoch_end))
-        if epoch_end is not None and closed_on > epoch_end:
-            raise ManifestError(
-                "declared performance_closed_on is after the epoch's effective_end: "
-                f"{raw_closed!r}"
-            )
-        if not epoch_start <= closed_on <= CUTOFF:
-            raise ManifestError(
-                "declared performance_closed_on is outside the epoch or after "
-                f"the cutoff: {raw_closed!r}"
-            )
-        closure_key = (key[0], epoch_start)
-        if closure_key in closures:
-            raise ManifestError(
-                "declared account-strategy manifest repeats an epoch closure"
-            )
-        closures[closure_key] = {
-            "funded_end": closed_on,
-            "post_liquidation_income": income,
-        }
+        _manifest_row_closure(row, closures)
     if declared_keys != crosswalk_keys:
         raise ManifestError(
             "declared account-strategy manifest rows do not match the crosswalk "
             "included epochs"
         )
     return closures
+
+
+def effective_perimeter_closures(
+    account_manifest: dict[str, object],
+    crosswalk_rows: list[dict[str, object]],
+    derived_epochs: list[Epoch],
+    epoch_parents: dict[str, str],
+) -> tuple[
+    dict[tuple[str, date], dict[str, object]],
+    set[tuple[str, str, str, str | None]],
+]:
+    """SPEC-COMBINED 1: bind the declared manifest to the effective perimeter.
+
+    The effective perimeter is (crosswalk INCLUDED epochs - epochs the
+    manifest dropped) + the derived-sleeve epochs of this derivation (the
+    derivation, not the manifest's coverage rows, is the authority for WHICH
+    epochs are derived).  The declared manifest must equal it exactly as sets
+    of the four-part identity (open end = null); any difference fails closed
+    (SleeveInputError, exit status 2) naming the first difference, and neither
+    side may be reconciled by tuning.  A four-part identity repeated among the
+    declared rows is likewise refused (R4: downstream consumers require one
+    row per epoch, and a repeat would collapse silently in the declared set).
+    Returns the rows' closure evidence and the dropped baseline epoch keys.
+    """
+    rows = account_manifest.get("rows")
+    if not isinstance(rows, list):
+        raise ManifestError("declared account-strategy manifest lacks rows")
+    declared_keys: set[tuple[str, str, str, str | None]] = set()
+    closures: dict[tuple[str, date], dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ManifestError(
+                "declared account-strategy manifest row is not an object"
+            )
+        # R4: downstream consumers require one row per epoch; a repeated
+        # four-part identity would collapse silently in the declared set.
+        declared_key = _epoch_identity_key(
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
+        )
+        if declared_key in declared_keys:
+            raise SleeveInputError(
+                "declared account-strategy manifest repeats epoch identity "
+                f"{_format_epoch_key(declared_key)}"
+            )
+        declared_keys.add(declared_key)
+        _manifest_row_closure(row, closures)
+    baseline_keys = {
+        _epoch_identity_key(
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row.get("effective_end"),
+        )
+        for row in crosswalk_rows
+        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+    }
+    # R3: no two derived epochs may claim one account/strategy/start.
+    seen_derived: set[tuple[str, str, str]] = set()
+    for epoch in derived_epochs:
+        claim = (
+            epoch.account_id,
+            epoch.strategy_id,
+            epoch.effective_start.isoformat(),
+        )
+        if claim in seen_derived:
+            raise SleeveInputError(
+                "two derived epochs claim one account/strategy/start: "
+                f"{claim[0]}|{claim[1]}|{claim[2]}"
+            )
+        seen_derived.add(claim)
+    derived_keys = {
+        _epoch_identity_key(
+            epoch.account_id,
+            epoch.strategy_id,
+            epoch.effective_start.isoformat(),
+            epoch.effective_end.isoformat()
+            if epoch.effective_end is not None
+            else None,
+        )
+        for epoch in derived_epochs
+    }
+    dropped = baseline_keys - declared_keys
+    baseline_strategies = {key[1] for key in baseline_keys}
+    # R3: a derived epoch of a strategy the crosswalk includes replaces its
+    # parent's epoch for that strategy; the parent's epoch must be dropped.
+    for epoch in derived_epochs:
+        if epoch.strategy_id not in baseline_strategies:
+            continue
+        parent = epoch_parents[epoch.account_id]
+        kept = sorted(
+            key
+            for key in baseline_keys
+            if key[0] == parent and key[1] == epoch.strategy_id and key not in dropped
+        )
+        if kept:
+            derived_key = _epoch_identity_key(
+                epoch.account_id,
+                epoch.strategy_id,
+                epoch.effective_start.isoformat(),
+                epoch.effective_end.isoformat()
+                if epoch.effective_end is not None
+                else None,
+            )
+            raise SleeveInputError(
+                f"derived epoch {_format_epoch_key(derived_key)} claims strategy "
+                f"{epoch.strategy_id}, which the crosswalk includes, while its "
+                f"parent {parent} keeps its baseline epoch "
+                f"{_format_epoch_key(kept[0])} for that strategy"
+            )
+    # R2: an epoch may be dropped only under a parent of derived epochs, and
+    # a parent that drops one baseline epoch drops all of its baseline epochs.
+    parent_accounts = set(epoch_parents.values())
+    for key in sorted(dropped):
+        if key[0] not in parent_accounts:
+            raise SleeveInputError(
+                "declared account-strategy manifest drops baseline epoch "
+                f"{_format_epoch_key(key)}, but {key[0]} is not a parent of "
+                "derived epochs"
+            )
+        if any(other[0] == key[0] and other not in dropped for other in baseline_keys):
+            raise SleeveInputError(
+                "declared account-strategy manifest drops some but not all "
+                f"baseline epochs of {key[0]}: a residual parent never stays "
+                "partly a strategy"
+            )
+    # R1: the manifest must equal the effective perimeter exactly.
+    effective = (baseline_keys - dropped) | derived_keys
+    if declared_keys != effective:
+        extra = sorted(declared_keys - effective)
+        missing = sorted(effective - declared_keys)
+        if extra and (not missing or extra[0] <= missing[0]):
+            difference = f"declared-only epoch {_format_epoch_key(extra[0])}"
+        else:
+            difference = f"missing declared epoch {_format_epoch_key(missing[0])}"
+        raise SleeveInputError(
+            "effective epoch perimeter differs from the declared "
+            f"account-strategy manifest: first difference: {difference}"
+        )
+    return closures, dropped
 
 
 def post_liquidation_income_from_raw(
@@ -3154,9 +3312,58 @@ def derive(
     active_strategy_ids = active_included_strategy_ids(crosswalk["rows"])
     account_epochs = included_epochs_by_account(crosswalk["rows"])
     member_epochs = strategy_member_epochs(crosswalk["rows"])
+    sleeve_result: dict[str, object] | None = None
+    derived_epochs: list[Epoch] = []
+    derived_by_strategy: dict[str, list[Epoch]] = {}
+    dropped_epoch_keys: set[tuple[str, str, str, str | None]] = set()
+    epoch_records: list[dict[str, object]] = []
+    epoch_parents: dict[str, str] = {}
+    if sleeve_inputs is not None:
+        # SPEC-COMBINED: this derivation's own sleeve epochs are the authority
+        # for WHICH epochs are derived; derive them before the manifest
+        # binding so the effective perimeter can be checked, and reuse the
+        # block for the sleeve section appended at the end.
+        sleeve_result = _derive_sleeve_block(qe_root, sleeve_inputs)
+        epoch_records = cast(list[dict[str, object]], sleeve_result["epoch_records"])
+        epoch_parents = {
+            str(record["account_id"]): str(record["parent_account_id"])
+            for record in epoch_records
+        }
+        derived_epochs = [epoch_from_record(record) for record in epoch_records]
+        for derived_epoch in derived_epochs:
+            derived_by_strategy.setdefault(derived_epoch.strategy_id, []).append(
+                derived_epoch
+            )
     epoch_closures: dict[tuple[str, date], dict[str, object]] = {}
     if account_manifest is not None:
-        epoch_closures = declared_epoch_closures(account_manifest, crosswalk["rows"])
+        if sleeve_result is not None:
+            epoch_closures, dropped_epoch_keys = effective_perimeter_closures(
+                account_manifest,
+                crosswalk["rows"],
+                derived_epochs,
+                epoch_parents,
+            )
+        else:
+            epoch_closures = declared_epoch_closures(
+                account_manifest, crosswalk["rows"]
+            )
+    elif sleeve_result is not None:
+        # No declared manifest to bind: a derived epoch of an included
+        # strategy replaces its parent's baseline epoch for that strategy.
+        for derived_epoch in derived_epochs:
+            parent = epoch_parents[derived_epoch.account_id]
+            dropped_epoch_keys.update(
+                _epoch_identity_key(
+                    row["account_id"],
+                    row["strategy_id"],
+                    row["effective_start"],
+                    row.get("effective_end"),
+                )
+                for row in crosswalk["rows"]
+                if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+                and str(row["account_id"]) == parent
+                and str(row["strategy_id"]) == derived_epoch.strategy_id
+            )
     crosswalk_capital_failures = (
         set(
             active_included_strategy_ids(
@@ -4235,8 +4442,28 @@ def derive(
                 add_not_derivable(
                     output, "twr.strategy", strategy_id, str(error), "ITD"
                 )
+        # SPEC-COMBINED M2: the strategy MWR pools the funded-epoch cash flows
+        # of the strategy's epochs in the EFFECTIVE perimeter, with the
+        # terminal value the sum of those epochs' values at the cutoff.  A
+        # dropped baseline epoch contributes nothing; a derived epoch
+        # contributes its sleeve-section flows (INTERNAL_IN legs are
+        # contributions, INTERNAL_OUT legs withdrawals) and its closing value.
+        strategy_derived = derived_by_strategy.get(strategy_id, [])
+        dropped_members = {
+            (epoch_account, epoch_start)
+            for epoch_account, epoch_start, epoch_end in epochs
+            if _epoch_identity_key(
+                epoch_account,
+                strategy_id,
+                epoch_start.isoformat(),
+                epoch_end.isoformat() if epoch_end is not None else None,
+            )
+            in dropped_epoch_keys
+        }
         mwr_flows: list[tuple[date, Decimal]] = []
         for member_key in member_windows:
+            if member_key in dropped_members:
+                continue
             epoch_window = member_windows[member_key]
             flow_data = member_flow_data[member_key]
             mwr_flows.append((epoch_window[0][0], -epoch_window[0][1]))
@@ -4245,6 +4472,30 @@ def derive(
                 for occurred_on, amount in flow_data.cash_flows.items()
             )
             mwr_flows.append((epoch_window[-1][0], epoch_window[-1][1]))
+        for derived_epoch in strategy_derived:
+            first_day = derived_epoch.nav[0][0]
+            last_day = derived_epoch.nav[-1][0]
+            derived_flows: dict[date, Decimal] = {}
+            for leg in derived_epoch.legs:
+                if first_day < leg.recognition_day <= last_day:
+                    derived_flows[leg.recognition_day] = (
+                        derived_flows.get(leg.recognition_day, Decimal(0)) + leg.signed
+                    )
+            mwr_flows.append((first_day, -derived_epoch.nav[0][1]))
+            mwr_flows.extend(
+                (occurred_on, -amount)
+                for occurred_on, amount in sorted(derived_flows.items())
+            )
+            mwr_flows.append((last_day, derived_epoch.nav[-1][1]))
+        if not mwr_flows:
+            add_not_derivable(
+                output,
+                "mwr.strategy",
+                strategy_id,
+                "the strategy has no funded epoch in the effective perimeter",
+                "ITD",
+            )
+            continue
         mwr = xirr(mwr_flows)
         if mwr is None:
             add_not_derivable(
@@ -4281,11 +4532,14 @@ def derive(
             str(row["entity"]),
             UNMAPPED_NAV_REASON,
         )
-    if sleeve_inputs is not None:
+    if sleeve_result is not None:
         # SPEC-HARNESS: append the derived-sleeve epoch metrics and replace the
         # residual parents' account-level return/flow metrics (their epochs are
         # replaced by the derived epochs); every other metric is untouched.
-        sleeve_result = _derive_sleeve_block(qe_root, sleeve_inputs)
+        # SPEC-COMBINED: the block was derived before the manifest binding so
+        # the declared manifest could be checked against the effective epoch
+        # perimeter (crosswalk INCLUDED epochs minus the epochs the manifest
+        # dropped, plus these derived epochs, as exact four-part identities).
         residual_parents = set(sleeve_result["residual_parent_ids"])
         replaced = {
             "flows.account.net",
@@ -4306,6 +4560,22 @@ def derive(
         output["metrics"].extend(sleeve_result["metrics"])
         output["not_derivable"].extend(sleeve_result["not_derivable"])
         output["convention_notes"].extend(sleeve_result["convention_notes"])
+        if account_manifest is not None:
+            output["convention_notes"].append(
+                "SPEC-COMBINED: the declared account-strategy manifest was "
+                "checked against the effective epoch perimeter (crosswalk "
+                "INCLUDED epochs minus the epochs the manifest dropped, plus "
+                "this derivation's derived-sleeve epochs) as exact sets of "
+                "the four-part epoch identity (open end = null)."
+            )
+        output["convention_notes"].append(
+            "SPEC-COMBINED M2: mwr.strategy pools the funded-epoch cash flows "
+            "of the strategy's effective-perimeter epochs, with the terminal "
+            "value the sum of those epochs' values at the cutoff; a derived "
+            "epoch contributes its sleeve-section flows (INTERNAL_IN legs are "
+            "contributions, INTERNAL_OUT legs withdrawals) and its closing "
+            "value."
+        )
         output["sleeve_derivation"] = sleeve_result["sleeve_derivation"]
     return output
 
@@ -4410,6 +4680,30 @@ class Epoch:
     effective_end: date | None
     nav: list[tuple[date, Decimal]]
     legs: list[Leg]
+
+
+def epoch_from_record(record: dict[str, object]) -> Epoch:
+    """Rebuild a derived sleeve epoch from its serializable in-memory record."""
+    raw_end = record["effective_end"]
+    return Epoch(
+        account_id=str(record["account_id"]),
+        strategy_id=str(record["strategy_id"]),
+        effective_start=date.fromisoformat(str(record["effective_start"])),
+        effective_end=None if raw_end is None else date.fromisoformat(str(raw_end)),
+        nav=[
+            (date.fromisoformat(str(day)), D(value))
+            for day, value in record["nav"]  # type: ignore[union-attr]
+        ],
+        legs=[
+            Leg(
+                date.fromisoformat(str(leg["recognition_day"])),
+                date.fromisoformat(str(leg["event_day"])),
+                str(leg["class"]),
+                D(leg["amount"]),
+            )
+            for leg in record["legs"]  # type: ignore[union-attr]
+        ],
+    )
 
 
 # ---------------------------------------------------------------- sleeve-inputs
@@ -6498,9 +6792,15 @@ def derive_sleeves(
     qb_parent = str(qb_parent_entry["parent_account_id"])
 
     # ---------------- epochs ----------------
-    epochs = ibkr_epochs(ibkr, ibkr_parent_entry)
-    epochs += quantbase_epochs(qb, qb_parent_entry, qb_parent)
-    epochs.sort(key=lambda epoch: epoch.account_id)
+    ibkr_epoch_list = ibkr_epochs(ibkr, ibkr_parent_entry)
+    quantbase_epoch_list = quantbase_epochs(qb, qb_parent_entry, qb_parent)
+    epochs = sorted(
+        [*ibkr_epoch_list, *quantbase_epoch_list], key=lambda epoch: epoch.account_id
+    )
+    epoch_parents = {
+        **{epoch.account_id: ibkr_parent for epoch in ibkr_epoch_list},
+        **{epoch.account_id: qb_parent for epoch in quantbase_epoch_list},
+    }
 
     inputs_used = inputs_used_rows(selection)
     notes_ibkr = (
@@ -6681,6 +6981,34 @@ def derive_sleeves(
         "residual_parent_ids": universe["residual_parent_ids"],
         "inputs": input_header_rows(selection),
         "convention_notes": convention_notes,
+        # SPEC-COMBINED: in-memory only (never serialized into the output
+        # documents); the combined run checks the effective epoch perimeter
+        # against the declared manifest and pools strategy MWR from these.
+        # Serializable so the whole result stays JSON-renderable.
+        "epoch_records": [
+            {
+                "account_id": epoch.account_id,
+                "parent_account_id": epoch_parents[epoch.account_id],
+                "strategy_id": epoch.strategy_id,
+                "effective_start": epoch.effective_start.isoformat(),
+                "effective_end": (
+                    epoch.effective_end.isoformat()
+                    if epoch.effective_end is not None
+                    else None
+                ),
+                "nav": [[day.isoformat(), fmt(value)] for day, value in epoch.nav],
+                "legs": [
+                    {
+                        "recognition_day": leg.recognition_day.isoformat(),
+                        "event_day": leg.event_day.isoformat(),
+                        "class": leg.cls,
+                        "amount": fmt(leg.amount),
+                    }
+                    for leg in epoch.legs
+                ],
+            }
+            for epoch in epochs
+        ],
     }
 
 

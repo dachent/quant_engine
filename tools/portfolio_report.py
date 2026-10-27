@@ -12611,6 +12611,16 @@ def _verified_epoch_authority_details(
             == subject_identity(path)
         )
 
+    derived_parent_receipt_ids = {
+        str(row.get("receipt_artifact_id"))
+        for row in subject_object("authority/account-flow-coverage.json").get(
+            "rows", []
+        )
+        if isinstance(row, Mapping)
+        and row.get("authority_kind")
+        == derived_epoch_perimeter.DERIVED_SLEEVE_AUTHORITY_KIND
+    }
+
     def validate_receipt_authority() -> None:
         failure = "epoch receipt authority semantic graph differs"
         try:
@@ -12691,6 +12701,63 @@ def _verified_epoch_authority_details(
                 ).validate(receipt)
             except JsonSchemaValidationError as exc:
                 raise ReportValidationError(failure) from exc
+            if (
+                receipt.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1"
+                and receipt_id in derived_parent_receipt_ids
+            ):
+                # The receipt of a sleeve parent, cited by derived-sleeve coverage rows
+                # (positive evidence: DERIVED_SLEEVE_COVERAGE_V1 names it).  Its window
+                # is not one baseline epoch's (a residual parent's epoch left the
+                # manifest; a live parent's receipt may start before its live epoch),
+                # so the epoch-bound fact comparison below does not apply.  Everything
+                # else a static receipt must carry still has to bind.
+                try:
+                    issuer = receipt["issuer"]
+                    staged_inputs = receipt["staged_inputs"]
+                    parent_contract = {
+                        "coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1",
+                        "account_id": receipt["account_id"],
+                        "strategy_id": receipt["strategy_id"],
+                        "requested_start": receipt["requested_start"],
+                        "requested_end": receipt["requested_end"],
+                        "provider_generation": receipt["provider_generation"],
+                        "staged_inputs": staged_inputs,
+                    }
+                    parent_staged = {
+                        "provider_ledger_generation_id": selected_identities[
+                            "provider_ledger"
+                        ]["generation_id"],
+                        "provider_ledger_artifact": selected_identities[
+                            "provider_ledger"
+                        ]["artifact"],
+                        "baseline_sha256": selected_identities["baseline"]["artifact"][
+                            "sha256"
+                        ],
+                        "baseline_size_bytes": selected_identities["baseline"][
+                            "artifact"
+                        ]["size_bytes"],
+                        "crosswalk_sha256": subject_identity(
+                            "authority/account-assignment-crosswalk.json"
+                        )["sha256"],
+                        "crosswalk_size_bytes": subject_identity(
+                            "authority/account-assignment-crosswalk.json"
+                        )["size_bytes"],
+                    }
+                    parent_end = cast(str, receipt["requested_end"])
+                except (KeyError, TypeError) as exc:
+                    raise ReportValidationError(failure) from exc
+                if (
+                    parent_end > cutoff
+                    or cast(str, receipt.get("requested_start")) > parent_end
+                    or receipt.get("calculation_cutoff_date") != cutoff
+                    or issuer.get("adapter_name") != "static-snapshot-coverage"
+                    or issuer.get("adapter_version") != "1"
+                    or cast(str, receipt.get("coverage_as_of_date")) < cutoff
+                    or staged_inputs != parent_staged
+                    or entry.get("contract") != parent_contract
+                ):
+                    raise ReportValidationError(failure)
+                continue
             if receipt.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
                 try:
                     staged_inputs = receipt["staged_inputs"]

@@ -465,6 +465,20 @@ def compute_governed_as_held_composite_hwm(
         # binding day. Builder output guarantees one row per end day.
         periods_by_key[(strategy_id, end.isoformat())] = original
 
+    # A member whose first observation precedes a non-publishing span (a membership that
+    # opens on the last day before a weekend) has no earlier period to carry capital
+    # from.  The capital at its opening is the beginning capital of the period that
+    # starts at the membership start, which the verified generation already binds.
+    opening_capital: dict[str, Decimal] = {}
+    for (opening_sid, _end_iso), opening_row in periods_by_key.items():
+        if (
+            _canonical_date(opening_row["interval_start"], "period start")
+            == membership_by_strategy[opening_sid]["start"]
+        ):
+            opening_capital[opening_sid] = Decimal(
+                _text(opening_row["beginning_capital_usd"], "beginning capital")
+            )
+
     # --- Coverage: every active member x interval covered or dispositioned. ---
 
     def resolve_period(sid: str, iv: Mapping[str, Any]) -> Row:
@@ -487,6 +501,11 @@ def compute_governed_as_held_composite_hwm(
             # the authority disposition supplies period return zero; weight
             # carries forward from the member's last known capital state.
             prior_capital = last_capital.get(sid)
+            if (
+                prior_capital is None
+                and iv["start_date"] == membership_by_strategy[sid]["start"]
+            ):
+                prior_capital = opening_capital.get(sid)
             if prior_capital is None:
                 raise HwmCoverageError(
                     f"derived-zero day lacks an opening anchor: {sid} "

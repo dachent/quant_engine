@@ -1078,7 +1078,13 @@ def _recipe(path: Path) -> dict[str, Any]:
     if schema_version == 10:
         required.add("epoch_manifest_generation")
     if (
-        set(recipe) - {"dependence_selected_inputs", "evaluated_on", "source_clock"}
+        set(recipe)
+        - {
+            "dependence_selected_inputs",
+            "evaluated_on",
+            "nested_tag_map",
+            "source_clock",
+        }
         != required
     ):
         raise VerticalBuildError("vertical-build recipe keys differ")
@@ -1134,6 +1140,18 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("source_clock identity differs")
+    if "nested_tag_map" in recipe:
+        definition = recipe["nested_tag_map"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("nested_tag_map definition differs")
+        artifact = _path(definition["path"], "nested_tag_map.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("nested_tag_map identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1307,6 +1325,7 @@ def create_recipe(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     evaluated_on: str | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     financial_cutoff = date.fromisoformat(as_of_date)
     normalized_evaluated_on: str | None = None
@@ -1415,6 +1434,8 @@ def create_recipe(
         )
     if source_clock_path is not None:
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
+    if nested_tag_map_path is not None:
+        payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
     if normalized_evaluated_on is not None:
         payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
@@ -5557,6 +5578,7 @@ def build_report_candidate(
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -5625,6 +5647,11 @@ def build_report_candidate(
         *(
             ("--source-clock", str(source_clock_path))
             if source_clock_path is not None
+            else ()
+        ),
+        *(
+            ("--nested-tag-map", str(nested_tag_map_path))
+            if nested_tag_map_path is not None
             else ()
         ),
         "--implementation-reconciliation",
@@ -6087,6 +6114,7 @@ def build_report(
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
         raise VerticalBuildError(
@@ -6167,6 +6195,7 @@ def build_report(
         epoch_manifest_generation_id=epoch_manifest_generation_id,
         **forwarded_arguments,
         source_clock_path=source_clock_path,
+        nested_tag_map_path=nested_tag_map_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
     report_arguments = (
@@ -7380,6 +7409,15 @@ def build_stage(
         if isinstance(recipe.get("source_clock"), dict)
         else {}
     )
+    nested_tag_map_paths = (
+        {
+            "nested_tag_map_path": _path(
+                recipe["nested_tag_map"]["path"], "nested_tag_map.path"
+            )
+        }
+        if isinstance(recipe.get("nested_tag_map"), dict)
+        else {}
+    )
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -7448,6 +7486,7 @@ def build_stage(
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **dependence_selected_inputs_paths,
             **source_clock_paths,
+            **nested_tag_map_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,

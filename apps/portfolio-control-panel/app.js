@@ -555,9 +555,30 @@
       row.account_id,
       typeof row.account_label === "string" && row.account_label.trim() !== "" ? row.account_label.trim() : `${provider} account ${index + 1}`,
     )));
+  // A derived sleeve account (<parent>-<sleeve>, #567) is a manifest epoch on a listed account,
+  // not an account of its own: it takes the label its manifest row carries and is selected with
+  // its parent.  Only an account the manifest names, hanging on exactly one listed account, counts.
+  // Built on first use, never at load: the payload guard runs before any read of the manifest.
+  let derivedAccountMaps = null;
+  const derivedAccounts = () => {
+    if (derivedAccountMaps) return derivedAccountMaps;
+    const parentOf = new Map();
+    const labelOf = new Map();
+    (data.account_manifest?.rows || []).forEach((row) => {
+      const id = row.account_id;
+      if (typeof id !== "string" || accountLabels.has(id)) return;
+      const parents = [...accountLabels.keys()].filter((parent) => id.startsWith(`${parent}-`));
+      if (parents.length !== 1) return;
+      parentOf.set(id, parents[0]);
+      if (typeof row.account_label === "string" && row.account_label.trim() !== "") labelOf.set(id, row.account_label.trim());
+    });
+    derivedAccountMaps = { parentOf, labelOf };
+    return derivedAccountMaps;
+  };
   let selectedContextAccount = "ALL";
   let selectedContextStrategy = "ALL";
-  const accountLabel = (accountId) => accountLabels.get(accountId) || "Unrecognized account";
+  // The context select lists provider accounts only (accountLabels); a derived account is named, not selectable.
+  const accountLabel = (accountId) => accountLabels.get(accountId) || derivedAccounts().labelOf.get(accountId) || "Unrecognized account";
   // F04/F35: an operator cell names the provider and the account, never a raw id.  A row with
   // no account id is a provider-level row; an id the account dimension does not know is said
   // to be unrecognized rather than printed.
@@ -567,7 +588,7 @@
     const label = accountLabel(row.account_id);
     return provider && !label.startsWith(provider) ? `${provider} · ${label}` : label;
   };
-  const matchesContext = (row) => (selectedContextAccount === "ALL" || row.account_id === selectedContextAccount)
+  const matchesContext = (row) => (selectedContextAccount === "ALL" || row.account_id === selectedContextAccount || derivedAccounts().parentOf.get(row.account_id) === selectedContextAccount)
     && (selectedContextStrategy === "ALL" || row.strategy_name === selectedContextStrategy || row.strategy_id === selectedContextStrategy);
   const targetState = (row) => {
     const target = number(row.accepted_target_weight ?? row.target_weight ?? row.target_systematic_weight);
@@ -936,7 +957,8 @@
       }).join("");
     const grid = [0, 0.5, 1].map((fraction) => `<line x1="${left}" x2="${width - right}" y1="${y(ceiling * fraction).toFixed(1)}" y2="${y(ceiling * fraction).toFixed(1)}" stroke="currentColor" stroke-opacity=".18"></line><text class="chart-label axis-label" x="2" y="${(y(ceiling * fraction) + 4).toFixed(1)}">${currency(ceiling * fraction)}</text>`).join("");
     const edges = `<text class="chart-label axis-label" x="${left}" y="${height - 6}">${safe(formatDate(dates[0]))}</text><text class="chart-label axis-label" text-anchor="end" x="${width - right}" y="${height - 6}">${safe(formatDate(dates[dates.length - 1]))}</text>`;
-    return `<svg class="capital-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Invested capital per strategy from ${formatDate(dates[0])} to ${formatDate(dates[dates.length - 1])}. Latest values: ${ids.map((id) => `${strategyNameById(id)} ${currency(series.get(id)[series.get(id).length - 1][1])}`).join("; ")}. The same figures are in the table below.`)}">${grid}${lines}${labels}${edges}</svg>`;
+    const chartLabel = `Invested capital per strategy from ${formatDate(dates[0])} to ${formatDate(dates[dates.length - 1])}. Latest values: ${ids.map((id) => `${strategyNameById(id)} ${currency(series.get(id)[series.get(id).length - 1][1])}`).join("; ")}. The same figures are in the table below.`;
+    return `<svg class="capital-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(chartLabel)}">${grid}${lines}${labels}${edges}</svg>`;
   }
 
   function renderInvestedCapital() {

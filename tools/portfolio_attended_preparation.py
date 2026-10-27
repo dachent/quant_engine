@@ -1261,6 +1261,46 @@ def _layered_history_repository_dependency_identity() -> dict[str, object]:
     return definitions
 
 
+_SLEEVE_SECTION_KEYS = frozenset(
+    {"policy_manifest", "ibkr_generation_root", "quantbase_source_dir"}
+)
+
+
+def _sleeve_tag_map_path(section: object) -> Path | None:
+    """The governed nested-strategy tag map the sleeve policy manifest pins."""
+
+    if section is None:
+        return None
+    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
+        raise AttendedPreparationError("sleeve facts configuration differs")
+    policy = _pin(section["policy_manifest"], "sleeve policy")
+    manifest = _read(policy, "sleeve policy manifest")
+    pin = manifest.get("sleeve-account-facts")
+    if not isinstance(pin, Mapping) or not isinstance(pin.get("tag_map"), Mapping):
+        raise AttendedPreparationError("sleeve policy manifest differs")
+    return policy.parent / str(pin["tag_map"]["path"])
+
+
+def _sleeve_parent_window_starts(section: object) -> dict[str, str]:
+    """The first governed sleeve day of every parent account of the sleeve policy."""
+
+    tag_path = _sleeve_tag_map_path(section)
+    if tag_path is None:
+        return {}
+    import nested_strategy_tag_map as tag_map_module
+
+    try:
+        tag_map = tag_map_module.validate_tag_map(tag_path.read_bytes())
+    except (OSError, tag_map_module.TagMapError) as exc:
+        raise AttendedPreparationError("sleeve tag map is unreadable") from exc
+    return {
+        parent.parent_account_id: min(
+            sleeve.effective_start for sleeve in parent.sleeves
+        ).isoformat()
+        for parent in tag_map.parents
+    }
+
+
 def _build_sleeve_facts(
     section: object, *, ledger_generation_dir: Path, destination: Path
 ) -> tuple[Path, ...]:
@@ -1275,11 +1315,7 @@ def _build_sleeve_facts(
 
     if section is None:
         return ()
-    if not isinstance(section, Mapping) or set(section) != {
-        "policy_manifest",
-        "ibkr_generation_root",
-        "quantbase_source_dir",
-    }:
+    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
         raise AttendedPreparationError("sleeve facts configuration differs")
     import build_sleeve_facts_release as sleeve_release
 
@@ -2087,6 +2123,9 @@ def _prepare_attended_inputs(
             / "portfolio-baseline.json",
             crosswalk_path=crosswalk,
             issuer_code_path=Path(__file__),
+            parent_window_starts=_sleeve_parent_window_starts(
+                config.get("sleeve_facts")
+            ),
         )
         receipt_root = root / "preparation" / "epoch-receipts"
         authority_path = receipt_root / "authority.json"
@@ -2167,6 +2206,7 @@ def _prepare_attended_inputs(
             dependence_selected_inputs_path=selected_path,
             source_clock_path=source_clock,
             evaluated_on=evaluated_on,
+            nested_tag_map_path=_sleeve_tag_map_path(config.get("sleeve_facts")),
         )
         checkpoint(
             "epoch",

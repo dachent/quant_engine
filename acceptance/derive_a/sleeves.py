@@ -22,6 +22,7 @@ from .sources import AccountFlows, Flow, InputError
 
 if TYPE_CHECKING:
     from .derive import Output
+    from .numerics import Member
 
 Z = D(0)
 EPS = D("0.000000001")
@@ -1469,7 +1470,11 @@ def universe(
 
 
 def emit_epoch(
-    item: dict[str, Any], output: Output, cutoff: dt.date, inputs: tuple[str, ...]
+    item: dict[str, Any],
+    output: Output,
+    cutoff: dt.date,
+    inputs: tuple[str, ...],
+    members: dict[str, Member] | None = None,
 ) -> None:
     from .derive import (
         AccountSource,
@@ -1556,6 +1561,8 @@ def emit_epoch(
         for metric in sorted(ACCOUNT_METRICS):
             output.missing(metric, account, WINDOW, str(exc))
         return
+    if members is not None:
+        members[account] = member
     output.metric(
         "flows.account.net",
         account,
@@ -1616,6 +1623,9 @@ def append_sleeves(
     qe_root: Path,
     repo_root: Path,
     cutoff: dt.date,
+    *,
+    parents_out: dict[str, str] | None = None,
+    members_out: dict[str, Member] | None = None,
 ) -> dict[str, Any]:
     from .derive import Output
     from .numerics import PRECISION
@@ -1661,18 +1671,22 @@ def append_sleeves(
         context.prec = 28
         ib = ibkr_facts(sliced, ib_dec, selected["ibkr"])
         qb = quantbase_facts(qb_dec, selected["quantbase"], csv_data)
-        epochs = sorted(
-            ibkr_epochs(ib, selected["ibkr"])
-            + quantbase_epochs(qb, selected["quantbase"]),
-            key=lambda e: e["account_id"],
-        )
+        ib_epochs = ibkr_epochs(ib, selected["ibkr"])
+        qb_epochs = quantbase_epochs(qb, selected["quantbase"])
+        epochs = sorted(ib_epochs + qb_epochs, key=lambda e: e["account_id"])
+    if parents_out is not None:
+        for provider, derived in (("ibkr", ib_epochs), ("quantbase", qb_epochs)):
+            for item in derived:
+                parents_out[item["account_id"]] = selected[provider][
+                    "parent_account_id"
+                ]
     census = universe(_json(raw["crosswalk"], "crosswalk"), parents, epochs)
     inputs = tuple(record["path"] for record in records.values())
     output = Output()
     with localcontext() as context:
         context.prec = PRECISION
         for item in epochs:
-            emit_epoch(item, output, cutoff, inputs)
+            emit_epoch(item, output, cutoff, inputs, members_out)
     for metric, value in census.items():
         output.metric(
             metric,

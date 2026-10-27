@@ -50,7 +50,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from decimal import Context, Decimal, localcontext
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
@@ -2777,6 +2777,7 @@ class SleeveManifestFacts:
     accounts: tuple[dict[str, Any], ...]
     assignments: tuple[dict[str, Any], ...]
     residual_parents: frozenset[str]
+    parents: frozenset[str]
     sleeve_accounts: frozenset[str]
     perimeter_accounts: frozenset[str]
     navs: tuple[dict[str, Any], ...]
@@ -2816,6 +2817,22 @@ def _sleeve_decimal(value: object, field: str) -> Decimal:
     if value.startswith("-") and Decimal(value) == 0:
         raise ManifestError(f"sleeve facts {field} must be canonical decimal text")
     return Decimal(value)
+
+
+_SLEEVE_SETTLEMENT_QUANTUM = Decimal("0.000000001")
+
+
+def _sleeve_settlement_amount(value: Decimal) -> Decimal:
+    """A settlement leg amount at the facts' own precision (nine decimals).
+
+    The cumulative allocated cost is a sum of long decimals.  Both legs of the
+    settlement pair carry one canonical amount, so every reader (the generation
+    builder under the default context, the verifier under a wider one) sees the
+    same equal-and-opposite pair instead of two roundings of it.
+    """
+
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        return value.quantize(_SLEEVE_SETTLEMENT_QUANTUM, rounding=ROUND_HALF_EVEN)
 
 
 def _sleeve_decimal_text(value: Decimal) -> str:
@@ -3248,7 +3265,8 @@ def derive_sleeve_manifest_facts(
                     )["tag_map_sha256"],
                 }
             )
-            if exit_day is not None and cumulative != 0:
+            settled = _sleeve_settlement_amount(abs(cumulative))
+            if exit_day is not None and settled != 0:
                 # Settle the allocated cost the sleeve carried (see the header).
                 settlement_legs.append(
                     {
@@ -3257,7 +3275,7 @@ def derive_sleeve_manifest_facts(
                         "class": "INTERNAL_OUT" if cumulative > 0 else "INTERNAL_IN",
                         "event_date": exit_day,
                         "nav_recognition_date": exit_day,
-                        "amount": _sleeve_decimal_text(abs(cumulative)),
+                        "amount": _sleeve_decimal_text(settled),
                     }
                 )
                 settlement_legs.append(
@@ -3267,7 +3285,7 @@ def derive_sleeve_manifest_facts(
                         "class": "INTERNAL_IN" if cumulative > 0 else "INTERNAL_OUT",
                         "event_date": exit_day,
                         "nav_recognition_date": exit_day,
-                        "amount": _sleeve_decimal_text(abs(cumulative)),
+                        "amount": _sleeve_decimal_text(settled),
                     }
                 )
         if not sleeve_account_set:
@@ -3316,6 +3334,7 @@ def derive_sleeve_manifest_facts(
                         "pair_id": pair_id,
                         "account_id": account_id,
                         "event_date": event_day,
+                        "nav_recognition_date": recognition,
                         "class": flow_class,
                         "amount": _sleeve_decimal_text(amount),
                     }
@@ -3378,6 +3397,7 @@ def derive_sleeve_manifest_facts(
             )
         ),
         residual_parents=frozenset(residual),
+        parents=frozenset(seen_parents),
         sleeve_accounts=frozenset(sleeve_accounts),
         perimeter_accounts=frozenset(perimeter_accounts),
         navs=tuple(sorted(navs, key=lambda row: str(row["record_id"]))),

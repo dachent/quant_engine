@@ -855,3 +855,68 @@ def test_the_executor_still_requires_the_grid_to_end_at_complete_through(tmp_pat
             generation=generation,
             complete_through="2026-01-07",
         )
+
+
+def _without_friday_row(fx):
+    """B has no Friday one-day row: its first period is the Fri->Mon accepted span."""
+    periods = [
+        row
+        for row in fx["component_periods"]
+        if not (
+            row["strategy_id"] == "b-session"
+            and row["interval_start"] == "2026-01-02"
+            and row["interval_end"] == "2026-01-03"
+        )
+    ]
+    old = fx["generation"]
+    generation = _generation(
+        periods,
+        policy_binding=old["policy_binding_sha256"],
+        calendar_binding=old["calendar_sha256"],
+        receipt_binding=old["upstream_receipt_sha256"],
+    )
+    return periods, generation
+
+
+def test_member_opening_before_a_weekend_takes_the_opening_capital_on_its_first_day(
+    tmp_path,
+):
+    """The first accepted span starts at the membership start: its capital anchors the zero days."""
+    fx = _fixture(tmp_path)
+    periods, generation = _without_friday_row(fx)
+    result = _run(fx, component_periods=periods, generation=generation)
+    saturday = result["periods"][0]
+    sunday = result["periods"][1]
+    b_sat = [c for c in saturday["components"] if c["strategy_id"] == "b-session"][0]
+    b_sun = [c for c in sunday["components"] if c["strategy_id"] == "b-session"][0]
+    # the capital of the period starting at the membership start (the span's)
+    assert b_sat["beginning_capital_usd"] == Decimal("40.2")
+    assert b_sat["period_return"] == Decimal("0")
+    assert b_sat["source"] == "AUTHORITY_DERIVED_ZERO"
+    # the next day carries the previous day's end capital (a zero return keeps it)
+    assert b_sun["beginning_capital_usd"] == Decimal("40.2")
+    assert b_sun["source"] == "AUTHORITY_DERIVED_ZERO"
+
+
+def test_no_period_at_the_membership_start_still_refuses_the_zero_day(tmp_path):
+    """A member whose first period does not start at its membership start has no anchor."""
+    fx = _fixture(tmp_path)
+    periods, generation = _without_friday_row(fx)
+    # B becomes a member on Saturday 2026-01-03; its only span starts on Friday
+    memberships = [
+        {**m, "effective_start": "2026-01-03"} if m["strategy_id"] == "b-session" else m
+        for m in fx["memberships"]
+    ]
+    generation = {**generation, "memberships": memberships}
+    generation.pop("generation_evidence_sha256")
+    canonical = json.dumps(generation, sort_keys=True, separators=(",", ":")).encode()
+    generation["generation_evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+    with pytest.raises(
+        HwmCoverageError, match="derived-zero day lacks an opening anchor"
+    ):
+        _run(
+            fx,
+            memberships=memberships,
+            component_periods=periods,
+            generation=generation,
+        )

@@ -4608,12 +4608,40 @@ def _with_sleeve_config(
 
 def _sleeve_section(tmp_path: Path) -> dict[str, object]:
     manifest = tmp_path / "sleeve-policy-manifest.json"
-    manifest.write_bytes(b'{"policy":"synthetic"}\n')
+    # the manifest pins the governed tag map; the preparation reads the parents' first
+    # sleeve days from it for the static-snapshot receipts and the recipe
+    tag_map = Path(__file__).resolve().parents[2] / (
+        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+    )
+    (tmp_path / "nested-strategy-tag-map.json").write_bytes(tag_map.read_bytes())
+    manifest.write_bytes(
+        canonical_json_bytes(
+            {
+                "policy": "synthetic",
+                "sleeve-account-facts": {
+                    "tag_map": {"path": "nested-strategy-tag-map.json"}
+                },
+            }
+        )
+    )
     return {
         "policy_manifest": preparation._definition(manifest),
         "ibkr_generation_root": str(tmp_path / "ibkr-root"),
         "quantbase_source_dir": str(tmp_path / "quantbase-sources"),
     }
+
+
+def test_a_sleeve_policy_manifest_without_the_tag_map_pin_is_refused(
+    tmp_path: Path,
+) -> None:
+    section = _sleeve_section(tmp_path)
+    manifest = tmp_path / "sleeve-policy-manifest.json"
+    manifest.write_bytes(canonical_json_bytes({"policy": "synthetic"}))
+    section["policy_manifest"] = preparation._definition(manifest)
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="sleeve policy manifest differs"
+    ):
+        preparation._sleeve_tag_map_path(section)
 
 
 def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(

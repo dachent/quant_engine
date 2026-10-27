@@ -2850,6 +2850,29 @@ def _derived_epoch_parent(
     return parents[0] if len(parents) == 1 else None
 
 
+def _unresolved_account_references(
+    account_ids: Collection[str],
+    reference_ids: Collection[str],
+    manifest_rows: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Account references the privacy-safe account dimension does not resolve.
+
+    A reference resolves to a listed account, or to a derived sleeve account (#567): a
+    manifest row that names it and hangs on exactly one listed account.  Nothing else
+    resolves; a name that merely extends a listed account does not.
+    """
+
+    listed = set(account_ids)
+    derived = {
+        str(row["account_id"])
+        for row in manifest_rows
+        if isinstance(row.get("account_id"), str)
+        and row["account_id"] not in listed
+        and _derived_epoch_parent(str(row["account_id"]), listed) is not None
+    }
+    return sorted(set(reference_ids) - listed - derived)
+
+
 def _history_only_strategy_ids(
     strategy_product_controls: Mapping[str, Mapping[str, str]],
 ) -> frozenset[str]:
@@ -2864,6 +2887,31 @@ def _history_only_strategy_ids(
         and control.get("product_requirement") == "EXCLUDED"
         and control.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
     )
+
+
+def _plan_without_retained_records(
+    plan_strategies: Mapping[str, str], contract_snapshot: bytes | None
+) -> dict[str, str]:
+    """A decomposition plan's strategies without the contract's retained records (#567).
+
+    The plan carries the history-only records beside the product strategies.  Every
+    panel and report check of the plan against the product perimeter reads it through
+    this one rule: the retained ids are the contract's EXCLUDED and
+    DEPRECATED_HISTORY_ONLY strategies, nothing inferred from the plan itself.
+    """
+
+    retained = _history_only_strategy_ids(
+        _financial_mvp_product_controls(
+            contract_snapshot
+            if contract_snapshot is not None
+            else FINANCIAL_MVP_CONTRACT.read_bytes()
+        )
+    )
+    return {
+        strategy_id: name
+        for strategy_id, name in plan_strategies.items()
+        if strategy_id not in retained
+    }
 
 
 def _validate_current_product_account_manifest(
@@ -5679,6 +5727,7 @@ def _decomposition_lenses_for_mode(
     strategy_names: Mapping[str, str],
     analysis_strategy_names: set[str],
     evidence_mode: str,
+    contract_snapshot: bytes | None = None,
 ) -> tuple[dict[str, Any], tuple[tuple[Path, str], ...]]:
     manifest_path = plan_bundle / "plan-manifest.json"
     plan_path = (
@@ -5759,10 +5808,23 @@ def _decomposition_lenses_for_mode(
             raise ControlPanelValidationError(
                 "legacy decomposition plan differs from the governed strategy identities"
             )
-    elif planned_ids != set(strategy_names) and not (
-        current_plan
-        and CURRENT_PRODUCT_STRATEGY_IDS <= planned_ids
-        and set(strategy_names) == CURRENT_REQUIRED_STRATEGY_IDS
+    elif (
+        planned_ids != set(strategy_names)
+        and not (
+            current_plan
+            and CURRENT_PRODUCT_STRATEGY_IDS <= planned_ids
+            and set(strategy_names) == CURRENT_REQUIRED_STRATEGY_IDS
+        )
+        # the plan also carries the contract's retained history-only records (#567)
+        and not (
+            current_plan
+            and set(
+                _plan_without_retained_records(
+                    dict.fromkeys(planned_ids, ""), contract_snapshot
+                )
+            )
+            == set(strategy_names)
+        )
     ):
         # The accepted plan retains the two explicitly excluded historical rows;
         # the current report/panel projects the seven required strategies.
@@ -5992,6 +6054,7 @@ def _decomposition_lenses(
         strategy_names,
         analysis_strategy_names,
         "LIVE_ONLY",
+        contract_snapshot,
     )
     modes: dict[str, list[dict[str, Any]]] = {"LIVE_ONLY": live["lenses"]}
     all_bindings = list(live_bindings)
@@ -6023,6 +6086,7 @@ def _decomposition_lenses(
             strategy_names,
             analysis_strategy_names,
             "LIVE_PLUS_BACKTEST",
+            contract_snapshot,
         )
         if not current_plan:
             dynamic_root = hybrid_root / "dynamic-style"
@@ -11689,8 +11753,10 @@ def _rendered_files(
             include_hybrid=include_hybrid_sources,
             hybrid_plan_bundle=hybrid_decomposition_plan_bundle,
         )
-        plan_strategy_names = _decomposition_plan_strategy_mapping(
-            decomposition_plan_bundle
+        # the weekly and correlation identity authorities are the product perimeter
+        plan_strategy_names = _plan_without_retained_records(
+            _decomposition_plan_strategy_mapping(decomposition_plan_bundle),
+            financial_contract_snapshot[0],
         )
     report_lenses = report.get("decomposition_lenses")
     if report_lenses is not None and lens_payload is None:
@@ -12997,12 +13063,20 @@ def verify_candidate(
             *_objects(data.get("positions"), "positions"),
         )
     }
+    manifest_rows = (
+        _objects(data["account_manifest"].get("rows"), "account_manifest.rows")
+        if isinstance(data.get("account_manifest"), Mapping)
+        else []
+    )
+    unresolved_references = _unresolved_account_references(
+        account_ids, account_reference_ids, manifest_rows
+    )
     checks.append(
         _check(
             "Privacy-safe account dimension is complete",
             len(account_rows) == report_expectations["counts"]["accounts"]
             and len(set(account_ids)) == len(account_rows)
-            and account_reference_ids <= set(account_ids)
+            and not unresolved_references
             and all(
                 row.get("provider_id") or row.get("provider") for row in account_rows
             )
@@ -13018,9 +13092,7 @@ def verify_candidate(
             {
                 "accounts": len(account_rows),
                 "referenced_accounts": len(account_reference_ids),
-                "unresolved_references": sorted(
-                    account_reference_ids - set(account_ids)
-                ),
+                "unresolved_references": unresolved_references,
             },
         )
     )

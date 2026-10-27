@@ -234,8 +234,11 @@ async function visualLint(page) {
       const selector = selectorFor(element);
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .weekly-table-shell, .scenario-row");
-      if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 3 || element.scrollHeight > element.clientHeight + 3)) {
+      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .weekly-table-shell, .scenario-row, .nav-stack");
+      // A dense cell the shell clamps on purpose (compactDenseCells) is reachable through its Show-more toggle.
+      const clampedCell = element.closest(".cell-clamp:not(.is-open)");
+      const reachableClamp = Boolean(clampedCell && clampedCell.nextElementSibling?.matches(".cell-more"));
+      if (text && !intentionalScroll && !reachableClamp && (element.scrollWidth > element.clientWidth + 3 || element.scrollHeight > element.clientHeight + 3)) {
         findings.push({ rule: "text_overflow", severity: "major", selector, message: "Element text appears clipped or scrollable.", sample: text.slice(0, 120), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
       }
       const fontSize = Number.parseFloat(style.fontSize);
@@ -297,7 +300,14 @@ try {
       const captureDate = boundLedgerArtifact?.as_of_date;
       const calculationFactsAfterAcceptedCutoff = calculationDateFacts(manifest)
         .filter((fact) => !isCalendarDate(fact.value) || fact.value > expectedCalculationCutoff);
-      if (rows.length !== 13 || strategyIds.size !== 7 || rows.some((row, index) => (
+      // Derived sleeves (#567) add retained history-only epochs beside the 13 product epochs;
+      // a retained epoch is one of a strategy the panel marks RETAINED_HISTORY_ONLY.
+      const retainedStrategyIds = new Set((dashboardData.strategies || [])
+        .filter((strategy) => strategy.record_kind === "RETAINED_HISTORY_ONLY")
+        .map((strategy) => strategy.strategy_id));
+      const productRows = rows.filter((row) => !retainedStrategyIds.has(row.strategy_id));
+      const productStrategyIds = new Set(productRows.map((row) => row.strategy_id));
+      if (rows.length !== manifest.rows.length || productRows.length !== 13 || productStrategyIds.size !== 7 || rows.some((row, index) => (
         row.account_id !== manifest.rows[index]?.account_id
         || row.account_label !== manifest.rows[index]?.account_label
         || row.strategy_id !== manifest.rows[index]?.strategy_id
