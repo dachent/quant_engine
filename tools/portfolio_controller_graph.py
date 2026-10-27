@@ -123,6 +123,9 @@ _PATH_STAGES = {
     "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # The Performance tab producer: builds one additive panel block from the weekly
+    # returns, account manifest and governed HWM proof the panel already holds.
+    "tools/portfolio_performance_tab.py": ["panel"],
     # The holdings identity sidecar: built by the report producer into the report
     # payload, and re-derived by the report verifier.  A change moves report bytes.
     "tools/holdings_identity.py": ["report", "panel"],
