@@ -1850,6 +1850,7 @@ class DerivedSleeveCapital:
     epochs: Mapping[EpochKey, Mapping[str, str]]
     product: frozenset[EpochKey]
     parents: frozenset[str]
+    residual_parents: frozenset[str]
     accounts: frozenset[str]
     provider_by_parent: Mapping[str, str]
     rows: tuple[dict[str, Any], ...]
@@ -1991,6 +1992,7 @@ def derive_sleeve_capital(
             key for key in epochs if key[1] in set(required_strategy_ids)
         ),
         parents=frozenset(providers),
+        residual_parents=frozenset(sleeve.residual_parents),
         accounts=frozenset(accounts),
         provider_by_parent=providers,
         rows=tuple(rows),
@@ -2177,18 +2179,30 @@ def _verify_required_epoch_identities(
         expected_claims
     ):
         raise CapitalValidationError("derived required epochs differ from the facts")
-    if any(row.get("account_id") in derived.parents for row in baseline):
+    # Only a residual parent stops being a strategy account; a live parent (the
+    # Quantbase account's own live fund) keeps its baseline epoch.
+    if any(row.get("account_id") in derived.residual_parents for row in baseline):
         raise CapitalValidationError(
             "a residual parent keeps a baseline epoch beside its derived epochs"
         )
     if provenance is not None:
         alias_accounts = census_baseline_alias_accounts(census, provenance)
-        if any(alias_accounts.get(item[0]) not in derived.parents for item in removed):
+        if any(
+            alias_accounts.get(item[0]) not in derived.residual_parents
+            for item in removed
+        ):
             raise CapitalValidationError(
                 "a baseline epoch is dropped although its account is not a "
                 "residual parent"
             )
     elif removed and not claims:
+        raise CapitalValidationError("capital exact required epoch identities differ")
+    elif removed and (
+        not derived.residual_parents
+        # Without provenance the account of a dropped epoch cannot be proved, so
+        # only the strategies the derived product epochs replace may be dropped.
+        or not {item[1] for item in removed} <= {row["strategy_id"] for row in claims}
+    ):
         raise CapitalValidationError("capital exact required epoch identities differ")
     return baseline
 

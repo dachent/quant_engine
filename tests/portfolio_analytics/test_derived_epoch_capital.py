@@ -713,3 +713,53 @@ def test_quantbase_live_parent_facts_derive_retained_epochs_and_one_flow_pair() 
         capital.derive_sleeve_capital(
             [facts_bytes(quantbase_facts())], ledger, _required_strategies()
         )
+
+
+def test_a_synthetic_input_cannot_drop_an_unrelated_baseline_epoch(
+    tmp_path, monkeypatch
+):
+    """Codex P2: without provenance only the strategy a sleeve replaces may go."""
+
+    world = build_world(tmp_path, monkeypatch, with_sleeves=True)
+    generation = deepcopy(world.generation)
+    generation["authority_profile"] = "SYNTHETIC"
+    victim = next(
+        row for row in generation["required_epochs"] if "derivation" not in row
+    )
+    for name, key in (
+        ("required_epochs", "epoch_id"),
+        ("events", "epoch_id"),
+        ("opening_basis", "epoch_id"),
+        ("flow_coverage", "epoch_id"),
+    ):
+        generation[name] = [
+            row for row in generation[name] if row[key] != victim["epoch_id"]
+        ]
+    world.input_path.write_bytes(capital._canonical(generation))
+    with pytest.raises(capital.CapitalValidationError, match="identities differ"):
+        capital.build_governed_capital_result(world.input_path, CONTRACT_PATH)
+
+
+def test_a_live_parent_keeps_its_baseline_epoch_beside_residual_sleeves() -> None:
+    """Codex P1: only a residual parent loses its baseline epochs."""
+
+    ledger = {
+        "flows": [],
+        "capital_anchors": [],
+        "nav_observations": [],
+        "admissions": [
+            {"account_id": QB_PARENT, "provider_id": "quantbase"},
+            {"account_id": PARENT, "provider_id": "ibkr"},
+        ],
+        "provider_generations": [
+            {"provider_id": "quantbase", "generation_id": QB_GENERATION},
+            {"provider_id": "ibkr", "generation_id": GENERATION},
+        ],
+    }
+    view = capital.derive_sleeve_capital(
+        [facts_bytes(quantbase_facts()), facts_bytes(sleeve_facts())],
+        ledger,
+        _required_strategies(),
+    )
+    assert view.parents == {QB_PARENT, PARENT}
+    assert view.residual_parents == {PARENT}

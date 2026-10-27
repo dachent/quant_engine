@@ -1444,6 +1444,9 @@ def _rebuild_selected_epochs(
     return cast(dict[str, Any], result)
 
 
+_EPOCH_KEY_FIELDS = ("account_id", "strategy_id", "effective_start", "effective_end")
+
+
 def _census_assignment_only_epochs(
     rows: Sequence[Mapping[str, Any]],
     contract: Mapping[str, Any],
@@ -1586,6 +1589,20 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         for assignment in sleeve["assignments"]
     )
     rows = rebuilt["rows"]
+    # The derived epochs and their parents, as the flow-coverage authority names
+    # them, for the consumer validation that must recognise them.
+    coverage_rows: list[dict[str, Any]] = []
+    if perimeters:
+        coverage_rows = [
+            {
+                "authority_kind": derived_epoch_perimeter.DERIVED_SLEEVE_AUTHORITY_KIND,
+                "assignment": dict(zip(_EPOCH_KEY_FIELDS, key, strict=True)),
+                "derivation": {"parent_account_id": parent},
+            }
+            for key, parent in sorted(
+                perimeters[0].parents.items(), key=lambda item: item[0][:3]
+            )
+        ]
     if perimeters:
         perimeter = perimeters[0]
         expected_count += len(perimeter.derived & perimeter.product) - len(
@@ -1622,6 +1639,7 @@ def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
         "manifest": rebuilt,
         "dashboard": dashboard,
         "epoch_count": len(rows),
+        "coverage_rows": coverage_rows,
         "assignment_only_epochs": assignment_only_epochs,
         "baseline_generation": baseline,
         "panel_generation": panel,
@@ -1808,7 +1826,10 @@ def _verify_consumers(
         baseline_catalog_path=baseline_path,
     )
     exact_epochs = report_producer._validate_report_account_manifest(
-        epochs["manifest"], controls, crosswalk=crosswalk
+        epochs["manifest"],
+        controls,
+        crosswalk=crosswalk,
+        coverage_rows=epochs.get("coverage_rows", ()),
     )
     capital_epochs = {
         (

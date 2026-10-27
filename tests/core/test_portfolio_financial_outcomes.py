@@ -2189,6 +2189,16 @@ def test_verify_epochs_counts_the_product_rows_of_a_derived_perimeter(
     proof = outcomes._verify_epochs(spec, _assignment_only_contract())
     assert proof["epoch_count"] == 13
     assert {row["account_id"] for row in rows} >= {"parent-s1", "parent-s2"}
+    # the consumer validation is told which epochs are derived and whose they are
+    # (Codex P1): without it the derived and retained rows would be refused
+    assert {
+        (row["assignment"]["account_id"], row["derivation"]["parent_account_id"])
+        for row in proof["coverage_rows"]
+    } == {("parent-s1", parent["account_id"]), ("parent-s2", parent["account_id"])}
+    assert all(
+        row["authority_kind"] == "DERIVED_SLEEVE_COVERAGE_V1"
+        for row in proof["coverage_rows"]
+    )
 
 
 def test_shipped_census_refuses_the_blocked_tt_predecessor_rows():
