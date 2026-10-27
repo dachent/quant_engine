@@ -144,3 +144,102 @@ def test_lineage_mismatch_withholds_both_charts(tmp_path: Path) -> None:
     assert "Performance withheld" in _plain(dom, "#perf-value-chart")
     assert "<polyline" not in dom["#perf-returns-chart"]["innerHTML"]
     assert "<polygon" not in dom["#perf-value-chart"]["innerHTML"]
+
+
+def _producer_payload() -> dict[str, Any]:
+    """The renderer fed the producer's real output (tools/portfolio_performance_tab.py)."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "producer_performance_tab_tests",
+        Path(__file__).with_name("test_performance_tab.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    panel = module._panel()
+    block = module.tab.build_performance_tab(panel)
+    return {
+        "performance_tab": block,
+        "strategies": [
+            {"strategy_id": "a", "strategy_name": "A one"},
+            {"strategy_id": "b", "strategy_name": "B two"},
+            {"strategy_id": "c", "strategy_name": "C three"},
+        ],
+        "hwm_governed_proof": panel["hwm_governed_proof"],
+    }
+
+
+def test_the_renderer_reads_the_producers_weekly_lines(tmp_path: Path) -> None:
+    payload = _producer_payload()
+    for mode in payload["performance_tab"]["modes"].values():
+        mode["last_week_partial"] = True
+        mode["gaps_before_common_start"] = [
+            {"series_id": "strategy:B two", "missing_weeks": 2}
+        ]
+    dom = _run(tmp_path, payload, "renderPerformance")
+
+    legend = _plain(dom, "#perf-returns-legend")
+    assert "A one" in legend and "Equal-weight portfolio" in legend
+    assert "SPY not in this snapshot" in legend
+    assert "SPXL not in this snapshot" in legend
+    note = _plain(dom, "#perf-returns-note")
+    assert "set by" in note and "as published by the producer" in note
+    assert "Weeks before the common start with no data" in note
+    assert "B two 2 weeks" in note
+    assert "The last week is partial" in note
+    assert "stroke-dasharray" in dom["#perf-returns-chart"]["innerHTML"]
+
+
+def test_the_renderer_reads_the_producers_slices_and_readout(tmp_path: Path) -> None:
+    dom = _run(tmp_path, _producer_payload(), "renderPerformance")
+
+    assert dom["#perf-value-chart"]["innerHTML"].count("<polygon") == 3
+    legend = _plain(dom, "#perf-value-legend")
+    assert "Residual against systematic capital at" in legend
+    readout = _plain(dom, "#perf-value-readout")
+    assert "candidate (pending owner acceptance)" in readout
+    assert "Summed-epoch TWR unavailable" in readout
+
+
+def test_unavailable_producer_modes_and_slices_are_explicit(tmp_path: Path) -> None:
+    payload = _producer_payload()
+    for mode in payload["performance_tab"]["modes"].values():
+        mode.clear()
+        mode.update({"status": "UNAVAILABLE", "reason": "WEEKLY_RETURNS_ABSENT"})
+    payload["performance_tab"]["slices"] = {
+        "status": "UNAVAILABLE",
+        "reason": "NO_ADMITTED_EPOCH_TRACES",
+    }
+    dom = _run(tmp_path, payload, "renderPerformance")
+
+    assert "no usable return lines" in _plain(dom, "#perf-returns-chart")
+    assert "WEEKLY_RETURNS_ABSENT" in _plain(dom, "#perf-returns-chart")
+    assert "no slice values" in _plain(dom, "#perf-value-chart")
+
+
+def test_benchmark_lines_inside_lines_are_drawn_once_and_solid(tmp_path: Path) -> None:
+    payload = _producer_payload()
+    tab = payload["performance_tab"]
+    for block in tab["modes"].values():
+        if not isinstance(block.get("lines"), list):
+            continue
+        n = len(block["dates"])
+        block["lines"].append(
+            {
+                "series_id": "market:SPY",
+                "display_name": "SPY",
+                "kind": "BENCHMARK",
+                "tri": [1.0 + 0.01 * i for i in range(n)],
+            }
+        )
+    for entry in tab["benchmarks"]:
+        if entry["series_id"] == "market:SPY":
+            entry["status"] = "AVAILABLE"
+    dom = _run(tmp_path, payload, "renderPerformance")
+
+    legend = _plain(dom, "#perf-returns-legend")
+    assert "SPY not in this snapshot" not in legend
+    assert "SPXL not in this snapshot" in legend
+    assert legend.count("SPY") == 1
