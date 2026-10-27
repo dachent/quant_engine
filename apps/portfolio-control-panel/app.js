@@ -2602,7 +2602,8 @@
     for (const line of block.lines) {
       const name = perfSeriesName(line);
       const kind = String(line.kind || "STRATEGY").toLowerCase();
-      const color = kind === "portfolio" ? "#edf4f7" : perfColor(strategyIndex++);
+      // Schema 2 carries benchmark lines inside lines[] (no origin: drawn solid, neutral).
+      const color = kind === "portfolio" ? "#edf4f7" : kind === "benchmark" ? (PERF_BENCHMARK_COLORS[name] || "#a8b7c5") : perfColor(strategyIndex++);
       const tri = Array.isArray(line.tri) ? line.tri : [];
       const dashed = tri.map(() => false);
       for (const [from, to, origin] of Array.isArray(line.origin) ? line.origin : []) {
@@ -2616,6 +2617,7 @@
     for (const entry of Array.isArray(tab.benchmarks) ? tab.benchmarks : []) {
       const name = entry.ticker || perfSeriesName(entry);
       const color = PERF_BENCHMARK_COLORS[name] || "#a8b7c5";
+      if (lines.some((line) => line.key === entry.series_id)) continue;
       const tri = Array.isArray(entry.tri) && entry.tri.length === block.dates.length ? entry.tri : null;
       if (entry.status === "UNAVAILABLE" || !tri) { missing.push({ name, color, reason: entry.reason || "not published" }); continue; }
       const dashed = tri.map(() => false);

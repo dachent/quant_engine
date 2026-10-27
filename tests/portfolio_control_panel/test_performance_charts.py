@@ -217,3 +217,29 @@ def test_unavailable_producer_modes_and_slices_are_explicit(tmp_path: Path) -> N
     assert "no usable return lines" in _plain(dom, "#perf-returns-chart")
     assert "WEEKLY_RETURNS_ABSENT" in _plain(dom, "#perf-returns-chart")
     assert "no slice values" in _plain(dom, "#perf-value-chart")
+
+
+def test_benchmark_lines_inside_lines_are_drawn_once_and_solid(tmp_path: Path) -> None:
+    payload = _producer_payload()
+    tab = payload["performance_tab"]
+    for block in tab["modes"].values():
+        if not isinstance(block.get("lines"), list):
+            continue
+        n = len(block["dates"])
+        block["lines"].append(
+            {
+                "series_id": "market:SPY",
+                "display_name": "SPY",
+                "kind": "BENCHMARK",
+                "tri": [1.0 + 0.01 * i for i in range(n)],
+            }
+        )
+    for entry in tab["benchmarks"]:
+        if entry["series_id"] == "market:SPY":
+            entry["status"] = "AVAILABLE"
+    dom = _run(tmp_path, payload, "renderPerformance")
+
+    legend = _plain(dom, "#perf-returns-legend")
+    assert "SPY not in this snapshot" not in legend
+    assert "SPXL not in this snapshot" in legend
+    assert legend.count("SPY") == 1
