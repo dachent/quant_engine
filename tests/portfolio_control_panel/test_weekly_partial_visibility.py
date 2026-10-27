@@ -70,7 +70,7 @@ def _weekly_payload(as_of: str, partial: bool) -> dict[str, object]:
             "series_id": f"market:Benchmark {index}",
             "values": {week: "0"},
         }
-        for index in range(9)
+        for index in range(11)
     ]
     return {
         "analytics_schema_version": 2,

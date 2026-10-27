@@ -372,6 +372,18 @@
           "source_id": "yahoo-adjusted-etf-daily",
           "economic_family": "ETHEREUM",
           "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "SPY",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "US_LARGE_CAP_EQUITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "SPXL",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "US_LARGE_CAP_EQUITY_LEVERED_3X",
+          "raw_orthogonal": false
         }
       ]
     },

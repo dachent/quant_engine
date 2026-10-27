@@ -32,7 +32,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "0.1.0"
+BUILDER_VERSION: Final = "0.2.0"
 SCHEMA_VERSION: Final = 2
 STRATEGY_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 PUBLIC_SOURCES: Final = {
@@ -83,6 +83,8 @@ CORE_BENCHMARKS: Final = {
     "IEMG": "Emerging-markets equity",
     "ITOT": "U.S. total equity",
     "UUP": "U.S. dollar",
+    "SPY": "U.S. large-cap equity (S&P 500)",
+    "SPXL": "U.S. large-cap equity, 3x daily leveraged",
 }
 
 
@@ -781,10 +783,10 @@ def verify_candidate(
         == list(STRATEGY_MODES),
         "strategy_boundary": bool(expected_strategies)
         and observed_strategies == expected_strategies,
-        "nine_core_benchmarks": sum(
+        "core_benchmarks_exact": sum(
             "CORE_BENCHMARK" in row["display_groups"] for row in payload["series"]
         )
-        == 9,
+        == len(CORE_BENCHMARKS),
     }
     if not all(checks.values()):
         raise WeeklyReturnError("weekly candidate verification failed")

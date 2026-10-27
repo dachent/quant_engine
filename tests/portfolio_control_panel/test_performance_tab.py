@@ -492,7 +492,7 @@ def test_the_block_validates_against_the_additive_optional_schema_entry() -> Non
     assert list(validator.iter_errors(tab.build_performance_tab(unavailable))) == []
 
 
-def test_the_schema_rejects_an_available_benchmark() -> None:
+def test_the_schema_rejects_an_available_benchmark_that_still_names_a_pull() -> None:
     block = tab.build_performance_tab(_panel())
     block["benchmarks"][0]["status"] = "AVAILABLE"
     assert list(_schema_validator().iter_errors(block))
@@ -565,3 +565,79 @@ def test_the_verifier_checks_the_difference_and_reason_against_593() -> None:
     bad["readout"]["summed_epoch_unavailable_reason"] = "OTHER"
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(bad, panel)
+
+
+# ------------------------------------------------------------ admitted benchmarks
+
+
+def _bench_row(series_id: str, weeks: list[str], step: str) -> dict[str, Any]:
+    return {
+        "series_id": series_id,
+        "display_name": series_id.split(":")[1],
+        "primary_group": "STYLE_MULTI_ASSET",
+        "display_groups": ["STYLE_MULTI_ASSET", "CORE_BENCHMARK"],
+        "return_basis": "TOTAL_RETURN_ETF_PROXY",
+        "values": {week: step for week in weeks},
+    }
+
+
+def _panel_with_benchmarks(spxl_weeks: list[str] | None = None) -> dict[str, Any]:
+    panel = _panel()
+    panel["weekly_returns"]["series"] += [
+        _bench_row("market:SPY", WEEKS, "0.004"),
+        _bench_row(
+            "market:SPXL", spxl_weeks if spxl_weeks is not None else WEEKS, "0.012"
+        ),
+    ]
+    return panel
+
+
+def test_admitted_spy_and_spxl_become_total_return_lines_without_origin() -> None:
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel)
+    assert [
+        (b["series_id"], b["status"], b["required_pull"]) for b in block["benchmarks"]
+    ] == [
+        ("market:SPY", "AVAILABLE", None),
+        ("market:SPXL", "AVAILABLE", None),
+    ]
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        spy = _line(block, mode, "market:SPY")
+        assert spy["kind"] == "BENCHMARK" and "origin" not in spy
+        assert spy["basis"] == "TOTAL_RETURN_ETF_PROXY"
+        assert len(spy["tri"]) == len(block["modes"][mode]["dates"])
+        assert block["modes"][mode]["benchmarks_unavailable"] == []
+    assert _line(block, "LIVE_ONLY", "market:SPY")["tri"][0] == 1.004
+    assert _line(block, "LIVE_ONLY", "market:SPXL")["tri"][1] == round(1.012**2, 8)
+    assert "ITOT" not in json.dumps(block)
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_a_benchmark_with_a_missing_week_is_named_per_mode_not_zero_filled() -> None:
+    panel = _panel_with_benchmarks(spxl_weeks=WEEKS[:6])
+    block = tab.build_performance_tab(panel)
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        assert block["modes"][mode]["benchmarks_unavailable"] == [
+            {
+                "series_id": "market:SPXL",
+                "reason": f"MISSING_WEEK:market:SPXL:{WEEKS[6]}",
+            }
+        ]
+        assert all(
+            line["series_id"] != "market:SPXL" for line in block["modes"][mode]["lines"]
+        )
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_verifier_rejects_a_tampered_or_invented_benchmark_line() -> None:
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel)
+    bad = copy.deepcopy(block)
+    _line(bad, "LIVE_ONLY", "market:SPY")["tri"][2] = 9.0
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
+    plain = _panel()
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(block, plain)
