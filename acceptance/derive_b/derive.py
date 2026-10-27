@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Callable, Iterable, cast
 
 
@@ -4482,8 +4482,20 @@ def load_sleeve_inputs(
             _fail(f"role {role!r}: missing path")
         if not isinstance(pin, str) or not SHA256_RE.match(pin):
             _fail(f"role {role!r}: bad sha256 form {pin!r}")
-        base = qe_root if root == "qe" else repo_root
-        absolute = base / raw_path
+        # Input paths must stay inside their declared root (CORRECTION3.md):
+        # an absolute path or one with a drive/anchor is rejected outright;
+        # anything else is resolved (links followed) against the resolved
+        # root and rejected when it lands outside it (a `..` escape or a
+        # link pointing out).  A `..` segment that stays inside is allowed.
+        candidate = PurePath(raw_path)
+        if candidate.is_absolute() or candidate.drive or candidate.anchor:
+            _fail(
+                f"role {role!r}: path is absolute or has a drive/anchor: {raw_path!r}"
+            )
+        base = (qe_root if root == "qe" else repo_root).resolve()
+        absolute = (base / raw_path).resolve()
+        if not absolute.is_relative_to(base):
+            _fail(f"role {role!r}: path escapes its declared root: {raw_path!r}")
         if not absolute.is_file():
             _fail(f"role {role!r}: file not found: {raw_path}")
         actual = _sha256_file(absolute)

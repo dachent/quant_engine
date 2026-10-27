@@ -398,12 +398,21 @@ def write_sleeve_inputs(
     extra_roles: dict[str, dict[str, str]] | None = None,
     corrupt_roles: tuple[str, ...] = (),
     root_style: str = "qe",
+    path_overrides: dict[str, str] | None = None,
 ) -> Path:
     entries: dict[str, object] = {}
     for role, relative in paths.items():
         if role in drop_roles:
             continue
-        pin = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        relative = (path_overrides or {}).get(role, relative)
+        source = root / relative
+        # A path that does not resolve to a file under root gets a dummy pin:
+        # the path checks fail closed before the pin is ever verified.
+        pin = (
+            hashlib.sha256(source.read_bytes()).hexdigest()
+            if source.is_file()
+            else "0" * 64
+        )
         if role in corrupt_roles:
             pin = "0" * 64
         entries[role] = {"root": root_style, "path": relative, "sha256": pin}
@@ -858,6 +867,71 @@ def test_catalog_schema_below_7_fails_closed(tmp_path: Path):
             cutoff=CUTOFF,
             engine=make_engine(derivation, sleeves),
         )
+
+
+# -------------------- (correction 3) paths stay inside their roots
+
+
+def test_absolute_path_fails_closed(tmp_path: Path):
+    """CORRECTION3: an absolute `path` is rejected, naming the role."""
+    derivation = load_module(DERIVE_PATH, "derive_b_for_sleeves_p1")
+    sleeves = derivation
+    absolute = str((tmp_path / "toy" / "crosswalk.json").resolve())
+    with pytest.raises(
+        sleeves.SleeveInputError,
+        match=r"role 'crosswalk': path is absolute or has a drive/anchor",
+    ):
+        run_toy(
+            tmp_path,
+            sleeves,
+            make_engine(derivation, sleeves),
+            path_overrides={"crosswalk": absolute},
+        )
+
+
+def test_dotdot_escape_fails_closed(tmp_path: Path):
+    """CORRECTION3: a `..` segment that leaves the root is rejected."""
+    derivation = load_module(DERIVE_PATH, "derive_b_for_sleeves_p2")
+    sleeves = derivation
+    with pytest.raises(
+        sleeves.SleeveInputError,
+        match=r"role 'crosswalk': path escapes its declared root",
+    ):
+        run_toy(
+            tmp_path,
+            sleeves,
+            make_engine(derivation, sleeves),
+            path_overrides={"crosswalk": "../crosswalk.json"},
+        )
+
+
+def test_nested_contained_path_stays_valid(tmp_path: Path):
+    """CORRECTION3: a nested path with an interior `..` that stays inside
+    the root is accepted (only escapes are rejected)."""
+    derivation = load_module(DERIVE_PATH, "derive_b_for_sleeves_p3")
+    sleeves = derivation
+    paths = write_toy_tree(tmp_path)
+    nested = tmp_path / "toy" / "nested" / "deep" / "crosswalk.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(
+        (tmp_path / "toy" / "crosswalk.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    selection = write_sleeve_inputs(
+        tmp_path,
+        paths,
+        path_overrides={"crosswalk": "toy/nested/../nested/deep/crosswalk.json"},
+    )
+
+    result = sleeves.derive_sleeves(
+        sleeve_inputs_path=selection,
+        qe_root=tmp_path,
+        repo_root=tmp_path,
+        cutoff=CUTOFF,
+        engine=make_engine(derivation, sleeves),
+    )
+
+    assert result["sleeve_derivation"]["refusals"] == []
 
 
 def test_cli_sleeves_only_requires_sleeve_inputs(
