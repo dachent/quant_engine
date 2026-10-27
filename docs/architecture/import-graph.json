@@ -430,6 +430,16 @@
     ],
     [
       "portfolio_report",
+      "portfolio_totals",
+      1
+    ],
+    [
+      "portfolio_report",
+      "portfolio_totals_verify",
+      1
+    ],
+    [
+      "portfolio_report",
       "provider_ledger",
       1
     ],
