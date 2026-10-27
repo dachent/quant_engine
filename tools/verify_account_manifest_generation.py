@@ -16,7 +16,6 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localco
 import hashlib
 import json
 import re
-import sys
 from types import MappingProxyType
 from typing import Final, NoReturn
 
@@ -32,7 +31,24 @@ from quant_engine.core.strict_json import strict_json_loads
 class IndependentVerificationError(ValueError):
     """A verifier input, subject set, or transport violates its contract."""
 
-    check: str | None = None
+    @property
+    def check(self) -> str | None:
+        """The verifier function and line that raised, from the traceback alone.
+
+        The message stays independent of caller labels, paths and source contents; the
+        failing check is the frame that called ``_fail`` (nothing from the inputs), so
+        a failure is traceable without changing the message callers compare.
+        """
+
+        frames: list[tuple[str, int]] = []
+        step = self.__traceback__
+        while step is not None:
+            frames.append((step.tb_frame.f_code.co_name, step.tb_lineno))
+            step = step.tb_next
+        if len(frames) < 2:
+            return None
+        name, line = frames[-2]
+        return f"{name}:{line}"
 
 
 EXACT_SUBJECT_PATHS: Final[tuple[str, ...]] = (
@@ -181,15 +197,11 @@ _PORTABLE_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 
 
 def _fail() -> NoReturn:
-    # Keep the message independent of caller labels, paths, and source contents.  The
-    # failing check (its function and line in this module, nothing from the inputs) is
-    # attached as a note and an attribute, so a failure is traceable without changing
-    # the message every caller and test compares.
-    caller = sys._getframe(1)
-    error = IndependentVerificationError("independent verification input is invalid")
-    error.check = f"{caller.f_code.co_name}:{caller.f_lineno}"
-    error.add_note(f"failing check: {error.check}")
-    raise error from None
+    # Keep errors independent of caller labels, paths, and source contents; the failing
+    # check is read from the traceback (IndependentVerificationError.check).
+    raise IndependentVerificationError(
+        "independent verification input is invalid"
+    ) from None
 
 
 def _require_snapshot(value: object) -> InputSnapshot:
@@ -6233,11 +6245,19 @@ def _ledger_with_derived(selected: IndependentVerifierInputs) -> dict[str, objec
                 and row["amount"].get("status") == "AVAILABLE"
                 and _parse_retained_source_decimal(row["amount"].get("value")) == wanted
             ]
+            allocation_strategies = {
+                row.get("strategy_id")
+                for row in (ledger.get("capital_anchors") or [])
+                if isinstance(row, dict)
+                and row.get("account_id") == reference["account_id"]
+                and row.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+            }
             anchor_found = [
                 row
                 for row in (ledger.get("capital_anchors") or [])
                 if isinstance(row, dict)
                 and reference["class"] == "INTERNAL_IN"
+                and len(allocation_strategies) == 1
                 and row.get("account_id") == reference["account_id"]
                 and row.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
                 and row.get("nav_recognition_date") == reference["nav_recognition_date"]

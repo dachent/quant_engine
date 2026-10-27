@@ -1928,10 +1928,20 @@ def _require_sleeve_references(
             and flow["amount"].get("status") == "AVAILABLE"
             and Decimal(str(flow["amount"].get("value"))) == wanted
         ]
+        # the facts leg names no anchor record or strategy: it binds to the account's
+        # allocation anchor only when the account's allocations are of one strategy,
+        # so a same-day, same-size allocation of another strategy cannot stand in
+        allocation_strategies = {
+            anchor.get("strategy_id")
+            for anchor in anchors
+            if anchor["account_id"] == reference["account_id"]
+            and anchor["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
+        }
         anchor_matches = [
             anchor
             for anchor in anchors
             if reference["class"] == "INTERNAL_IN"
+            and len(allocation_strategies) == 1
             and anchor["account_id"] == reference["account_id"]
             and anchor["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
             and anchor["nav_recognition_date"] == reference["nav_recognition_date"]

@@ -1261,12 +1261,17 @@ def _layered_history_repository_dependency_identity() -> dict[str, object]:
     return definitions
 
 
+_SLEEVE_SECTION_KEYS = frozenset(
+    {"policy_manifest", "ibkr_generation_root", "quantbase_source_dir"}
+)
+
+
 def _sleeve_tag_map_path(section: object) -> Path | None:
     """The governed nested-strategy tag map the sleeve policy manifest pins."""
 
     if section is None:
         return None
-    if not isinstance(section, Mapping) or "policy_manifest" not in section:
+    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
         raise AttendedPreparationError("sleeve facts configuration differs")
     policy = _pin(section["policy_manifest"], "sleeve policy")
     manifest = _read(policy, "sleeve policy manifest")
@@ -1310,11 +1315,7 @@ def _build_sleeve_facts(
 
     if section is None:
         return ()
-    if not isinstance(section, Mapping) or set(section) != {
-        "policy_manifest",
-        "ibkr_generation_root",
-        "quantbase_source_dir",
-    }:
+    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
         raise AttendedPreparationError("sleeve facts configuration differs")
     import build_sleeve_facts_release as sleeve_release
 

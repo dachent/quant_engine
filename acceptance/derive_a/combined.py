@@ -21,16 +21,9 @@ def identity(raw: Mapping[str, Any]) -> Identity:
         raw.get(k)
         for k in ("account_id", "strategy_id", "effective_start", "effective_end")
     )
-    account, strategy, start, end = values
-    if not (
-        isinstance(account, str)
-        and account
-        and isinstance(strategy, str)
-        and strategy
-        and isinstance(start, str)
-        and start
-    ):
+    if any(not isinstance(v, str) or not v for v in values[:3]):
         raise InputError(f"malformed epoch identity {values!r}")
+    account, strategy, start, end = values
     try:
         first = dt.date.fromisoformat(start)
         if end is not None and dt.date.fromisoformat(end) < first:
@@ -66,7 +59,12 @@ def perimeter(
         seen.add(key[:3])
         if key[0] not in parents:
             raise InputError(f"derived epoch lacks parent authority {key!r}")
-    actual = {identity(r) for r in declared}
+    actual: set[Identity] = set()
+    for raw in declared:
+        key = identity(raw)
+        if key in actual:
+            raise InputError(f"duplicate declared epoch {key!r}")
+        actual.add(key)
     dropped = baseline - actual
     derived_parents = {parents[key[0]] for key in derived}
     for key in sorted(dropped, key=repr):

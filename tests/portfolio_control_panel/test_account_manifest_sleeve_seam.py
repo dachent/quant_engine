@@ -1341,3 +1341,52 @@ def test_settlement_pair_carries_one_canonical_nine_decimal_amount(
     assert abs(amounts[0]) == abs(exact).quantize(Decimal("0.000000001"))
     for event in settle:
         assert Decimal(event["amount"]["value"]).as_tuple().exponent >= -9
+
+
+def _anchor(
+    strategy: str, value: str = "100", day: str = "2026-02-03"
+) -> dict[str, Any]:
+    return {
+        "account_id": PARENT,
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "strategy_id": strategy,
+        "nav_recognition_date": day,
+        "amount": {"status": "AVAILABLE", "value": value},
+    }
+
+
+def _reference() -> dict[str, Any]:
+    return {
+        "pair_id": "pair-1",
+        "account_id": PARENT,
+        "class": "INTERNAL_IN",
+        "amount": "100",
+        "event_date": "2026-02-01",
+        "nav_recognition_date": "2026-02-03",
+    }
+
+
+def test_a_parent_allocation_anchor_backs_a_reference_only_when_unambiguous() -> None:
+    from types import SimpleNamespace
+
+    import build_account_manifest_generation as builder
+
+    facts = SimpleNamespace(references=(_reference(),))
+    require = builder._require_sleeve_references
+    require([], facts, [_anchor("one")])  # exactly one anchor of one strategy
+    for anchors in (
+        [],  # no record
+        [_anchor("one"), _anchor("one")],  # two identical anchors
+        [_anchor("one"), _anchor("two", "250", "2026-03-01")],  # two strategies
+    ):
+        with pytest.raises(builder.AccountAssignmentPerimeterError):
+            require([], facts, anchors)
+
+
+def test_a_verifier_failure_names_the_check_that_raised_it() -> None:
+    import verify_account_manifest_generation as verifier
+
+    with pytest.raises(verifier.IndependentVerificationError) as raised:
+        verifier._require_snapshot("not a snapshot")
+    assert str(raised.value) == "independent verification input is invalid"
+    assert (raised.value.check or "").startswith("_require_snapshot:")

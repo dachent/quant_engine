@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from datetime import date
 from decimal import Decimal, getcontext, setcontext
@@ -295,6 +296,37 @@ def test_perimeter_refuses_two_derived_epochs_one_identity(derivation):
             [],
             [epoch(None), epoch(date(2026, 3, 1))],
             {"account-p-s1": "account-p"},
+        )
+
+
+def test_perimeter_refuses_a_repeated_declared_row(
+    derivation, declared_manifest, real_crosswalk, perimeter_inputs
+):
+    """R4: downstream consumers require one row per epoch.  A declared
+    manifest repeating an ordinary epoch row (the same four-part identity,
+    nothing distinguishing the copies) would collapse silently in the
+    declared set, so it is refused, naming the duplicated identity."""
+    epochs, parents = perimeter_inputs
+    repeated = declared_manifest["rows"][0]
+    document = mutated_manifest(
+        declared_manifest, lambda rows: rows.append(dict(repeated))
+    )
+    identity = derivation._format_epoch_key(
+        derivation._epoch_identity_key(
+            repeated["account_id"],
+            repeated["strategy_id"],
+            repeated["effective_start"],
+            repeated.get("effective_end"),
+        )
+    )
+    with pytest.raises(
+        derivation.SleeveInputError,
+        match=re.escape(
+            f"declared account-strategy manifest repeats epoch identity {identity}"
+        ),
+    ):
+        derivation.effective_perimeter_closures(
+            document, real_crosswalk["rows"], epochs, parents
         )
 
 

@@ -924,8 +924,10 @@ def effective_perimeter_closures(
     epochs are derived).  The declared manifest must equal it exactly as sets
     of the four-part identity (open end = null); any difference fails closed
     (SleeveInputError, exit status 2) naming the first difference, and neither
-    side may be reconciled by tuning.  Returns the rows' closure evidence and
-    the dropped baseline epoch keys.
+    side may be reconciled by tuning.  A four-part identity repeated among the
+    declared rows is likewise refused (R4: downstream consumers require one
+    row per epoch, and a repeat would collapse silently in the declared set).
+    Returns the rows' closure evidence and the dropped baseline epoch keys.
     """
     rows = account_manifest.get("rows")
     if not isinstance(rows, list):
@@ -937,14 +939,20 @@ def effective_perimeter_closures(
             raise ManifestError(
                 "declared account-strategy manifest row is not an object"
             )
-        declared_keys.add(
-            _epoch_identity_key(
-                row.get("account_id"),
-                row.get("strategy_id"),
-                row.get("effective_start"),
-                row.get("effective_end"),
-            )
+        # R4: downstream consumers require one row per epoch; a repeated
+        # four-part identity would collapse silently in the declared set.
+        declared_key = _epoch_identity_key(
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
         )
+        if declared_key in declared_keys:
+            raise SleeveInputError(
+                "declared account-strategy manifest repeats epoch identity "
+                f"{_format_epoch_key(declared_key)}"
+            )
+        declared_keys.add(declared_key)
         _manifest_row_closure(row, closures)
     baseline_keys = {
         _epoch_identity_key(

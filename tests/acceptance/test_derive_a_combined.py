@@ -82,6 +82,62 @@ def test_duplicate_derived_start_refused() -> None:
 
 
 @real_inputs
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_declared_duplicate_identity_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    duplicate: bool,
+) -> None:
+    import hashlib
+    from derive_a import cli
+
+    manifest = json.loads(
+        (BASE / "inputs/acceptance-inputs-manifest.json").read_bytes()
+    )
+    entry = next(e for e in manifest["inputs"] if e["family"] == "declared_cutoff_date")
+    declared = json.loads(Path(entry["path"]).read_bytes())
+    ordinary = next(
+        r for r in declared["rows"] if r["account_id"] == "account-58e75e8d952fa1b8"
+    )
+    key = combined.identity(ordinary)
+    if duplicate:
+        declared["rows"].append(dict(ordinary))
+    payload = json.dumps(declared).encode()
+    selected = tmp_path / "declared.json"
+    selected.write_bytes(payload)
+    entry.update(
+        path=str(selected),
+        bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    selection = tmp_path / "inputs.json"
+    selection.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "result.json"
+    status = cli.main(
+        [
+            "--qe-root",
+            str(BASE / "tree/qe-root"),
+            "--out",
+            str(output),
+            "--inputs",
+            str(selection),
+            "--sleeve-inputs",
+            str(BASE / "inputs/sleeve-inputs.json"),
+        ]
+    )
+    if duplicate:
+        assert status == 2
+        error = capsys.readouterr().err
+        assert "input error:" in error
+        assert "duplicate declared epoch" in error
+        assert repr(key) in error
+        assert not output.exists()
+    else:
+        assert status == 0
+        assert output.exists()
+
+
+@real_inputs
 def test_without_sleeves_exact_original_bytes() -> None:
     actual = original.derive.dumps(original._run(BASE / "out/compat-fixture"))
     assert actual == (BASE / "out/before-no-sleeves.json").read_bytes()
