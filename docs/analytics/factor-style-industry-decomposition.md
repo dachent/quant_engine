@@ -261,3 +261,15 @@ inference-unavailable state. Every computed fit reports train and sealed-
 holdout residual diagnostics, including autocorrelation, squared-residual
 autocorrelation, Durbin-Watson, skewness, and excess kurtosis. These diagnostics
 never convert post-selection estimates into p-values or confidence intervals.
+
+## SPY and SPXL benchmark total returns
+
+`SPY` and `SPXL` are catalog candidates of the `multi-asset-etf-style` universe
+(`yahoo-adjusted-etf-daily`, adjusted-close total-return proxy like every other ETF
+there). They enter the plan bundle's `multi-asset-style` lens columns with the other
+candidates, are listed in `CORE_BENCHMARKS` of `tools/portfolio_weekly_returns.py`
+(eleven core benchmarks) and feed the Performance tab's `market:SPY` and
+`market:SPXL` lines. The plan's explicit factor sets are unchanged, so neither ETF is
+fitted as a decomposition factor. SPXL is its own total return, not 3x SPY. A style
+source run must request both tickers (capture script and manifest are retained with
+the run).

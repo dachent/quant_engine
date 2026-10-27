@@ -2139,17 +2139,24 @@
     "performance_tab_line": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "tri", "origin"],
+      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "tri"],
       "properties": {
         "series_id": { "type": "string", "minLength": 1 },
         "display_name": { "type": ["string", "null"] },
-        "kind": { "enum": ["STRATEGY", "PORTFOLIO"] },
+        "kind": { "enum": ["STRATEGY", "PORTFOLIO", "BENCHMARK"] },
         "basis": { "type": "string", "minLength": 1 },
         "definition": { "type": "string", "minLength": 1 },
-        "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK"] },
+        "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK", "WEEKLY_RETURNS_SINGLE_MODE"] },
         "tri": { "type": "array", "minItems": 1, "items": { "type": "number" } },
         "origin": { "$ref": "#/$defs/performance_tab_origin_runs" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "BENCHMARK" } }, "required": ["kind"] },
+          "then": { "not": { "required": ["origin"] } },
+          "else": { "required": ["origin"] }
+        }
+      ]
     },
     "performance_tab_unavailable": {
       "type": "object",
@@ -2166,7 +2173,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "lines"],
+          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "benchmarks_unavailable", "lines"],
           "properties": {
             "status": { "const": "AVAILABLE" },
             "grid": { "const": "ISO_WEEK_START_MONDAY" },
@@ -2194,6 +2201,15 @@
             "last_week_partial": { "type": "boolean" },
             "stale_before_current_week": { "type": "boolean" },
             "data_through_date": { "type": ["string", "null"] },
+            "benchmarks_unavailable": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["series_id", "reason"],
+                "properties": { "series_id": { "type": "string" }, "reason": { "type": "string" } }
+              }
+            },
             "lines": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/performance_tab_line" } }
           }
         }
@@ -2202,15 +2218,23 @@
     "performance_tab_benchmark": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "ticker", "status", "reason", "substitute", "required_pull"],
+      "required": ["series_id", "ticker", "status", "reason", "substitute", "source", "required_pull"],
       "properties": {
         "series_id": { "type": "string" },
         "ticker": { "type": "string" },
-        "status": { "const": "UNAVAILABLE" },
-        "reason": { "type": "string" },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "reason": { "type": ["string", "null"] },
         "substitute": { "type": "null" },
-        "required_pull": { "type": "object" }
-      }
+        "source": { "type": ["string", "null"] },
+        "required_pull": { "type": ["object", "null"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "AVAILABLE" } }, "required": ["status"] },
+          "then": { "properties": { "source": { "type": "string" }, "required_pull": { "type": "null" } } },
+          "else": { "properties": { "source": { "type": "null" }, "required_pull": { "type": "object" } } }
+        }
+      ]
     },
     "performance_tab_slices": {
       "oneOf": [
@@ -2271,7 +2295,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "as_of", "scope", "modes", "benchmarks", "slices", "readout"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "as_of": { "type": ["string", "null"] },
         "scope": { "const": "SYSTEMATIC_EX_RESERVE" },
         "modes": {

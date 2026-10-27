@@ -360,7 +360,7 @@ def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
             "series_id": f"market:Benchmark {index}",
             "values": {},
         }
-        for index in range(9)
+        for index in range(11)
     ]
     weekly = {
         "analytics_schema_version": 2,
@@ -2689,7 +2689,7 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
             "series_id": f"market:Benchmark {index}",
             "values": {"2026-07-27": "0.01"},
         }
-        for index in range(9)
+        for index in range(11)
     )
     _publish_analytics(
         weekly_root,
