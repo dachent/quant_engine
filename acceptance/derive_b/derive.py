@@ -6,14 +6,24 @@ import argparse
 import csv
 import hashlib
 import json
+import re
+import sys
+import types
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
 from pathlib import Path
-from typing import Iterable, cast
+from typing import Callable, Iterable, cast
 
 
 getcontext().prec = 50
+
+# A by-path load (the tests' harness) does not register this module in
+# sys.modules before executing it, and the dataclasses in the R2 section below
+# resolve their string annotations through sys.modules[cls.__module__]; a
+# stand-in keeps that resolution working (no annotation is a ClassVar/InitVar).
+sys.modules.setdefault(__name__, types.ModuleType(__name__))
 
 CUTOFF = date(2026, 9, 17)
 LEDGER_PATH = Path(
@@ -149,6 +159,42 @@ NATIVE_MATRIXPORT_BASE_FAMILIES = frozenset(
 
 class ManifestError(ValueError):
     """An inputs manifest or a declared input fails closed verification."""
+
+
+def _sleeve_engine() -> Engine:
+    """Bind the sleeve derivation to this module's existing return engine."""
+
+    def not_derivable_row(
+        metric_id: str, entity: str, reason: str, window: str | None = None
+    ) -> dict[str, object]:
+        row: dict[str, object] = {
+            "metric_id": metric_id,
+            "entity": entity,
+            "reason": reason,
+        }
+        if window is not None:
+            row["window"] = window
+        return row
+
+    return Engine(
+        time_weighted_return=time_weighted_return,
+        xirr=xirr,
+        money=money,
+        ratio=ratio,
+        metric=metric,
+        not_derivable_row=not_derivable_row,
+    )
+
+
+def _derive_sleeve_block(qe_root: Path, sleeve_inputs: Path) -> dict[str, object]:
+    """Run the SPEC-HARNESS sleeve derivation (the R2 section below)."""
+    return derive_sleeves(
+        sleeve_inputs_path=sleeve_inputs,
+        qe_root=qe_root,
+        repo_root=Path(__file__).resolve().parents[2],
+        cutoff=CUTOFF,
+        engine=_sleeve_engine(),
+    )
 
 
 def default_input_paths() -> dict[str, Path]:
@@ -2991,6 +3037,7 @@ def fund_scoped_providers_from_authority(
 def derive(
     qe_root: Path,
     inputs_manifest: dict[str, object] | None = None,
+    sleeve_inputs: Path | None = None,
 ) -> dict[str, object]:
     input_paths = default_input_paths()
     schema_v3 = False
@@ -4234,7 +4281,2395 @@ def derive(
             str(row["entity"]),
             UNMAPPED_NAV_REASON,
         )
+    if sleeve_inputs is not None:
+        # SPEC-HARNESS: append the derived-sleeve epoch metrics and replace the
+        # residual parents' account-level return/flow metrics (their epochs are
+        # replaced by the derived epochs); every other metric is untouched.
+        sleeve_result = _derive_sleeve_block(qe_root, sleeve_inputs)
+        residual_parents = set(sleeve_result["residual_parent_ids"])
+        replaced = {
+            "flows.account.net",
+            "flows.account.count",
+            "twr.account",
+            "mwr.account",
+        }
+        output["metrics"] = [
+            row
+            for row in output["metrics"]
+            if not (row["metric_id"] in replaced and row["entity"] in residual_parents)
+        ]
+        output["not_derivable"] = [
+            row
+            for row in output["not_derivable"]
+            if not (row["metric_id"] in replaced and row["entity"] in residual_parents)
+        ]
+        output["metrics"].extend(sleeve_result["metrics"])
+        output["not_derivable"].extend(sleeve_result["not_derivable"])
+        output["convention_notes"].extend(sleeve_result["convention_notes"])
+        output["sleeve_derivation"] = sleeve_result["sleeve_derivation"]
     return output
+
+
+# ======================================================================
+# R2 derived sleeve epochs
+# ======================================================================
+
+"""R2 derived sleeve epochs (SPEC-HARNESS), derivation b.
+
+Formerly sleeves.py: moved into derive.py per CORRECTION2.md (the
+architecture rule forbids dynamic module loading); no behaviour change.
+Stdlib only; decimal.Decimal, never float.  The SPEC-IBKR / SPEC-QB fact
+derivations reuse the implementer's own verified standalone programs
+(prev/derive_ibkr.py, prev/derive_qb.py); the epoch layer on top of the
+facts is the new part (SPEC-HARNESS section 3).
+"""
+
+getcontext().prec = 50  # same as at the top of this module
+
+SLEEVE_INPUTS_SCHEMA = "qe-cp-sleeve-inputs/1"
+SLEEVE_DERIVATION_SCHEMA = "qe-cp-sleeve-derivation/1"
+
+ROLES = (
+    "crosswalk",
+    "ibkr_catalog",
+    "tag_map",
+    "ibkr_declared_inputs",
+    "quantbase_declared_inputs",
+    "quantbase_accounts",
+    "quantbase_account_activity",
+    "quantbase_dashboard_crisis",
+    "quantbase_dashboard_singleindex",
+    "quantbase_dashboard_volatis",
+    "quantbase_dashboard_total",
+)
+
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+DIV_KINDS = (
+    "CASH_ACTIVITY:Dividends",
+    "CASH_ACTIVITY:Payment In Lieu Of Dividends",
+    "CASH_ACTIVITY:Withholding Tax",
+)
+
+DUST = Decimal("1e-9")
+RECON_TOL = Decimal("1e-6")
+NOMARK_TOL = Decimal("1e-6")
+
+XIRR_NOT_DERIVABLE_REASON = "ACTUAL_365 XIRR uniqueness or bracket not proved"
+
+
+class SleeveInputError(ValueError):
+    """A --sleeve-inputs selection failed closed verification (exit status 2)."""
+
+
+def _fail(message: str) -> None:
+    raise SleeveInputError(message)
+
+
+def D(s: object) -> Decimal:
+    return Decimal(str(s).strip())
+
+
+def fmt(x: Decimal | None) -> str | None:
+    if x is None:
+        return None
+    if not isinstance(x, Decimal):
+        x = Decimal(x)
+    return format(x, "f")
+
+
+@dataclass(frozen=True)
+class Engine:
+    """The existing derivation's return engine and formatting conventions."""
+
+    time_weighted_return: Callable[..., Decimal]
+    xirr: Callable[..., Decimal | None]
+    money: Callable[[Decimal], str]
+    ratio: Callable[[Decimal], str]
+    metric: Callable[..., dict[str, object]]
+    not_derivable_row: Callable[..., dict[str, object]]
+
+
+@dataclass(frozen=True)
+class Leg:
+    recognition_day: date
+    event_day: date
+    cls: str  # INTERNAL_IN | INTERNAL_OUT
+    amount: Decimal  # positive magnitude; the class carries the direction
+
+    @property
+    def signed(self) -> Decimal:
+        return self.amount if self.cls == "INTERNAL_IN" else -self.amount
+
+
+@dataclass
+class Epoch:
+    account_id: str
+    strategy_id: str
+    effective_start: date
+    effective_end: date | None
+    nav: list[tuple[date, Decimal]]
+    legs: list[Leg]
+
+
+# ---------------------------------------------------------------- sleeve-inputs
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SleeveInputError(f"duplicate key {key!r} in a JSON object")
+        result[key] = value
+    return result
+
+
+def load_json_strict(path: Path) -> object:
+    return json.loads(
+        path.read_text(encoding="utf-8"), object_pairs_hook=_strict_object
+    )
+
+
+def load_sleeve_inputs(
+    sleeve_inputs_path: Path,
+    qe_root: Path,
+    repo_root: Path,
+    cutoff: date,
+) -> dict[str, object]:
+    """Validate a qe-cp-sleeve-inputs/1 file fail-closed and pin every role."""
+    try:
+        document = load_json_strict(sleeve_inputs_path)
+    except (OSError, json.JSONDecodeError) as error:
+        _fail(f"cannot read sleeve-inputs file {sleeve_inputs_path}: {error}")
+    if not isinstance(document, dict):
+        _fail("sleeve-inputs file is not a JSON object")
+    if document.get("schema") != SLEEVE_INPUTS_SCHEMA:
+        _fail(f"schema is not {SLEEVE_INPUTS_SCHEMA!r}")
+    declared_cutoff = document.get("cutoff")
+    if declared_cutoff != cutoff.isoformat():
+        _fail(
+            f"cutoff {declared_cutoff!r} differs from the cutoff {cutoff.isoformat()}"
+        )
+    inputs = document.get("inputs")
+    if not isinstance(inputs, dict):
+        _fail("sleeve-inputs file has no inputs object")
+    order = list(inputs)
+    seen: set[str] = set()
+    resolved: dict[str, dict[str, object]] = {}
+    for role in order:
+        if role not in ROLES:
+            _fail(f"unknown role {role!r}")
+        if role in seen:
+            _fail(f"duplicate role {role!r}")
+        seen.add(role)
+        entry = inputs[role]
+        if not isinstance(entry, dict):
+            _fail(f"role {role!r} is not an object")
+        root = entry.get("root")
+        raw_path = entry.get("path")
+        pin = entry.get("sha256")
+        if root not in ("qe", "repo"):
+            _fail(f"role {role!r}: root must be 'qe' or 'repo'")
+        if not isinstance(raw_path, str) or not raw_path:
+            _fail(f"role {role!r}: missing path")
+        if not isinstance(pin, str) or not SHA256_RE.match(pin):
+            _fail(f"role {role!r}: bad sha256 form {pin!r}")
+        base = qe_root if root == "qe" else repo_root
+        absolute = base / raw_path
+        if not absolute.is_file():
+            _fail(f"role {role!r}: file not found: {raw_path}")
+        actual = _sha256_file(absolute)
+        if actual.lower() != pin.lower():
+            _fail(
+                f"role {role!r}: sha256 mismatch for {raw_path} "
+                f"(pinned {pin}, actual {actual})"
+            )
+        resolved[role] = {
+            "path": raw_path,
+            "root": root,
+            "sha256": pin.lower(),
+            "bytes": absolute.stat().st_size,
+            "abspath": absolute,
+        }
+    for role in ROLES:
+        if role not in resolved:
+            _fail(f"missing role {role!r}")
+    return {"order": order, "roles": resolved, "cutoff": cutoff}
+
+
+def inputs_used_rows(selection: dict[str, object]) -> list[str]:
+    """inputs_used entries: the sleeve input paths as given, with their pins."""
+    order: list[str] = selection["order"]  # type: ignore[assignment]
+    roles: dict[str, dict[str, object]] = selection["roles"]  # type: ignore[assignment]
+    return [f"{roles[role]['path']} sha256:{roles[role]['sha256']}" for role in order]
+
+
+def input_header_rows(selection: dict[str, object]) -> list[dict[str, object]]:
+    """Document-level inputs rows in the style of the existing derivation."""
+    order: list[str] = selection["order"]  # type: ignore[assignment]
+    roles: dict[str, dict[str, object]] = selection["roles"]  # type: ignore[assignment]
+    return [
+        {
+            "path": roles[role]["path"],
+            "sha256": roles[role]["sha256"],
+            "bytes": roles[role]["bytes"],
+        }
+        for role in order
+    ]
+
+
+def block_inputs(selection: dict[str, object]) -> dict[str, object]:
+    order: list[str] = selection["order"]  # type: ignore[assignment]
+    roles: dict[str, dict[str, object]] = selection["roles"]  # type: ignore[assignment]
+    return {
+        role: {"path": roles[role]["path"], "sha256": roles[role]["sha256"]}
+        for role in order
+    }
+
+
+def _role_json(selection: dict[str, object], role: str) -> object:
+    roles: dict[str, dict[str, object]] = selection["roles"]  # type: ignore[assignment]
+    path = roles[role]["abspath"]
+    try:
+        return load_json_strict(path)  # type: ignore[arg-type]
+    except (OSError, json.JSONDecodeError) as error:
+        _fail(f"role {role!r}: cannot parse JSON: {error}")
+
+
+def _role_csv_rows(selection: dict[str, object], role: str) -> list[dict[str, str]]:
+    roles: dict[str, dict[str, object]] = selection["roles"]  # type: ignore[assignment]
+    path = roles[role]["abspath"]
+    with Path(path).open(encoding="utf-8-sig", newline="") as handle:  # type: ignore[arg-type]
+        return list(csv.DictReader(handle))
+
+
+# ---------------------------------------------------------------- IBKR facts
+# (SPEC-IBKR; adapted from this implementer's verified prev/derive_ibkr.py)
+
+
+def _cut_ibkr_slice(
+    catalog: dict[str, object], parent: str, first_day: str, last_day: str
+) -> dict[str, object]:
+    """The parent account's rows restricted to the declared window."""
+
+    def in_window(day: str | None) -> bool:
+        return day is not None and first_day <= day <= last_day
+
+    transactions = []
+    for row in catalog["transactions"]:  # type: ignore[index]
+        if row.get("account_id") != parent:
+            continue
+        if str(row.get("kind", "")).startswith("TRADE:"):
+            day = row.get("event_date")
+        else:
+            day = row.get("nav_recognition_date") or row.get("event_date")
+        if in_window(day):
+            transactions.append(row)
+    return {
+        "transactions": transactions,
+        "positions": [
+            row
+            for row in catalog["positions"]  # type: ignore[index]
+            if row.get("account_id") == parent and in_window(row.get("as_of_date"))
+        ],
+        "change_in_nav_observations": [
+            row
+            for row in catalog["change_in_nav_observations"]  # type: ignore[index]
+            if row.get("account_id") == parent and in_window(row.get("accounting_date"))
+        ],
+        "corporate_actions": [
+            row
+            for row in catalog.get("corporate_actions", [])  # type: ignore[union-attr]
+            if row.get("account_id") == parent
+        ],
+        "accounts": [
+            row
+            for row in catalog["accounts"]  # type: ignore[index]
+            if row.get("account_id") == parent
+        ],
+    }
+
+
+def _ibkr_facts(
+    slc: dict[str, object],
+    declared: dict[str, object],
+    parent_entry: dict[str, object],
+) -> dict[str, object]:
+    refusals: list[str] = []
+    assumptions: list[str] = []
+
+    parent = str(parent_entry["parent_account_id"])
+    unallocated = parent + "-unallocated"
+    residual_id = str(declared["residual_id"])  # "other"
+    sleeves_meta = parent_entry["sleeves"]
+    REAL = [str(s["sleeve_id"]) for s in sleeves_meta]  # type: ignore[index]
+    ALL = REAL + [residual_id]
+    unmatched = parent_entry["unmatched"]  # type: ignore[index]
+    fallback_default = unmatched["fallback_sleeve_id"]
+    unheld_fallback = declared.get("unheld_fallback", {})
+    aliases = declared.get("symbol_aliases", {}).get("aliases", {})  # type: ignore[union-attr]
+    funding = declared["funding_events"]
+    roles = declared["change_in_nav_components"]
+    tol_day = D(declared["closure_tolerance"]["per_day"])  # type: ignore[index]
+    tol_win = D(declared["closure_tolerance"]["window"])  # type: ignore[index]
+
+    # ---------------- NAV days ----------------
+    nav_rows = sorted(
+        slc["change_in_nav_observations"],  # type: ignore[index]
+        key=lambda r: r["accounting_date"],
+    )
+    nav_days = [r["accounting_date"] for r in nav_rows]
+    if len(set(nav_days)) != len(nav_days):
+        refusals.append("ChangeInNAV: duplicate accounting_date values")
+    nav_set = set(nav_days)
+    if not nav_days:
+        _fail("ibkr_catalog: the parent account has no ChangeInNAV row in the window")
+    declared_window = declared["window"]  # type: ignore[index]
+    if (
+        nav_days[0] != declared_window["first_day"]
+        or nav_days[-1] != declared_window["last_day"]
+    ):
+        refusals.append(
+            f"NAV window {nav_days[0]}..{nav_days[-1]} != declared "
+            f"{declared_window['first_day']}..{declared_window['last_day']}"
+        )
+    for a, b in zip(nav_rows, nav_rows[1:]):
+        if D(a["ending_nav"]) != D(b["opening_nav"]):
+            refusals.append(
+                f"ChangeInNAV break: {a['accounting_date']} ending {a['ending_nav']} "
+                f"!= {b['accounting_date']} opening {b['opening_nav']}"
+            )
+
+    acct = {}
+    for r in nav_rows:
+        d = r["accounting_date"]
+        comp = {c["source_component_key"]: D(c["value"]) for c in r["components"]}
+
+        def role_sum(role: str) -> Decimal:
+            tot = Decimal(0)
+            for k in roles[role]:  # type: ignore[index]
+                if k not in comp:
+                    refusals.append(
+                        f"ChangeInNAV {d}: listed component key '{k}' not stated"
+                    )
+                else:
+                    tot += comp[k]
+            return tot
+
+        ext = role_sum("external_flow")
+        acct[d] = {
+            "external_flow": ext,
+            "interest": role_sum("interest"),
+            "fees": role_sum("fees"),
+            "dividend_accrual": role_sum("dividend_accrual"),
+            "account_pnl": D(r["ending_nav"]) - D(r["opening_nav"]) - ext,
+        }
+
+    # ---------------- positions ----------------
+    book: dict[str, dict[str, Decimal]] = {}
+    marks: dict[str, dict[str, Decimal]] = {}
+    for p in slc["positions"]:  # type: ignore[index]
+        d = p["as_of_date"]
+        if d not in nav_set:
+            refusals.append(f"position on non-NAV day {d} ({p['security_id']})")
+            continue
+        q = D(p["quantity"])
+        sec = p["security_id"]
+        if sec in book.setdefault(d, {}):
+            refusals.append(f"position listed twice on {d}: {sec}")
+        book[d][sec] = q
+        mk = p.get("mark_price")
+        if mk in (None, ""):
+            if q != 0:
+                refusals.append(f"non-zero position without mark_price on {d}: {sec}")
+        else:
+            marks.setdefault(d, {})[sec] = D(mk)
+    for d in nav_days:
+        book.setdefault(d, {})
+        marks.setdefault(d, {})
+
+    sec_kind = {}
+    for p in slc["positions"]:  # type: ignore[index]
+        sec_kind[p["security_id"]] = (p.get("asset_category"), p.get("multiplier"))
+
+    # ---------------- trades ----------------
+    trades_by_day: dict[str, list[dict[str, object]]] = {d: [] for d in nav_days}
+    for t in slc["transactions"]:  # type: ignore[index]
+        kind = str(t.get("kind", ""))
+        if not kind.startswith("TRADE:"):
+            continue
+        d = t["event_date"]
+        if d not in nav_set:
+            refusals.append(f"trade on non-NAV day {d}: {t.get('record_id')}")
+            continue
+        bad = None
+        if (
+            t.get("quantity") in (None, "")
+            or t.get("execution_price") in (None, "")
+            or not t.get("commission")
+            or t["commission"].get("value") in (None, "")
+        ):
+            bad = "missing quantity/execution_price/commission"
+        elif t.get("amount", {}).get("currency") != "USD":
+            bad = "amount not in USD"
+        elif sec_kind.get(t["security_id"], ("STK", "1")) != ("STK", "1"):
+            bad = "security is not a plain share"
+        if bad:
+            refusals.append(f"trade {t.get('record_id')} on {d}: {bad}")
+            continue
+        trades_by_day[d].append(
+            {
+                "day": d,
+                "time": t.get("executed_time") or "",
+                "sec": t["security_id"],
+                "qty": D(t["quantity"]),
+                "price": D(t["execution_price"]),
+                "comm": D(t["commission"]["value"]),
+                "ref": t.get("order_reference"),
+            }
+        )
+
+    # ---------------- dividends ----------------
+    divs_by_day: dict[str, list[dict[str, object]]] = {d: [] for d in nav_days}
+    for t in slc["transactions"]:  # type: ignore[index]
+        if t.get("kind") not in DIV_KINDS or not t.get("security_id"):
+            continue
+        d = t.get("nav_recognition_date") or t["event_date"]
+        if d not in nav_set:
+            refusals.append(f"dividend on non-NAV day {d}: {t.get('record_id')}")
+            continue
+        divs_by_day[d].append(
+            {"sec": t["security_id"], "amount": D(t["amount"]["value"])}
+        )
+
+    # ---------------- tag resolution ----------------
+    def resolve(ref: object, day: str) -> str | None:
+        if not ref:
+            return None
+        ntag = re.sub(r"^[0-9]+-?", "", str(ref), count=1)
+        if not ntag:
+            return None
+        hits = []
+        for s in sleeves_meta:  # type: ignore[union-attr]
+            if s["effective_start"] <= day and (
+                s["effective_end"] is None or day <= s["effective_end"]
+            ):
+                for rule in s["tags"]:
+                    m, pat = rule["match"], rule["pattern"]
+                    ok = (
+                        (m == "startswith" and ntag.startswith(pat))
+                        or (m == "contains" and pat in ntag)
+                        or (m == "exact" and ntag == pat)
+                    )
+                    if ok:
+                        hits.append(s["sleeve_id"])
+                        break
+        if len(hits) > 1:
+            refusals.append(f"tag '{ref}' on {day} matches two sleeves {hits}")
+        return hits[0] if hits else None
+
+    # ---------------- ledger ----------------
+    holdings: dict[str, dict[str, Decimal]] = {s: {} for s in ALL}
+    manual_assignments = []
+    recon_gaps = []
+    recon_scalings = []
+    offsetting_residues = []
+    unallocated_dividends = []
+    facts: dict[tuple[str, str], dict[str, Decimal]] = {}
+
+    alias_at: dict[str, list[tuple[str, str]]] = {}
+    old_of: dict[str, str] = {}
+    for old, a in aliases.items():  # type: ignore[union-attr]
+        alias_at.setdefault(a["from_day"], []).append((old, a["to"]))
+        old_of[a["to"]] = old
+
+    def prev_mark(sec: str, pday: str) -> Decimal | None:
+        m = marks.get(pday, {}).get(sec)
+        o = sec
+        while m is None and o in old_of:
+            o = old_of[o]
+            m = marks.get(pday, {}).get(o)
+        return m
+
+    prev_day = None
+    for d in nav_days:
+        for old, new in alias_at.get(d, []):
+            for s in ALL:
+                q = holdings[s].pop(old, Decimal(0))
+                if q != 0:
+                    holdings[s][new] = holdings[s].get(new, Decimal(0)) + q
+
+        prev_qty = {
+            s: {k: v for k, v in holdings[s].items() if abs(v) > DUST} for s in ALL
+        }
+
+        net_trade = {s: Decimal(0) for s in ALL}
+        comm = {s: Decimal(0) for s in ALL}
+        todays = trades_by_day[d]
+        if any(t["time"] == "" for t in todays) and any(
+            resolve(t["ref"], d) is None for t in todays
+        ):
+            refusals.append(
+                f"{d}: day has both an execution with no executed_time and an "
+                "UNASSIGNED execution; attribution order is ambiguous (continued "
+                "with the spec order)"
+            )
+        keyed = []
+        for t in todays:
+            s = resolve(t["ref"], d)
+            keyed.append(
+                (
+                    f"{d};{t['time']}",
+                    0 if s else 1,
+                    t["sec"],
+                    t["qty"],
+                    t["price"],
+                    t["comm"],
+                    s,
+                    t,
+                )
+            )
+        keyed.sort(key=lambda k: k[:6])
+
+        for _, _, sec, qty, price, c, s, t in keyed:
+            if s is not None:
+                holdings[s][sec] = holdings[s].get(sec, Decimal(0)) + qty
+                net_trade[s] += qty * price
+                comm[s] += c
+                continue
+            holders = [h for h in REAL if holdings[h].get(sec, Decimal(0)) * qty < 0]
+            if len(holders) == 1:
+                h = holders[0]
+                holdings[h][sec] += qty
+                net_trade[h] += qty * price
+                comm[h] += c
+                manual_assignments.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "quantity": fmt(qty),
+                        "how": "assigned",
+                        "sleeves": [h],
+                    }
+                )
+            elif len(holders) > 1:
+                tot = sum(abs(holdings[h][sec]) for h in holders)
+                for h in sorted(holders):
+                    share = abs(holdings[h][sec]) / tot
+                    holdings[h][sec] += share * qty
+                    net_trade[h] += share * qty * price
+                    comm[h] += share * c
+                manual_assignments.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "quantity": fmt(qty),
+                        "how": "split",
+                        "sleeves": sorted(holders),
+                    }
+                )
+            else:
+                fb = unheld_fallback.get(sec, fallback_default)  # type: ignore[union-attr]
+                if fb is None:
+                    fb = residual_id
+                holdings[fb][sec] = holdings[fb].get(sec, Decimal(0)) + qty
+                net_trade[fb] += qty * price
+                comm[fb] += c
+                manual_assignments.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "quantity": fmt(qty),
+                        "how": "unheld",
+                        "sleeves": [fb],
+                    }
+                )
+
+        secs = set(book[d]) | {
+            sec for s in ALL for sec, q in holdings[s].items() if q != 0
+        }
+        for sec in sorted(secs):
+            total = sum((holdings[s].get(sec, Decimal(0)) for s in ALL), Decimal(0))
+            actual = book[d].get(sec, Decimal(0))
+            if abs(total - actual) <= RECON_TOL:
+                if actual == 0:
+                    held = {
+                        s: holdings[s][sec]
+                        for s in ALL
+                        if abs(holdings[s].get(sec, Decimal(0))) > DUST
+                    }
+                    if held:
+                        offsetting_residues.append(
+                            {
+                                "day": d,
+                                "security_id": sec,
+                                "quantities": {
+                                    s: fmt(q) for s, q in sorted(held.items())
+                                },
+                            }
+                        )
+                        for s in held:
+                            del holdings[s][sec]
+                continue
+            recon_gaps.append(
+                {
+                    "day": d,
+                    "security_id": sec,
+                    "derived": fmt(total),
+                    "account": fmt(actual),
+                }
+            )
+            if abs(total) > DUST and abs(actual) > DUST and total * actual > 0:
+                factor = actual / total
+                for s in ALL:
+                    if sec in holdings[s]:
+                        holdings[s][sec] *= factor
+                recon_scalings.append(
+                    {"day": d, "security_id": sec, "factor": fmt(factor)}
+                )
+            elif abs(total) > DUST and actual == 0:
+                for s in ALL:
+                    holdings[s].pop(sec, None)
+            else:
+                holdings[residual_id][sec] = holdings[residual_id].get(
+                    sec, Decimal(0)
+                ) + (actual - total)
+
+        div_cash = {s: Decimal(0) for s in ALL}
+        for dv in divs_by_day[d]:
+            sec, amt = dv["sec"], dv["amount"]
+            holders = [s for s in ALL if prev_qty[s].get(sec, Decimal(0)) > 0]
+            basis = {s: prev_qty[s][sec] for s in holders}
+            if not holders:
+                holders = [s for s in ALL if holdings[s].get(sec, Decimal(0)) > 0]
+                basis = {s: holdings[s][sec] for s in holders}
+            if not holders:
+                unallocated_dividends.append({"day": d, "amount": fmt(amt)})
+                continue
+            tot = sum(basis.values())
+            for s in holders:
+                div_cash[s] += amt * basis[s] / tot
+
+        for s in ALL:
+            value = Decimal(0)
+            for sec, q in holdings[s].items():
+                if abs(q) <= DUST:
+                    continue
+                m = marks[d].get(sec)
+                if m is None:
+                    if abs(q) <= NOMARK_TOL:
+                        continue
+                    refusals.append(
+                        f"{d}: sleeve {s} holds {fmt(q)} of {sec} with no mark"
+                    )
+                    continue
+                value += q * m
+            pv = Decimal(0)
+            if prev_day is not None:
+                for sec, q in prev_qty[s].items():
+                    m = prev_mark(sec, prev_day)
+                    if m is None:
+                        if abs(q) <= NOMARK_TOL:
+                            continue
+                        refusals.append(
+                            f"{d}: sleeve {s} prev holding {fmt(q)} of {sec} has "
+                            "no previous mark"
+                        )
+                        continue
+                    pv += q * m
+            nt, cm, dv_c = net_trade[s], comm[s], div_cash[s]
+            facts[(s, d)] = {
+                "value": value,
+                "prev_value": pv,
+                "net_trade": nt,
+                "commission": cm,
+                "dividend": dv_c,
+                "price_pnl": value - pv - nt,
+            }
+        prev_day = d
+
+    # ---------------- SPEC-IBKR 6: sleeve NAV rows ----------------
+    sleeve_first: dict[str, str | None] = {}
+    sleeve_exit: dict[str, str | None] = {}
+    for s in REAL:
+        days = sorted(funding.get(s, {}))  # type: ignore[union-attr]
+        sleeve_first[s] = days[0] if days else None
+        exits = [dd for dd in days if funding[s][dd]["kind"] == "EXIT"]  # type: ignore[index]
+        sleeve_exit[s] = exits[-1] if exits else None
+        for dd in days:
+            if dd not in nav_set:
+                refusals.append(
+                    f"{s}: declared funding event on {dd} which is not a NAV day"
+                )
+
+    sleeve_days: dict[str, list[str]] = {}
+    for s in REAL:
+        if sleeve_first[s] is None:
+            sleeve_days[s] = []
+            continue
+        last = sleeve_exit[s] or nav_days[-1]
+        sleeve_days[s] = [d for d in nav_days if sleeve_first[s] <= d <= last]  # type: ignore[operator]
+
+    rows: dict[str, list[dict[str, object]]] = {s: [] for s in REAL}
+    nav_prev_map = {s: Decimal(0) for s in REAL}
+    cum_alloc = {s: Decimal(0) for s in REAL}
+    cum_alloc_alt = {s: Decimal(0) for s in REAL}
+
+    for d in nav_days:
+        active = [s for s in REAL if d in sleeve_days[s]]
+        if not active:
+            continue
+        interim = {}
+        for s in active:
+            f = facts[(s, d)]
+            kind = funding[s].get(d, {}).get("kind", "")  # type: ignore[index]
+            flow_in = f["net_trade"] if kind == "IN" else Decimal(0)
+            exposure = abs(f["prev_value"]) + max(f["net_trade"], Decimal(0))
+            nav_prev = nav_prev_map[s]
+            base = nav_prev + flow_in
+            own_pnl = f["price_pnl"] + f["commission"] + f["dividend"]
+            interim[s] = {
+                "kind": kind,
+                "flow_in": flow_in,
+                "exposure": exposure,
+                "base": base,
+                "own_pnl": own_pnl,
+                "f": f,
+            }
+        exp_sum = sum(interim[s]["exposure"] for s in active)
+        base_sum = sum(max(interim[s]["base"], Decimal(0)) for s in active)
+        for s in active:
+            it = interim[s]
+            f, kind = it["f"], it["kind"]
+            nav_prev = nav_prev_map[s]
+            nav_pre = nav_prev + it["flow_in"] + it["own_pnl"]
+            if kind == "OUT":
+                flow_out = f["net_trade"]
+            elif kind == "EXIT":
+                flow_out = -nav_pre
+            elif kind == "SWEEP":
+                flow_out = f["value"] - nav_pre
+            else:
+                flow_out = Decimal(0)
+            nav_end = nav_pre + flow_out
+            value = f["value"]
+            if kind == "EXIT":
+                nav_end = Decimal(0)
+                value = Decimal(0)
+            share = it["exposure"] / exp_sum if exp_sum != 0 else Decimal(0)
+            share_alt = (
+                max(it["base"], Decimal(0)) / base_sum if base_sum != 0 else Decimal(0)
+            )
+            a = acct[d]
+            alloc_interest = a["interest"] * share
+            alloc_fees = a["fees"] * share
+            alloc_div = a["dividend_accrual"] * share
+            alloc_total = alloc_interest + alloc_fees + alloc_div
+            alloc_total_alt = (
+                a["interest"] + a["fees"] + a["dividend_accrual"]
+            ) * share_alt
+            base = it["base"]
+            r_own = it["own_pnl"] / base if base > 1 else Decimal(0)
+            r_alloc = (it["own_pnl"] + alloc_total) / base if base > 1 else Decimal(0)
+            r_alloc_alt = (
+                (it["own_pnl"] + alloc_total_alt) / base if base > 1 else Decimal(0)
+            )
+            cum_alloc[s] += alloc_total
+            cum_alloc_alt[s] += alloc_total_alt
+            if kind == "EXIT":
+                nav_end_after = Decimal(0)
+                nav_end_after_alt = Decimal(0)
+            else:
+                nav_end_after = nav_end + cum_alloc[s]
+                nav_end_after_alt = nav_end + cum_alloc_alt[s]
+            rows[s].append(
+                {
+                    "day": d,
+                    "event": kind,
+                    "nav_prev": fmt(nav_prev),
+                    "flow_in": fmt(it["flow_in"]),
+                    "flow_out": fmt(flow_out),
+                    "nav_end": fmt(nav_end),
+                    "value": fmt(value),
+                    "exposure": fmt(it["exposure"]),
+                    "exposure_share": fmt(share),
+                    "price_pnl": fmt(f["price_pnl"]),
+                    "commission": fmt(f["commission"]),
+                    "dividend": fmt(f["dividend"]),
+                    "own_pnl": fmt(it["own_pnl"]),
+                    "base": fmt(base),
+                    "r_own": fmt(r_own),
+                    "alloc_interest": fmt(alloc_interest),
+                    "alloc_fees": fmt(alloc_fees),
+                    "alloc_dividend_accrual": fmt(alloc_div),
+                    "alloc_total": fmt(alloc_total),
+                    "r_alloc": fmt(r_alloc),
+                    "nav_end_after_alloc": fmt(nav_end_after),
+                    "alloc_total_alt": fmt(alloc_total_alt),
+                    "r_alloc_alt": fmt(r_alloc_alt),
+                    "nav_end_after_alloc_alt": fmt(nav_end_after_alt),
+                }
+            )
+            nav_prev_map[s] = nav_end
+
+    cumulative = {}
+    for s in REAL:
+        rs = rows[s]
+        if not rs:
+            continue
+        twr_o = Decimal(1)
+        twr_a = Decimal(1)
+        twr_alt = Decimal(1)
+        for r in rs:
+            twr_o *= 1 + D(r["r_own"])
+            twr_a *= 1 + D(r["r_alloc"])
+            twr_alt *= 1 + D(r["r_alloc_alt"])
+        cumulative[s] = {
+            "first_day": rs[0]["day"],
+            "last_day": rs[-1]["day"],
+            "rows": len(rs),
+            "twr_own": fmt(twr_o - 1),
+            "twr_after_alloc": fmt(twr_a - 1),
+            "twr_after_alloc_alt": fmt(twr_alt - 1),
+            "sum_flow_in": fmt(sum((D(r["flow_in"]) for r in rs), Decimal(0))),
+            "sum_flow_out": fmt(sum((D(r["flow_out"]) for r in rs), Decimal(0))),
+            "sum_own_pnl": fmt(sum((D(r["own_pnl"]) for r in rs), Decimal(0))),
+            "sum_alloc_total": fmt(sum((D(r["alloc_total"]) for r in rs), Decimal(0))),
+            "sum_alloc_total_alt": fmt(
+                sum((D(r["alloc_total_alt"]) for r in rs), Decimal(0))
+            ),
+            "final_nav_end": rs[-1]["nav_end"],
+            "final_nav_end_after_alloc": rs[-1]["nav_end_after_alloc"],
+        }
+
+    # ---------------- SPEC-IBKR 7: closure ----------------
+    row_by = {(s, r["day"]): r for s in REAL for r in rows[s]}
+    closure = []
+    max_abs_unx = Decimal(0)
+    win_unx = Decimal(0)
+    for d in nav_days:
+        active = [s for s in REAL if (s, d) in row_by]
+        sop = sum(
+            (
+                D(row_by[(s, d)]["own_pnl"]) + D(row_by[(s, d)]["alloc_total"])
+                for s in active
+            ),
+            Decimal(0),
+        )
+        resid_sleeves = [residual_id] + [s for s in REAL if (s, d) not in row_by]
+        resid = Decimal(0)
+        for s in resid_sleeves:
+            f = facts[(s, d)]
+            resid += (
+                f["value"]
+                - f["prev_value"]
+                - f["net_trade"]
+                + f["commission"]
+                + f["dividend"]
+            )
+        resid += sum(
+            (D(u["amount"]) for u in unallocated_dividends if u["day"] == d), Decimal(0)
+        )
+        unx = acct[d]["account_pnl"] - sop - resid
+        ucf = Decimal(0)
+        for s in active:
+            ev = funding[s].get(d)  # type: ignore[index]
+            if ev and ev.get("counterparty") == "UNALLOCATED_ACCOUNT_CASH":
+                ucf += -(D(row_by[(s, d)]["flow_in"]) + D(row_by[(s, d)]["flow_out"]))
+        closure.append(
+            {
+                "day": d,
+                "account_pnl": fmt(acct[d]["account_pnl"]),
+                "sleeves_own_plus_alloc": fmt(sop),
+                "residual_and_post_exit": fmt(resid),
+                "unexplained": fmt(unx),
+                "unallocated_cash_flow": fmt(ucf),
+            }
+        )
+        if abs(unx) > max_abs_unx:
+            max_abs_unx = abs(unx)
+        win_unx += unx
+
+    closure_summary = {
+        "max_abs_unexplained": fmt(max_abs_unx),
+        "window_unexplained": fmt(win_unx),
+        "per_day_tolerance_met": max_abs_unx <= tol_day,
+        "window_tolerance_met": abs(win_unx) <= tol_win,
+    }
+
+    # ---------------- SPEC-IBKR 8: pairs ----------------
+    pairs = []
+    seq = 0
+    for d in nav_days:
+        active = [s for s in REAL if (s, d) in row_by]
+        nets = {}
+        for s in active:
+            r = row_by[(s, d)]
+            nets[s] = D(r["flow_in"]) + D(r["flow_out"])
+        day_pairs = []
+        greedy_ins, greedy_outs = [], []
+        for s in sorted(active):
+            if nets[s] == 0:
+                continue
+            ev = funding[s].get(d, {})  # type: ignore[index]
+            if ev.get("counterparty") == "UNALLOCATED_ACCOUNT_CASH":
+                if nets[s] > 0:
+                    day_pairs.append(
+                        (
+                            unallocated,
+                            parent + "-" + s,
+                            "unallocated",
+                            s,
+                            nets[s],
+                            "UNALLOCATED_CASH",
+                            "DECLARED_UNALLOCATED",
+                        )
+                    )
+                else:
+                    day_pairs.append(
+                        (
+                            parent + "-" + s,
+                            unallocated,
+                            s,
+                            "unallocated",
+                            -nets[s],
+                            "UNALLOCATED_CASH",
+                            "DECLARED_UNALLOCATED",
+                        )
+                    )
+            else:
+                (greedy_ins if nets[s] > 0 else greedy_outs).append(s)
+        rem_in = {s: nets[s] for s in greedy_ins}
+        rem_out = {s: -nets[s] for s in greedy_outs}
+        i = j = 0
+        while i < len(greedy_ins) and j < len(greedy_outs):
+            si, so = greedy_ins[i], greedy_outs[j]
+            amt = min(rem_in[si], rem_out[so])
+            day_pairs.append(
+                (
+                    parent + "-" + so,
+                    parent + "-" + si,
+                    so,
+                    si,
+                    amt,
+                    "REALLOCATION",
+                    "SLEEVE_PAIR",
+                )
+            )
+            rem_in[si] -= amt
+            rem_out[so] -= amt
+            if rem_in[si] == 0:
+                i += 1
+            if rem_out[so] == 0:
+                j += 1
+        for s in sorted(rem_in):
+            if rem_in[s] > 0:
+                day_pairs.append(
+                    (
+                        unallocated,
+                        parent + "-" + s,
+                        "unallocated",
+                        s,
+                        rem_in[s],
+                        "UNALLOCATED_CASH",
+                        "UNALLOCATED_REMAINDER",
+                    )
+                )
+        for s in sorted(rem_out):
+            if rem_out[s] > 0:
+                day_pairs.append(
+                    (
+                        parent + "-" + s,
+                        unallocated,
+                        s,
+                        "unallocated",
+                        rem_out[s],
+                        "UNALLOCATED_CASH",
+                        "UNALLOCATED_REMAINDER",
+                    )
+                )
+        for out_acct, in_acct, fs, ts, amt, kind, pairing in day_pairs:
+            seq += 1
+            pairs.append(
+                {
+                    "day": d,
+                    "sequence": seq,
+                    "amount": fmt(amt),
+                    "out_account": out_acct,
+                    "in_account": in_acct,
+                    "kind": kind,
+                    "pairing": pairing,
+                    "from_sleeve": fs,
+                    "to_sleeve": ts,
+                }
+            )
+
+    assumptions.extend(
+        [
+            "Execution ordering tie-break 'ascending security_id, quantity, "
+            "execution_price, commission' is applied as decimal/string ascending "
+            "sorts on the parsed values.",
+            "Section 4.4 reconciliation iterates the union of the account book's "
+            "securities and every sleeve-held security in ascending security_id "
+            "order; dust of |q| <= 1e-9 left by a reconcile-to-zero is dropped via "
+            "the offsetting-residue branch.",
+            "prev_value missing-mark fallback walks the alias chain (new -> old) at "
+            "the previous day's marks.",
+            "Pairs (SPEC-IBKR 8): within a day, DECLARED_UNALLOCATED pairs are "
+            "emitted first in ascending sleeve-id order, then greedy SLEEVE_PAIR "
+            "reallocations in pairing order, then UNALLOCATED_REMAINDER pairs "
+            "(remaining ins ascending, then remaining outs ascending).",
+            "Pairs: from_sleeve/to_sleeve carry the sleeve id, or 'unallocated' "
+            "for the perimeter pseudo-account '<parent>-unallocated'.",
+            "Cumulative TWRs chain every row's rate including rows where the spec "
+            "yields r = 0 (base <= 1), which contribute a factor of exactly 1.",
+        ]
+    )
+
+    return {
+        "window": {"first_day": nav_days[0], "last_day": nav_days[-1]},
+        "sleeves": rows,
+        "cumulative": cumulative,
+        "closure": closure,
+        "closure_summary": closure_summary,
+        "pairs": pairs,
+        "disclosures": {
+            "manual_assignments": manual_assignments,
+            "reconciliation_gaps": recon_gaps,
+            "reconciliation_scalings": recon_scalings,
+            "offsetting_residues": offsetting_residues,
+            "unallocated_dividends": unallocated_dividends,
+        },
+        "refusals": refusals,
+        "assumptions": assumptions,
+    }
+
+
+# ------------------------------------------------------------- Quantbase facts
+# (SPEC-QB; adapted from this implementer's verified prev/derive_qb.py)
+
+
+def _udt(s: str) -> datetime:
+    return datetime.fromisoformat(s.strip().replace("Z", "+00:00")).astimezone(
+        timezone.utc
+    )
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_day_us(s: str) -> date:
+    return datetime.strptime(s.strip(), "%m/%d/%Y").date()
+
+
+def _load_dashboard_rows(
+    rows: Iterable[dict[str, str]], name: str, refusals: list[str]
+) -> dict[date, dict[str, Decimal]]:
+    board: dict[date, dict[str, Decimal]] = {}
+    for r in rows:
+        d = _parse_day_us(r["time"])
+        if d in board:
+            refusals.append(f"dashboard {name}: duplicate day {d.isoformat()}")
+        board[d] = {
+            "value": D(r["value"]),
+            "cost_basis": D(r["cost_basis"]),
+            "profit_loss": D(r["profit_loss"]),
+        }
+    return board
+
+
+def _qb_facts(
+    declared: dict[str, object],
+    dashboards: dict[str, list[dict[str, str]]],
+    activity_rows: list[dict[str, str]],
+    accounts_rows: list[dict[str, str]],
+    cutoff: date,
+) -> dict[str, object]:
+    refusals: list[str] = []
+    assumptions: list[str] = []
+
+    parent = str(declared["parent_account_id"])
+    unallocated = parent + "-unallocated"
+    tol = {k: D(v) for k, v in declared["closure_tolerance"].items()}  # type: ignore[index]
+    pairing_decl = declared["pairing"]  # type: ignore[index]
+    window_seconds = D(pairing_decl["window_seconds"])
+    exempt_days = {
+        date.fromisoformat(k)
+        for k in declared.get("nav_total_exempt_days", {})  # type: ignore[union-attr]
+    }
+
+    dash = {
+        name: _load_dashboard_rows(rows, name, refusals)
+        for name, rows in dashboards.items()
+    }
+
+    # dedupe on (activity_type, id); exact repeat = one row, conflicting = error
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+    activity: list[dict[str, str]] = []
+    for r in activity_rows:
+        key = (r["activity_type"], r["id"])
+        if key in seen:
+            if dict(seen[key]) != dict(r):
+                refusals.append(
+                    f"conflicting repeat of (activity_type={key[0]}, id={key[1]})"
+                )
+            continue
+        seen[key] = r
+        activity.append(r)
+
+    def row_day(r: dict[str, str]) -> date | None:
+        at = r["activity_type"]
+        if at == "filled_txn":
+            return _udt(r["time"]).date()
+        if at == "order":
+            return _udt(r["filled_at"]).date() if r["filled_at"] else None
+        if at in ("transfer", "journal"):
+            return _udt(r["created_at"]).date()
+        if at == "dividend":
+            return _udt(r["date"]).date()
+        return None
+
+    kept, after_cutoff = [], 0
+    for r in activity:
+        d = row_day(r)
+        if d is not None and d > cutoff:
+            after_cutoff += 1
+            continue
+        kept.append(r)
+
+    orders = [r for r in kept if r["activity_type"] == "order" and r["executed"] == "Y"]
+    orders_by_txn: dict[str, list[dict[str, str]]] = {}
+    for o in orders:
+        orders_by_txn.setdefault(o["transaction"], []).append(o)
+
+    txns = [
+        r for r in kept if r["activity_type"] == "filled_txn" and r["filled"] == "Y"
+    ]
+
+    def fill_moment(txn: dict[str, str], include_fee_orders: bool) -> datetime | None:
+        os_ = orders_by_txn.get(txn["id"], [])
+        if not include_fee_orders:
+            os_ = [o for o in os_ if o["created_to_cover_fees"] != "True"]
+        if not os_:
+            return None
+        return max(_udt(o["filled_at"]) for o in os_)
+
+    def txn_fill(txn: dict[str, str]) -> datetime | None:
+        fee_txn = txn["created_to_cover_fees"] == "True"
+        m = fill_moment(txn, include_fee_orders=fee_txn)
+        if m is None:
+            m = fill_moment(txn, include_fee_orders=True)
+        if m is None:
+            refusals.append(
+                f"filled_txn {txn['id']} (fund {txn['fund']} {txn['type']}) has "
+                "no executed orders"
+            )
+        return m
+
+    funds_decl = declared["funds"]  # type: ignore[index]
+    out_funds: dict[str, object] = {}
+    all_flows: list[dict[str, object]] = []
+    net_fills_by_fund: dict[str, Decimal] = {}
+    fee_sells_by_fund: dict[str, list[dict[str, object]]] = {}
+
+    for sleeve in ("crisis", "singleindex"):
+        fd = funds_decl[sleeve]
+        fund_id = fd["fund_id"]
+        board = dash[fd["dashboard"]]
+        first_nz = date.fromisoformat(fd["first_nonzero_day"])
+        last_nz = date.fromisoformat(fd["last_nonzero_day"])
+        exit_day = last_nz + timedelta(days=1)
+
+        nz_days = [d for d in sorted(board) if board[d]["value"] != 0]
+        if not nz_days:
+            refusals.append(f"{sleeve}: dashboard has no non-zero value day")
+        else:
+            if nz_days[0] != first_nz:
+                refusals.append(
+                    f"{sleeve}: declared first_nonzero_day {first_nz} != bytes "
+                    f"{nz_days[0]}"
+                )
+            if nz_days[-1] != last_nz:
+                refusals.append(
+                    f"{sleeve}: declared last_nonzero_day {last_nz} != bytes "
+                    f"{nz_days[-1]}"
+                )
+
+        d = first_nz
+        while d <= exit_day:
+            if d not in board:
+                refusals.append(
+                    f"{sleeve}: dashboard gap at {d.isoformat()} inside the fund epoch"
+                )
+            d += timedelta(days=1)
+
+        fund_txns = [
+            t
+            for t in txns
+            if t["fund"] == fund_id and t["type"] in ("BUY", "SELL", "MAX_S")
+        ]
+        fills = []
+        for t in fund_txns:
+            m = txn_fill(t)
+            fills.append(
+                {
+                    "txn": t,
+                    "kind": t["type"],
+                    "amount": D(t["amount"]),
+                    "fee": t["created_to_cover_fees"] == "True",
+                    "fill_at": m,
+                    "fill_day": m.date() if m else None,
+                    "time_utc": _udt(t["time"]),
+                }
+            )
+        fills.sort(
+            key=lambda f: f["fill_at"] or datetime.min.replace(tzinfo=timezone.utc)
+        )
+
+        net_fills = sum((f["amount"] for f in fills), Decimal(0))
+        net_fills_by_fund[fund_id] = net_fills
+        fee_sells = [f for f in fills if f["fee"]]
+        fee_sells_by_fund[fund_id] = fee_sells
+        nonfee = [f for f in fills if not f["fee"]]
+
+        opening = None
+        for f in nonfee:
+            if f["kind"] == "BUY" and f["fill_day"] == first_nz:
+                opening = f
+                break
+        if opening is None:
+            refusals.append(
+                f"{sleeve}: no purchase with fill day == first_nonzero_day {first_nz}"
+            )
+
+        flows_out = []
+        for f in nonfee:
+            if opening is not None and f["txn"]["id"] == opening["txn"]["id"]:
+                rec = f["fill_day"]
+            else:
+                rec = f["fill_day"] + timedelta(days=1)
+            f["recognition_day"] = rec
+            flows_out.append(
+                {
+                    "fill_day": f["fill_day"].isoformat(),
+                    "recognition_day": rec.isoformat(),
+                    "txn_id": f["txn"]["id"],
+                    "kind": f["kind"],
+                    "amount": fmt(f["amount"]),
+                    "fill_at_utc": _iso(f["fill_at"]) if f["fill_at"] else None,
+                    "time_utc": _iso(f["time_utc"]),
+                }
+            )
+
+        # Pairing flows are copied only after their recognition day is set
+        # (SPEC-QB 2: fill day + 1, the opening purchase: its fill day).
+        for f in nonfee:
+            all_flows.append({**f, "sleeve": sleeve, "fund_id": fund_id})
+
+        flow_in_by_day: dict[date, Decimal] = {}
+        flow_out_by_day: dict[date, Decimal] = {}
+        for f in nonfee:
+            if f["kind"] == "BUY":
+                flow_in_by_day[f["recognition_day"]] = (
+                    flow_in_by_day.get(f["recognition_day"], Decimal(0)) + f["amount"]
+                )
+            else:
+                flow_out_by_day[f["recognition_day"]] = (
+                    flow_out_by_day.get(f["recognition_day"], Decimal(0)) + f["amount"]
+                )
+
+        rows_out = []
+        nav_prev = Decimal(0)
+        twr = Decimal(1)
+        own_pnl_total = Decimal(0)
+        d = first_nz
+        while d <= exit_day:
+            nav_end = board[d]["value"] if d in board else Decimal(0)
+            fi = flow_in_by_day.get(d, Decimal(0))
+            fo = flow_out_by_day.get(d, Decimal(0))
+            own_pnl = nav_end - nav_prev - fi - fo
+            r = (own_pnl / nav_prev) if nav_prev > 0 else None
+            if r is not None:
+                twr *= 1 + r
+            own_pnl_total += own_pnl
+            if d == first_nz:
+                event = "OPEN"
+            elif d == exit_day:
+                event = "EXIT"
+            elif fi > 0 and fo < 0:
+                event = "BOTH"
+            elif fi > 0:
+                event = "IN"
+            elif fo < 0:
+                event = "OUT"
+            else:
+                event = ""
+            rows_out.append(
+                {
+                    "day": d.isoformat(),
+                    "event": event,
+                    "nav_prev": fmt(nav_prev),
+                    "flow_in": fmt(fi),
+                    "flow_out": fmt(fo),
+                    "nav_end": fmt(nav_end),
+                    "own_pnl": fmt(own_pnl),
+                    "interval_return": fmt(r),
+                }
+            )
+            nav_prev = nav_end
+            d += timedelta(days=1)
+
+        cb_cut = board[cutoff]["cost_basis"] if cutoff in board else None
+        if cb_cut is None:
+            refusals.append(f"{sleeve}: dashboard has no cutoff-day row {cutoff}")
+            cb_diff = None
+        else:
+            cb_diff = net_fills - cb_cut
+            if abs(cb_diff) > tol["cost_basis"]:
+                refusals.append(
+                    f"{sleeve}: net fills {fmt(net_fills)} vs dashboard cost_basis "
+                    f"{fmt(cb_cut)} differ by {fmt(cb_diff)} (> {fmt(tol['cost_basis'])})"
+                )
+        opening_value = board[first_nz]["value"]
+        opening_purchase = opening["amount"] if opening else None
+        if opening is not None:
+            o_diff = opening_value - opening_purchase
+            if abs(o_diff) > D(fd["opening_tolerance"]):
+                refusals.append(
+                    f"{sleeve}: opening value {fmt(opening_value)} vs opening "
+                    f"purchase {fmt(opening_purchase)} differ by {fmt(o_diff)} "
+                    f"(> {fd['opening_tolerance']})"
+                )
+        last_value = board[last_nz]["value"]
+        exits = [f for f in nonfee if f["kind"] == "MAX_S"]
+        exit_proceeds = -sum((f["amount"] for f in exits), Decimal(0))
+        if last_value != 0:
+            e_rel = abs(exit_proceeds - last_value) / abs(last_value)
+            if e_rel > tol["exit_relative"]:
+                refusals.append(
+                    f"{sleeve}: MAX_S proceeds {fmt(exit_proceeds)} vs last "
+                    f"non-zero value {fmt(last_value)} relative difference "
+                    f"{fmt(e_rel)} (> {fmt(tol['exit_relative'])})"
+                )
+
+        out_funds[sleeve] = {
+            "fund_id": fund_id,
+            "first_day": first_nz.isoformat(),
+            "last_nonzero_day": last_nz.isoformat(),
+            "exit_recognition_day": exit_day.isoformat(),
+            "rows": rows_out,
+            "net_external_flow": fmt(sum((f["amount"] for f in nonfee), Decimal(0))),
+            "fee_sells_net": fmt(sum((f["amount"] for f in fee_sells), Decimal(0))),
+            "own_pnl_total": fmt(own_pnl_total),
+            "twr": fmt(twr - 1),
+            "flows": flows_out,
+            "fee_sells": [
+                {
+                    "txn_id": f["txn"]["id"],
+                    "fill_day": f["fill_day"].isoformat(),
+                    "amount": fmt(f["amount"]),
+                }
+                for f in fee_sells
+            ],
+            "net_fills": fmt(net_fills),
+            "dashboard_cost_basis": fmt(cb_cut),
+            "cost_basis_difference": fmt(cb_diff),
+            "opening_value": fmt(opening_value),
+            "opening_purchase": fmt(opening_purchase),
+            "exit_proceeds": fmt(exit_proceeds),
+            "last_nonzero_value": fmt(last_value),
+        }
+
+    # ---- fund 107 (out of scope): fills for pairing + volatis_fills ----
+    volatis_fills = []
+    for t in txns:
+        if t["fund"] != "107" or t["type"] not in ("BUY", "SELL", "MAX_S"):
+            continue
+        fee = t["created_to_cover_fees"] == "True"
+        m_rule = fill_moment(t, include_fee_orders=fee) or fill_moment(
+            t, include_fee_orders=True
+        )
+        m_all = fill_moment(t, include_fee_orders=True)
+        rec = {
+            "txn_id": t["id"],
+            "kind": t["type"],
+            "amount": fmt(D(t["amount"])),
+            "fill_day_excluding_fee_orders": m_rule.date().isoformat()
+            if m_rule
+            else None,
+            "fill_day_including_all_orders": m_all.date().isoformat()
+            if m_all
+            else None,
+            "fee_sell": fee,
+        }
+        volatis_fills.append(rec)
+        amt = D(t["amount"])
+        net_fills_by_fund["107"] = net_fills_by_fund.get("107", Decimal(0)) + amt
+        if not fee:
+            all_flows.append(
+                {
+                    "txn": t,
+                    "kind": t["type"],
+                    "amount": amt,
+                    "fee": False,
+                    "fill_at": m_rule,
+                    "fill_day": m_rule.date() if m_rule else None,
+                    "time_utc": _udt(t["time"]),
+                    "sleeve": None,
+                    "fund_id": "107",
+                }
+            )
+    volatis_fills.sort(
+        key=lambda r: (r["fill_day_excluding_fee_orders"] or "", r["txn_id"])
+    )
+
+    # ---- closure 3: nav total ----
+    total_board = dash[declared["total_dashboard"]]  # type: ignore[index]
+    nav_days_total = sorted(d for d in total_board if d <= cutoff)
+    max_abs = Decimal(0)
+    exempt_report = []
+    for d in nav_days_total:
+        s = Decimal(0)
+        for name in ("crisis", "singleindex", "volatis"):
+            s += dash[name][d]["value"] if d in dash[name] else Decimal(0)
+        diff = s - total_board[d]["value"]
+        if d in exempt_days:
+            exempt_report.append({"day": d.isoformat(), "difference": fmt(diff)})
+        else:
+            if abs(diff) > tol["nav_total"]:
+                refusals.append(
+                    f"nav_total: day {d.isoformat()} funds sum minus Total = "
+                    f"{fmt(diff)} (> {fmt(tol['nav_total'])})"
+                )
+            if abs(diff) > max_abs:
+                max_abs = abs(diff)
+
+    # ---- closure 4: account cash ----
+    deposits = Decimal(0)
+    deposit_count = 0
+    ignored_transfers = 0
+    for r in kept:
+        if r["activity_type"] != "transfer":
+            continue
+        if r["type"] == "DEPOSIT" and r["status"] == "C":
+            deposits += D(r["amount"])
+            deposit_count += 1
+        elif r["type"] == "WITHDRAWAL" and r["status"] == "C":
+            deposits -= D(r["amount"])
+        else:
+            ignored_transfers += 1
+    aum_fees = Decimal(0)
+    partner_fees = Decimal(0)
+    for r in kept:
+        if r["activity_type"] == "journal" and r["status"] == "COMPLETE":
+            if r["type"] == "AUM_FEE":
+                aum_fees += D(r["amount"])
+            elif r["type"] == "PARTNER_SUB_FEE":
+                partner_fees += D(r["amount"])
+    dividends_rows = [r for r in kept if r["activity_type"] == "dividend"]
+    dividends_total = sum((D(r["amount"]) for r in dividends_rows), Decimal(0))
+    net_fund_flows = sum(net_fills_by_fund.values(), Decimal(0))
+
+    settled = None
+    for r in accounts_rows:
+        if r["type"] == "alpaca":
+            settled = D(r["settled_balance"])
+    if settled is None:
+        refusals.append("accounts.csv: no row with type=alpaca")
+
+    derived_cash = deposits - net_fund_flows + dividends_total - aum_fees - partner_fees
+    residual = derived_cash - settled if settled is not None else None
+    cash_residual = declared["open_items"]["cash_residual"]  # type: ignore[index]
+    declared_residual = D(cash_residual["amount"])
+    residual_tol = D(cash_residual["tolerance"])
+    if residual is not None and abs(residual - declared_residual) > residual_tol:
+        refusals.append(
+            f"cash closure: derived residual {fmt(residual)} vs declared "
+            f"{fmt(declared_residual)} differ by {fmt(residual - declared_residual)} "
+            f"(> {fmt(residual_tol)})"
+        )
+
+    # ---- closure 5: dividends attribution ----
+    sym_funds: dict[str, set[str]] = {}
+    for o in orders:
+        if o["symbol"] and o["symbol"] != "$USD" and o["fund"]:
+            sym_funds.setdefault(o["symbol"], set()).add(o["fund"])
+    sleeve_by_fund = {funds_decl[s]["fund_id"]: s for s in funds_decl}
+    attr_sleeves: dict[str, Decimal] = {}
+    attr_counter: dict[str, Decimal] = {}
+    unattributed = Decimal(0)
+    div_list = []
+    for r in dividends_rows:
+        day = _udt(r["date"]).date()
+        amt = D(r["amount"])
+        fs = sym_funds.get(r["symbol"], set())
+        if len(fs) == 1:
+            fid = next(iter(fs))
+            if fid in sleeve_by_fund:
+                sl = sleeve_by_fund[fid]
+                attr_sleeves[sl] = attr_sleeves.get(sl, Decimal(0)) + amt
+                div_list.append(
+                    {
+                        "sleeve": sl,
+                        "day": day.isoformat(),
+                        "symbol": r["symbol"],
+                        "amount": fmt(amt),
+                        "after_exit": day
+                        > date.fromisoformat(funds_decl[sl]["last_nonzero_day"]),
+                    }
+                )
+            else:
+                attr_counter[fid] = attr_counter.get(fid, Decimal(0)) + amt
+        else:
+            unattributed += amt
+            if len(fs) > 1:
+                refusals.append(
+                    f"dividend {r['id']} ({r['symbol']} {r['date']}): traded by "
+                    f"several funds {sorted(fs)}"
+                )
+    div_list.sort(key=lambda x: (x["sleeve"], x["day"], x["symbol"]))
+
+    # ---- SPEC-QB 4: pairing ----
+    out_of_scope = declared["out_of_scope_funds"]["107"]  # type: ignore[index]
+    counterparty_account = str(out_of_scope["counterparty_account_id"])
+
+    def flow_acct(f: dict[str, object]) -> str:
+        if f["fund_id"] in sleeve_by_fund:
+            return parent + "-" + sleeve_by_fund[f["fund_id"]]
+        return counterparty_account
+
+    def flow_side(f: dict[str, object]) -> str:
+        return sleeve_by_fund.get(f["fund_id"], f["fund_id"])
+
+    def recog_day(f: dict[str, object]) -> date:
+        if "recognition_day" in f:
+            return f["recognition_day"]  # type: ignore[return-value]
+        return f["fill_day"] + timedelta(days=1)  # type: ignore[operator]
+
+    outflows = [f for f in all_flows if f["amount"] < 0]  # type: ignore[operator]
+    inflows = [f for f in all_flows if f["amount"] > 0]  # type: ignore[operator]
+
+    cand: dict[int, list[int]] = {}
+    for oi, o in enumerate(outflows):
+        for ii, i in enumerate(inflows):
+            if o["fund_id"] == i["fund_id"]:
+                continue
+            if o["fill_day"] != i["fill_day"]:
+                continue
+            if abs(D((o["time_utc"] - i["time_utc"]).total_seconds())) > window_seconds:  # type: ignore[operator]
+                continue
+            if abs(abs(o["amount"]) - abs(i["amount"])) > tol["pairing_amount"]:  # type: ignore[arg-type]
+                continue
+            cand.setdefault(oi, []).append(ii)
+
+    in_cand: dict[int, list[int]] = {}
+    for oi, iis in cand.items():
+        for ii in iis:
+            in_cand.setdefault(ii, []).append(oi)
+    for oi, iis in cand.items():
+        if len(iis) > 1:
+            refusals.append(
+                f"pairing: outflow txn {outflows[oi]['txn']['id']} has "
+                f"{len(iis)} candidate inflows"
+            )
+    for ii, ois in in_cand.items():
+        if len(ois) > 1:
+            refusals.append(
+                f"pairing: inflow txn {inflows[ii]['txn']['id']} has "
+                f"{len(ois)} candidate outflows"
+            )
+
+    matched: dict[tuple[int, int], Decimal] = {}
+    for oi, iis in cand.items():
+        for ii in iis:
+            if len(iis) == 1 and len(in_cand.get(ii, [])) == 1:
+                matched[(oi, ii)] = min(
+                    abs(outflows[oi]["amount"]),
+                    abs(inflows[ii]["amount"]),  # type: ignore[arg-type]
+                )
+
+    pairs = []
+    used_out: dict[int, Decimal] = {}
+    used_in: dict[int, Decimal] = {}
+    for (oi, ii), amt in matched.items():
+        o, i = outflows[oi], inflows[ii]
+        both_retired = o["fund_id"] in sleeve_by_fund and i["fund_id"] in sleeve_by_fund
+        retired_side = o if o["fund_id"] in sleeve_by_fund else i
+        pairs.append(
+            {
+                "event_day": o["fill_day"],
+                "recognition_day": recog_day(retired_side),
+                "amount": amt,
+                "out": o,
+                "in": i,
+                "kind": "REALLOCATION",
+                "pairing": "SLEEVE_PAIR" if both_retired else "COUNTERPARTY_PAIR",
+                "_sort_fill": o["fill_at"],
+            }
+        )
+        used_out[oi] = used_out.get(oi, Decimal(0)) + amt
+        used_in[ii] = used_in.get(ii, Decimal(0)) + amt
+
+    remainders = []
+    for oi, o in enumerate(outflows):
+        rem = abs(o["amount"]) - used_out.get(oi, Decimal(0))  # type: ignore[arg-type]
+        if rem > 0:
+            remainders.append(
+                {
+                    "event_day": o["fill_day"],
+                    "recognition_day": recog_day(o),
+                    "amount": rem,
+                    "out": o,
+                    "in": None,
+                    "kind": "UNALLOCATED_CASH",
+                    "pairing": "UNALLOCATED_REMAINDER",
+                    "_sort_fill": o["fill_at"],
+                    "_txn": o["txn"]["id"],
+                }
+            )
+    for ii, i in enumerate(inflows):
+        rem = abs(i["amount"]) - used_in.get(ii, Decimal(0))  # type: ignore[arg-type]
+        if rem > 0:
+            remainders.append(
+                {
+                    "event_day": i["fill_day"],
+                    "recognition_day": recog_day(i),
+                    "amount": rem,
+                    "out": None,
+                    "in": i,
+                    "kind": "UNALLOCATED_CASH",
+                    "pairing": "UNALLOCATED_REMAINDER",
+                    "_sort_fill": i["fill_at"],
+                    "_txn": i["txn"]["id"],
+                }
+            )
+
+    def day_key(p: dict[str, object]) -> date:
+        return p["event_day"] or date.min  # type: ignore[return-value]
+
+    paired_sorted = sorted(
+        pairs,
+        key=lambda p: (
+            day_key(p),
+            p["_sort_fill"] or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+    )
+    rem_sorted = sorted(
+        remainders,
+        key=lambda p: (
+            day_key(p),
+            p["_sort_fill"] or datetime.min.replace(tzinfo=timezone.utc),
+            p["_txn"],
+        ),
+    )
+    by_day: dict[date, dict[str, list[dict[str, object]]]] = {}
+    for p in paired_sorted + rem_sorted:
+        by_day.setdefault(day_key(p), {"paired": [], "rem": []})
+    for p in paired_sorted:
+        by_day[day_key(p)]["paired"].append(p)
+    for p in rem_sorted:
+        by_day[day_key(p)]["rem"].append(p)
+
+    pairs_out = []
+    legs: list[dict[str, object]] = []
+    for d in sorted(by_day):
+        for p in by_day[d]["paired"] + by_day[d]["rem"]:
+            o, i = p["out"], p["in"]
+            out_acct = flow_acct(o) if o else unallocated
+            in_acct = flow_acct(i) if i else unallocated
+            pairs_out.append(
+                {
+                    "event_day": p["event_day"].isoformat(),
+                    "recognition_day": p["recognition_day"].isoformat(),
+                    "amount": fmt(p["amount"]),
+                    "out_account": out_acct,
+                    "in_account": in_acct,
+                    "kind": p["kind"],
+                    "pairing": p["pairing"],
+                    "from": flow_side(o) if o else "unallocated",
+                    "to": flow_side(i) if i else "unallocated",
+                }
+            )
+            # One leg per side; each leg carries its own side's recognition day
+            # (SPEC-QB 2: fill day + 1, opening purchase: fill day).
+            legs.append(
+                {
+                    "account": out_acct,
+                    "counterparty_account": in_acct,
+                    "cls": "INTERNAL_OUT",
+                    "amount": p["amount"],
+                    "event_day": p["event_day"],
+                    "recognition_day": recog_day(o) if o else p["event_day"],
+                    "pairing": p["pairing"],
+                }
+            )
+            legs.append(
+                {
+                    "account": in_acct,
+                    "counterparty_account": out_acct,
+                    "cls": "INTERNAL_IN",
+                    "amount": p["amount"],
+                    "event_day": p["event_day"],
+                    "recognition_day": recog_day(i) if i else p["event_day"],
+                    "pairing": p["pairing"],
+                }
+            )
+
+    assumptions.extend(
+        [
+            "Cutoff filter: a row is 'dated after the cutoff' by its own date "
+            "field (filled_txn: time; order: filled_at; transfer/journal: "
+            "created_at; dividend: date), converted to the UTC date.",
+            "Pairs: out_account/in_account use '<parent>-<sleeve>' for retired "
+            "funds, the declared counterparty_account_id (the parent account "
+            "itself) for fund 107, and '<parent>-unallocated' for the perimeter "
+            "pseudo-account; from/to carry the sleeve id ('crisis'/"
+            "'singleindex'), the fund id ('107'), or 'unallocated'.",
+            "Pairs: recognition_day of a remainder pair is the retired fund's "
+            "recognition day when a retired fund is a side, else (fund 107 only) "
+            "fill day + 1, mirroring the reallocation rule.",
+            "Pairs: within one event day, reallocations are ordered by the "
+            "outflow's fill moment, then remainders by the flow's fill moment "
+            "(ties by txn id); the spec fixes only 'paired pairs first, then "
+            "remainders'.",
+            "Exit-proceeds check: 'equal within 1%' is read as |proceeds - "
+            "last_nonzero_value| / |last_nonzero_value| <= exit_relative.",
+            "Nav-total closure is checked on every day of the Total dashboard up "
+            "to the cutoff; a fund without a row that day counts as 0.",
+            "Dividend day is the UTC date of the dividend row's 'date' field; "
+            "after_exit compares it to the sleeve's last_nonzero_day.",
+            "TWR chains only rows whose interval_return is not null "
+            "(nav_prev > 0), i.e. the opening row contributes no factor.",
+        ]
+    )
+
+    return {
+        "funds": out_funds,
+        "pairs": pairs_out,
+        "legs": legs,
+        "closure": {
+            "nav_total": {
+                "days_checked": len(nav_days_total),
+                "max_abs_difference": fmt(max_abs),
+                "exempt_days": exempt_report,
+            },
+            "cash": {
+                "deposits": fmt(deposits),
+                "deposit_count": deposit_count,
+                "ignored_transfers": ignored_transfers,
+                "net_fund_flows_by_fund": {
+                    k: fmt(v) for k, v in sorted(net_fills_by_fund.items())
+                },
+                "net_fund_flows": fmt(net_fund_flows),
+                "dividends": fmt(dividends_total),
+                "aum_fees": fmt(aum_fees),
+                "partner_subscription_fees": fmt(partner_fees),
+                "derived_cash": fmt(derived_cash),
+                "provider_settled_cash": fmt(settled),
+                "residual": fmt(residual),
+            },
+            "dividends": {
+                "total": fmt(dividends_total),
+                "attributed_to_sleeves": {
+                    k: fmt(v) for k, v in sorted(attr_sleeves.items())
+                },
+                "attributed_to_counterparty_funds": {
+                    k: fmt(v) for k, v in sorted(attr_counter.items())
+                },
+                "unattributed": fmt(unattributed),
+            },
+            "rows_after_cutoff_excluded": after_cutoff,
+        },
+        "dividends": div_list,
+        "volatis_fills": volatis_fills,
+        "refusals": refusals,
+        "assumptions": assumptions,
+    }
+
+
+# ---------------------------------------------------------------- epochs
+
+
+def ibkr_epochs(
+    facts: dict[str, object], parent_entry: dict[str, object]
+) -> list[Epoch]:
+    """SPEC-HARNESS 3: one epoch per real IBKR sleeve (never the residual)."""
+    parent = str(parent_entry["parent_account_id"])
+    pairs: list[dict[str, object]] = facts["pairs"]  # type: ignore[assignment]
+    sleeve_rows: dict[str, list[dict[str, object]]] = facts["sleeves"]  # type: ignore[assignment]
+    epochs = []
+    for sleeve_meta in parent_entry["sleeves"]:  # type: ignore[index]
+        sid = str(sleeve_meta["sleeve_id"])
+        rows = sleeve_rows.get(sid, [])
+        if not rows:
+            continue
+        account_id = f"{parent}-{sid}"
+        nav = [
+            (date.fromisoformat(str(r["day"])), D(r["nav_end_after_alloc"]))
+            for r in rows
+        ]
+        legs: list[Leg] = []
+        for pair in pairs:
+            day = date.fromisoformat(str(pair["day"]))
+            amount = D(pair["amount"])
+            if pair["in_account"] == account_id:
+                legs.append(Leg(day, day, "INTERNAL_IN", amount))
+            if pair["out_account"] == account_id:
+                legs.append(Leg(day, day, "INTERNAL_OUT", amount))
+        last_event = str(rows[-1]["event"])
+        effective_end = None
+        if last_event == "EXIT":
+            effective_end = date.fromisoformat(str(rows[-1]["day"]))
+            cumulative_alloc = sum((D(r["alloc_total"]) for r in rows), Decimal(0))
+            if cumulative_alloc != 0:
+                legs.append(
+                    Leg(
+                        effective_end,
+                        effective_end,
+                        "INTERNAL_OUT" if cumulative_alloc > 0 else "INTERNAL_IN",
+                        abs(cumulative_alloc),
+                    )
+                )
+        legs.sort(
+            key=lambda leg: (leg.recognition_day, leg.event_day, leg.cls, leg.amount)
+        )
+        epochs.append(
+            Epoch(
+                account_id=account_id,
+                strategy_id=str(sleeve_meta["strategy_id"]),
+                effective_start=nav[0][0],
+                effective_end=effective_end,
+                nav=nav,
+                legs=legs,
+            )
+        )
+    return epochs
+
+
+def quantbase_epochs(
+    facts: dict[str, object], parent_entry: dict[str, object], parent: str
+) -> list[Epoch]:
+    """SPEC-HARNESS 3 (as corrected): one epoch per retired Quantbase fund.
+
+    Which ACCOUNT a leg sits on decides, not its counterparty: every leg on
+    a retired fund's own account is an epoch leg of that fund, INCLUDING the
+    retired side of a COUNTERPARTY_PAIR; only legs on fund 107's own account
+    (the other side of such a pair, and fund 107's own activity) are never
+    epoch legs (CORRECTION.md).
+    """
+    strategy_by_sleeve = {
+        str(s["sleeve_id"]): str(s["strategy_id"])
+        for s in parent_entry["sleeves"]  # type: ignore[index]
+    }
+    funds: dict[str, dict[str, object]] = facts["funds"]  # type: ignore[assignment]
+    legs_all: list[dict[str, object]] = facts["legs"]  # type: ignore[assignment]
+    epochs = []
+    for sleeve in sorted(funds):
+        fund = funds[sleeve]
+        account_id = f"{parent}-{sleeve}"
+        nav = [
+            (date.fromisoformat(str(r["day"])), D(r["nav_end"]))
+            for r in fund["rows"]  # type: ignore[index]
+        ]
+        # Epoch legs: every SPEC-QB 4 leg that sits on the fund's own
+        # account, INCLUDING the retired side of a COUNTERPARTY_PAIR (the
+        # account a leg sits on decides, not its counterparty; CORRECTION.md).
+        # Legs on fund 107's own account never match this filter: their
+        # account is the declared counterparty account, not the fund's.
+        legs = [
+            Leg(
+                leg["recognition_day"],  # type: ignore[arg-type]
+                leg["event_day"],  # type: ignore[arg-type]
+                str(leg["cls"]),
+                D(leg["amount"]),
+            )
+            for leg in legs_all
+            if leg["account"] == account_id
+        ]
+        legs.sort(
+            key=lambda leg: (leg.recognition_day, leg.event_day, leg.cls, leg.amount)
+        )
+        epochs.append(
+            Epoch(
+                account_id=account_id,
+                strategy_id=strategy_by_sleeve[sleeve],
+                effective_start=nav[0][0],
+                effective_end=nav[-1][0],
+                nav=nav,
+                legs=legs,
+            )
+        )
+    return epochs
+
+
+def classify_universe(
+    crosswalk_rows: list[dict[str, object]],
+    parents: list[dict[str, object]],
+    epochs: list[Epoch],
+) -> dict[str, object]:
+    """Residual parents, retained strategies, registry and epoch id lists."""
+    included_strategy_by_account: dict[str, set[str]] = {}
+    registry: set[str] = set()
+    for row in crosswalk_rows:
+        strategy_id = str(row["strategy_id"])
+        registry.add(strategy_id)
+        if str(row.get("product_epoch_disposition")) == "INCLUDED_PRODUCT_EPOCH":
+            included_strategy_by_account.setdefault(str(row["account_id"]), set()).add(
+                strategy_id
+            )
+    residual_parents = []
+    for parent_entry in parents:
+        parent = str(parent_entry["parent_account_id"])
+        included = included_strategy_by_account.get(parent, set())
+        if any(
+            str(s["strategy_id"]) in included
+            for s in parent_entry["sleeves"]  # type: ignore[index]
+        ):
+            residual_parents.append(parent)
+    derived_strategies = {epoch.strategy_id for epoch in epochs}
+    retained = sorted(derived_strategies - registry)
+    registry |= derived_strategies
+    epoch_ids = sorted(
+        "{}|{}|{}|{}".format(
+            epoch.account_id,
+            epoch.strategy_id,
+            epoch.effective_start.isoformat(),
+            epoch.effective_end.isoformat()
+            if epoch.effective_end is not None
+            else "open",
+        )
+        for epoch in epochs
+    )
+    return {
+        "residual_parent_ids": sorted(residual_parents),
+        "retained_strategy_ids": retained,
+        "retained_strategy_count": len(retained),
+        "registry_strategy_count": len(registry),
+        "derived_epoch_ids": epoch_ids,
+        "derived_epoch_count": len(epochs),
+    }
+
+
+def epoch_metrics(
+    epoch: Epoch,
+    engine: Engine,
+    cutoff: date,
+    inputs_used: list[str],
+    notes: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    """The section 4 metrics of one derived epoch through the existing engine."""
+    metrics: list[dict[str, object]] = []
+    not_derivable: list[dict[str, object]] = []
+    first_day = epoch.nav[0][0]
+    last_day = epoch.nav[-1][0]
+    opening = epoch.nav[0][1]
+    closing = epoch.nav[-1][1]
+    capital_flows = [
+        leg for leg in epoch.legs if first_day < leg.recognition_day <= last_day
+    ]
+    flows_by_day: dict[date, Decimal] = {}
+    for leg in capital_flows:
+        flows_by_day[leg.recognition_day] = (
+            flows_by_day.get(leg.recognition_day, Decimal(0)) + leg.signed
+        )
+    flow_in_total = sum(
+        (leg.amount for leg in capital_flows if leg.cls == "INTERNAL_IN"), Decimal(0)
+    )
+    flow_out_total = sum(
+        (leg.amount for leg in capital_flows if leg.cls == "INTERNAL_OUT"), Decimal(0)
+    )
+    net_capital = opening + flow_in_total - flow_out_total
+    net_flows = flow_in_total - flow_out_total
+
+    metrics.append(
+        engine.metric(
+            "date.epoch.start",
+            epoch.account_id,
+            first_day.isoformat(),
+            "date",
+            inputs_used,
+            cutoff.isoformat(),
+            window="",
+        )
+    )
+    metrics.append(
+        engine.metric(
+            "date.epoch.end",
+            epoch.account_id,
+            last_day.isoformat() if epoch.effective_end is not None else "open",
+            "date",
+            inputs_used,
+            cutoff.isoformat(),
+            window="",
+        )
+    )
+    for metric_id, value in (
+        ("capital.epoch.opening", opening),
+        ("capital.epoch.net_capital", net_capital),
+        ("capital.epoch.closing", closing),
+    ):
+        metrics.append(
+            engine.metric(
+                metric_id,
+                epoch.account_id,
+                engine.money(value),
+                "USD",
+                inputs_used,
+                cutoff.isoformat(),
+                window="",
+            )
+        )
+    as_of = last_day.isoformat()
+    metrics.append(
+        engine.metric(
+            "flows.account.net",
+            epoch.account_id,
+            engine.money(net_flows),
+            "USD",
+            inputs_used,
+            as_of,
+            window="ITD",
+            notes=notes,
+        )
+    )
+    metrics.append(
+        engine.metric(
+            "flows.account.count",
+            epoch.account_id,
+            str(len(capital_flows)),
+            "count",
+            inputs_used,
+            as_of,
+            window="ITD",
+            notes=notes,
+        )
+    )
+    summary: dict[str, object] = {
+        "opening": opening,
+        "net_capital": net_capital,
+        "closing": closing,
+        "flows_net": net_flows,
+        "flows_count": len(capital_flows),
+        "twr": None,
+        "mwr": None,
+    }
+    try:
+        twr = engine.time_weighted_return(epoch.nav, flows_by_day, {})
+    except ValueError as error:
+        not_derivable.append(
+            engine.not_derivable_row("twr.account", epoch.account_id, str(error), "ITD")
+        )
+    else:
+        summary["twr"] = twr
+        metrics.append(
+            engine.metric(
+                "twr.account",
+                epoch.account_id,
+                engine.ratio(twr),
+                "ratio",
+                inputs_used,
+                as_of,
+                window="ITD",
+                notes=notes,
+            )
+        )
+    mwr_flows = [(first_day, -opening)]
+    mwr_flows.extend(
+        (occurred_on, -amount) for occurred_on, amount in sorted(flows_by_day.items())
+    )
+    mwr_flows.append((last_day, closing))
+    mwr = engine.xirr(mwr_flows)
+    if mwr is None:
+        not_derivable.append(
+            engine.not_derivable_row(
+                "mwr.account", epoch.account_id, XIRR_NOT_DERIVABLE_REASON, "ITD"
+            )
+        )
+    else:
+        summary["mwr"] = mwr
+        metrics.append(
+            engine.metric(
+                "mwr.account",
+                epoch.account_id,
+                engine.ratio(mwr),
+                "ratio",
+                inputs_used,
+                as_of,
+                window="ITD",
+                notes=notes,
+            )
+        )
+    return metrics, not_derivable, summary
+
+
+# ---------------------------------------------------------------- top level
+
+
+def derive_sleeves(
+    *,
+    sleeve_inputs_path: Path,
+    qe_root: Path,
+    repo_root: Path,
+    cutoff: date,
+    engine: Engine,
+) -> dict[str, object]:
+    """Run the whole SPEC-HARNESS sleeve derivation fail-closed."""
+    selection = load_sleeve_inputs(sleeve_inputs_path, qe_root, repo_root, cutoff)
+
+    crosswalk = _role_json(selection, "crosswalk")
+    tag_map = _role_json(selection, "tag_map")
+    ibkr_declared = _role_json(selection, "ibkr_declared_inputs")
+    qb_declared = _role_json(selection, "quantbase_declared_inputs")
+    catalog = _role_json(selection, "ibkr_catalog")
+
+    # Content checks (fail closed, SPEC-HARNESS 2).
+    schema_version = catalog.get("catalog_schema_version")  # type: ignore[union-attr]
+    if not isinstance(schema_version, int) or schema_version < 7:
+        _fail(f"ibkr_catalog: catalog schema {schema_version!r} is below 7")
+    parents = tag_map.get("parents")  # type: ignore[union-attr]
+    if not isinstance(parents, list):
+        _fail("tag_map: no parents list")
+    ibkr_parents = [p for p in parents if p.get("provider_id") == "ibkr"]
+    qb_parents = [p for p in parents if p.get("provider_id") == "quantbase"]
+    if len(ibkr_parents) != 1 or len(qb_parents) != 1:
+        _fail(
+            "tag_map: expected exactly one 'ibkr' and one 'quantbase' parent, "
+            f"found {len(ibkr_parents)} and {len(qb_parents)}"
+        )
+    ibkr_parent_entry = ibkr_parents[0]
+    qb_parent_entry = qb_parents[0]
+    ibkr_window = ibkr_declared.get("window")  # type: ignore[union-attr]
+    if ibkr_window.get("last_day") != cutoff.isoformat():
+        _fail(
+            f"ibkr declared window last day {ibkr_window.get('last_day')!r} "
+            f"differs from the cutoff {cutoff.isoformat()}"
+        )
+    qb_cutoff = qb_declared.get("data_cutoff")  # type: ignore[union-attr]
+    if qb_cutoff != cutoff.isoformat():
+        _fail(
+            f"quantbase data_cutoff {qb_cutoff!r} differs from the cutoff "
+            f"{cutoff.isoformat()}"
+        )
+
+    # ---------------- facts ----------------
+    ibkr_parent = str(ibkr_parent_entry["parent_account_id"])
+    slc = _cut_ibkr_slice(
+        catalog,  # type: ignore[arg-type]
+        ibkr_parent,
+        str(ibkr_window["first_day"]),
+        str(ibkr_window["last_day"]),
+    )
+    ibkr = _ibkr_facts(slc, ibkr_declared, ibkr_parent_entry)  # type: ignore[arg-type]
+
+    dashboards = {
+        "crisis": _role_csv_rows(selection, "quantbase_dashboard_crisis"),
+        "singleindex": _role_csv_rows(selection, "quantbase_dashboard_singleindex"),
+        "volatis": _role_csv_rows(selection, "quantbase_dashboard_volatis"),
+        "total": _role_csv_rows(selection, "quantbase_dashboard_total"),
+    }
+    qb = _qb_facts(
+        qb_declared,  # type: ignore[arg-type]
+        dashboards,
+        _role_csv_rows(selection, "quantbase_account_activity"),
+        _role_csv_rows(selection, "quantbase_accounts"),
+        cutoff,
+    )
+    qb_parent = str(qb_parent_entry["parent_account_id"])
+
+    # ---------------- epochs ----------------
+    epochs = ibkr_epochs(ibkr, ibkr_parent_entry)
+    epochs += quantbase_epochs(qb, qb_parent_entry, qb_parent)
+    epochs.sort(key=lambda epoch: epoch.account_id)
+
+    inputs_used = inputs_used_rows(selection)
+    notes_ibkr = (
+        "R2 derived sleeve epoch (SPEC-HARNESS): NAV = nav_end_after_alloc "
+        "(SPEC-IBKR 6, after allocated account costs); capital flows are the "
+        "SPEC-IBKR 8 legs on the sleeve account plus the exit settlement leg, "
+        "recognised same-day, end-of-day."
+    )
+    notes_qb = (
+        "R2 derived sleeve epoch (SPEC-HARNESS, as corrected): NAV = the "
+        "fund's nav_end (SPEC-QB 2) through the exit recognition day; capital "
+        "flows are every SPEC-QB 4 leg on the fund's own account (including "
+        "the retired side of a counterparty-107 pair), end-of-day at their "
+        "recognition day."
+    )
+    metrics: list[dict[str, object]] = []
+    not_derivable: list[dict[str, object]] = []
+    summaries: dict[str, dict[str, object]] = {}
+    for epoch in epochs:
+        notes = notes_ibkr if epoch.account_id.startswith(ibkr_parent) else notes_qb
+        rows, nd, summary = epoch_metrics(epoch, engine, cutoff, inputs_used, notes)
+        metrics.extend(rows)
+        not_derivable.extend(nd)
+        summaries[epoch.account_id] = summary
+
+    universe = classify_universe(
+        crosswalk["rows"],  # type: ignore[index]
+        [ibkr_parent_entry, qb_parent_entry],
+        epochs,
+    )
+    universe_rows = (
+        ("universe.derived_epoch_ids", universe["derived_epoch_ids"], "list"),
+        ("universe.derived_epoch_count", str(universe["derived_epoch_count"]), "count"),
+        ("universe.retained_strategy_ids", universe["retained_strategy_ids"], "list"),
+        (
+            "universe.retained_strategy_count",
+            str(universe["retained_strategy_count"]),
+            "count",
+        ),
+        (
+            "universe.registry_strategy_count",
+            str(universe["registry_strategy_count"]),
+            "count",
+        ),
+        ("universe.residual_parent_ids", universe["residual_parent_ids"], "list"),
+    )
+    for metric_id, value, unit in universe_rows:
+        metrics.append(
+            engine.metric(
+                metric_id,
+                "portfolio",
+                value,
+                unit,
+                inputs_used,
+                cutoff.isoformat(),
+                window="",
+            )
+        )
+
+    epoch_blocks = []
+    for epoch in epochs:
+        summary = summaries[epoch.account_id]
+        epoch_blocks.append(
+            {
+                "account_id": epoch.account_id,
+                "strategy_id": epoch.strategy_id,
+                "effective_start": epoch.effective_start.isoformat(),
+                "effective_end": (
+                    epoch.effective_end.isoformat()
+                    if epoch.effective_end is not None
+                    else None
+                ),
+                "opening": fmt(summary["opening"]),  # type: ignore[arg-type]
+                "closing": fmt(summary["closing"]),  # type: ignore[arg-type]
+                "net_capital": fmt(summary["net_capital"]),  # type: ignore[arg-type]
+                "twr": fmt(summary["twr"]),  # type: ignore[arg-type]
+                "mwr": fmt(summary["mwr"]),  # type: ignore[arg-type]
+                "flows_net": fmt(summary["flows_net"]),  # type: ignore[arg-type]
+                "flows_count": summary["flows_count"],
+                "legs": [
+                    {
+                        "recognition_day": leg.recognition_day.isoformat(),
+                        "event_day": leg.event_day.isoformat(),
+                        "class": leg.cls,
+                        "amount": fmt(leg.amount),
+                    }
+                    for leg in epoch.legs
+                ],
+                "nav": {day.isoformat(): fmt(value) for day, value in epoch.nav},
+            }
+        )
+
+    assumptions = [
+        "SPEC-HARNESS 2 names a command line '--cutoff'; this command line has "
+        "no such option (only the two new options were added), so the check "
+        "compares the sleeve-inputs cutoff against the derivation's fixed "
+        "cutoff constant.",
+        "Duplicate roles are detected by rejecting any duplicate JSON object "
+        "key anywhere in the sleeve-inputs file (parsed with "
+        "object_pairs_hook); JSON alone cannot otherwise represent a "
+        "duplicate role.",
+        "Section 4 header says as_of = cutoff and window = '' per epoch; the "
+        "twr.account/mwr.account/flows.account.net/flows.account.count row "
+        "defers to the existing conventions ('as existing', 'mirror them "
+        "exactly'), so those four keep window 'ITD' and as_of = the epoch's "
+        "last row day, while the new date.epoch.*/capital.epoch.* and "
+        "universe.* rows carry as_of = cutoff and window ''.",
+        "inputs_used of the sleeve metrics list every sleeve input as "
+        "'<path as given in the file> sha256:<pin>'; the existing rows' style "
+        "(plain path strings) has no place for a pin, so the pin is appended "
+        "to the same string.",
+        "SPEC-HARNESS 3 (Quantbase), per the orchestrator's correction "
+        "(CORRECTION.md): which account a leg sits on decides, not its "
+        "counterparty. Every leg on a retired fund's own account is an "
+        "epoch leg of that fund, INCLUDING the retired side of a "
+        "COUNTERPARTY_PAIR (e.g. the singleindex MAX_S exit proceeds of "
+        "2025-05-05 re-used by fund 107 within 120 seconds: the OUT leg on "
+        "the singleindex account is the epoch leg that takes the epoch's "
+        "NAV to zero); only legs on fund 107's own account are never epoch "
+        "legs. Every derived epoch therefore closes to a zero NAV on its "
+        "last row through its own legs.",
+        "IBKR epoch legs: the two legs of every SPEC-IBKR 8 pair are split by "
+        "account; a pair never has both legs on the same sleeve account, so "
+        "each pair contributes at most one epoch leg per sleeve.",
+        "Epoch legs are emitted sorted by (recognition_day, event_day, class, "
+        "amount); the spec fixes the set but not the emission order.",
+        "A tag-map sleeve with no SPEC-IBKR 6 rows (no declared funding "
+        "events) yields no derived epoch; all five real sleeves have rows "
+        "here.",
+        "root 'repo' resolves to the directory holding contracts/ (this "
+        "tree's root, two levels above this file's parent's parent).",
+    ]
+    assumptions = (
+        assumptions + ibkr["assumptions"] + qb["assumptions"]  # type: ignore[operator]
+    )
+    refusals = ibkr["refusals"] + qb["refusals"]  # type: ignore[operator]
+
+    sleeve_derivation = {
+        "schema": SLEEVE_DERIVATION_SCHEMA,
+        "inputs": block_inputs(selection),
+        "epochs": epoch_blocks,
+        "closure": {
+            "ibkr": ibkr["closure_summary"],
+            "quantbase": qb["closure"],
+        },
+        "disclosures": {
+            "ibkr": ibkr["disclosures"],
+            "quantbase": {
+                "dividends": qb["dividends"],
+                "volatis_fills": qb["volatis_fills"],
+            },
+        },
+        "assumptions": assumptions,
+        "refusals": refusals,
+    }
+
+    convention_notes = [
+        "R2 sleeve epochs (SPEC-HARNESS): a derived epoch is one IBKR sleeve "
+        "(NAV = nav_end_after_alloc, first row day to EXIT day) or one retired "
+        "Quantbase fund (NAV = nav_end, first non-zero day through the exit "
+        "recognition day); opening = the first NAV observation and capital "
+        "flows are the paired internal legs recognised after the first row "
+        "day (plus the IBKR exit settlement leg releasing the cumulative "
+        "allocated cost).",
+        "Derived-epoch returns use this derivation's existing account-epoch "
+        "engine unchanged: date-only end-of-day TWR (not the facts' "
+        "beginning-of-day daily chaining) and ACTUAL_365 XIRR.",
+        "Residual parents (a sleeve strategy_id equals an INCLUDED baseline "
+        "crosswalk epoch of the same account): their account-level "
+        "twr/mwr/flows metrics are replaced by the derived epochs; every "
+        "other metric is untouched.",
+    ]
+
+    return {
+        "metrics": metrics,
+        "not_derivable": not_derivable,
+        "sleeve_derivation": sleeve_derivation,
+        "residual_parent_ids": universe["residual_parent_ids"],
+        "inputs": input_header_rows(selection),
+        "convention_notes": convention_notes,
+    }
 
 
 def main() -> None:
@@ -4250,7 +6685,28 @@ def main() -> None:
             "when omitted, the built-in v1 input selection is used"
         ),
     )
+    parser.add_argument(
+        "--sleeve-inputs",
+        type=Path,
+        default=None,
+        help=(
+            "qe-cp-sleeve-inputs/1 file selecting and pinning the sleeve "
+            "derivation inputs; the derived-sleeve epoch metrics are appended "
+            "and a top-level sleeve_derivation block is added"
+        ),
+    )
+    parser.add_argument(
+        "--sleeves-only",
+        action="store_true",
+        help=(
+            "skip every other derivation and write a document with only the "
+            "sleeve metrics and the sleeve_derivation block "
+            "(requires --sleeve-inputs)"
+        ),
+    )
     args = parser.parse_args()
+    if args.sleeves_only and args.sleeve_inputs is None:
+        parser.exit(2, "input error: --sleeves-only requires --sleeve-inputs\n")
     manifest = None
     if args.inputs is not None:
         try:
@@ -4258,7 +6714,23 @@ def main() -> None:
         except ManifestError as error:
             parser.exit(1, f"error: {error}\n")
     try:
-        result = derive(args.qe_root, manifest)
+        if args.sleeves_only:
+            sleeve_result = _derive_sleeve_block(args.qe_root, args.sleeve_inputs)
+            result = {
+                "schema": "qe-cp-derivation/1",
+                "derivation": "b",
+                "model": "independent-standalone-python",
+                "code_commit": code_commit(),
+                "inputs": sleeve_result["inputs"],
+                "convention_notes": sleeve_result["convention_notes"],
+                "metrics": sleeve_result["metrics"],
+                "not_derivable": sleeve_result["not_derivable"],
+                "sleeve_derivation": sleeve_result["sleeve_derivation"],
+            }
+        else:
+            result = derive(args.qe_root, manifest, sleeve_inputs=args.sleeve_inputs)
+    except SleeveInputError as error:
+        parser.exit(2, f"input error: {error}\n")
     except ManifestError as error:
         parser.exit(1, f"error: {error}\n")
     args.out.parent.mkdir(parents=True, exist_ok=True)
