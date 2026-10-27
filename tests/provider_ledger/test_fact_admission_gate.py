@@ -135,3 +135,72 @@ def test_cli_exit_codes(tmp_path: Path) -> None:
     args = ["--catalog", str(tmp_path / "catalog.json"), "--ledger"]
     assert gate.main([*args, str(tmp_path / "good.json")]) == 0
     assert gate.main([*args, str(tmp_path / "bad.json")]) == 1
+
+
+def _workspace(tmp_path: Path, *, drop: str | None = None, late: bool = False) -> Path:
+    catalog = _catalog()
+    if late:
+        catalog["transactions"].append(
+            {
+                "account_id": ACCOUNT,
+                "commission": {"currency": "USD", "status": "AVAILABLE", "value": "-2"},
+                "event_date": "2026-12-31",
+                "kind": "TRADE:ExchTrade:BUY",
+                "record_id": "ibkr-trade-late",
+            }
+        )
+    projected = copy.deepcopy(_project(_catalog()))
+    for row in projected:
+        row["provider_id"] = "ibkr"
+        if drop:
+            row.pop(drop, None)
+    root = tmp_path / "dataIBKR" / "generations" / "gen-1"
+    root.mkdir(parents=True)
+    (root / "ibkr-catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+    ledger_file = tmp_path / "provider-ledger.json"
+    ledger_file.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-09-17",
+                "provider_generations": [
+                    {"provider_id": "ibkr", "generation_id": "gen-1"},
+                    {"provider_id": "schwab", "generation_id": "gen-2"},
+                ],
+                "quality_findings": [],
+                "transactions": projected,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ledger_file
+
+
+def test_workspace_mode_passes_excludes_cutoff_rows_and_reports_skips(
+    tmp_path: Path,
+) -> None:
+    ledger_file = _workspace(tmp_path, late=True)
+    outcome = gate.check_ledger_generation(ledger_file, tmp_path)
+    assert outcome["status"] == "PASS", outcome
+    assert "1 excluded" in outcome["providers"]["ibkr"]
+    # a provider whose catalog is not on disk is skipped, never passed
+    assert outcome["providers"]["schwab"] == "SKIPPED_CATALOG_NOT_ON_DISK"
+    assert gate.main(["--workspace", str(tmp_path), "--ledger", str(ledger_file)]) == 0
+
+
+def test_workspace_mode_fails_on_a_dropped_fact(tmp_path: Path) -> None:
+    ledger_file = _workspace(tmp_path, drop="commission")
+    outcome = gate.check_ledger_generation(ledger_file, tmp_path)
+    assert outcome["status"] == "FAIL"
+    assert "ibkr: ibkr-trade-1: commission dropped" in outcome["findings"]
+    assert gate.main(["--workspace", str(tmp_path), "--ledger", str(ledger_file)]) == 1
+
+
+def test_workspace_with_no_checkable_provider_is_skipped_not_passed(
+    tmp_path: Path,
+) -> None:
+    ledger_file = tmp_path / "provider-ledger.json"
+    ledger_file.write_text(
+        json.dumps({"as_of_date": "2026-09-17", "provider_generations": []}),
+        encoding="utf-8",
+    )
+    assert gate.check_ledger_generation(ledger_file, tmp_path)["status"] == "SKIPPED"

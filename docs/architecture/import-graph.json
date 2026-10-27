@@ -94,6 +94,11 @@
       1
     ],
     [
+      "check_fact_admission",
+      "provider_ledger",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "check_retained_authority_pins",
       1
