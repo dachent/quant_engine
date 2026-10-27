@@ -35,11 +35,24 @@ def test_the_sleeve_label_depends_on_the_governed_capital_result() -> None:
 
 def test_the_separate_report_claim_only_appears_when_the_input_was_supplied() -> None:
     sentence = (
-        "Governed invested capital (the deposits) and the strategy cash line are "
-        "reported separately."
+        "Governed invested capital (for fund-scoped providers, the gross allocations "
+        "to the fund; account deposits are not capital) is reported separately."
     )
     assert APP_JS.count(sentence) == 1
     assert f'governedCapitalSupplied ? "{sentence}"' in APP_JS
+
+
+def test_the_sleeve_legend_does_not_call_deposits_capital_or_name_a_cash_line() -> None:
+    """Owner decision B on #330: fund-scoped capital is the gross allocation at fill dates."""
+
+    assert "(the deposits)" not in APP_JS
+    assert "and the strategy cash line are reported separately" not in APP_JS
+    assert "not the deposits into the provider cash or wallet account" not in APP_JS
+    assert (
+        "the gross amount allocated to the strategy sleeve at fill dates; account "
+        "deposits and wallet conversions are not capital, and no derived strategy "
+        "cash line exists for these rows."
+    ) in APP_JS
 
 
 def test_the_column_is_capital_in_and_the_qa_header_list_agrees() -> None:
