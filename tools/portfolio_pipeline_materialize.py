@@ -6492,9 +6492,9 @@ def _derived_only_strategy_ids() -> frozenset[str]:
         other: set[str] = set()
         for sleeve in census["current_census"]["account_sleeves"]:
             for assignment in sleeve["assignments"]:
-                (
-                    derived if assignment.get("authority") == authority else other
-                ).add(str(assignment["strategy_id"]))
+                (derived if assignment.get("authority") == authority else other).add(
+                    str(assignment["strategy_id"])
+                )
         return frozenset(derived - other)
     except (MaterializationError, OSError, ValueError, KeyError, TypeError):
         return frozenset()

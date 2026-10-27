@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 from typing import Any, Final
 
+import derived_epoch_perimeter
 import portfolio_financial_mvp_contract as financial_contract
 from quant_engine.core import GenerationManifest, InputSnapshot, VerificationStatus
 from quant_engine.core.publication import (
@@ -447,7 +448,7 @@ def _selected_sleeve_facts(
         raise SelectedHwmInputError(
             "a sleeve facts artifact this generation selected was not supplied"
         )
-    return tuple(snapshots)
+    return tuple(sorted(snapshots, key=lambda item: item.sha256))
 
 
 def _verify_account_manifest_replay(
@@ -770,6 +771,7 @@ def _source_rows(
     calculation: Mapping[str, Any],
     output: Mapping[str, Any],
     crosswalk: Mapping[str, Any],
+    coverage_rows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[dict[EpochKey, Row], dict[EpochKey, Row], dict[EpochKey, Row], list[Row]]:
     included_crosswalk = [
         dict(row)
@@ -780,13 +782,51 @@ def _source_rows(
         raise SelectedHwmInputError(
             "account crosswalk must select exactly 13 product epochs"
         )
-    crosswalk_by_key: dict[EpochKey, Row] = {}
+    baseline_by_key: dict[EpochKey, Row] = {}
     for index, row in enumerate(included_crosswalk):
         key = _epoch_key(row, f"crosswalk row {index}")
-        if key in crosswalk_by_key:
+        if key in baseline_by_key:
             raise SelectedHwmInputError("account crosswalk epoch is duplicated")
         _text(row.get("provider"), f"crosswalk row {index}.provider")
-        crosswalk_by_key[key] = row
+        baseline_by_key[key] = row
+
+    # Derived sleeves (#567): the manifest drops a residual parent's epoch and
+    # carries the sleeve epochs.  The HWM perimeter is the product epochs (the
+    # baseline strategies, with a sleeve epoch standing for its parent's); a
+    # retained sleeve of any other strategy is history and no part of it.
+    output_rows = {
+        _epoch_key(raw, f"output row {index}"): dict(raw)
+        for index, raw in enumerate(
+            _rows(output.get("rows"), "account-manifest output rows")
+        )
+    }
+    if len(output_rows) != len(_rows(output.get("rows"), "output rows")):
+        raise SelectedHwmInputError("output epoch is duplicated")
+    try:
+        effective = derived_epoch_perimeter.effective_perimeter(
+            baseline_by_key, output_rows, coverage_rows
+        )
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise SelectedHwmInputError(str(exc)) from exc
+    crosswalk_by_key: dict[EpochKey, Row] = {}
+    for key in sorted(effective.product):
+        if key in baseline_by_key:
+            crosswalk_by_key[key] = baseline_by_key[key]
+        else:
+            # a sleeve epoch has no crosswalk row; its provider is the manifest's
+            crosswalk_by_key[key] = {
+                "account_id": key[0],
+                "strategy_id": key[1],
+                "effective_start": key[2],
+                "effective_end": key[3],
+                "provider": _text(
+                    output_rows[key].get("provider"), "derived output provider"
+                ),
+            }
+    if len(crosswalk_by_key) != 13:
+        raise SelectedHwmInputError(
+            "the selected product perimeter must hold exactly 13 epochs"
+        )
 
     calculation_by_key: dict[EpochKey, Row] = {}
     for index, raw in enumerate(_rows(calculation.get("rows"), "calculation rows")):
@@ -795,10 +835,13 @@ def _source_rows(
         key = _epoch_key(epoch, f"calculation row {index}.epoch")
         if key in calculation_by_key:
             raise SelectedHwmInputError("calculation epoch is duplicated")
-        if key not in crosswalk_by_key:
+        if key not in effective.included:
             raise SelectedHwmInputError(
                 "calculation epoch is outside the selected crosswalk"
             )
+        if key in effective.retained:
+            calculation_by_key[key] = row
+            continue
         if row.get("provider") != crosswalk_by_key[key].get("provider"):
             raise SelectedHwmInputError(
                 "calculation provider differs from selected crosswalk"
@@ -806,28 +849,23 @@ def _source_rows(
         calculation_by_key[key] = row
 
     output_by_key: dict[EpochKey, Row] = {}
-    for index, raw in enumerate(
-        _rows(output.get("rows"), "account-manifest output rows")
-    ):
-        row = dict(raw)
-        key = _epoch_key(row, f"output row {index}")
-        if key in output_by_key:
-            raise SelectedHwmInputError("output epoch is duplicated")
-        if key not in crosswalk_by_key:
-            raise SelectedHwmInputError(
-                "output epoch is outside the selected crosswalk"
-            )
+    for key, row in output_rows.items():
+        if key in effective.retained:
+            continue
         if row.get("provider") != crosswalk_by_key[key].get("provider"):
             raise SelectedHwmInputError(
                 "output provider differs from selected crosswalk"
             )
         output_by_key[key] = row
-    if set(calculation_by_key) != set(crosswalk_by_key) or set(output_by_key) != set(
+    if set(calculation_by_key) != set(effective.included) or set(output_by_key) != set(
         crosswalk_by_key
     ):
         raise SelectedHwmInputError(
             "calculation, output, and crosswalk epoch sets differ"
         )
+    calculation_by_key = {
+        key: row for key, row in calculation_by_key.items() if key in crosswalk_by_key
+    }
 
     funded_by_key: dict[EpochKey, Row] = {}
     excluded: list[Row] = []
@@ -1862,6 +1900,13 @@ def _selected_hwm_source_rows(
         documents["authority/calculation-inputs.json"],
         documents["outputs/account-strategy-manifest.json"],
         documents["authority/account-assignment-crosswalk.json"],
+        _rows(
+            strict_json_object(
+                bundle.payloads["authority/account-flow-coverage.json"],
+                label="account-flow-coverage",
+            ).get("rows"),
+            "coverage rows",
+        ),
     )
     _validate_contract_epoch_strategy_perimeter(contract, crosswalk)
     artifact_sha256s = {

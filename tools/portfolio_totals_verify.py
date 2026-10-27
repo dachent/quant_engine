@@ -70,13 +70,21 @@ def _event_class(event: Mapping[str, Any]) -> str:
 def included_rows(
     manifest: Mapping[str, Any], crosswalk: Mapping[str, Any]
 ) -> list[Mapping[str, Any]]:
-    """The manifest rows of the current product epochs the crosswalk includes."""
+    """The manifest rows of the current product epochs the crosswalk includes.
+
+    A derived sleeve epoch (#567) has no crosswalk row: its account is not one
+    the crosswalk names, and its strategy is one the crosswalk includes (the
+    sleeve stands for its residual parent's epoch).  A derived epoch of any
+    other strategy is retained history and no part of the product totals.
+    """
 
     wanted = {
         (r["account_id"], r["strategy_id"], r["effective_start"], r["effective_end"])
         for r in crosswalk["rows"]
         if r["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
     }
+    product_strategies = {key[1] for key in wanted}
+    crosswalk_accounts = {r["account_id"] for r in crosswalk["rows"]}
     return [
         row
         for row in manifest["rows"]
@@ -87,6 +95,10 @@ def included_rows(
             row.get("effective_end"),
         )
         in wanted
+        or (
+            row.get("account_id") not in crosswalk_accounts
+            and row.get("strategy_id") in product_strategies
+        )
     ]
 
 

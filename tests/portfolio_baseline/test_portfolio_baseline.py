@@ -70,7 +70,9 @@ def _published_provenance(
     root = tmp_path / "private-provenance"
     strategies = []
     for index in range(1, 16):
-        strategy_id = f"strategy-{index}" if index <= 9 else RETIRED_RECORD_IDS[index - 10]
+        strategy_id = (
+            f"strategy-{index}" if index <= 9 else RETIRED_RECORD_IDS[index - 10]
+        )
         strategies.append(
             {
                 "aliases": [f"Synthetic Strategy {index}"],
@@ -4428,8 +4430,10 @@ def test_materializer_verifies_the_catalog_the_real_builder_publishes(
     monkeypatch.setattr(
         baseline,
         "_hwm_policy_exclusions",
-        lambda: RETIRED_EXCLUSIONS
-        | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
     )
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
 
@@ -4561,8 +4565,10 @@ def _provider_ledger_catalog_for_current_capital(
     monkeypatch.setattr(
         baseline,
         "_hwm_policy_exclusions",
-        lambda: RETIRED_EXCLUSIONS
-        | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)},
+        lambda: (
+            RETIRED_EXCLUSIONS
+            | {f"strategy-{index}": date(2026, 1, 1) for index in range(4, 10)}
+        ),
     )
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
     assert isinstance(catalog, dict)

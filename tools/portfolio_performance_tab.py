@@ -422,8 +422,32 @@ def _epoch_id(row: Mapping[str, Any]) -> str:
     )
 
 
+def _sleeve_links(panel: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """Strategy id -> (parent strategy id, sleeve id) for every sleeve strategy.
+
+    The panel's lifecycle rows (current and retained records alike) carry the
+    link the report proved from the nested-strategy tag map and the parent's
+    assignment (#567); a row without a sleeve carries neither field.
+    """
+
+    links: dict[str, tuple[str, str]] = {}
+    for row in _sequence(panel.get("strategies")):
+        if not isinstance(row, Mapping) or row.get("sleeve_id") is None:
+            continue
+        strategy = str(row.get("strategy_id"))
+        parent, sleeve = row.get("parent_strategy_id"), row.get("sleeve_id")
+        if not isinstance(parent, str) or not isinstance(sleeve, str):
+            raise PerformanceTabError("a sleeve strategy lacks its parent or id")
+        if strategy in links:
+            raise PerformanceTabError("a sleeve strategy is listed twice")
+        links[strategy] = (parent, sleeve)
+    return links
+
+
 def _build_slices(
-    manifest: Mapping[str, Any] | None, capital: Mapping[str, Any]
+    manifest: Mapping[str, Any] | None,
+    capital: Mapping[str, Any],
+    sleeve_links: Mapping[str, tuple[str, str]],
 ) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         return _unavailable("ACCOUNT_MANIFEST_ABSENT")
@@ -512,8 +536,12 @@ def _build_slices(
             {
                 "slice_id": strategy,
                 "strategy_id": strategy,
-                "parent_strategy_id": None,
-                "sleeve_id": None,
+                "parent_strategy_id": (
+                    sleeve_links[strategy][0] if strategy in sleeve_links else None
+                ),
+                "sleeve_id": (
+                    sleeve_links[strategy][1] if strategy in sleeve_links else None
+                ),
                 "first_nav_date": first_day,
                 "epoch_ids": sorted(
                     e["id"] for e in epochs if e["strategy"] == strategy
@@ -542,8 +570,13 @@ def _build_slices(
             "residual_cents": None if reference is None else reference - totals[-1],
             "residual_label": (
                 "SYSTEMATIC_CAPITAL_MINUS_SLICE_TOTAL_AT_CUTOFF "
-                "(cash left in a liquidated epoch; named by capital_reconciliation "
-                "when that block is present)"
+                "(cash left in a liquidated epoch"
+                + (
+                    " and in the unallocated cash of a residual parent account"
+                    if sleeve_links
+                    else ""
+                )
+                + "; named by capital_reconciliation when that block is present)"
             ),
             "reason": None if reference is not None else "CAPITAL_SYSTEMATIC_ABSENT",
         },
@@ -654,6 +687,7 @@ def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
         slices = _build_slices(
             manifest if isinstance(manifest, Mapping) else None,
             _mapping(panel.get("capital")),
+            _sleeve_links(panel),
         )
     except PerformanceTabError as exc:
         slices = _unavailable(str(exc))
@@ -977,6 +1011,7 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
         )
         return Fraction(0) if handoff else parsed[0][2]
 
+    expected_links = _expected_sleeve_links(panel)
     totals = [0] * len(days)
     for row in block["rows"]:
         strategy = row["strategy_id"]
@@ -1000,10 +1035,11 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             if row["net_flow_cents"][index] != cents(flow):
                 raise _fail(f"{strategy} flow differs on {day.isoformat()}")
             totals[index] += row["nav_cents"][index]
-        if row["parent_strategy_id"] is not None or row["sleeve_id"] is not None:
-            raise _fail(
-                f"{strategy} carries a sleeve identity before sleeve facts exist"
-            )
+        expected_link = expected_links.get(strategy)
+        if (row["parent_strategy_id"], row["sleeve_id"]) != (
+            (None, None) if expected_link is None else expected_link
+        ):
+            raise _fail(f"{strategy} sleeve identity differs from the panel's")
     reconciliation = block["reconciliation"]
     if reconciliation["total_cents"] != totals:
         raise _fail("slice total differs from the sum of the rows")
@@ -1017,6 +1053,24 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             raise _fail("systematic capital differs")
         if reconciliation["residual_cents"] != reference - totals[-1]:
             raise _fail("residual differs from capital minus the slice total")
+
+
+def _expected_sleeve_links(panel: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """The sleeve identity of each strategy, read again from the panel's rows."""
+
+    expected: dict[str, tuple[str, str]] = {}
+    for raw in _sequence(panel.get("strategies")):
+        if not isinstance(raw, Mapping):
+            continue
+        sleeve, parent = raw.get("sleeve_id"), raw.get("parent_strategy_id")
+        if sleeve is None and parent is None:
+            continue
+        if not (isinstance(sleeve, str) and isinstance(parent, str)):
+            raise _fail("a sleeve strategy lacks its parent or id")
+        if str(raw.get("strategy_id")) in expected:
+            raise _fail("a sleeve strategy is listed twice")
+        expected[str(raw.get("strategy_id"))] = (parent, sleeve)
+    return expected
 
 
 def _effective_start(manifest: Mapping[str, Any], trace: Any) -> str:

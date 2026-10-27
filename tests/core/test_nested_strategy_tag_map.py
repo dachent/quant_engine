@@ -182,3 +182,54 @@ def test_an_unknown_sleeve_has_no_derived_account() -> None:
         parent.sleeve_account_id("s9")
     with pytest.raises(TagMapError, match="unknown parent"):
         validate_tag_map(_bytes(_payload())).parent("other")
+
+
+def _two_parent_map(second_strategy: str, second_parent: str = "account-b") -> bytes:
+    def parent(account: str, strategy: str) -> dict[str, object]:
+        return {
+            "parent_account_id": account,
+            "provider_id": "synthetic",
+            "tag_field": "orderReference",
+            "tag_normalization": "NONE",
+            "sleeves": [
+                {
+                    "sleeve_id": "s1",
+                    "strategy_id": strategy,
+                    "label": "Sleeve",
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "tags": [{"match": "exact", "pattern": "T"}],
+                }
+            ],
+            "unmatched": {"mode": "BLOCK"},
+        }
+
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "artifact_id": "nested-strategy-tag-map",
+            "as_of_date": "2026-09-17",
+            "parents": [
+                parent("account-a", "strategy-one"),
+                parent(second_parent, second_strategy),
+            ],
+        }
+    ).encode("utf-8")
+
+
+def test_one_map_names_several_parents_with_distinct_strategies() -> None:
+    tag_map = tag_map_module.validate_tag_map(_two_parent_map("strategy-two"))
+
+    assert [parent.parent_account_id for parent in tag_map.parents] == [
+        "account-a",
+        "account-b",
+    ]
+    assert [item[0] for item in tag_map_module.sleeve_accounts(tag_map)] == [
+        "account-a-s1",
+        "account-b-s1",
+    ]
+
+
+def test_a_strategy_cannot_be_a_sleeve_of_two_parents() -> None:
+    with pytest.raises(tag_map_module.TagMapError, match="repeats across parents"):
+        tag_map_module.validate_tag_map(_two_parent_map("strategy-one"))

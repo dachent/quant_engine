@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
+import derived_epoch_perimeter
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
 from quant_engine.core import GenerationManifest, VerificationStatus
 from quant_engine.core.contracts import canonical_json_bytes
@@ -491,8 +492,14 @@ def selected_sleeve_facts_paths(spec: Any) -> tuple[Path, ...]:
     return tuple(paths)
 
 
-def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
-    """Resolve the already selected account, provider and baseline authorities."""
+def selected_hwm_source_paths(spec: Any) -> dict[str, Any]:
+    """Resolve the already selected account, provider and baseline authorities.
+
+    A specification that selects derived-sleeve facts (#567) names each artifact
+    as a node ``financial-account-manifest-sleeve-facts-*``; their verified paths
+    are returned under ``sleeve_facts_paths`` so the replay can re-derive the
+    sleeve epochs.  A specification without such a node returns no such key.
+    """
 
     account = [
         node
@@ -503,7 +510,7 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     if len(account) != 1 or account[0].path.name != "generation.json":
         raise FinancialOutcomeError("selected HWM account generation binding differs")
     _verified_file(account[0].path, account[0].sha256, account[0].size_bytes)
-    result = {"account_manifest_generation_path": account[0].path}
+    result: dict[str, Any] = {"account_manifest_generation_path": account[0].path}
     for key, roots in (
         ("provider_ledger_generation_path", {"provider-ledger", "ledger"}),
         ("baseline_generation_path", {"portfolio-baseline", "baseline"}),
@@ -529,6 +536,9 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     result["account_manifest_flow_classification_policy_path"] = profile[
         "classification_policy_path"
     ]
+    facts = selected_sleeve_facts_paths(spec)
+    if facts:
+        result["sleeve_facts_paths"] = facts
     return result
 
 
@@ -575,7 +585,7 @@ def verify_selected_capital_ledger(
 
 
 def verify_selected_hwm_generation(
-    source_paths: Mapping[str, Path],
+    source_paths: Mapping[str, Any],
     *,
     contract_path: Path,
     bindings: Mapping[str, Path],
@@ -1365,9 +1375,23 @@ def _rebuild_selected_epochs(
     result = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
     rows = result["rows"]
     fields = ("account_id", "strategy_id", "effective_start", "effective_end")
-    if len(rows) != len(selected_keys) or {
-        tuple(row[field] for field in fields) for row in rows
-    } != set(selected_keys):
+    coverage_bytes = bundle.payloads.get("authority/account-flow-coverage.json")
+    coverage = (
+        json.loads(coverage_bytes) if coverage_bytes is not None else {"rows": []}
+    )
+    try:
+        # The crosswalk names the baseline perimeter; derived sleeves replace a
+        # residual parent's epoch (#567), and nothing else may differ.
+        derived_epoch_perimeter.effective_perimeter(
+            selected_keys,
+            [tuple(row[field] for field in fields) for row in rows],
+            coverage["rows"],
+        )
+    except derived_epoch_perimeter.PerimeterError as exc:
+        raise FinancialOutcomeError(
+            f"finalized epoch product perimeter differs: {exc}"
+        ) from exc
+    if len(rows) != len({tuple(row[field] for field in fields) for row in rows}):
         raise FinancialOutcomeError("finalized epoch product perimeter differs")
     return cast(dict[str, Any], result)
 

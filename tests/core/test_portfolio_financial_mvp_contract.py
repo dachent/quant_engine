@@ -1463,12 +1463,24 @@ def test_summary_separates_current_perimeter_from_historical_owner_exclusions() 
     assert exclusions_rows == [
         ("echotrade-growth-pivots", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
         ("composer-holy-grail", "IMMATERIAL_EXCLUDED", "EXCLUDED"),
-        ("p123-conn-1911998-andreas-sc-ai-mq-live", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
-        ("p123-conn-1951348-higher-beta-earnings", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        (
+            "p123-conn-1911998-andreas-sc-ai-mq-live",
+            "DEPRECATED_HISTORY_ONLY",
+            "EXCLUDED",
+        ),
+        (
+            "p123-conn-1951348-higher-beta-earnings",
+            "DEPRECATED_HISTORY_ONLY",
+            "EXCLUDED",
+        ),
         ("p123-conn-1956961-ai-largecap-ls", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
         ("p123-conn-1958970-high-octane", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
         ("quantbase-crisis-factor-investing", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
-        ("quantbase-single-index-leveraged-in-out", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        (
+            "quantbase-single-index-leveraged-in-out",
+            "DEPRECATED_HISTORY_ONLY",
+            "EXCLUDED",
+        ),
     ]
 
 

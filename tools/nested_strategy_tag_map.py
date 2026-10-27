@@ -298,6 +298,20 @@ def validate_tag_map(raw: bytes) -> TagMap:
                 fallback,
             )
         )
+    # One strategy is one sleeve of one parent, and every derived account id is
+    # unique: the report and the panel key a sleeve by either.
+    all_strategies = [
+        sleeve.strategy_id for parent in parents for sleeve in parent.sleeves
+    ]
+    all_accounts = [
+        parent.sleeve_account_id(sleeve.sleeve_id)
+        for parent in parents
+        for sleeve in parent.sleeves
+    ]
+    if len(all_strategies) != len(set(all_strategies)):
+        raise TagMapError("a sleeve strategy repeats across parents")
+    if len(all_accounts) != len(set(all_accounts)) or set(all_accounts) & seen_parents:
+        raise TagMapError("a derived sleeve account repeats")
     return TagMap(
         as_of_date=as_of,
         parents=tuple(parents),
