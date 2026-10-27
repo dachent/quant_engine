@@ -586,9 +586,10 @@
       "$comment": "JSON Schema uniqueItems cannot enforce semantic strategy identity for generic objects; the Python panel validator owns that invariant.",
       "type": "array",
       "minItems": 7,
-      "maxItems": 7,
+      "maxItems": 15,
       "items": { "type": "object" }
     },
+    "lifecycle_schema_version": { "const": 1 },
     "strategy_underwriting": {
       "type": "object",
       "additionalProperties": false,
@@ -727,6 +728,11 @@
     }
   },
   "allOf": [
+    {
+      "if": {"required": ["lifecycle_schema_version"]},
+      "then": {"properties": {"strategies": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}, "performance": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}}},
+      "else": {"properties": {"strategies": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}, "performance": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}}}
+    },
     {
       "if": {"properties": {"panel_schema_version": {"enum": [24, 25]}}, "required": ["panel_schema_version"]},
       "then": {
