@@ -567,6 +567,19 @@ FUND = f"{PARENT}-crisis"
 FUND_NAV = {DAYS[1]: "100", DAYS[2]: "115", DAYS[3]: "0"}
 
 
+def _bindings(**extra: Any) -> dict[str, Any]:
+    return {
+        "tag_map_sha256": "0" * 64,
+        "parent_ledger_generation_id": "synthetic-generation",
+        "declared_inputs_sha256": "1" * 64,
+        "builder_code": {
+            "files": {"tools/synthetic_builder.py": "5" * 64},
+            "sha256": "6" * 64,
+        },
+        **extra,
+    }
+
+
 def _quantbase_leg(
     pair: str,
     account: str,
@@ -621,7 +634,23 @@ def _quantbase_facts() -> dict[str, Any]:
         "schema_version": 1,
         "artifact_id": "quantbase-fund-facts",
         "parent_account_id": PARENT,
+        "provider_id": "synthetic",
         "base_currency": "USD",
+        "data_cutoff": LAST,
+        # the manifest seam reads only the bindings, sleeves, perimeter and flows;
+        # the nested conventions / closure / open items are the builder's own
+        # (covered by tests/core/test_build_quantbase_fund_facts.py)
+        "bindings": _bindings(
+            source_sha256={
+                "account_activity": "2" * 64,
+                "accounts": "3" * 64,
+                "dashboards": {"crisis": "4" * 64},
+            }
+        ),
+        "conventions": {},
+        "closure": {},
+        "open_items": {},
+        "disclosures": {},
         "window": {"first_day": FIRST, "last_day": LAST},
         "perimeter_account": {
             "account_id": POOL,
@@ -737,6 +766,66 @@ def test_quantbase_parent_ledger_leg_is_pairing_evidence_not_a_second_flow(
         "flow_count",
     ):
         assert live_row[field] == plain_row[field], field
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda f: f.pop("bindings"), "lack governed field.*bindings"),
+        (lambda f: f.pop("closure"), "lack governed field.*closure"),
+        (
+            lambda f: f["bindings"].__setitem__("tag_map_sha256", "xyz"),
+            "tag_map_sha256 is not a sha256",
+        ),
+        (
+            lambda f: f["bindings"].pop("source_sha256"),
+            "bindings lack source_sha256",
+        ),
+        (
+            lambda f: f["bindings"].__setitem__("builder_code", {"files": {}}),
+            "builder_code is invalid",
+        ),
+        (
+            lambda f: f.__setitem__("provider_id", "other-provider"),
+            "provider_id differs from the parent account",
+        ),
+    ],
+)
+def test_sleeve_artifact_without_its_governed_bindings_is_refused(
+    perimeter_module: Any, mutate: Any, message: str
+) -> None:
+    facts = _quantbase_facts()
+    mutate(facts)
+    snapshot = InputSnapshot.from_bytes("qb facts", _facts_bytes(facts))
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=_census([("strategy-crisis", DAYS[1], DAYS[3])]),
+    )
+    with pytest.raises(Exception, match=message):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+def test_same_day_equal_amount_sleeve_legs_block_the_epoch_instead_of_guessing(
+    perimeter_module: Any,
+) -> None:
+    facts = _quantbase_facts()
+    # a second fund-account pair of the same amount on the same day: the
+    # classifier can only match by date and amount, so it refuses to guess
+    extra = []
+    for leg in facts["flows"]:
+        if leg["pair_id"] == f"{DAYS[1]}:0001":
+            extra.append({**leg, "pair_id": f"{DAYS[1]}:0009"})
+    facts["flows"].extend(extra)
+    snapshot = InputSnapshot.from_bytes("qb facts", _facts_bytes(facts))
+    selected = _selected(
+        perimeter_module,
+        (snapshot,),
+        census=_census([("strategy-crisis", DAYS[1], DAYS[3])]),
+        ledger_edit=_live_fund_receives_the_sweep,
+    )
+    with pytest.raises(Exception, match="blocked classified flow"):
+        perimeter_module.build_account_manifest_payloads(selected)
 
 
 def test_census_lists_a_funded_membership_per_derived_epoch(

@@ -2837,6 +2837,120 @@ def _sleeve_list(value: object, field: str) -> list[Any]:
     return value
 
 
+_SLEEVE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SLEEVE_GENERATION_ID = re.compile(r"^[A-Za-z0-9._:@+-]{1,200}$")
+_SLEEVE_TOP_LEVEL = MappingProxyType(
+    {
+        "sleeve-account-facts": frozenset(
+            {
+                "schema_version",
+                "artifact_id",
+                "parent_account_id",
+                "provider_id",
+                "base_currency",
+                "window",
+                "bindings",
+                "closure_policy",
+                "sleeves",
+                "perimeter_account",
+                "flows",
+                "allocated_cost",
+                "closure",
+                "disclosures",
+            }
+        ),
+        "quantbase-fund-facts": frozenset(
+            {
+                "schema_version",
+                "artifact_id",
+                "parent_account_id",
+                "provider_id",
+                "base_currency",
+                "data_cutoff",
+                "window",
+                "bindings",
+                "conventions",
+                "sleeves",
+                "perimeter_account",
+                "flows",
+                "closure",
+                "open_items",
+                "disclosures",
+            }
+        ),
+    }
+)
+_SLEEVE_BINDING_KEYS = MappingProxyType(
+    {
+        "sleeve-account-facts": frozenset({"account_rows_sha256"}),
+        "quantbase-fund-facts": frozenset({"source_sha256"}),
+    }
+)
+
+
+def _require_sleeve_contract(payload: Mapping[str, Any], provider: str) -> None:
+    """The artifact carries every governed top-level key and hash binding.
+
+    The full JSON schema (``schemas/portfolio/{sleeve-account,quantbase-fund}-
+    facts.schema.json``) is not read here: the schema files are not part of the
+    builder's code identity yet.  What is enforced is that no binding can be
+    absent or malformed, so every derived fact is attributable to its inputs.
+    """
+
+    artifact_id = str(payload.get("artifact_id"))
+    required = _SLEEVE_TOP_LEVEL[artifact_id]
+    missing = sorted(required - set(payload))
+    if missing:
+        raise ManifestError(
+            f"sleeve facts lack governed field(s): {', '.join(missing)}"
+        )
+    if str(payload.get("provider_id")).casefold() != provider.casefold():
+        raise ManifestError("sleeve facts provider_id differs from the parent account")
+    bindings = _sleeve_object(payload.get("bindings"), "bindings")
+    shas = {"tag_map_sha256", "declared_inputs_sha256"} | _SLEEVE_BINDING_KEYS[
+        artifact_id
+    ]
+    for key in sorted(shas | {"parent_ledger_generation_id", "builder_code"}):
+        if key not in bindings:
+            raise ManifestError(f"sleeve facts bindings lack {key}")
+    for key in sorted(shas):
+        value = bindings[key]
+        if key == "source_sha256":
+            source = _sleeve_object(value, "bindings.source_sha256")
+            dashboards = _sleeve_object(
+                source.get("dashboards"), "bindings.source_sha256.dashboards"
+            )
+            digests = [source.get("account_activity"), source.get("accounts")]
+            digests += list(dashboards.values())
+            if not dashboards or any(
+                not isinstance(item, str) or _SLEEVE_SHA256.fullmatch(item) is None
+                for item in digests
+            ):
+                raise ManifestError("sleeve facts bindings.source_sha256 is invalid")
+        elif not isinstance(value, str) or _SLEEVE_SHA256.fullmatch(value) is None:
+            raise ManifestError(f"sleeve facts bindings.{key} is not a sha256")
+    generation = bindings["parent_ledger_generation_id"]
+    if (
+        not isinstance(generation, str)
+        or _SLEEVE_GENERATION_ID.fullmatch(generation) is None
+    ):
+        raise ManifestError(
+            "sleeve facts bindings.parent_ledger_generation_id is invalid"
+        )
+    code = _sleeve_object(bindings["builder_code"], "bindings.builder_code")
+    files = _sleeve_object(code.get("files"), "bindings.builder_code.files")
+    if (
+        not files
+        or not isinstance(code.get("sha256"), str)
+        or _SLEEVE_SHA256.fullmatch(str(code["sha256"])) is None
+        or any(
+            not isinstance(item, str) or _SLEEVE_SHA256.fullmatch(item) is None
+            for item in files.values()
+        )
+    ):
+        raise ManifestError("sleeve facts bindings.builder_code is invalid")
+
+
 def derive_sleeve_manifest_facts(
     snapshots: Sequence[InputSnapshot],
     *,
@@ -2886,6 +3000,7 @@ def derive_sleeve_manifest_facts(
             raise ManifestError(
                 f"sleeve facts parent is not a baseline account: {parent}"
             )
+        _require_sleeve_contract(payload, provider)
         if payload.get("base_currency") != "USD":
             raise ManifestError("sleeve facts base_currency must be USD")
         currency = "USD"

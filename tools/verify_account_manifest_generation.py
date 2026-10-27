@@ -5602,6 +5602,21 @@ class _SleeveView:
 _SLEEVE_ROLES: Final[Mapping[str, str]] = MappingProxyType(
     {"sleeve-account-facts": "RESIDUAL", "quantbase-fund-facts": "LIVE"}
 )
+_SLEEVE_REQUIRED_KEYS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "sleeve-account-facts": frozenset(
+            "schema_version artifact_id parent_account_id provider_id base_currency "
+            "window bindings closure_policy sleeves perimeter_account flows "
+            "allocated_cost closure disclosures".split()
+        ),
+        "quantbase-fund-facts": frozenset(
+            "schema_version artifact_id parent_account_id provider_id base_currency "
+            "data_cutoff window bindings conventions sleeves perimeter_account flows "
+            "closure open_items disclosures".split()
+        ),
+    }
+)
+_SLEEVE_GENERATION_ID: Final = re.compile(r"^[A-Za-z0-9._:@+-]{1,200}$")
 _SLEEVE_FLOW_TYPE: Final[str] = "TRANSFER:INTERNAL:SLEEVE"
 _DERIVED_COVERAGE_KIND: Final[str] = "DERIVED_SLEEVE_COVERAGE_V1"
 
@@ -5622,6 +5637,59 @@ def _sleeve_money(value: object) -> Decimal:
     if type(value) is not str or _CANONICAL_NUMERIC.fullmatch(value) is None:
         _fail()
     return _parse_retained_source_decimal(value)
+
+
+def _sleeve_contract_holds(payload: Mapping[str, object], provider: str) -> bool:
+    """Governed top-level keys, provider and every hash binding are present."""
+
+    if not _SLEEVE_REQUIRED_KEYS[str(payload["artifact_id"])] <= set(payload):
+        return False
+    if str(payload.get("provider_id")).casefold() != provider.casefold():
+        return False
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return False
+
+    def is_sha(value: object) -> bool:
+        return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+    if not (
+        is_sha(bindings.get("tag_map_sha256"))
+        and is_sha(bindings.get("declared_inputs_sha256"))
+    ):
+        return False
+    generation = bindings.get("parent_ledger_generation_id")
+    if (
+        not isinstance(generation, str)
+        or _SLEEVE_GENERATION_ID.fullmatch(generation) is None
+    ):
+        return False
+    if payload["artifact_id"] == "sleeve-account-facts":
+        if not is_sha(bindings.get("account_rows_sha256")):
+            return False
+    else:
+        source = bindings.get("source_sha256")
+        if not isinstance(source, Mapping):
+            return False
+        dashboards = source.get("dashboards")
+        if (
+            not isinstance(dashboards, Mapping)
+            or not dashboards
+            or not is_sha(source.get("account_activity"))
+            or not is_sha(source.get("accounts"))
+            or not all(is_sha(item) for item in dashboards.values())
+        ):
+            return False
+    code = bindings.get("builder_code")
+    if not isinstance(code, Mapping):
+        return False
+    files = code.get("files")
+    return (
+        isinstance(files, Mapping)
+        and bool(files)
+        and is_sha(code.get("sha256"))
+        and all(is_sha(item) for item in files.values())
+    )
 
 
 def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView | None:
@@ -5656,6 +5724,8 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                 _fail()
             parent = _internal_id(payload.get("parent_account_id"))
             if parent is None or parent in used_parents or parent not in providers:
+                _fail()
+            if not _sleeve_contract_holds(payload, providers[parent]):
                 _fail()
             used_parents.add(parent)
             if payload.get("base_currency") != "USD":
