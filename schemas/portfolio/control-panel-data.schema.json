@@ -2038,7 +2038,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "data_through_date", "lines"],
+          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "lines"],
           "properties": {
             "status": { "const": "AVAILABLE" },
             "grid": { "const": "ISO_WEEK_START_MONDAY" },
@@ -2064,6 +2064,7 @@
             "dates": { "type": "array", "minItems": 1, "items": { "type": "string" } },
             "week_end_dates": { "type": "array", "minItems": 1, "items": { "type": "string" } },
             "last_week_partial": { "type": "boolean" },
+            "stale_before_current_week": { "type": "boolean" },
             "data_through_date": { "type": ["string", "null"] },
             "lines": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/performance_tab_line" } }
           }

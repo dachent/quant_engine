@@ -349,8 +349,11 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
         "gaps_before_common_start": gaps,
         "dates": week_keys,
         "week_end_dates": ends,
-        "last_week_partial": bool(current.get("is_partial")),
-        "data_through_date": current.get("data_through_date"),
+        "last_week_partial": current.get("week_start") == week_keys[-1]
+        and bool(current.get("is_partial")),
+        "stale_before_current_week": bool(current.get("week_start"))
+        and week_keys[-1] < str(current.get("week_start")),
+        "data_through_date": ends[-1],
         "lines": lines,
     }
 
@@ -711,6 +714,32 @@ def _verify_mode(
         expected = date.fromisoformat(latest) + timedelta(days=7 * index)
         if key != expected.isoformat():
             raise _fail(f"{mode} dates are not consecutive Mondays")
+    observed_ends = []
+    for key in dates:
+        candidates = []
+        for row in rows:
+            entry = (_mode_inputs(row, mode) or ({}, {}, ""))[1].get(key)
+            if isinstance(entry, list) and len(entry) > 2:
+                candidates.append(str(entry[2]))
+        observed_ends.append(
+            max(candidates)
+            if candidates
+            else (date.fromisoformat(key) + timedelta(days=6)).isoformat()
+        )
+    if list(block["week_end_dates"]) != observed_ends:
+        raise _fail(f"{mode} week_end_dates differ from the observation meta")
+    if block["data_through_date"] != observed_ends[-1]:
+        raise _fail(f"{mode} data_through_date is not the final observation")
+    current_week = _mapping(weekly.get("current_week"))
+    week_start = current_week.get("week_start")
+    if block["last_week_partial"] != (
+        week_start == dates[-1] and bool(current_week.get("is_partial"))
+    ):
+        raise _fail(f"{mode} last_week_partial differs")
+    if block["stale_before_current_week"] != (
+        bool(week_start) and dates[-1] < str(week_start)
+    ):
+        raise _fail(f"{mode} stale_before_current_week differs")
     if len(block["week_end_dates"]) != length:
         raise _fail(f"{mode} week_end_dates length differs")
     by_id = {str(line["series_id"]): line for line in block["lines"]}
@@ -929,8 +958,22 @@ def _verify_readout(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             != "PORTFOLIO_TWR_CUMULATIVE_ABSENT"
         ):
             raise _fail("summed-epoch figure is published without its source")
-    elif block["summed_epoch_twr"] != (totals.get("summed_epoch_twr") or None):
-        raise _fail("summed-epoch figure differs from portfolio_twr_cumulative")
+    else:
+        source = totals.get("summed_epoch_twr") or None
+        if block["summed_epoch_twr"] != source:
+            raise _fail("summed-epoch figure differs from portfolio_twr_cumulative")
+        if source is None or source.get("status") != "AVAILABLE":
+            expected_reason = str(
+                (source or {}).get("reason") or "SUMMED_EPOCH_TWR_UNAVAILABLE"
+            )
+            expected_difference = None
+        else:
+            expected_reason = None
+            expected_difference = totals.get("headline_minus_summed_epoch_twr")
+        if block["summed_epoch_unavailable_reason"] != expected_reason:
+            raise _fail("summed-epoch reason differs from portfolio_twr_cumulative")
+        if block["headline_minus_summed_epoch_twr"] != expected_difference:
+            raise _fail("headline difference differs from portfolio_twr_cumulative")
 
 
 def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:

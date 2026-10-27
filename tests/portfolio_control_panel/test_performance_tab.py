@@ -439,6 +439,8 @@ def _tamper(path: list[Any], value: Any) -> Any:
             ["readout", "summed_epoch_twr"], {"status": "AVAILABLE", "value": "0.5"}
         ),
         _tamper(["schema_version"], 2),
+        _tamper(["modes", "LIVE_ONLY", "data_through_date"], "2026-12-31"),
+        _tamper(["modes", "LIVE_ONLY", "stale_before_current_week"], True),
     ],
 )
 def test_the_verifier_rejects_a_tampered_block(mutate: Any) -> None:
@@ -516,3 +518,50 @@ def test_the_dashboard_data_js_twin_carries_the_block() -> None:
         for part in descriptor["parts"]
     )
     assert json.loads(raw)["performance_tab"] == data["performance_tab"]
+
+
+def test_a_mode_that_ends_before_the_current_week_is_labelled_stale() -> None:
+    panel = _panel()
+    for row in panel["weekly_returns"]["series"]:
+        for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+            values = row["values_by_mode"].get(mode)
+            if values:
+                values.pop(WEEKS[7], None)
+    panel["weekly_returns"]["current_week"] = {
+        "is_partial": True,
+        "data_through_date": "2026-03-05",
+        "week_start": WEEKS[7],
+    }
+    block = tab.build_performance_tab(panel)
+    mode = block["modes"]["LIVE_ONLY"]
+    assert mode["dates"][-1] == WEEKS[6]
+    assert mode["stale_before_current_week"] is True
+    assert mode["last_week_partial"] is False
+    assert mode["data_through_date"] == mode["week_end_dates"][-1] != "2026-03-05"
+    tab.verify_performance_tab(block, panel)
+
+
+def test_the_verifier_checks_the_difference_and_reason_against_593() -> None:
+    panel = _panel()
+    panel["portfolio_twr_cumulative"] = {
+        "summed_epoch_twr": {"status": "AVAILABLE", "value": "0.1"},
+        "headline_minus_summed_epoch_twr": "0.025",
+    }
+    block = tab.build_performance_tab(panel)
+    for key, value in (
+        ("headline_minus_summed_epoch_twr", "0.9"),
+        ("summed_epoch_unavailable_reason", "X"),
+    ):
+        bad = copy.deepcopy(block)
+        bad["readout"][key] = value
+        with pytest.raises(tab.PerformanceTabError):
+            tab.verify_performance_tab(bad, panel)
+    panel["portfolio_twr_cumulative"] = {
+        "summed_epoch_twr": {"status": "UNAVAILABLE", "reason": "GRIDS"},
+        "headline_minus_summed_epoch_twr": None,
+    }
+    block = tab.build_performance_tab(panel)
+    bad = copy.deepcopy(block)
+    bad["readout"]["summed_epoch_unavailable_reason"] = "OTHER"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
