@@ -104,6 +104,7 @@ from quant_engine.portfolio_ledger.returns import (
     ReturnSpan,
     ReturnsError,
     SubperiodLink,
+    ValuePeriod,
     cagr,
     classify_xirr,
     composite,
@@ -112,6 +113,7 @@ from quant_engine.portfolio_ledger.returns import (
     mwr_cashflows,
     opening_point,
     splice_spans,
+    summed_value_composite,
     xirr,
 )
 from quant_engine.portfolio_ledger.strategy_versions import (
@@ -220,6 +222,8 @@ __all__ = [
     "reconcile_position_values",
     "reconcile_allocation_bridge",
     "splice_spans",
+    "summed_value_composite",
+    "ValuePeriod",
     "validate_hwm_inputs_envelope",
     "validate_as_held_hwm_policy",
     "validate_as_held_hwm_receipt_generation_binding",

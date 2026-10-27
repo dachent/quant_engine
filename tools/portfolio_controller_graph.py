@@ -121,6 +121,10 @@ _PATH_STAGES = {
     # panel that renders it) must be re-run.
     "tools/portfolio_implementation_reconciliation.py": ["report", "panel"],
     "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
+    # PANEL-VIS-002 (#593): the portfolio-level totals are built inside the report
+    # and re-derived by its verifier, then carried into the panel payload.
+    "tools/portfolio_totals.py": ["report", "panel"],
+    "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
     # The Performance tab producer: builds one additive panel block from the weekly
