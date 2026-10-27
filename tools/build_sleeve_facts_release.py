@@ -33,11 +33,7 @@ import re
 import sys
 from typing import Any, Final, Mapping, Sequence
 
-from quant_engine.core.contracts import (
-    GenerationManifest,
-    VerificationStatus,
-    canonical_json_bytes,
-)
+from quant_engine.core import GenerationManifest, VerificationStatus
 
 import build_quantbase_fund_facts as quantbase_builder
 import build_sleeve_account_facts as ibkr_builder
@@ -46,6 +42,9 @@ import sleeve_ledger as ledger_module
 import sleeve_nav as nav_module
 
 MANIFEST_ARTIFACT_ID: Final = "sleeve-policy-manifest"
+# The manifest keys each section by the artifact it builds.
+ACCOUNT_SECTION: Final = "sleeve-account-facts"
+FUND_SECTION: Final = "quantbase-fund-facts"
 IBKR_FACTS_NAME: Final = "sleeve-account-facts.json"
 QUANTBASE_FACTS_NAME: Final = "quantbase-fund-facts.json"
 SELECTION_NAME: Final = "sleeve-facts-selection.json"
@@ -152,7 +151,9 @@ def _selected_catalog(
 ) -> tuple[str, bytes]:
     """One verified source generation's catalog bytes and generation id."""
 
-    manifest_bytes = _read_exact(generation_dir, "generation.json", "generation manifest")
+    manifest_bytes = _read_exact(
+        generation_dir, "generation.json", "generation manifest"
+    )
     catalog_bytes = _read_exact(generation_dir, catalog_file, catalog_file)
     try:
         manifest = GenerationManifest.from_json_bytes(manifest_bytes)
@@ -202,7 +203,7 @@ def build_release_sleeve_facts(
     manifest_bytes = policy_manifest_path.read_bytes()
     manifest = _closed(
         _load_json(manifest_bytes, "sleeve policy manifest"),
-        {"schema_version", "artifact_id", "ibkr", "quantbase"},
+        {"schema_version", "artifact_id", ACCOUNT_SECTION, FUND_SECTION},
         "sleeve policy manifest",
     )
     if (
@@ -210,28 +211,34 @@ def build_release_sleeve_facts(
         or manifest["artifact_id"] != MANIFEST_ARTIFACT_ID
     ):
         raise SleeveFactsReleaseError("sleeve policy manifest identity differs")
-    ibkr = _closed(manifest["ibkr"], {"tag_map", "declared_inputs"}, "ibkr policy")
-    quantbase = _closed(
-        manifest["quantbase"],
-        {"tag_map", "declared_inputs", "sources"},
-        "quantbase policy",
+    ibkr = _closed(
+        manifest[ACCOUNT_SECTION],
+        {"tag_map", "declared_inputs"},
+        "account sleeve policy",
     )
-    ibkr_tag_map = _pinned(policy_root, ibkr["tag_map"], "ibkr tag map")
-    ibkr_declared = _pinned(policy_root, ibkr["declared_inputs"], "ibkr declared inputs")
-    qb_tag_map = _pinned(policy_root, quantbase["tag_map"], "quantbase tag map")
+    quantbase = _closed(
+        manifest[FUND_SECTION],
+        {"tag_map", "declared_inputs", "sources"},
+        "fund sleeve policy",
+    )
+    ibkr_tag_map = _pinned(policy_root, ibkr["tag_map"], "account sleeve tag map")
+    ibkr_declared = _pinned(
+        policy_root, ibkr["declared_inputs"], "account sleeve declared inputs"
+    )
+    qb_tag_map = _pinned(policy_root, quantbase["tag_map"], "fund sleeve tag map")
     qb_declared = _pinned(
-        policy_root, quantbase["declared_inputs"], "quantbase declared inputs"
+        policy_root, quantbase["declared_inputs"], "fund sleeve declared inputs"
     )
     sources = _closed(
-        quantbase["sources"], {*_QUANTBASE_SOURCES, "dashboards"}, "quantbase sources"
+        quantbase["sources"], {*_QUANTBASE_SOURCES, "dashboards"}, "fund source files"
     )
     source_bytes = {
-        key: _source_pinned(quantbase_source_dir, sources[key], f"quantbase {key}")
+        key: _source_pinned(quantbase_source_dir, sources[key], f"fund source {key}")
         for key in _QUANTBASE_SOURCES
     }
     dashboards_policy = _object(sources["dashboards"], "quantbase dashboards")
     dashboards = {
-        str(key): _source_pinned(quantbase_source_dir, pin, f"quantbase dashboard {key}")
+        str(key): _source_pinned(quantbase_source_dir, pin, f"fund dashboard {key}")
         for key, pin in sorted(dashboards_policy.items())
     }
 
@@ -251,7 +258,9 @@ def build_release_sleeve_facts(
                 f"generation {parent_generation}, which is absent under "
                 f"{ibkr_generation_root}"
             )
-        ibkr_generation, ibkr_catalog_bytes = _selected_catalog(ibkr_dir, *_IBKR_CATALOG)
+        ibkr_generation, ibkr_catalog_bytes = _selected_catalog(
+            ibkr_dir, *_IBKR_CATALOG
+        )
         if ibkr_generation != parent_generation:
             raise SleeveFactsReleaseError(
                 "the IBKR generation read differs from the id the ledger records"
@@ -314,7 +323,10 @@ def build_release_sleeve_facts(
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, data, _artifact_id in produced:
         _create_exact(output_dir / name, data)
-    _create_exact(output_dir / SELECTION_NAME, canonical_json_bytes(selection))
+    _create_exact(
+        output_dir / SELECTION_NAME,
+        (json.dumps(selection, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+    )
     return selection
 
 

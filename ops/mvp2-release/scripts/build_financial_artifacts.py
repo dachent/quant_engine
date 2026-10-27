@@ -112,9 +112,9 @@ def sleeve_facts_rows(prepared: Path) -> list[dict[str, object]]:
 
     from portfolio_financial_outcomes import sleeve_facts_node_id
 
-    recorded = json.loads((prepared / "preparation/checkpoints/epoch.json").read_bytes())[
-        "result"
-    ]["sleeve_facts"]
+    recorded = json.loads(
+        (prepared / "preparation/checkpoints/epoch.json").read_bytes()
+    )["result"]["sleeve_facts"]
     rows = []
     for pin in recorded:
         row = artifact(sleeve_facts_node_id(pin["sha256"]), Path(pin["path"]))

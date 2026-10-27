@@ -154,17 +154,21 @@ _PATH_STAGES = {
     # change affects the report and the panel built from it.
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
-    "tools/sleeve_ledger.py": [],
-    "tools/sleeve_nav.py": [],
-    # #567 stage 5: the post-ledger sleeve-facts builder; nothing imports it yet.
-    "tools/build_sleeve_account_facts.py": [],
-    "tools/sleeve_inputs.py": [],
+    # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
+    # runs them.  Attended preparation builds the facts, the epoch manifest selects
+    # them and the HWM replay re-supplies them, so a change to any of them moves the
+    # epoch manifest the report and the panel are built from.
+    "tools/sleeve_ledger.py": ["report", "panel"],
+    "tools/sleeve_nav.py": ["report", "panel"],
+    "tools/build_sleeve_account_facts.py": ["report", "panel"],
+    "tools/build_sleeve_facts_release.py": ["report", "panel"],
+    "tools/sleeve_inputs.py": ["report", "panel"],
     "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": [],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
-    # source bytes only and nothing imports it yet.
-    "tools/build_quantbase_fund_facts.py": [],
+    # source bytes only, and the release step runs it beside the IBKR builder.
+    "tools/build_quantbase_fund_facts.py": ["report", "panel"],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
@@ -508,6 +512,13 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
             "tools/rebind_current_epoch_crosswalk.py",
             _PREPARATION,
+            "tools/build_sleeve_facts_release.py",
+            "tools/build_sleeve_account_facts.py",
+            "tools/build_quantbase_fund_facts.py",
+            "tools/nested_strategy_tag_map.py",
+            "tools/sleeve_inputs.py",
+            "tools/sleeve_ledger.py",
+            "tools/sleeve_nav.py",
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/account-manifest-independent-verification.schema.json",
             "schemas/portfolio/account-assignment-perimeter.schema.json",
@@ -533,7 +544,10 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
         "writers": ((_EPOCH_MANIFEST, "stage_current_epoch_manifest"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
-        "tests": ("tests/core/test_attended_preparation.py",),
+        "tests": (
+            "tests/core/test_attended_preparation.py",
+            "tests/core/test_build_sleeve_facts_release.py",
+        ),
         "sinks": ("report-json-html", "panel-json-html"),
     },
     {

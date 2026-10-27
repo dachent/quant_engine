@@ -1,18 +1,6 @@
 {
   "artifact_id": "sleeve-policy-manifest",
-  "ibkr": {
-    "declared_inputs": {
-      "path": "sleeve-declared-inputs.json",
-      "sha256": "1ae9ec2a4865cdf8854ec6335c7b6758cc66d2843a3a8c5d574ba028452600a5",
-      "size_bytes": 9164
-    },
-    "tag_map": {
-      "path": "nested-strategy-tag-map.json",
-      "sha256": "b5982a3b4162fd9c27b87a84742909e115ede48c64eccf75ae11ef8d53db729e",
-      "size_bytes": 2422
-    }
-  },
-  "quantbase": {
+  "quantbase-fund-facts": {
     "declared_inputs": {
       "path": "quantbase/declared-inputs.json",
       "sha256": "aacd82f71793fa1fdeb094e62b5c6bfee7814dc3e5e9d5121e89d7a239290913",
@@ -52,5 +40,17 @@
       "size_bytes": 833
     }
   },
-  "schema_version": 1
+  "schema_version": 1,
+  "sleeve-account-facts": {
+    "declared_inputs": {
+      "path": "sleeve-declared-inputs.json",
+      "sha256": "1ae9ec2a4865cdf8854ec6335c7b6758cc66d2843a3a8c5d574ba028452600a5",
+      "size_bytes": 9164
+    },
+    "tag_map": {
+      "path": "nested-strategy-tag-map.json",
+      "sha256": "b5982a3b4162fd9c27b87a84742909e115ede48c64eccf75ae11ef8d53db729e",
+      "size_bytes": 2422
+    }
+  }
 }

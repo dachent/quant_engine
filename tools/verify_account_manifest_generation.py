@@ -5814,9 +5814,8 @@ def _independent_sleeve_view(selected: IndependentVerifierInputs) -> _SleeveView
                 _fail()
             if not _sleeve_contract_holds(payload, providers[parent]):
                 _fail()
-            if (
-                _bound_parent_generation(payload)
-                != ledger_generations.get(providers[parent].casefold())
+            if _bound_parent_generation(payload) != ledger_generations.get(
+                providers[parent].casefold()
             ):
                 _fail()
             used_parents.add(parent)

@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+import dataclasses
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -6699,7 +6700,7 @@ class ManifestCandidateSnapshots:
     sleeve_facts: tuple[InputSnapshot, ...] = ()
     # provider id (case-folded) -> the source generation id the selected provider
     # ledger records; every sleeve-facts artifact is reconciled against it
-    provider_generation_ids: Mapping[str, str] = field(default_factory=dict)
+    provider_generation_ids: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -6775,7 +6776,9 @@ class ManifestCandidateSnapshots:
         object.__setattr__(
             self,
             "provider_generation_ids",
-            MappingProxyType({key.casefold(): value for key, value in generations.items()}),
+            MappingProxyType(
+                {key.casefold(): value for key, value in generations.items()}
+            ),
         )
 
 

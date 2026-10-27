@@ -378,9 +378,9 @@ def test_sleeve_facts_rows_name_every_file_preparation_consumed(tmp_path):
     }
     assert all(row["kind"] == "ARTIFACT" and row["depends_on"] == [] for row in rows)
     # producer and both consumers agree, with nothing fabricated on either side
-    assert {path.name for path in materializer._production_sleeve_facts_paths(rows)} == set(
-        files
-    )
+    assert {
+        path.name for path in materializer._production_sleeve_facts_paths(rows)
+    } == set(files)
     nodes = tuple(
         core_pipeline.ArtifactNode(
             str(row["node_id"]),
@@ -392,7 +392,8 @@ def test_sleeve_facts_rows_name_every_file_preparation_consumed(tmp_path):
         for row in rows
     )
     assert {
-        path.name for path in outcomes.selected_sleeve_facts_paths(SimpleNamespace(nodes=nodes))
+        path.name
+        for path in outcomes.selected_sleeve_facts_paths(SimpleNamespace(nodes=nodes))
     } == set(files)
 
 
@@ -430,5 +431,7 @@ def test_consumers_refuse_a_sleeve_facts_node_that_does_not_name_its_digest(tmp_
         str(row["sha256"]),
         int(row["size_bytes"]),
     )
-    with pytest.raises(outcomes.FinancialOutcomeError, match="does not name its digest"):
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="does not name its digest"
+    ):
         outcomes.selected_sleeve_facts_paths(SimpleNamespace(nodes=(node,)))

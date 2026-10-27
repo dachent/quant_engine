@@ -132,12 +132,14 @@ class World:
         self.manifest: dict[str, Any] = {
             "schema_version": 1,
             "artifact_id": "sleeve-policy-manifest",
-            "ibkr": {"tag_map": ibkr_tag, "declared_inputs": ibkr_decl},
-            "quantbase": {
+            "sleeve-account-facts": {"tag_map": ibkr_tag, "declared_inputs": ibkr_decl},
+            "quantbase-fund-facts": {
                 "tag_map": qb_tag,
                 "declared_inputs": qb_decl,
                 "sources": {
-                    "account_activity": source("account_activity.csv", csvs["account_activity"]),
+                    "account_activity": source(
+                        "account_activity.csv", csvs["account_activity"]
+                    ),
                     "accounts": source("accounts.csv", csvs["accounts"]),
                     "dashboards": {
                         key: source(f"dashboard_{key}.csv", data)
@@ -232,7 +234,9 @@ def test_builds_both_artifacts_bound_to_the_ledger_generations(world: World) -> 
     assert selection["provider_ledger_generation_id"] == world.ledger_dir.name
     # the artifacts bind the governed policy bytes
     governed = tag_map_module.validate_tag_map(
-        (world.policy / world.manifest["ibkr"]["tag_map"]["path"]).read_bytes()
+        (
+            world.policy / world.manifest["sleeve-account-facts"]["tag_map"]["path"]
+        ).read_bytes()
     )
     assert ibkr["bindings"]["tag_map_sha256"] == governed.sha256
     assert release.selected_paths(selection, out) == (
@@ -308,21 +312,23 @@ def test_a_manifest_with_an_extra_or_missing_key_is_refused(world: World) -> Non
     with pytest.raises(release.SleeveFactsReleaseError, match="keys differ"):
         world.build()
     del world.manifest["extra"]
-    del world.manifest["ibkr"]
+    del world.manifest["sleeve-account-facts"]
     world.write_manifest()
     with pytest.raises(release.SleeveFactsReleaseError, match="keys differ"):
         world.build()
 
 
 def test_a_path_that_escapes_the_policy_directory_is_refused(world: World) -> None:
-    world.manifest["ibkr"]["tag_map"]["path"] = "../sources/accounts.csv"
+    world.manifest["sleeve-account-facts"]["tag_map"]["path"] = (
+        "../sources/accounts.csv"
+    )
     world.write_manifest()
     with pytest.raises(release.SleeveFactsReleaseError, match="escapes"):
         world.build()
 
 
 def test_a_builder_refusal_is_a_release_refusal(world: World) -> None:
-    pin = world.manifest["quantbase"]["sources"]["dashboards"]
+    pin = world.manifest["quantbase-fund-facts"]["sources"]["dashboards"]
     dropped = pin.pop("total")
     world.write_manifest()
     with pytest.raises(release.SleeveFactsReleaseError, match="dashboards must be"):
@@ -363,10 +369,10 @@ def test_the_committed_policy_is_pinned_valid_and_complete() -> None:
     manifest_path = GOVERNED_POLICY / "sleeve-policy-manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     pins = {
-        "ibkr tag map": manifest["ibkr"]["tag_map"],
-        "ibkr declared": manifest["ibkr"]["declared_inputs"],
-        "quantbase tag map": manifest["quantbase"]["tag_map"],
-        "quantbase declared": manifest["quantbase"]["declared_inputs"],
+        "ibkr tag map": manifest["sleeve-account-facts"]["tag_map"],
+        "ibkr declared": manifest["sleeve-account-facts"]["declared_inputs"],
+        "quantbase tag map": manifest["quantbase-fund-facts"]["tag_map"],
+        "quantbase declared": manifest["quantbase-fund-facts"]["declared_inputs"],
     }
     raw: dict[str, bytes] = {}
     for label, pin in pins.items():
@@ -376,15 +382,19 @@ def test_the_committed_policy_is_pinned_valid_and_complete() -> None:
         assert b"\r" not in raw[label], label
     ibkr_map = tag_map_module.validate_tag_map(raw["ibkr tag map"])
     ibkr_declared = ibkr_builder.load_declared_inputs(raw["ibkr declared"], ibkr_map)
-    assert ibkr_map.parent(ibkr_declared.parent_account_id).tag_field == "orderReference"
+    assert (
+        ibkr_map.parent(ibkr_declared.parent_account_id).tag_field == "orderReference"
+    )
     qb_map = tag_map_module.validate_tag_map(raw["quantbase tag map"])
-    qb_declared = quantbase_builder.load_declared_inputs(raw["quantbase declared"], qb_map)
+    qb_declared = quantbase_builder.load_declared_inputs(
+        raw["quantbase declared"], qb_map
+    )
     # every dashboard the builder needs is pinned, and nothing else
     needed = (
         {item.dashboard for item in qb_declared.funds}
         | {item.dashboard for item in qb_declared.out_of_scope}
         | {qb_declared.total_dashboard}
     )
-    sources = manifest["quantbase"]["sources"]
+    sources = manifest["quantbase-fund-facts"]["sources"]
     assert set(sources["dashboards"]) == needed
     assert set(sources) == {"account_activity", "accounts", "dashboards"}

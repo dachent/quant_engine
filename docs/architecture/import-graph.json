@@ -94,6 +94,36 @@
       1
     ],
     [
+      "build_sleeve_facts_release",
+      "build_quantbase_fund_facts",
+      1
+    ],
+    [
+      "build_sleeve_facts_release",
+      "build_sleeve_account_facts",
+      1
+    ],
+    [
+      "build_sleeve_facts_release",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "build_sleeve_facts_release",
+      "sleeve_ledger",
+      1
+    ],
+    [
+      "build_sleeve_facts_release",
+      "sleeve_nav",
+      1
+    ],
+    [
+      "portfolio_attended_preparation",
+      "build_sleeve_facts_release",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "check_retained_authority_pins",
       1

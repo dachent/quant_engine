@@ -4688,8 +4688,9 @@ def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(
         preparation._definition(path) for path in expected
     ]
     assert "sleeve_facts" in checkpoint["outputs"]
-    assert checkpoint["input_identity"]["inputs"]["sleeve_policy_manifest"] == (
-        section["policy_manifest"]
+    assert (
+        checkpoint["input_identity"]["inputs"]["sleeve_policy_manifest"]
+        == (section["policy_manifest"])
     )
 
 
