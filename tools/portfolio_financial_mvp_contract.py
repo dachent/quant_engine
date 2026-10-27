@@ -356,6 +356,20 @@ _CENSUS_SOURCE_VERSION_OVERRIDES: Final = {
         "status": "UNRESOLVED",
         "strategy_ids": (),
     },
+    # R2 (#475/#468): design evidence is admitted for six of the seven required
+    # strategies; p123-ai-factor stays REFERENCE_ONLY (UI-only predictor).
+    "strategy-design-and-configuration": {
+        "binding": "EFFECTIVE_PER_SUBJECT_VERSION_REQUIRED",
+        "status": "MIXED",
+        "strategy_ids": (
+            "p123-eu",
+            "qsi",
+            "tt-portfolio",
+            "volatis-strategy",
+            "grizzlybears-vtma",
+            "robuxio-crypto",
+        ),
+    },
 }
 
 
@@ -3141,9 +3155,23 @@ def census_owner_decision_projection(
         "DEPRECATED_HISTORY_ONLY": "DEPRECATED_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
         "IMMATERIAL_EXCLUDED": "IMMATERIAL_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
     }
+    # A retired funded member (a strategy with a FUNDED_MEMBERSHIP census epoch
+    # that is itself excluded from the current product) is a retained
+    # history-only record, not part of the 2026-08-19 perimeter decision: it did
+    # not exist as a strategy when the owner approved that payload.
+    funded_strategy_ids = {
+        _text(assignment.get("strategy_id"), "census owner funded strategy")
+        for sleeve in _objects(census.get("account_sleeves"), "census account_sleeves")
+        for assignment in _objects(
+            sleeve.get("assignments"), "census sleeve assignments"
+        )
+        if assignment.get("status") == "FUNDED_MEMBERSHIP"
+    }
     perimeter: list[dict[str, str]] = []
     for strategy_id, row in sorted(strategy_by_id.items()):
         if row.get("product_requirement") != "EXCLUDED":
+            continue
+        if strategy_id in funded_strategy_ids:
             continue
         lifecycle = _text(
             row.get("lifecycle_status"), f"census owner lifecycle {strategy_id}"
@@ -3525,9 +3553,9 @@ def _validate_current_census(
     }
 
     sleeves = _objects(census["account_sleeves"], "census account_sleeves")
-    if len(sleeves) != 19:
+    if len(sleeves) != 26:
         raise FinancialMvpContractError(
-            "current census must contain 19 redacted sleeves"
+            "current census must contain 26 redacted sleeves"
         )
     sleeve_by_id: dict[str, Mapping[str, Any]] = {}
     transition_groups: dict[str, list[tuple[date, date | None, str, str]]] = {}

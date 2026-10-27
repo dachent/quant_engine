@@ -149,7 +149,12 @@
      "ibkr-p123-eu-01",
      "ibkr-reserve-01",
      "ibkr-reserve-02",
-     "ibkr-unassigned-history-01"
+     "ibkr-unassigned-history-01",
+     "ibkr-p123-s1-01",
+     "ibkr-p123-s3-01",
+     "ibkr-p123-s4-01",
+     "ibkr-p123-s5-01",
+     "ibkr-p123-s2-01"
     ],
     "generation": {
      "generation_id": "70c078a45356a1dddbe01ddee2d4828ee16c9381fa6879b03de706636017d402",
@@ -212,7 +217,9 @@
     "lane_status": "ACTIVE_CURRENT_MEMBERS",
     "source_segment_id": "quantbase-account-generation",
     "account_sleeve_ids": [
-     "quantbase-volatis-01"
+     "quantbase-volatis-01",
+     "quantbase-crisis-fund-01",
+     "quantbase-single-index-fund-01"
     ],
     "generation": {
      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
@@ -570,6 +577,139 @@
       "transition_group_id": null
      }
     ]
+   },
+   {
+    "sleeve_alias": "ibkr-p123-s1-01",
+    "provider_id": "IBKR",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "ibkr-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "p123-conn-1911998-andreas-sc-ai-mq-live",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2026-01-26",
+      "effective_end": "2026-06-23",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "ibkr-p123-s3-01",
+    "provider_id": "IBKR",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "ibkr-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "p123-conn-1951348-higher-beta-earnings",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2026-06-22",
+      "effective_end": "2026-07-22",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "ibkr-p123-s4-01",
+    "provider_id": "IBKR",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "ibkr-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "p123-conn-1956961-ai-largecap-ls",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2026-07-15",
+      "effective_end": "2026-07-27",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "ibkr-p123-s5-01",
+    "provider_id": "IBKR",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "ibkr-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "p123-conn-1958970-high-octane",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2026-07-22",
+      "effective_end": "2026-07-27",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "quantbase-crisis-fund-01",
+    "provider_id": "QUANTBASE",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "quantbase-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "quantbase-crisis-factor-investing",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2024-07-24",
+      "effective_end": "2024-12-13",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "quantbase-single-index-fund-01",
+    "provider_id": "QUANTBASE",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "quantbase-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "quantbase-single-index-leveraged-in-out",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2024-07-24",
+      "effective_end": "2025-05-06",
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
+   },
+   {
+    "sleeve_alias": "ibkr-p123-s2-01",
+    "provider_id": "IBKR",
+    "role": "HISTORICAL_ONLY",
+    "current_strategy_id": null,
+    "source_segment_ids": [
+     "ibkr-account-generation"
+    ],
+    "assignments": [
+     {
+      "strategy_id": "p123-ai-factor",
+      "status": "FUNDED_MEMBERSHIP",
+      "effective_start": "2026-01-30",
+      "effective_end": null,
+      "authority": "R2_DERIVED_SLEEVE_EPOCH_FUNDED_MEMBERSHIP",
+      "transition_group_id": null
+     }
+    ]
    }
   ]
  },
@@ -921,6 +1061,216 @@
    "funded_membership": {
     "status": "EXCLUDED",
     "authority": "OWNER_302_COMMENT_5349926811_IMMATERIAL",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "p123-conn-1911998-andreas-sc-ai-mq-live",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2026-01-26",
+    "effective_end": "2026-06-23"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:p123-conn-1911998-andreas-sc-ai-mq-live:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "p123-conn-1951348-higher-beta-earnings",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2026-06-22",
+    "effective_end": "2026-07-22"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:p123-conn-1951348-higher-beta-earnings:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "p123-conn-1956961-ai-largecap-ls",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2026-07-15",
+    "effective_end": "2026-07-27"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:p123-conn-1956961-ai-largecap-ls:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "p123-conn-1958970-high-octane",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2026-07-22",
+    "effective_end": "2026-07-27"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:p123-conn-1958970-high-octane:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "quantbase-crisis-factor-investing",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2024-07-24",
+    "effective_end": "2024-12-13"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:quantbase-crisis-factor-investing:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
+    "effective_start": null,
+    "effective_end": null
+   },
+   "outcome_dispositions": {
+    "AS_HELD_COMPOSITE_HWM": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "INVESTED_CAPITAL": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DECOMPOSITION": "EXCLUDED_BY_ACCEPTED_POLICY",
+    "DEPENDENCE": "EXCLUDED_BY_ACCEPTED_POLICY"
+   }
+  },
+  {
+   "strategy_id": "quantbase-single-index-leveraged-in-out",
+   "history_series_id": null,
+   "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+   "live_implementation_identity": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": null,
+    "generation_id": null,
+    "receipt_sha256": null
+   },
+   "product_requirement": "EXCLUDED",
+   "readiness": "READY",
+   "readiness_reason": "Retired history-only record retained as clearly labelled historical evidence of what the account held; it is excluded from every current financial-MVP outcome and cannot create a current membership requirement.",
+   "blockers": [],
+   "effective_product_interval": {
+    "effective_start": "2024-07-24",
+    "effective_end": "2025-05-06"
+   },
+   "strategy_version": {
+    "status": "NOT_APPLICABLE",
+    "version_ref": "retired-history-only-record:quantbase-single-index-leveraged-in-out:2026-10-26"
+   },
+   "funded_membership": {
+    "status": "EXCLUDED",
+    "authority": "R2_RETIRED_HISTORY_ONLY_RECORD_REGISTRY_9_TO_15",
     "effective_start": null,
     "effective_end": null
    },
@@ -3125,9 +3475,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "40c5bedb356ce6ef77a84690e52d3ba5c027a2bbdbdde2450ca62dcc5be21ea7",
-    "sha256": "40c5bedb356ce6ef77a84690e52d3ba5c027a2bbdbdde2450ca62dcc5be21ea7",
-    "as_of": "2026-09-07"
+    "generation_id": "b3d89a73f92ca4ed5b090d65dd2d0088febc82ffdfe4db0bc21b63b03a6332b4",
+    "sha256": "b3d89a73f92ca4ed5b090d65dd2d0088febc82ffdfe4db0bc21b63b03a6332b4",
+    "as_of": "2026-10-27"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -3150,9 +3500,16 @@
    "source_id": "strategy-design-and-configuration",
    "source_version": "return-sources-v1",
    "strategy_version": {
-    "status": "UNRESOLVED",
+    "status": "MIXED",
     "binding": "EFFECTIVE_PER_SUBJECT_VERSION_REQUIRED",
-    "version_refs": {}
+    "version_refs": {
+     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
+     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
+    }
    },
    "subjects": {
     "account_scope": "NOT_APPLICABLE",
@@ -3222,18 +3579,15 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "f6cde74974687fb59422b73574dac297eeea46602697bb1dc034867a7013d53b",
-    "sha256": "f6cde74974687fb59422b73574dac297eeea46602697bb1dc034867a7013d53b",
-    "as_of": "2026-08-17"
+    "generation_id": "691c9a84c7ffae12f0c53c8caa7d17dcafb03b717bece12bf013b60a6d660e11",
+    "sha256": "691c9a84c7ffae12f0c53c8caa7d17dcafb03b717bece12bf013b60a6d660e11",
+    "as_of": "2026-10-27"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
    "absence_behavior": "FAIL_VERSION_COMPATIBILITY_AND_ANY_REQUIRED_DESIGN_DEPENDENT_CELL",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    328,
-    475
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "invalidated_outputs": [
     "DECOMPOSITION",
     "DEPENDENCE",
@@ -3241,7 +3595,7 @@
     "PANEL",
     "RELEASE_RECEIPT"
    ],
-   "owner_policy_decision": "The committed attribution hypotheses are not proof of design or version; required provider/owner evidence remains explicit and cannot be replaced by labels."
+   "owner_policy_decision": "The committed attribution hypotheses are not proof of design or version; required provider/owner evidence remains explicit and cannot be replaced by labels. Design evidence is admitted for six of the seven required strategies and configuration evidence for all seven; the p123-ai-factor design stays REFERENCE_ONLY because its predictor is UI-only and its capture is login-gated (named on the R3 capture list), so it carries no evidenced design version here. The registry pin is the exact committed registry file of fifteen retained records."
   },
   {
    "source_id": "strategy-backtests",

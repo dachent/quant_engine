@@ -1579,6 +1579,264 @@
           "authority": "OWNER_302_IMMATERIAL_EXCLUSION"
         }
       }
+    },
+    {
+      "strategy_id": "p123-conn-1911998-andreas-sc-ai-mq-live",
+      "series_id": "p123-conn-1911998-andreas-sc-ai-mq-live [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
+    },
+    {
+      "strategy_id": "p123-conn-1951348-higher-beta-earnings",
+      "series_id": "p123-conn-1951348-higher-beta-earnings [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
+    },
+    {
+      "strategy_id": "p123-conn-1956961-ai-largecap-ls",
+      "series_id": "p123-conn-1956961-ai-largecap-ls [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
+    },
+    {
+      "strategy_id": "p123-conn-1958970-high-octane",
+      "series_id": "p123-conn-1958970-high-octane [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
+    },
+    {
+      "strategy_id": "quantbase-crisis-factor-investing",
+      "series_id": "quantbase-crisis-factor-investing [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
+    },
+    {
+      "strategy_id": "quantbase-single-index-leveraged-in-out",
+      "series_id": "quantbase-single-index-leveraged-in-out [retained history-only record]",
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "europe-economic": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-equity-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "multi-asset-style": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-sector": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        },
+        "us-industry": {
+          "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+          "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+          "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+          "authority": "R2_RETAINED_HISTORY_ONLY_RECORD"
+        }
+      }
     }
   ]
 }

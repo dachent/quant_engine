@@ -16,6 +16,42 @@
         "classification": "EXCLUDED_DE_MINIMIS",
         "effective_date": "2025-11-25",
         "reason": "Owner-confirmed deprecated strategy: its Alpaca assignment closed on 2025-11-24, so retain it only as historical evidence and exclude it from every later systematic HWM period."
+      },
+      {
+        "strategy_id": "p123-conn-1911998-andreas-sc-ai-mq-live",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-06-24",
+        "reason": "Retired history-only record: its derived epoch closed on 2026-06-23, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
+      },
+      {
+        "strategy_id": "p123-conn-1951348-higher-beta-earnings",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-07-23",
+        "reason": "Retired history-only record: its derived epoch closed on 2026-07-22, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
+      },
+      {
+        "strategy_id": "p123-conn-1956961-ai-largecap-ls",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-07-28",
+        "reason": "Retired history-only record: its derived epoch closed on 2026-07-27, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
+      },
+      {
+        "strategy_id": "p123-conn-1958970-high-octane",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-07-28",
+        "reason": "Retired history-only record: its derived epoch closed on 2026-07-27, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
+      },
+      {
+        "strategy_id": "quantbase-crisis-factor-investing",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2024-12-14",
+        "reason": "Retired history-only record: its derived epoch closed on 2024-12-13, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
+      },
+      {
+        "strategy_id": "quantbase-single-index-leveraged-in-out",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2025-05-07",
+        "reason": "Retired history-only record: its derived epoch closed on 2025-05-06, so retain it only as historical evidence and exclude it from every later systematic HWM period; its own epoch stays in the composite."
       }
     ]
   },

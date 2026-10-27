@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import importlib.util
 import json
@@ -46,6 +46,16 @@ SCHEMA_PATH = (
 REGISTRY_PATH = ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 GENERATED_ROOT = ROOT / "generated" / "financial-mvp"
 HWM_POLICY_PATH = ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+# Retired history-only records added by R2 (registry nine -> fifteen): four retired
+# IBKR sleeves of the AI Factor account and the two retired Quantbase funds.
+RETAINED_HISTORY_ONLY_IDS = (
+    "p123-conn-1911998-andreas-sc-ai-mq-live",
+    "p123-conn-1951348-higher-beta-earnings",
+    "p123-conn-1956961-ai-largecap-ls",
+    "p123-conn-1958970-high-octane",
+    "quantbase-crisis-factor-investing",
+    "quantbase-single-index-leveraged-in-out",
+)
 
 EPOCH_MANIFEST_ARTIFACT_PATH = "outputs/account-strategy-manifest.json"
 SYNTHETIC_EPOCH_PAYLOAD = b'{"fixture":"synthetic-task-6","version":8}\n'
@@ -1057,7 +1067,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "0b4d2d35db3e265cbe95044ec53a63fdbe4d440d8fcef00fe94d4253bbf1ff1c"
+        "c543f245ca6bf3394fe619fe1d44273a1cf7f3b778312fc338e30ea990978787"
     )
 
 
@@ -1223,7 +1233,7 @@ def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> Non
     assert source["current_generation"] == {
         "generation_id": digest,
         "sha256": digest,
-        "as_of": "2026-09-07",
+        "as_of": "2026-10-27",
     }
 
 
@@ -1351,6 +1361,7 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
     assert {key for key, value in requirements.items() if value == "EXCLUDED"} == {
         "composer-holy-grail",
         "echotrade-growth-pivots",
+        *RETAINED_HISTORY_ONLY_IDS,
     }
     assert {key for key, value in requirements.items() if value == "REQUIRED"} == {
         "grizzlybears-vtma",
@@ -1373,6 +1384,7 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
         "robuxio-crypto": "Robuxio Crypto (High Sharpe High Vol)",
         "tt-portfolio": "TT Portfolio",
         "volatis-strategy": "Volatis Strategy",
+        **dict.fromkeys(RETAINED_HISTORY_ONLY_IDS),
     }
     hwm_exclusions = {
         row["strategy_id"]
@@ -1383,10 +1395,12 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
     assert hwm_exclusions == {
         "composer-holy-grail",
         "echotrade-growth-pivots",
+        *RETAINED_HISTORY_ONLY_IDS,
     }
     excluded = {
         "composer-holy-grail",
         "echotrade-growth-pivots",
+        *RETAINED_HISTORY_ONLY_IDS,
     }
     for row in contract["strategies"]:
         expected = (
@@ -1445,18 +1459,104 @@ def test_summary_separates_current_perimeter_from_historical_owner_exclusions() 
     ]
 
     exclusions_rows = strategy_rows(exclusions_section)
-    assert len(exclusions_rows) == 2
+    assert len(exclusions_rows) == 8
     assert exclusions_rows == [
         ("echotrade-growth-pivots", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
         ("composer-holy-grail", "IMMATERIAL_EXCLUDED", "EXCLUDED"),
+        ("p123-conn-1911998-andreas-sc-ai-mq-live", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("p123-conn-1951348-higher-beta-earnings", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("p123-conn-1956961-ai-largecap-ls", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("p123-conn-1958970-high-octane", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("quantbase-crisis-factor-investing", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("quantbase-single-index-leveraged-in-out", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
     ]
+
+
+def test_retired_funded_members_stay_outside_the_owner_perimeter_decision() -> None:
+    """Retired derived epochs are retained records, not the 2026-08-19 perimeter."""
+
+    contract = _contract()
+    census = contract["current_census"]
+    projection = contract_tool.census_owner_decision_projection(
+        census, contract["strategies"]
+    )
+    assert {row["strategy_id"] for row in projection["perimeter"]} == {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    assert (
+        hashlib.sha256(contract_tool.canonical_json_bytes(projection)).hexdigest()
+        == census["decision_payload_sha256"]
+    )
+    funded = {
+        assignment["strategy_id"]
+        for sleeve in census["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["status"] == "FUNDED_MEMBERSHIP"
+    }
+    by_id = {row["strategy_id"]: row for row in contract["strategies"]}
+    for strategy_id in RETAINED_HISTORY_ONLY_IDS:
+        row = by_id[strategy_id]
+        assert strategy_id in funded
+        assert row["product_requirement"] == "EXCLUDED"
+        assert row["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+        assert row["effective_product_interval"]["effective_end"] is not None
+
+
+def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> None:
+    """The governed tag maps and the census name the same derived epochs."""
+
+    contract = _contract()
+    by_id = {row["strategy_id"]: row for row in contract["strategies"]}
+    census = {
+        (
+            sleeve["provider_id"],
+            assignment["strategy_id"],
+            assignment["effective_start"],
+        ): assignment
+        for sleeve in contract["current_census"]["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["status"] == "FUNDED_MEMBERSHIP"
+    }
+    sleeve_root = ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
+    seen: set[str] = set()
+    for tag_map_path in (
+        sleeve_root / "nested-strategy-tag-map.json",
+        sleeve_root / "quantbase" / "tag-map.json",
+    ):
+        tag_map = json.loads(tag_map_path.read_bytes())
+        for parent in tag_map["parents"]:
+            provider = parent["provider_id"].upper()
+            for sleeve in parent["sleeves"]:
+                strategy_id = sleeve["strategy_id"]
+                seen.add(strategy_id)
+                assert strategy_id in by_id
+                assignment = census[(provider, strategy_id, sleeve["effective_start"])]
+                tag_end = sleeve["effective_end"]
+                if tag_end is None:
+                    assert assignment["effective_end"] is None
+                else:
+                    # The derived epoch ends on the zero-NAV exit day, which is
+                    # the tag-map end or the day after it.
+                    assert assignment["effective_end"] in {
+                        tag_end,
+                        (date.fromisoformat(tag_end) + timedelta(days=1)).isoformat(),
+                    }
+    assert set(RETAINED_HISTORY_ONLY_IDS) <= seen
+    # Every retained record is named by a tag map: nothing is registered by hand.
+    assert {
+        strategy_id
+        for strategy_id, row in by_id.items()
+        if row["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+        and strategy_id != "echotrade-growth-pivots"
+    } == set(RETAINED_HISTORY_ONLY_IDS)
 
 
 def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> None:
     contract = _contract()
     census = contract["current_census"]
     assert census["authority_issue"] == 302
-    assert len(census["account_sleeves"]) == 19
+    assert len(census["account_sleeves"]) == 26
     assert len(census["provider_lanes"]) == 10
     assert {row["role"] for row in census["evidence_receipts"]} == {
         "BASELINE_CURRENT_POINTER",
@@ -1755,12 +1855,10 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     design_version = _source(
         invented_source_assertion, "strategy-design-and-configuration"
     )["strategy_version"]
-    design_version["version_refs"]["p123-eu"] = next(
-        row["strategy_version"]["version_ref"]
-        for row in baseline["strategies"]
-        if row["strategy_id"] == "p123-eu"
-    )
-    design_version["status"] = "MIXED"
+    # The accepted design/configuration projection names six evidenced
+    # designs (p123-ai-factor stays REFERENCE_ONLY); dropping one is a rewrite.
+    assert "p123-ai-factor" not in design_version["version_refs"]
+    del design_version["version_refs"]["qsi"]
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -2329,7 +2427,7 @@ def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() 
     missing["current_census"]["account_sleeves"].pop()
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="19 redacted sleeves",
+        match="26 redacted sleeves",
     ):
         _validate(missing)
 
@@ -3888,7 +3986,7 @@ def test_duplicate_source_and_unknown_consumer_fail() -> None:
 
 def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
     contract = copy.deepcopy(_contract())
-    contract["source_segments"][1]["blockers"] = []
+    _source(contract, "provider-track-record")["blockers"] = []
     with pytest.raises(contract_tool.FinancialMvpContractError, match="lacks blocker"):
         _validate(contract)
 
@@ -4243,7 +4341,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "934f4f03cace113d84658c2ec04f12ea567344b56d7ae3e3370c1f3bb6c7e4a2"
+        "03bb8ec0a8864d896c3c59ca1d88d4aaf356d1f7f2c739612679d612131a704f"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4280,7 +4378,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "934f4f03cace113d84658c2ec04f12ea567344b56d7ae3e3370c1f3bb6c7e4a2"
+        "03bb8ec0a8864d896c3c59ca1d88d4aaf356d1f7f2c739612679d612131a704f"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
