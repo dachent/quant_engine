@@ -597,3 +597,119 @@ def test_outcomes_bind_capital_to_the_selected_facts(tmp_path, monkeypatch):
     other.write_bytes(facts_bytes({**sleeve_facts(), "window": {"first_day": "x"}}))
     with pytest.raises(outcomes.FinancialOutcomeError, match="sleeve facts differ"):
         outcomes.verify_selected_capital_sleeve_facts(world.input_path, (other,))
+
+
+QB_PARENT = "qb-account-01"
+QB_GENERATION = "b" * 64
+
+
+def quantbase_facts() -> dict[str, Any]:
+    """A live-parent (fund-scoped) account whose retired fund hands its value on.
+
+    The live fund's leg is a PARENT_LEDGER_REFERENCE: the parent ledger already
+    carries it, so it is a pairing reference and never a second flow.
+    """
+
+    pool = f"{QB_PARENT}-unallocated"
+    fund = f"{QB_PARENT}-single"
+    legs = [
+        {
+            **_leg("2024-07-24:0001", pool, "INTERNAL_OUT", "2024-07-24", "500"),
+            "leg_source": "ARTIFACT",
+        },
+        {
+            **_leg("2024-07-24:0001", fund, "INTERNAL_IN", "2024-07-24", "500"),
+            "leg_source": "ARTIFACT",
+        },
+        {
+            **_leg("2025-05-05:0002", fund, "INTERNAL_OUT", "2025-05-05", "480"),
+            "leg_source": "ARTIFACT",
+        },
+        {
+            **_leg("2025-05-05:0002", QB_PARENT, "INTERNAL_IN", "2025-05-05", "480"),
+            "leg_source": "PARENT_LEDGER_REFERENCE",
+        },
+    ]
+    return {
+        "schema_version": 1,
+        "artifact_id": "quantbase-fund-facts",
+        "parent_account_id": QB_PARENT,
+        "provider_id": "QUANTBASE",
+        "base_currency": "USD",
+        "data_cutoff": "2025-05-06",
+        "window": {"first_day": "2024-07-24", "last_day": "2025-05-06"},
+        "bindings": {
+            "tag_map_sha256": _sha("tag"),
+            "parent_ledger_generation_id": QB_GENERATION,
+            "declared_inputs_sha256": _sha("declared"),
+            "source_sha256": {
+                "account_activity": _sha("a"),
+                "accounts": _sha("b"),
+                "dashboards": {"single": _sha("c")},
+            },
+            "builder_code": {
+                "files": {"tools/a.py": _sha("a")},
+                "sha256": _sha("code"),
+            },
+        },
+        "conventions": {},
+        "sleeves": [
+            {
+                "sleeve_id": "single",
+                "account_id": fund,
+                "strategy_id": "quantbase-single-index-leveraged-in-out",
+                "first_day": "2024-07-24",
+                "last_day": "2025-05-06",
+                "days": [
+                    {"day": "2024-07-24", "event": "OPEN", "nav_end": "500"},
+                    {"day": "2025-05-06", "event": "", "nav_end": "0"},
+                ],
+            }
+        ],
+        "perimeter_account": {"account_id": pool, "days": [], "scope": "x"},
+        "flows": legs,
+        "closure": {},
+        "open_items": {},
+        "disclosures": {},
+    }
+
+
+def test_quantbase_live_parent_facts_derive_retained_epochs_and_one_flow_pair() -> None:
+    ledger = {
+        "flows": [],
+        "capital_anchors": [],
+        "nav_observations": [],
+        "admissions": [
+            {"account_id": QB_PARENT, "provider_id": "quantbase", "fact_type": "flows"}
+        ],
+        "provider_generations": [
+            {"provider_id": "quantbase", "generation_id": QB_GENERATION}
+        ],
+    }
+    view = capital.derive_sleeve_capital(
+        [facts_bytes(quantbase_facts())], ledger, _required_strategies()
+    )
+    fund = f"{QB_PARENT}-single"
+    key = (
+        fund,
+        "quantbase-single-index-leveraged-in-out",
+        "2024-07-24",
+        "2025-05-06",
+    )
+    assert set(view.epochs) == {key}
+    # a retired fund is history: no governed capital epoch
+    assert view.product == frozenset()
+    assert view.parents == {QB_PARENT}
+    # the parent-ledger reference leg is not a flow; the artifact pair is
+    assert sorted((row["account_id"], row["amount"]["value"]) for row in view.rows) == [
+        (f"{QB_PARENT}-single", "-480"),
+        (f"{QB_PARENT}-single", "500"),
+        (f"{QB_PARENT}-unallocated", "-500"),
+    ]
+    assert {row["provider_id"] for row in view.rows} == {"QUANTBASE"}
+    # a parent the ledger does not know is refused
+    ledger["admissions"] = []
+    with pytest.raises(capital.CapitalValidationError, match="selected ledger"):
+        capital.derive_sleeve_capital(
+            [facts_bytes(quantbase_facts())], ledger, _required_strategies()
+        )
