@@ -73,6 +73,16 @@ CASES: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        "a closed epoch whose assignment is still open ends on its close date",
+        {
+            "status": "OK",
+            "effective_end": None,
+            "performance_closed_on": "2026-06-23",
+            "current_value": "0",
+            "capital_flow_trace": [_leg("INTERNAL_OUT", "2026-06-22", "2026-06-23")],
+        },
+    ),
+    (
         "no outgoing leg",
         {
             "status": "OK",
@@ -92,7 +102,7 @@ def test_builder_and_independent_verifier_derive_the_same_economic_end(
     produced = builder._epoch_lifecycle_fields(row, "INCLUDED_PRODUCT_EPOCH")
     derived = verifier._independent_epoch_lifecycle(
         end,
-        None,
+        row.get("performance_closed_on"),
         "INCLUDED_PRODUCT_EPOCH",
         {
             "current_value": Decimal(row["current_value"]),
@@ -111,3 +121,10 @@ def test_the_recognition_day_basis_is_named_for_a_next_day_exit() -> None:
     assert same_day["end_recognition_basis"] == "EXIT_FILL_DAY_IS_END_DAY"
     held = builder._epoch_lifecycle_fields(CASES[3][1], "INCLUDED_PRODUCT_EPOCH")
     assert held["economic_end_date"] is None and held["end_recognition_basis"] is None
+
+
+def test_a_closed_epoch_is_dated_by_its_own_close_not_by_the_open_assignment() -> None:
+    fields = builder._epoch_lifecycle_fields(CASES[5][1], "INCLUDED_PRODUCT_EPOCH")
+    assert fields["lifecycle_state"] == "CLOSED"
+    assert fields["economic_end_date"] == "2026-06-22"
+    assert fields["end_recognition_basis"] == "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL"

@@ -484,9 +484,10 @@ def _independent_epoch_lifecycle(
             latest = max(leg["event_date"] for leg in outgoing)
             economic_end = latest
             last_legs = [leg for leg in outgoing if leg["event_date"] == latest]
-            if latest == effective_end:
+            end_day = closed_on if state == "CLOSED" else effective_end
+            if latest == end_day:
                 recognition_basis = "EXIT_FILL_DAY_IS_END_DAY"
-            elif any(leg["nav_recognition_date"] == effective_end for leg in last_legs):
+            elif any(leg["nav_recognition_date"] == end_day for leg in last_legs):
                 recognition_basis = "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL"
             else:
                 recognition_basis = "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION"

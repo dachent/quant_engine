@@ -468,7 +468,13 @@ def _economic_end(
         return None, None
     last = max(exits, key=lambda leg: str(leg.get("event_date")))
     economic = str(last.get("event_date"))
-    end = row.get("effective_end")
+    # a CLOSED epoch (assignment still open) ends on its own performance close date; a
+    # RETIRED one on its assignment end
+    end = (
+        row.get("performance_closed_on")
+        if state == "CLOSED"
+        else row.get("effective_end")
+    )
     if economic == end:
         return economic, "EXIT_FILL_DAY_IS_END_DAY"
     if str(last.get("nav_recognition_date")) == end:

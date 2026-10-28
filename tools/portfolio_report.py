@@ -10133,6 +10133,19 @@ def build_report_data(
                     "sha256": hashlib.sha256(tag_map_bytes_early).hexdigest(),
                 },
             ]
+        if sleeve_disclosure_sources_path is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "sleeve-disclosure-sources",
+                    "schema": sleeve_disclosures.SOURCES_SCHEMA,
+                    "sha256": hashlib.sha256(
+                        _regular_file_bytes(
+                            sleeve_disclosure_sources_path, "sleeve disclosure sources"
+                        )
+                    ).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -15606,6 +15619,21 @@ def publish_report(
             str(report["report_schema_version"]),
         ),
     ]
+    disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
+    if disclosure_sources.is_file() and not disclosure_sources.is_symlink():
+        # the exact bytes the methodology disclosures were composed from
+        artifact_specs.append(
+            (
+                disclosure_sources,
+                "input/sleeve-disclosure-sources.json",
+                "sleeve-disclosure-sources",
+                _declared_schema_version(
+                    _load_json(disclosure_sources, "sleeve disclosure sources"),
+                    "schema_version",
+                    "sleeve disclosure sources",
+                ),
+            )
+        )
     if "workbook" in evidence_snapshots:
         artifact_specs.extend(
             [
