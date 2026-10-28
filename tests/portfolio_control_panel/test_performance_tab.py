@@ -763,8 +763,21 @@ def test_a_strategy_line_carries_the_return_scope_its_row_states() -> None:
         {"strategy_id": "b", "strategy_name": "B two"},
     ]
     block = tab.build_performance_tab(panel)
+    assert _line(block, "LIVE_ONLY", "strategy:A one")["return_scope_label"] == label
+    # R-9: in the hybrid mode the weeks before live capital are not that live series, and
+    # the label names them from the line's own origin runs
+    hybrid = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
+    non_live = [run for run in hybrid["origin"] if run[2] != "LIVE"]
+    assert non_live
+    assert hybrid["return_scope_label"].startswith(label + " In this mode the weeks ")
+    assert hybrid["return_scope_label"].endswith(" are not that live series.")
+    dates = block["modes"]["LIVE_PLUS_BACKTEST"]["dates"]
+    for start, _end, flag in non_live:
+        assert (
+            f"{dates[start]}" in hybrid["return_scope_label"]
+            and flag in hybrid["return_scope_label"]
+        )
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        assert _line(block, mode, "strategy:A one")["return_scope_label"] == label
         assert "return_scope_label" not in _line(block, mode, "strategy:B two")
     tab.verify_performance_tab(block, panel)
     # the verifier refuses a line whose label differs from its row, and a label the row lacks
@@ -776,3 +789,25 @@ def test_a_strategy_line_carries_the_return_scope_its_row_states() -> None:
     _line(extra, "LIVE_ONLY", "strategy:B two")["return_scope_label"] = label
     with pytest.raises(tab.PerformanceTabError, match="return scope label differs"):
         tab.verify_performance_tab(extra, panel)
+
+
+def test_the_residual_label_quotes_the_memo_remainder_and_the_closed_epoch_cash() -> (
+    None
+):
+    """R-5: with sleeves and a memo remainder both amounts are in the label, from the data."""
+
+    panel = _sleeve_panel()
+    base = tab.build_performance_tab(panel)["slices"]["reconciliation"]
+    residual = Decimal(base["residual_cents"]) / 100
+    remainder = residual - Decimal("3.81")
+    panel["capital_reconciliation"] = {
+        "memo": {"perimeter_remainder": {"amount_usd": str(remainder)}}
+    }
+    reconciliation = tab.build_performance_tab(panel)["slices"]["reconciliation"]
+    label = reconciliation["residual_label"]
+    assert f"residual {residual:,.2f} = " in label
+    assert f"perimeter_remainder {remainder:,.2f}" in label
+    assert "+3.81 cash left in liquidated epochs" in label
+    tab.verify_performance_tab(tab.build_performance_tab(panel), panel)
+    # a remainder the panel does not carry leaves the label as before, naming the memo
+    assert "when that block carries it" in base["residual_label"]

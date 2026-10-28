@@ -8,6 +8,7 @@
     "panel_generation_id": "85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd",
     "pointers": {
       "aggregate": "/invested_capital/current_aggregate_usd",
+      "hwm_current_index": "/hwm_governed_proof/current_index",
       "strategy_capital_field": "invested_capital_usd",
       "strategy_capital_list": "/invested_capital/current_by_strategy",
       "strategy_id": "p123-ai-factor"

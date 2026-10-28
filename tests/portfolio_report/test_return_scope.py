@@ -42,3 +42,48 @@ def test_the_row_names_the_parent_series_the_sleeve_epoch_and_the_retired_sleeve
     assert "parent account" in label and "s1, s3" in label and "sleeve s2" in label
     # a strategy that is not a derived product epoch is untouched
     assert "return_scope" not in report["strategy_summary"][1]
+
+
+def test_the_scope_covers_every_field_the_parent_series_or_its_capital_drives() -> None:
+    """R-9: drawdown, weight, cost denominator and year returns follow the same series."""
+
+    report: dict[str, Any] = {"strategy_summary": [{"strategy_id": "p123-ai-factor"}]}
+    sleeves = {f"{PARENT}-s{n}": PARENT for n in (1, 2, 3)}
+    report_module._apply_return_scope(report, _rows(), sleeves, ["p123-ai-factor"])
+    applies = report["strategy_summary"][0]["return_scope"]["applies_to"]
+    for field in (
+        "twr",
+        "account_live_max_drawdown",
+        "hwm_max_drawdown",
+        "hwm_current_drawdown",
+        "systematic_weight",
+        "cost_rate_denominator_usd",
+        "ytd_twr",
+        "calendar_year_twr",
+        "account_live_cagr",
+    ):
+        assert field in applies
+
+
+def test_a_retained_strategy_carries_the_economic_exit_day_and_how_its_end_is_dated() -> (
+    None
+):
+    """R-4: retired_on is the NAV recognition day; the row also says when the capital left."""
+
+    manifest_rows = [
+        {
+            "strategy_id": "retired-one",
+            "economic_end_date": "2024-12-12",
+            "end_recognition_basis": "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL",
+        },
+        {"strategy_id": "retired-one", "economic_end_date": None},
+        {"strategy_id": "open", "economic_end_date": None},
+    ]
+    assert report_module._economic_end_fields("retired-one", manifest_rows) == {
+        "economic_end_date": "2024-12-12",
+        "end_recognition_basis": "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL",
+    }
+    assert report_module._economic_end_fields("open", manifest_rows) == {
+        "economic_end_date": None,
+        "end_recognition_basis": None,
+    }

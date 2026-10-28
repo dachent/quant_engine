@@ -160,6 +160,8 @@
           "closed_on": {"type": ["string", "null"], "format": "date"},
           "parent_assignment_id": {"type": ["string", "null"], "minLength": 1},
           "sleeve_label": {"type": ["string", "null"], "minLength": 1},
+          "economic_end_date": {"type": ["string", "null"], "format": "date"},
+          "end_recognition_basis": {"enum": ["EXIT_FILL_DAY_IS_END_DAY", "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL", "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION", null]},
           "parent_strategy_id": {"type": "string", "minLength": 1},
           "sleeve_id": {"type": "string", "minLength": 1}
         }
@@ -1572,11 +1574,13 @@
         "reported_basis": {"enum": ["CUMULATIVE", "ANNUALISED", "ANNUALISED_FROM_DAYS", null]},
         "window_days": {"type": ["integer", "null"], "minimum": 0},
         "annualised_field": {"type": "string"},
+        "window_start_field": {"const": "opening_capital_date"},
         "annualised_status": {"enum": ["AVAILABLE", "SUPPRESSED_UNDER_365D", "UNAVAILABLE"]},
         "annualised_method": {"enum": ["GEOMETRIC_ACT_365", null]},
         "method": {"enum": ["XIRR_ACT_365", "XIRR_TO_WINDOW_ACT_365", "GEOMETRIC_ACT_365", "LINEAR_ACT_365", null]},
         "window_equivalent_field": {"type": "string"},
-        "year_attribution": {"enum": ["LINK_END_DATE_YEAR", "DAILY_RETURN_DATE_YEAR"]}
+        "year_attribution": {"enum": ["LINK_END_DATE_YEAR", "DAILY_RETURN_DATE_YEAR"]},
+        "status": {"const": "NOT_MEANINGFUL_EXITED_EPOCH"}
       }
     },
     "annualisation_basis_map": {

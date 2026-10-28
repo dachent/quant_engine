@@ -80,6 +80,10 @@ def _object(raw: bytes, label: str) -> dict[str, Any]:
 
 _BLOCK = re.compile(r"^=== (?P<strategy>\S+) .*?(?P<account>account-[0-9a-f]+)\b")
 _COMMITTED = re.compile(r"^committed TWR\s+(?P<value>-?[0-9.]+) %")
+_ALL_BOD = re.compile(r"^all legs BOD\s+[-0-9.]+ %\s+delta (?P<value>[-+]?[0-9.]+) pt")
+_EXT_BOD = re.compile(
+    r"^external legs BOD only\s+[-0-9.]+ %\s+delta (?P<value>[-+]?[0-9.]+) pt"
+)
 _BOUND = re.compile(
     r"^bounds (?P<name>b_all|b_ext)\s+lower (?P<lo>[-+]?[0-9.]+) pt\s+upper (?P<hi>[-+]?[0-9.]+) pt"
 )
@@ -101,6 +105,14 @@ def parse_timestamp_evidence(text: str) -> dict[tuple[str, str], dict[str, str]]
         committed = _COMMITTED.match(line)
         if committed is not None:
             current["committed_twr_pct"] = committed["value"]
+            continue
+        all_bod = _ALL_BOD.match(line)
+        if all_bod is not None:
+            current["all_bod_delta_pt"] = all_bod["value"]
+            continue
+        ext_bod = _EXT_BOD.match(line)
+        if ext_bod is not None:
+            current["ext_bod_delta_pt"] = ext_bod["value"]
             continue
         bound = _BOUND.match(line)
         if bound is not None:
@@ -165,7 +177,171 @@ def _facts_summary(facts: Mapping[str, Any]) -> dict[str, Any]:
         account: {day: str(total) for day, total in sorted(days.items())}
         for account, days in sorted(inflow.items())
     }
+    by_source: dict[str, dict[str, dict[str, Decimal]]] = {}
+    for flow in flows if isinstance(flows, list) else []:
+        if isinstance(flow, Mapping) and flow.get("class") == "INTERNAL_IN":
+            source = by_source.setdefault(str(flow.get("account_id")), {}).setdefault(
+                str(flow.get("event_date")), {}
+            )
+            counterparty = str(flow.get("counterparty_account_id"))
+            source[counterparty] = source.get(counterparty, Decimal(0)) + _dec(
+                flow.get("amount")
+            )
+    summary["internal_in_by_source"] = {
+        account: {
+            day: {cp: str(total) for cp, total in sorted(parts.items())}
+            for day, parts in sorted(days.items())
+        }
+        for account, days in sorted(by_source.items())
+    }
+    if facts.get("artifact_id") == ACCOUNT_FACTS:
+        summary.update(_sleeve_perimeter(facts))
     return summary
+
+
+def _sleeve_perimeter(facts: Mapping[str, Any]) -> dict[str, Any]:
+    """Per sleeve the gain from its first-day end-of-day NAV and its entry-day difference.
+
+    A sleeve's first day carries the difference between its end-of-day NAV and the amount
+    allocated to it; the gain is every later day.  The facts' daily closure ties both to
+    the account: the closure's sleeve column must equal the sum of the two, or the facts
+    are inconsistent and the preparation is refused.
+    """
+
+    sleeves: list[dict[str, str]] = []
+    own_total = Decimal(0)
+    for sleeve in facts.get("sleeves", []):
+        days = sleeve.get("days") or []
+        if not days:
+            continue
+        daily = [_dec(day["own_pnl"]) + _dec(day["alloc_total"]) for day in days]
+        own_total += sum(daily, Decimal(0))
+        sleeves.append(
+            {
+                "sleeve_id": str(sleeve["sleeve_id"]),
+                "account_id": str(sleeve["account_id"]),
+                "strategy_id": str(sleeve["strategy_id"]),
+                "first_day": str(days[0]["day"]),
+                "last_day": str(days[-1]["day"]),
+                "entry_day_difference": str(daily[0]),
+                "gain_from_first_day_nav": str(sum(daily[1:], Decimal(0))),
+            }
+        )
+    closure = facts.get("closure") or []
+    totals = {
+        key: sum((_dec(day[key]) for day in closure), Decimal(0))
+        for key in (
+            "account_pnl",
+            "sleeves_own_plus_alloc",
+            "residual_and_post_exit",
+            "unexplained",
+        )
+    }
+    if closure and abs(totals["sleeves_own_plus_alloc"] - own_total) > Decimal("0.005"):
+        raise DisclosureError(
+            "the sleeve facts' daily closure does not equal the sleeves' own P&L"
+        )
+    window = facts.get("window") or {}
+    bindings = facts.get("bindings") or {}
+    return {
+        "perimeter_sleeves": sleeves,
+        "closure_totals": {key: str(value) for key, value in totals.items()},
+        "closure_window": {
+            "first_day": window.get("first_day"),
+            "last_day": window.get("last_day"),
+        },
+        "parent_ledger_generation_id": bindings.get("parent_ledger_generation_id"),
+    }
+
+
+def _account_reconciliation(
+    summary: Mapping[str, Any], ledger: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The parent account's gain against the sleeves', every figure from the ledger.
+
+    Capital paid in is the opening capital anchor's NAV plus every flow recognised after
+    the anchor's day up to the closure window's last day.  The account's gain is its NAV on
+    that day less that capital.  It must equal the sleeves' gains and entry-day differences
+    plus an unattributed remainder that is measured a second way (the days before the first
+    sleeve day, then the facts' own residual columns); the build fails if the two differ.
+    """
+
+    parent = str(summary["parent_account_id"])
+    window = summary["closure_window"]
+    last_day = str(window["last_day"])
+    first_day = str(window["first_day"])
+    anchors = [
+        item
+        for item in ledger.get("capital_anchors", [])
+        if item.get("account_id") == parent
+        and item.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+    ]
+    if len(anchors) != 1:
+        raise DisclosureError("the parent account has no unique opening capital anchor")
+    anchor = anchors[0]
+    if anchor.get("generation_id") != summary.get("parent_ledger_generation_id"):
+        raise DisclosureError("the sleeve facts bind a different ledger generation")
+    opening = _dec(anchor["opening_nav"]["value"])
+    anchor_day = str(anchor["opening_nav_accounting_date"])
+    nav = {
+        str(item["as_of_date"]): _dec(item["nav"]["value"])
+        for item in ledger.get("nav_observations", [])
+        if item.get("account_id") == parent
+    }
+    flows = [
+        (str(item["nav_recognition_date"]), _dec(item["amount"]["value"]))
+        for item in ledger.get("flows", [])
+        if item.get("account_id") == parent
+        and anchor_day < str(item["nav_recognition_date"]) <= last_day
+    ]
+    if last_day not in nav:
+        raise DisclosureError("the parent account has no NAV on the window's last day")
+    paid_in = opening + sum((amount for _day, amount in flows), Decimal(0))
+    account_gain = nav[last_day] - paid_in
+    sleeves = summary["perimeter_sleeves"]
+    gains = sum((_dec(s["gain_from_first_day_nav"]) for s in sleeves), Decimal(0))
+    entries = sum((_dec(s["entry_day_difference"]) for s in sleeves), Decimal(0))
+    unattributed = account_gain - gains - entries
+    totals = summary["closure_totals"]
+    # the second measurement: the days before the first sleeve day, from the ledger's own
+    # NAV, plus the facts' residual columns
+    before = [day for day in nav if day < first_day]
+    if not before:
+        raise DisclosureError(
+            "the parent account has no NAV before the first sleeve day"
+        )
+    previous = max(before)
+    pre_sleeve = (
+        nav[previous]
+        - opening
+        - sum((a for d, a in flows if d <= previous), Decimal(0))
+    )
+    independent = (
+        pre_sleeve
+        + _dec(totals["residual_and_post_exit"])
+        + _dec(totals["unexplained"])
+    )
+    if abs(unattributed - independent) > Decimal("0.005"):
+        raise DisclosureError(
+            "the sleeves, the entry-day differences and the unattributed remainder "
+            "do not sum to the parent account's gain"
+        )
+    return {
+        "parent_account_id": parent,
+        "ledger_generation_id": anchor["generation_id"],
+        "anchor_day": anchor_day,
+        "last_day": last_day,
+        "opening_nav": str(opening),
+        "paid_in_after_anchor": str(paid_in - opening),
+        "paid_in": str(paid_in),
+        "terminal_nav": str(nav[last_day]),
+        "account_gain": str(account_gain),
+        "sleeve_gain_total": str(gains),
+        "entry_day_total": str(entries),
+        "unattributed": str(unattributed),
+        "unattributed_pre_sleeve_days": str(pre_sleeve),
+        "sleeves": sleeves,
+    }
 
 
 def _margin_funding_events(declared: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -190,6 +366,20 @@ def _margin_funding_events(declared: Mapping[str, Any]) -> list[dict[str, str]]:
                     }
                 )
     return events
+
+
+def _exit_events(declared: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The declared funding events that close a sleeve (its proceeds go elsewhere)."""
+
+    funding = declared.get("funding_events")
+    return [
+        {"sleeve_id": str(sleeve), "day": str(day)}
+        for sleeve, days in sorted(
+            funding.items() if isinstance(funding, Mapping) else []
+        )
+        for day, event in sorted(days.items() if isinstance(days, Mapping) else [])
+        if isinstance(event, Mapping) and event.get("kind") == "EXIT"
+    ]
 
 
 def _pointer(document: Any, pointer: str) -> Any:
@@ -248,6 +438,10 @@ def _resolve_predecessor(
         values["aggregate_capital_usd"] = str(
             _pointer(document, str(pointers["aggregate"]))
         )
+        if "hwm_current_index" in pointers:
+            values["hwm_current_index"] = str(
+                _pointer(document, str(pointers["hwm_current_index"]))
+            )
     except (KeyError, IndexError, ValueError, StopIteration, TypeError):
         return {"status": "OMITTED", "reason": "POINTER_DOES_NOT_RESOLVE", **release}
     return {
@@ -265,6 +459,7 @@ def build_sources(
     inputs_path: Path | None,
     predecessor_data_root: Path | None,
     declared_inputs_path: Path | None = None,
+    ledger_path: Path | None = None,
 ) -> dict[str, Any]:
     """The preparation-time document: every value read from pinned bytes."""
 
@@ -284,9 +479,24 @@ def build_sources(
             if declared_inputs_path is not None
             else []
         ),
+        "sleeve_exit_events": (
+            _exit_events(
+                _object(declared_inputs_path.read_bytes(), "declared sleeve inputs")
+            )
+            if declared_inputs_path is not None
+            else []
+        ),
+        "account_reconciliation": [],
         "timestamp_bounds": None,
         "predecessor": None,
     }
+    if ledger_path is not None:
+        ledger = _object(ledger_path.read_bytes(), "provider ledger")
+        sources["account_reconciliation"] = [
+            _account_reconciliation(item, ledger)
+            for item in sources["facts"]
+            if item.get("perimeter_sleeves")
+        ]
     if inputs_path is None:
         return sources
     inputs = _object(inputs_path.read_bytes(), "disclosure inputs")
@@ -346,6 +556,144 @@ def _signed_pt(text: str) -> str:
     return f"{value:+.2f}"
 
 
+def _sleeve_label(account: str) -> str:
+    return (
+        "no sleeve" if account.endswith("-unallocated") else account.rsplit("-", 1)[-1]
+    )
+
+
+def _margin_allocation(
+    event: Mapping[str, str], by_source: Mapping[str, Mapping[str, str]]
+) -> str:
+    """One declared margin allocation, split by where its amount came from."""
+
+    parts = by_source.get(event["day"], {})
+    total = sum((_dec(value) for value in parts.values()), Decimal(0))
+    split = [f"{_usd(_dec(v))} from {_sleeve_label(cp)}" for cp, v in parts.items()]
+    head = f"{event['day']} {_usd(total)}" if parts else event["day"]
+    if len(parts) == 1:
+        (only,) = parts
+        where = f" from {_sleeve_label(only)}"
+    else:
+        where = f": {' and '.join(split)}" if split else ""
+    return f"{head}{where} (declared: {event['note']})"
+
+
+def _exit_proceeds(
+    sources: Mapping[str, Any],
+    *,
+    product_sleeves: Mapping[str, str],
+    by_source: Mapping[str, Mapping[str, Mapping[str, str]]],
+    margin_days: set[tuple[str, str]],
+) -> str:
+    """Allocations that are the proceeds of a closing sleeve whose entries were margin-funded."""
+
+    exits = {(e["sleeve_id"], e["day"]) for e in sources.get("sleeve_exit_events", [])}
+    margin_entries: dict[str, list[tuple[str, str]]] = {}
+    inflow_by_account = {
+        account: {
+            day: sum((_dec(v) for v in parts.values()), Decimal(0))
+            for day, parts in days.items()
+        }
+        for account, days in by_source.items()
+    }
+    sleeve_account = {a.rsplit("-", 1)[-1]: a for a in by_source}
+    for event in sources.get("margin_funding_events", []):
+        if event["kind"] == "IN":
+            amount = inflow_by_account.get(
+                sleeve_account.get(event["sleeve_id"], ""), {}
+            ).get(event["day"])
+            if amount is not None:
+                margin_entries.setdefault(event["sleeve_id"], []).append(
+                    (event["day"], _usd(amount))
+                )
+    sentences: list[str] = []
+    for sleeve_id, account in sorted(product_sleeves.items()):
+        for day, parts in sorted(by_source.get(account, {}).items()):
+            if (sleeve_id, day) in margin_days:
+                continue
+            closing = {
+                cp: _dec(v)
+                for cp, v in parts.items()
+                if (_sleeve_label(cp), day) in exits
+                and _sleeve_label(cp) in margin_entries
+            }
+            if not closing:
+                continue
+            total = sum((_dec(v) for v in parts.values()), Decimal(0))
+            proceeds = " and ".join(
+                f"{_sleeve_label(cp)} ({_usd(v)})" for cp, v in sorted(closing.items())
+            )
+            entries = "; ".join(
+                f"{_sleeve_label(cp)} {amount} on {entry_day}"
+                for cp in sorted(closing)
+                for entry_day, amount in margin_entries[_sleeve_label(cp)]
+            )
+            sentences.append(
+                f" The {day} allocation into {sleeve_id} ({_usd(total)}) is the proceeds of "
+                f"{proceeds}, whose entries ({entries}) are declared account-margin-funded."
+            )
+    return "".join(sentences)
+
+
+def _perimeter_reconciliation(
+    reconciliation: Mapping[str, Any], excluded: Sequence[Mapping[str, Any]]
+) -> str:
+    """What sits between the parent account's gain and the sleeves' gains."""
+
+    by_account = {s["account_id"]: s for s in reconciliation["sleeves"]}
+    for row in excluded:
+        known = by_account.get(str(row["account_id"]))
+        if known is None or abs(
+            _dec(known["gain_from_first_day_nav"]) - _dec(row["gain"])
+        ) > Decimal("0.01"):
+            raise DisclosureError(
+                f"the report row gain of {row['account_id']} differs from the sleeve facts"
+            )
+    entries = ", ".join(
+        f"{s['sleeve_id']} {_dec(s['entry_day_difference']):+,.2f}"
+        for s in sorted(reconciliation["sleeves"], key=lambda s: s["sleeve_id"])
+    )
+    entry_total = _dec(reconciliation["entry_day_total"]).quantize(_CENT)
+    gain = _dec(reconciliation["account_gain"]).quantize(_CENT)
+    sleeves = _dec(reconciliation["sleeve_gain_total"]).quantize(_CENT)
+    # shown figures close: the remainder is the shown difference less the shown entry-day
+    # differences (the unrounded remainder is within one cent of it)
+    difference = gain - sleeves
+    remainder = difference - entry_total
+    if abs(remainder - _dec(reconciliation["unattributed"])) >= _CENT:
+        raise DisclosureError("the shown perimeter figures do not close")
+    later = _dec(reconciliation["paid_in_after_anchor"])
+    return (
+        " Sleeve gains are measured from each sleeve's first-day end-of-day NAV, not from "
+        f"the amount allocated to it; the entry-day differences ({entries}; total "
+        f"{entry_total:+,.2f}) belong to no sleeve. Parent account gain over "
+        f"{reconciliation['anchor_day']}..{reconciliation['last_day']} is {gain:+,.2f} on "
+        f"{_usd(_dec(reconciliation['paid_in']))} of external capital (opening NAV "
+        f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later); "
+        f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
+        f"entry-day differences ({entry_total:+,.2f}) and {remainder:+,.2f} not attributed "
+        "(days before the first sleeve day and the parent remainder)."
+    )
+
+
+def _index_move(predecessor: object, current: str | None) -> str:
+    if (
+        current is not None
+        and isinstance(predecessor, Mapping)
+        and predecessor.get("status") == "RESOLVED"
+        and "hwm_current_index" in predecessor["values"]
+    ):
+        before = _dec(predecessor["values"]["hwm_current_index"])
+        now = _dec(current)
+        return (
+            f"The index is {now:.4f} against {before:.4f} in the previous release "
+            f"({now - before:+.2f}, {((now - before) / before * 100):+.2f}%); the move is "
+            "not attributed beyond this timing."
+        )
+    return "Its movement against the previous release is not attributed beyond this timing."
+
+
 def compose(
     sources: Mapping[str, Any],
     *,
@@ -354,6 +702,7 @@ def compose(
     sleeve_accounts: Mapping[str, str],
     product_strategies: Sequence[str],
     strategy_returns: Mapping[str, Decimal] | None = None,
+    hwm_current_index: str | None = None,
 ) -> dict[str, Any]:
     """Methodology items from the sources and the report's own rows.
 
@@ -416,12 +765,19 @@ def compose(
                     }
                 )
                 continue
+            every_bod = (
+                f"; placing every flow at beginning of day moves it by "
+                f"{_signed_pt(entry['all_bod_delta_pt'])} points"
+                if "all_bod_delta_pt" in entry
+                else ""
+            )
             parts.append(
-                f"{label} (cumulative TWR {_pct(twr)}%{basis_note}): beginning-of-day "
-                "placement of every "
-                f"flow moves it by between {_signed_pt(entry['b_all_lower_pt'])} and "
+                f"{label} (cumulative TWR {_pct(twr)}%{basis_note}): placing each flow "
+                "at the beginning or the end of its day, independently, moves it by "
+                f"between {_signed_pt(entry['b_all_lower_pt'])} and "
                 f"{_signed_pt(entry['b_all_upper_pt'])} points (external flows only: "
-                f"{_signed_pt(entry['b_ext_lower_pt'])} / {_signed_pt(entry['b_ext_upper_pt'])})"
+                f"{_signed_pt(entry['b_ext_lower_pt'])} / "
+                f"{_signed_pt(entry['b_ext_upper_pt'])}){every_bod}"
             )
         if parts:
             items.append(
@@ -506,10 +862,10 @@ def compose(
             product_sleeves = {
                 account.rsplit("-", 1)[-1]: account for account in product_accounts
             }
-            inflow = {
+            by_source = {
                 account: days
                 for item in facts.values()
-                for account, days in (item.get("internal_in_by_day") or {}).items()
+                for account, days in (item.get("internal_in_by_source") or {}).items()
             }
             margin = [
                 event
@@ -522,26 +878,43 @@ def compose(
                 "the sum of the allocations into its sleeve, margin-funded allocations included "
                 "(not netted)."
             )
+            margin_days: set[tuple[str, str]] = set()
             if margin:
                 listed = "; ".join(
-                    event["day"]
-                    + (
-                        f" {_usd(_dec(amounts[event['day']]))}"
-                        if event["day"]
-                        in (
-                            amounts := inflow.get(
-                                product_sleeves[event["sleeve_id"]], {}
-                            )
-                        )
-                        else ""
+                    _margin_allocation(
+                        event,
+                        by_source.get(product_sleeves[event["sleeve_id"]], {}),
                     )
-                    + f" ({event['note']})"
                     for event in margin
                 )
+                margin_days = {(e["sleeve_id"], e["day"]) for e in margin}
                 text += (
                     " Allocations whose declared funding events name account margin "
                     f"({len(margin)}): {listed}."
                 )
+            text += _exit_proceeds(
+                sources,
+                product_sleeves=product_sleeves,
+                by_source=by_source,
+                margin_days=margin_days,
+            )
+            reconciliation = next(
+                (
+                    item
+                    for item in sources.get("account_reconciliation", [])
+                    if sleeve_accounts.get(next(iter(product_accounts), ""))
+                    == item["parent_account_id"]
+                ),
+                None,
+            )
+            if reconciliation is not None:
+                paid_in = _dec(reconciliation["paid_in"])
+                if capital[strategy] > paid_in:
+                    text += (
+                        f" Gross capital {_usd(capital[strategy])} exceeds all external "
+                        f"capital paid into the account ({_usd(paid_in)}) by "
+                        f"{_usd(capital[strategy] - paid_in)}."
+                    )
             predecessor = sources.get("predecessor")
             if isinstance(predecessor, Mapping):
                 if predecessor.get("status") == "RESOLVED":
@@ -549,11 +922,13 @@ def compose(
                     if values.get("strategy_id") == strategy:
                         before = _dec(values["strategy_capital_usd"])
                         before_total = _dec(values["aggregate_capital_usd"])
+                        delta = capital[strategy] - before
                         text += (
-                            f" Previous release ({str(predecessor['panel_generation_id'])[:8]}): "
-                            f"{_usd(before)} for {strategy} ({_usd(capital[strategy] - before)}, "
-                            f"{((capital[strategy] - before) / before * 100).quantize(Decimal('0.1'))}%) "
-                            f"and {_usd(before_total)} in total ({_usd(total - before_total)})."
+                            f" Previous release {str(predecessor['release_id'])[:8]} "
+                            f"(panel generation {str(predecessor['panel_generation_id'])[:8]}): "
+                            f"{_usd(before)} for {strategy} ({delta:+,.2f}, "
+                            f"{(delta / before * 100).quantize(Decimal('0.1')):+}%) "
+                            f"and {_usd(before_total)} in total ({total - before_total:+,.2f})."
                         )
                 else:
                     omitted.append(
@@ -589,16 +964,29 @@ def compose(
                 f"{str(r['account_id']).rsplit('-', 1)[-1]} {_dec(r['gain']):+,.2f}"
                 for r in sorted(group, key=lambda r: str(r["account_id"]))
             )
-            items.append(
-                {
-                    "item": "Product perimeter",
-                    "value": (
-                        f"The product epoch of {', '.join(product_strategies)} is its derived "
-                        f"sleeve only. Sleeves of the same parent account kept as history, "
-                        f"outside the product: gain {total_gain:+,.2f} USD in total ({lines})."
-                    ),
-                }
+            text = (
+                f"The product epoch of {', '.join(product_strategies)} is its derived "
+                f"sleeve only. Sleeves of the same parent account kept as history, "
+                f"outside the product: gain {total_gain:+,.2f} USD in total ({lines})."
             )
+            reconciliation = next(
+                (
+                    item
+                    for item in sources.get("account_reconciliation", [])
+                    if item["parent_account_id"] == parent
+                ),
+                None,
+            )
+            if reconciliation is not None:
+                text += _perimeter_reconciliation(reconciliation, group)
+            else:
+                omitted.append(
+                    {
+                        "entry": f"perimeter reconciliation of {parent}",
+                        "reason": "ACCOUNT_RECONCILIATION_NOT_IN_SOURCES",
+                    }
+                )
+            items.append({"item": "Product perimeter", "value": text})
     for strategy in product_strategies:
         epochs = sorted(
             (str(r.get("effective_start")), str(r.get("account_id")))
@@ -614,8 +1002,8 @@ def compose(
                     "value": (
                         f"The governed HWM member for {strategy} is the sleeve series "
                         f"{epochs[0][1]} from {epochs[0][0]}; the index carries this member from "
-                        "that date. Its movement against the previous release is not attributed "
-                        "beyond this timing."
+                        "that date. "
+                        + _index_move(sources.get("predecessor"), hwm_current_index)
                     ),
                 }
             )

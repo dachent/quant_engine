@@ -91,9 +91,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "081b2ea1ef7e202d4e0f285e7866035382aaf33c1460dd07bdadd7c42a0da3fe"
+    "c3cd0bcee99d71c9afab1240a4371bdae718739ab4fd9af0d52b3ed77a5411fd"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 36157
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 36222
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -2830,12 +2830,12 @@ def _period_ppy(days: list[date]) -> tuple[int | None, str]:
 
 
 def _independent_exited(numeric: Mapping[str, object]) -> bool:
-    """A fully exited epoch (value zero, capital positive): no return on net capital."""
+    """A fully exited epoch (value zero, net capital not zero): no return on net capital."""
 
     try:
         return (
             Decimal(str(numeric.get("current_value"))) == 0
-            and Decimal(str(numeric.get("net_capital"))) > 0
+            and Decimal(str(numeric.get("net_capital"))) != 0
         )
     except (ArithmeticError, ValueError):
         return False
@@ -2965,6 +2965,7 @@ def _independent_period_fields(
                         None if _independent_exited(numeric) else "CUMULATIVE"
                     ),
                     "window_days": span,
+                    "window_start_field": "opening_capital_date",
                     **(
                         {"status": "NOT_MEANINGFUL_EXITED_EPOCH"}
                         if _independent_exited(numeric)
@@ -2974,6 +2975,7 @@ def _independent_period_fields(
                 "annualized_return_on_net_capital": {
                     "reported_basis": None if ronc_annual is None else label(span),
                     "window_days": span,
+                    "window_start_field": "opening_capital_date",
                     "method": (
                         "GEOMETRIC_ACT_365"
                         if span >= _PERIOD_YEAR_DAYS

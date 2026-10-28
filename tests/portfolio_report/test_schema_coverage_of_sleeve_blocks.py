@@ -222,3 +222,95 @@ def test_the_report_over_derived_sleeves_validates_against_its_schema(
     items = {item["item"] for item in report["methodology"]}
     assert "Sleeve closure" in items
     assert Decimal(0) == Decimal(0)
+
+
+# ---------------------------------------------------------------- rerun1 fields
+
+
+def test_the_basis_entries_state_the_window_they_are_counted_from() -> None:
+    """R-10: the net-capital windows count from the capital date, and the schema says so."""
+
+    producer = pytest.importorskip("account_strategy_manifest")
+    schema = _schema("account-strategy-manifest.schema.json")
+    links = [
+        {"start_date": "2026-08-02", "end_date": "2026-08-03", "factor": "1.001"},
+        {"start_date": "2026-08-03", "end_date": "2026-08-04", "factor": "0.999"},
+    ]
+    row = {
+        "observation_trace": {"links": links},
+        "observation_linked_return": "0.0",
+        "end": "2026-08-04",
+        "opening_capital_date": "2026-08-01",
+        "current_value": "0",
+        # more came out than went in: the ratio has no meaning and the basis says why
+        "net_capital": "-100",
+    }
+    basis = producer.json_ready(producer._period_return_fields(row, 2026))[
+        "annualisation_basis"
+    ]
+    assert basis["return_on_net_capital"]["status"] == "NOT_MEANINGFUL_EXITED_EPOCH"
+    for name in ("return_on_net_capital", "annualized_return_on_net_capital"):
+        assert basis[name]["window_start_field"] == "opening_capital_date"
+        assert basis[name]["window_days"] == 3  # 2026-08-01 .. 2026-08-04
+    assert _errors(_def(schema, "annualisation_basis"), basis) == []
+    # the report publishes the same entries under its own schema
+    report_schema = _schema("report-data.schema.json")
+    for name in ("return_on_net_capital", "annualized_return_on_net_capital"):
+        assert (
+            _errors(_def(report_schema, "annualisation_basis_entry"), basis[name]) == []
+        )
+
+
+def test_a_retained_strategy_row_with_its_economic_exit_is_described() -> None:
+    schema = _schema("report-data.schema.json")
+    items = schema["properties"]["retained_strategies"]["items"]
+    row = {
+        "strategy_id": "retired-one",
+        "strategy_name": "Retired one",
+        "record_kind": "RETAINED_HISTORY_ONLY",
+        "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
+        "product_requirement": "EXCLUDED",
+        "source": "NESTED_STRATEGY_TAG_MAP",
+        "effective_start": "2024-07-24",
+        "effective_end": "2024-12-13",
+        "lifecycle_state": "RETIRED",
+        "retired_on": "2024-12-13",
+        "closed_on": None,
+        "parent_assignment_id": None,
+        "sleeve_label": None,
+        "economic_end_date": "2024-12-12",
+        "end_recognition_basis": "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL",
+    }
+    assert _errors({**items, "$defs": schema.get("$defs", {})}, row) == []
+    bad = {**row, "end_recognition_basis": "SOMETHING_ELSE"}
+    assert _errors({**items, "$defs": schema.get("$defs", {})}, bad) != []
+
+
+def test_the_performance_tab_with_a_memo_remainder_and_a_hybrid_label_is_described() -> (
+    None
+):
+    fixture = _load_perf_fixture()
+    panel = fixture._sleeve_panel()
+    rows = tab.build_performance_tab(panel)["slices"]["reconciliation"]
+    residual = Decimal(rows["residual_cents"]) / 100
+    panel["capital_reconciliation"] = {
+        "memo": {"perimeter_remainder": {"amount_usd": str(residual - Decimal("3.81"))}}
+    }
+    sleeve = next(row for row in panel["strategies"] if row["strategy_id"] == "a")
+    sleeve["strategy_name"] = "A one"
+    sleeve["return_scope_label"] = "Return: parent account X."
+    block = tab.build_performance_tab(panel)
+    assert (
+        "cash left in liquidated epochs"
+        in block["slices"]["reconciliation"]["residual_label"]
+    )
+    hybrid = [
+        line
+        for line in block["modes"]["LIVE_PLUS_BACKTEST"]["lines"]
+        if "return_scope_label" in line
+    ]
+    assert hybrid and all(
+        "In this mode the weeks" in line["return_scope_label"] for line in hybrid
+    )
+    schema = _schema("control-panel-data.schema.json")
+    assert _errors(_def(schema, "performance_tab"), block) == []

@@ -448,6 +448,7 @@ def _build_slices(
     manifest: Mapping[str, Any] | None,
     capital: Mapping[str, Any],
     sleeve_links: Mapping[str, tuple[str, str]],
+    remainder: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         return _unavailable("ACCOUNT_MANIFEST_ABSENT")
@@ -568,21 +569,53 @@ def _build_slices(
             "reference_date": cutoff.isoformat(),
             "systematic_capital_cents": reference,
             "residual_cents": None if reference is None else reference - totals[-1],
-            "residual_label": (
-                "SYSTEMATIC_CAPITAL_MINUS_SLICE_TOTAL_AT_CUTOFF "
-                "(cash left in a liquidated epoch"
-                + (
-                    " and in the unallocated cash of a residual parent account"
-                    if sleeve_links
-                    else ""
-                )
-                + "; named in capital_reconciliation.memo.perimeter_remainder "
-                "(component RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS) "
-                "when that block carries it)"
+            "residual_label": _residual_label(
+                bool(sleeve_links),
+                None if reference is None else reference - totals[-1],
+                remainder,
             ),
             "reason": None if reference is not None else "CAPITAL_SYSTEMATIC_ABSENT",
         },
     }
+
+
+def _residual_label(
+    sleeves: bool, residual_cents: int | None, remainder: Mapping[str, Any] | None
+) -> str:
+    """The residual's name; with sleeves and a memo remainder, both amounts are quoted."""
+
+    base = "SYSTEMATIC_CAPITAL_MINUS_SLICE_TOTAL_AT_CUTOFF"
+    if (
+        sleeves
+        and residual_cents is not None
+        and isinstance(remainder, Mapping)
+        and remainder.get("amount_usd") is not None
+    ):
+        with localcontext() as context:
+            context.prec = _PRECISION
+            memo = _dec(remainder["amount_usd"], "perimeter remainder").quantize(
+                Decimal("0.01")
+            )
+            residual = Decimal(residual_cents) / 100
+            rest = residual - memo
+        return (
+            f"{base}: residual {residual:,.2f} = "
+            f"capital_reconciliation.memo.perimeter_remainder {memo:,.2f} "
+            "(the residual parent account's value outside the product sleeve: "
+            f"unallocated cash, margin debit and any other sleeve's remainder) {rest:+,.2f} "
+            "cash left in liquidated epochs"
+        )
+    return (
+        f"{base} (cash left in a liquidated epoch"
+        + (
+            " and in the unallocated cash of a residual parent account"
+            if sleeves
+            else ""
+        )
+        + "; named in capital_reconciliation.memo.perimeter_remainder "
+        "(component RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS) "
+        "when that block carries it)"
+    )
 
 
 def _systematic_cents(capital: Mapping[str, Any]) -> int | None:
@@ -681,6 +714,30 @@ def _return_scope_labels(panel: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
+    """A return-scope label, qualified where the line's own weeks are not live.
+
+    The label states the parent account's live series; a hybrid line's weeks before live
+    capital are backtest (or a mix at the boundary), which the line's origin runs say.
+    """
+
+    grid = _sequence(dates)
+    parts = [
+        (
+            f"{grid[start]} ({flag})"
+            if start == end
+            else f"{grid[start]} to {grid[end]} ({flag})"
+        )
+        for start, end, flag in _sequence(line.get("origin"))
+        if flag != "LIVE" and 0 <= start <= end < len(grid)
+    ]
+    if not parts:
+        return label
+    return (
+        f"{label} In this mode the weeks {', '.join(parts)} are not that live series."
+    )
+
+
 def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
     """Build the ``performance_tab`` block from the assembled panel mapping."""
 
@@ -698,13 +755,21 @@ def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
     for block in modes.values():
         for line in _sequence(block.get("lines")) if isinstance(block, dict) else []:
             if isinstance(line, dict) and line.get("series_id") in scopes:
-                line["return_scope_label"] = scopes[str(line["series_id"])]
+                line["return_scope_label"] = _qualified_label(
+                    scopes[str(line["series_id"])], line, block.get("dates")
+                )
     manifest = panel.get("account_manifest")
     try:
         slices = _build_slices(
             manifest if isinstance(manifest, Mapping) else None,
             _mapping(panel.get("capital")),
             _sleeve_links(panel),
+            _mapping(
+                _mapping(_mapping(panel.get("capital_reconciliation")).get("memo")).get(
+                    "perimeter_remainder"
+                )
+            )
+            or None,
         )
     except PerformanceTabError as exc:
         slices = _unavailable(str(exc))
@@ -1177,9 +1242,12 @@ def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -
     scopes = _return_scope_labels(panel)
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
         for line in _sequence(_mapping(modes[mode]).get("lines")):
-            if isinstance(line, Mapping) and line.get(
-                "return_scope_label"
-            ) != scopes.get(str(line.get("series_id"))):
+            expected = scopes.get(str(line.get("series_id")))
+            if expected is not None:
+                expected = _qualified_label(
+                    expected, line, _mapping(modes[mode]).get("dates")
+                )
+            if isinstance(line, Mapping) and line.get("return_scope_label") != expected:
                 raise _fail(
                     f"{mode} {line.get('series_id')} return scope label differs"
                 )

@@ -8308,6 +8308,19 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                 "account_manifest.annualized_return_on_net_capital:", row, short
             )
             short_window(label, days, row, "annualized_return_on_net_capital")
+        # the epoch's annualised money-weighted return (XIRR): a window under a year,
+        # retired epochs included, must declare ANNUALISED_FROM_DAYS beside the figure
+        mwr_days = _window_days(
+            row.get("mwr_opening_date"), row.get("mwr_terminal_date")
+        )
+        if (
+            row.get("mwr_unit") == "ANNUALIZED_RETURN"
+            and row.get("mwr_xirr") is not None
+            and mwr_days is not None
+            and mwr_days < ONE_YEAR_DAYS
+        ):
+            label = _unique_label("account_manifest.mwr_xirr:", row, short)
+            short_window(label, mwr_days, row, "mwr_xirr")
     impossible: dict[str, Any] = {}
     comparison_labels = {
         str(item.get("strategy_id")): item

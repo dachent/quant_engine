@@ -282,9 +282,14 @@ def test_a_fully_exited_epoch_has_no_return_on_net_capital(
 
     assert producer._exited_epoch({"current_value": "0", "net_capital": "100"})
     assert not producer._exited_epoch({"current_value": "5", "net_capital": "100"})
-    assert not producer._exited_epoch({"current_value": "0", "net_capital": "-100"})
+    # more came out than went in: the ratio has no meaning either, and the basis says so
+    assert producer._exited_epoch({"current_value": "0", "net_capital": "-100"})
+    assert not producer._exited_epoch({"current_value": "0", "net_capital": "0"})
     assert verifier._independent_exited(
         {"current_value": Decimal(0), "net_capital": Decimal(100)}
+    )
+    assert verifier._independent_exited(
+        {"current_value": Decimal(0), "net_capital": Decimal(-100)}
     )
     assert not verifier._independent_exited(
         {"current_value": Decimal(1), "net_capital": Decimal(100)}
