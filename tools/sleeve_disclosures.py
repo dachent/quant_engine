@@ -26,6 +26,10 @@ from typing import Any, Final
 
 SOURCES_SCHEMA: Final = "sleeve-disclosure-sources/1"
 INPUTS_ARTIFACT_ID: Final = "sleeve-disclosure-inputs"
+# the two facts artifacts are told apart by what they are (account facts of a parent account,
+# facts of a fund family), never by a provider name
+ACCOUNT_FACTS: Final = "sleeve-account-facts"
+FUND_FACTS: Final = "quantbase-fund-facts"
 _CENT: Final = Decimal("0.01")
 
 
@@ -136,7 +140,7 @@ def _facts_summary(facts: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(policy, Mapping):
         summary["closure_policy"] = dict(policy)
     disclosures = facts.get("disclosures")
-    if isinstance(disclosures, Mapping) and provider == "ibkr":
+    if isinstance(disclosures, Mapping) and facts.get("artifact_id") == ACCOUNT_FACTS:
         summary["disclosure_counts"] = {
             key: len(value)
             for key, value in sorted(disclosures.items())
@@ -256,7 +260,7 @@ def build_sources(
         "schema_version": 1,
         "artifact_id": "sleeve-disclosure-sources",
         "schema": SOURCES_SCHEMA,
-        "facts": sorted(facts, key=lambda item: str(item["provider_id"])),
+        "facts": sorted(facts, key=lambda item: str(item["artifact_id"])),
         "timestamp_bounds": None,
         "predecessor": None,
     }
@@ -335,7 +339,7 @@ def compose(
 
     items: list[dict[str, str]] = []
     omitted: list[dict[str, str]] = []
-    facts = {str(item.get("provider_id")): item for item in sources.get("facts", [])}
+    facts = {str(item.get("artifact_id")): item for item in sources.get("facts", [])}
 
     stamp = sources.get("timestamp_bounds")
     if isinstance(stamp, Mapping):
@@ -395,7 +399,7 @@ def compose(
                 }
             )
 
-    quantbase = facts.get("quantbase")
+    quantbase = facts.get(FUND_FACTS)
     if quantbase is not None and isinstance(quantbase.get("account_cash"), Mapping):
         cash = quantbase["account_cash"]
         open_items = quantbase.get("open_items") or {}
@@ -420,7 +424,7 @@ def compose(
             }
         )
 
-    ibkr = facts.get("ibkr")
+    ibkr = facts.get(ACCOUNT_FACTS)
     if ibkr is not None and isinstance(ibkr.get("closure_policy"), Mapping):
         policy = ibkr["closure_policy"]
         counts = ibkr.get("disclosure_counts") or {}
