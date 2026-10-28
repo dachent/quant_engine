@@ -2641,6 +2641,7 @@
       const points = [{ time: starts[0], value: 1, backtest: false }, ...tri.map((value, index) => ({ time: ends[index], value: number(value) == null ? null : Number(value), backtest: dashed[index] }))];
       lines.push({ key: line.series_id, name, color, kind, points, definition: line.definition || "" });
       if (kind === "portfolio" && line.definition) definitions.push(`${name}: ${line.definition}`);
+      if (line.return_scope_label) definitions.push(`${name}: ${line.return_scope_label}`);
       if (line.source_mode && line.source_mode !== mode) definitions.push(`${name}: ${humanStatus(line.source_mode).toLowerCase()}.`);
     }
     for (const entry of Array.isArray(tab.benchmarks) ? tab.benchmarks : []) {

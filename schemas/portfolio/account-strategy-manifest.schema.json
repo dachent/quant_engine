@@ -59,8 +59,8 @@
   "allOf": [
     {
       "if": {"required": ["lifecycle_schema_version"]},
-      "then": {"properties": {"rows": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"]}}}},
-      "else": {"properties": {"rows": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}]}}}}}
+      "then": {"properties": {"rows": {"items": {"required": ["lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label", "economic_end_date", "end_recognition_basis"]}}}},
+      "else": {"properties": {"rows": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}, {"required": ["economic_end_date"]}, {"required": ["end_recognition_basis"]}]}}}}}
     },
     {
       "if": {"properties": {"schema_version": {"const": 7}}, "required": ["schema_version"]},
@@ -496,6 +496,8 @@
         "closed_on": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
         "parent_assignment_id": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "sleeve_label": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "economic_end_date": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "end_recognition_basis": {"enum": ["EXIT_FILL_DAY_IS_END_DAY", "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL", "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION", null]},
         "provider": {"type": "string"},
         "strategy_id": {"type": "string", "minLength": 1},
         "effective_start": {"$ref": "#/$defs/date"},

@@ -46,6 +46,7 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
+import sleeve_disclosures
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -10427,6 +10428,13 @@ def _panel_data(
             "Provider, account-live, predecessor, shadow, and backtest evidence are not concatenated.",
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
             *source_clock_lines,
+            *(
+                f"{item['item']}: {item['value']}"
+                for item in report.get("methodology", [])
+                if isinstance(item, Mapping)
+                and item.get("item") in sleeve_disclosures.ITEM_NAMES
+                and isinstance(item.get("value"), str)
+            ),
         }
     )
     account_manifest_verification = (

@@ -2773,6 +2773,7 @@ def _preparation_function_fixture(
                 "sleeve_account_facts",
                 "quantbase_fund_facts",
                 "nested_tag_map",
+                "sleeve_disclosures",
                 "sleeve_inputs",
                 "sleeve_ledger",
                 "sleeve_nav",
@@ -4799,4 +4800,61 @@ def test_a_malformed_sleeve_configuration_is_refused(
             requested_as_of="2026-09-17",
             evaluated_on="2026-09-19",
             release_commit="a" * 40,
+        )
+
+
+def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
+    tmp_path: Path,
+) -> None:
+    """The sources hash-bind the governed disclosure inputs the policy manifest pins."""
+
+    import json
+
+    section = _sleeve_section(tmp_path)
+    inputs = {
+        "schema_version": 1,
+        "artifact_id": "sleeve-disclosure-inputs",
+    }
+    raw = json.dumps(inputs).encode()
+    (tmp_path / "disclosure-inputs.json").write_bytes(raw)
+    manifest = json.loads((tmp_path / "sleeve-policy-manifest.json").read_bytes())
+    manifest["disclosure-inputs"] = {
+        "path": "disclosure-inputs.json",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    (tmp_path / "sleeve-policy-manifest.json").write_bytes(
+        canonical_json_bytes(manifest)
+    )
+    section["policy_manifest"] = preparation._definition(
+        tmp_path / "sleeve-policy-manifest.json"
+    )
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(
+        json.dumps(
+            {"artifact_id": "sleeve-account-facts", "provider_id": "ibkr"}
+        ).encode()
+    )
+    destination = tmp_path / "out"
+    destination.mkdir()
+    path = preparation._build_sleeve_disclosure_sources(
+        section, facts_paths=(facts,), destination=destination
+    )
+    assert path == destination / "sleeve-disclosure-sources.json"
+    written = json.loads(path.read_bytes())
+    assert written["schema"] == "sleeve-disclosure-sources/1"
+    assert written["predecessor"] is None
+    # no sleeves selected: no sources; a pin that differs from the file is refused
+    assert (
+        preparation._build_sleeve_disclosure_sources(
+            None, facts_paths=(facts,), destination=destination
+        )
+        is None
+    )
+    (tmp_path / "disclosure-inputs.json").write_bytes(raw + b" ")
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="differ from their pin"
+    ):
+        preparation._build_sleeve_disclosure_sources(
+            section, facts_paths=(facts,), destination=tmp_path / "again"
         )

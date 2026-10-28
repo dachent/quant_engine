@@ -50,7 +50,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
@@ -4583,7 +4583,12 @@ def analyze_epoch(
     # This is not money-weighted return: it ignores flow timing.  Preserve the
     # useful simple ratio under its accurate name; the governed MWR is attached
     # separately from the performance leg list.
-    return_on_net_capital = gain / net_capital if net_capital > 0 else None
+    # A fully exited epoch (current value zero) has gain == -net_capital by identity, so
+    # gain / net_capital is -100% whatever it earned: not an economic return.  Its TWR,
+    # money-weighted return and gain are the epoch's return figures.
+    return_on_net_capital = (
+        gain / net_capital if net_capital > 0 and current != 0 else None
+    )
     if return_on_net_capital is None:
         annualized = None
     else:
@@ -5181,7 +5186,31 @@ def _period_periods_per_year(end_dates: Sequence[date]) -> tuple[int | None, str
     return None, "UNCLASSIFIED_CADENCE"
 
 
-def _period_return_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+def _exited_epoch(row: Mapping[str, Any]) -> bool:
+    """An epoch whose capital is fully withdrawn: no return on net capital is meaningful."""
+
+    try:
+        return (
+            Decimal(str(row.get("current_value"))) == 0
+            and Decimal(str(row.get("net_capital"))) > 0
+        )
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _cutoff_year(manifest: Mapping[str, Any]) -> int | None:
+    """The calendar year of the manifest's calculation cutoff, when it names one."""
+
+    value = manifest.get("calculation_cutoff_date")
+    try:
+        return date.fromisoformat(str(value)).year if value is not None else None
+    except ValueError:
+        return None
+
+
+def _period_return_fields(
+    row: Mapping[str, Any], cutoff_year: int | None = None
+) -> dict[str, Any]:
     """Per-epoch window, annualisation, YTD and calendar-year returns (schema 10).
 
     A pure function of one finished OK row: its observation trace (the daily
@@ -5225,7 +5254,13 @@ def _period_return_fields(row: Mapping[str, Any]) -> dict[str, Any]:
                 date.fromisoformat(str(year_links[-1]["end_date"])),
                 year,
             )
-        ytd_key = None if close is None else str(close.year)
+        # year to date is the cutoff year's: a retired epoch that closed in an earlier
+        # year carries its calendar-year return, not a year-to-date one
+        ytd_key = (
+            None
+            if close is None or (cutoff_year is not None and close.year != cutoff_year)
+            else str(close.year)
+        )
         periods, periods_basis = _period_periods_per_year(
             [date.fromisoformat(str(link["end_date"])) for link in links]
         )
@@ -5284,8 +5319,13 @@ def _period_return_fields(row: Mapping[str, Any]) -> dict[str, Any]:
                 "method": "XIRR_TO_WINDOW_ACT_365",
             },
             "return_on_net_capital": {
-                "reported_basis": "CUMULATIVE",
+                "reported_basis": (None if _exited_epoch(row) else "CUMULATIVE"),
                 "window_days": span_days,
+                **(
+                    {"status": "NOT_MEANINGFUL_EXITED_EPOCH"}
+                    if _exited_epoch(row)
+                    else {}
+                ),
             },
             "annualized_return_on_net_capital": {
                 "reported_basis": (
@@ -5336,7 +5376,11 @@ def _attach_period_returns(manifest: Mapping[str, Any]) -> None:
         raise ManifestError("manifest rows are invalid")
     for row in rows:
         if isinstance(row, dict) and row.get("status") == "OK":
-            row.update(_period_return_fields(cast(Mapping[str, Any], json_ready(row))))
+            row.update(
+                _period_return_fields(
+                    cast(Mapping[str, Any], json_ready(row)), _cutoff_year(manifest)
+                )
+            )
 
 
 MWR_VALUATION_TIMING = "NAV_RECOGNITION_DATE_OR_EXACT_FILL_DATE"
@@ -6445,7 +6489,9 @@ def _validate_manifest_semantics(
             raise ManifestError(f"row {index} capital flow trace totals are invalid")
 
         expected_ronc = (
-            money["gain"] / money["net_capital"] if money["net_capital"] > 0 else None
+            money["gain"] / money["net_capital"]
+            if money["net_capital"] > 0 and money["current_value"] != 0
+            else None
         )
         ronc_raw = row.get("return_on_net_capital")
         ronc = (
@@ -6525,7 +6571,9 @@ def _validate_manifest_semantics(
             dual_date_trace=schema_version in _CURRENT_MANIFEST_FAMILY,
         )
         if schema_version == _PERIOD_RETURNS_MANIFEST_SCHEMA_VERSION:
-            expected_period = json_ready(_period_return_fields(row))
+            expected_period = json_ready(
+                _period_return_fields(row, _cutoff_year(manifest))
+            )
             if not isinstance(expected_period, dict) or any(
                 field not in row or row[field] != expected_period[field]
                 for field in PERIOD_RETURN_FIELDS

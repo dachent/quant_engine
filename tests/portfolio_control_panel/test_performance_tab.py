@@ -751,3 +751,28 @@ def test_a_sleeve_strategy_without_its_parent_is_refused() -> None:
     slices = tab.build_performance_tab(panel)["slices"]
     assert slices["status"] == "UNAVAILABLE"
     assert "parent or id" in slices["reason"]
+
+
+def test_a_strategy_line_carries_the_return_scope_its_row_states() -> None:
+    """J1: the line of a strategy whose product epoch is a derived sleeve says whose series it is."""
+
+    panel = _panel()
+    label = "Return, drawdown and weekly series: parent account X. MWR and capital: sleeve s2."
+    panel["strategies"] = [
+        {"strategy_id": "a", "strategy_name": "A one", "return_scope_label": label},
+        {"strategy_id": "b", "strategy_name": "B two"},
+    ]
+    block = tab.build_performance_tab(panel)
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        assert _line(block, mode, "strategy:A one")["return_scope_label"] == label
+        assert "return_scope_label" not in _line(block, mode, "strategy:B two")
+    tab.verify_performance_tab(block, panel)
+    # the verifier refuses a line whose label differs from its row, and a label the row lacks
+    forged = tab.build_performance_tab(panel)
+    _line(forged, "LIVE_ONLY", "strategy:A one")["return_scope_label"] = "other"
+    with pytest.raises(tab.PerformanceTabError, match="return scope label differs"):
+        tab.verify_performance_tab(forged, panel)
+    extra = tab.build_performance_tab(panel)
+    _line(extra, "LIVE_ONLY", "strategy:B two")["return_scope_label"] = label
+    with pytest.raises(tab.PerformanceTabError, match="return scope label differs"):
+        tab.verify_performance_tab(extra, panel)

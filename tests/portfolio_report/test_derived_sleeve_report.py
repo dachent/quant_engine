@@ -127,6 +127,7 @@ def _build(
     tag_map: bytes | None,
     details_edit: Any = None,
     tag_map_sha256: str | None = None,
+    disclosure_sources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
     retained = _epoch(date(2026, 7, 1), "104")
@@ -217,6 +218,10 @@ def _build(
     if tag_map is not None:
         tag_map_path = tmp_path / "tag-map.json"
         tag_map_path.write_bytes(tag_map)
+    sources_path = None
+    if disclosure_sources is not None:
+        sources_path = tmp_path / "sleeve-disclosure-sources.json"
+        sources_path.write_bytes(json.dumps(disclosure_sources).encode("utf-8"))
     report, _content, _path = full.reporter.build_report_data(
         baseline_root,
         epoch_manifest_path=tmp_path / "synthetic-manifest.json",
@@ -224,6 +229,7 @@ def _build(
         epoch_crosswalk_path=tmp_path / "synthetic-crosswalk.json",
         epoch_manifest_generation_root=REPOSITORY_ROOT,
         nested_tag_map_path=tag_map_path,
+        sleeve_disclosure_sources_path=sources_path,
     )
     result: dict[str, Any] = report
     return result
@@ -430,3 +436,54 @@ def test_a_retired_fund_older_than_its_live_parents_assignment_has_a_parent(
     before = tag_maps.validate_tag_map(_live_parent_map("2026-05-01", "2026-06-15"))
     with pytest.raises(full.reporter.ReportValidationError, match="no provable parent"):
         full.reporter._lifecycle_sleeves(before, assignments)
+
+
+def test_the_disclosure_sources_reach_the_methodology_provenance_and_strategy_row(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sources are bound by hash in the report and shown; the row names its basis."""
+
+    import hashlib
+
+    sources = {
+        "schema": "sleeve-disclosure-sources/1",
+        "facts": [
+            {
+                "artifact_id": "sleeve-account-facts",
+                "provider_id": "p",
+                "closure_policy": {
+                    "max_abs_unexplained": "0.05",
+                    "window_unexplained": "-0.01",
+                    "tolerance_per_day": "1",
+                    "tolerance_window": "1",
+                },
+                "disclosure_counts": {"manual_assignments": 4},
+            }
+        ],
+        "timestamp_bounds": None,
+        "predecessor": None,
+    }
+    report = _build(
+        full, tmp_path, monkeypatch, tag_map=_tag_map(), disclosure_sources=sources
+    )
+    items = {item["item"]: item["value"] for item in report["methodology"]}
+    assert "4 manual assignments" in items["Sleeve closure"]
+    digest = hashlib.sha256(
+        (tmp_path / "sleeve-disclosure-sources.json").read_bytes()
+    ).hexdigest()
+    assert {
+        "artifact": "sleeve-disclosure-sources",
+        "schema": "sleeve-disclosure-sources/1",
+        "sha256": digest,
+    } in report["provenance"]
+    summary = {item["strategy_id"]: item for item in report["strategy_summary"]}
+    scope = summary["strategy-1"]["return_scope"]
+    assert scope["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
+    assert scope["mwr_and_governed_capital_basis"] == "SLEEVE_EPOCH"
+    # without the sources nothing is disclosed and the provenance has no such entry
+    plain = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
+    assert "Sleeve closure" not in {item["item"] for item in plain["methodology"]}
+    assert all(
+        item.get("artifact") != "sleeve-disclosure-sources"
+        for item in plain["provenance"]
+    )

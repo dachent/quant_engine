@@ -8299,6 +8299,15 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
             label = _unique_label("twr_mwr.twr_annualised:", row, short)
             short[label] = period_days
             blocking[label] = period_days
+    for _, row in manifest_rows(ctx):
+        # the epoch's return on net capital, annualised: a short window must say so
+        annual = to_decimal(row.get("annualized_return_on_net_capital"))
+        days = _window_days(row.get("opening_capital_date"), row.get("end"))
+        if annual is not None and days is not None and days < ONE_YEAR_DAYS:
+            label = _unique_label(
+                "account_manifest.annualized_return_on_net_capital:", row, short
+            )
+            short_window(label, days, row, "annualized_return_on_net_capital")
     impossible: dict[str, Any] = {}
     comparison_labels = {
         str(item.get("strategy_id")): item

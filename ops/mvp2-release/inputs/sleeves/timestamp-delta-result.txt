@@ -1,0 +1,49 @@
+=== p123-ai-factor IBKR •6907 account-1b44c987969b9e47  legs=5 (external=2)
+committed TWR            2.453178 %
+replicated (all EOD)     2.453178 %   diff vs committed 0.000e-36
+all legs BOD             2.265307 %   delta -0.187871 pt
+external legs BOD only   2.453178 %   delta +0.000000 pt
+bounds b_all          lower -0.187871 pt  upper +0.000000 pt
+bounds b_ext          lower +0.000000 pt  upper +0.000000 pt
+bounds b_dt           lower -0.187871 pt  upper +0.000000 pt
+bounds b_dateonly     lower +0.000000 pt  upper +0.000000 pt
+bounds b_ext_dt       lower +0.000000 pt  upper +0.000000 pt
+bounds b_ext_dateonly lower +0.000000 pt  upper +0.000000 pt
+time-of-day (ET clock assumed, zone unverified) counts {'POST': 3, 'IN': 1, 'PRE': 1}
+ET-clock: pre-open->BOD, rest EOD  -0.186268 pt
+ET-clock: pre-open BOD, in-session free: lower -0.187871 upper -0.186268 pt
+legs (idx cls event recog amount | catalog timing time type | single-move EOD->BOD delta pt)
+  0 EXTERNAL_IN  2026-01-22 2026-01-23      4495.93 | DATETIME 20:23:17 TRANSFER:INTERNAL:IN rec=flow-29da3ee41d8ddac33a9e103d | +0.000000
+  1 EXTERNAL_IN  2026-01-23 2026-01-23       537.99 | DATETIME 17:44:17 TRANSFER:INTERNAL:IN rec=flow-b0fd16c3adf597ecd779c67a | +0.000000
+  2 INTERNAL_IN  2026-01-23 2026-01-23     10312.23 | DATETIME 17:46:32 TRANSFER:INTERNAL:IN rec=flow-13e89d564fc351c3d8f46835 | +0.000000
+  3 INTERNAL_IN  2026-01-27 2026-01-27        92.73 | DATETIME 13:53:25 TRANSFER:INTERNAL:IN rec=flow-7634d0e87592e99fc1d7a202 | -0.001607
+  4 INTERNAL_IN  2026-08-03 2026-08-03      5309.52 | DATETIME 00:17:19 TRANSFER:INTERNAL:IN rec=flow-c5a80281ef6128791a65cbc4 | -0.186268
+=== p123-eu IBKR •9054 account-d69701da9143c430  legs=14 (external=7)
+committed TWR            33.027382 %
+replicated (all EOD)     33.027382 %   diff vs committed 0.000e-36
+all legs BOD             32.311562 %   delta -0.715820 pt
+external legs BOD only   32.223733 %   delta -0.803649 pt
+bounds b_all          lower -2.203870 pt  upper +0.979914 pt
+bounds b_ext          lower -1.715383 pt  upper +0.392776 pt
+bounds b_dt           lower -2.198837 pt  upper +0.585409 pt
+bounds b_dateonly     lower -0.005117 pt  upper +0.392776 pt
+bounds b_ext_dt       lower -1.710331 pt  upper +0.000000 pt
+bounds b_ext_dateonly lower -0.005117 pt  upper +0.392776 pt
+time-of-day (ET clock assumed, zone unverified) counts {'IN': 5, 'DATE_ONLY': 5, 'POST': 3, 'PRE': 1}
+ET-clock: pre-open->BOD, rest EOD  -0.099134 pt
+ET-clock: pre-open BOD, in-session free: lower -2.109766 upper +0.402579 pt
+legs (idx cls event recog amount | catalog timing time type | single-move EOD->BOD delta pt)
+  0 EXTERNAL_IN  2025-11-24 2025-11-24      3572.46 | DATETIME 15:36:14 DEPOSIT_OR_WITHDRAWAL rec=flow-0bbe503a09385b44a84b05d5 | -0.967058
+  1 EXTERNAL_OUT 2025-11-24 2025-12-02     -3572.46 | DATETIME 15:36:14 DEPOSIT_OR_WITHDRAWAL rec=flow-cbc2e52504ed752786d41abc | -0.748716
+  2 EXTERNAL_IN  2025-11-25 2025-11-25         0.08 | DATE_ONLY None DEPOSIT_OR_WITHDRAWAL rec=flow-f95535933c02cec5111f2d5d | -0.000014
+  3 EXTERNAL_IN  2025-11-25 2025-11-25         0.28 | DATE_ONLY None DEPOSIT_OR_WITHDRAWAL rec=flow-1f1250374cc6ff3052e88a03 | -0.000050
+  4 EXTERNAL_OUT 2025-11-25 2025-11-25        -0.36 | DATE_ONLY None DEPOSIT_OR_WITHDRAWAL rec=flow-87f8926d412ed643c28ea678 | +0.000064
+  5 EXTERNAL_IN  2025-11-25 2025-12-02         5250 | DATE_ONLY None DEPOSIT_OR_WITHDRAWAL rec=flow-ec73930eca4679cd6aec7a1d | +0.392712
+  6 INTERNAL_IN  2026-02-23 2026-02-23  2111.143419 | DATETIME 20:19:59 TRANSFER:INTERNAL:IN rec=flow-1fa73f0ec68e7f3dbe99b303 | -0.090491
+  7 INTERNAL_OUT 2026-02-23 2026-02-24      -1981.4 | DATETIME 21:15:43 TRANSFER:INTERNAL:OUT rec=flow-23ea02e5c84448873ecac38c | +0.083009
+  8 INTERNAL_IN  2026-03-05 2026-03-05      4561.86 | DATETIME 14:41:47 TRANSFER:INTERNAL:IN rec=flow-9ca09938e4f15329f269a77f | +0.244255
+  9 INTERNAL_IN  2026-03-06 2026-03-06      4480.04 | DATETIME 13:33:07 TRANSFER:INTERNAL:IN rec=flow-17f37347f71f5c2d8475acc2 | +0.257359
+ 10 INTERNAL_IN  2026-03-10 2026-03-10         0.09 | DATETIME 19:51:27 TRANSFER:INTERNAL:IN rec=flow-0f3f42cd53bd45fde93aa2d6 | -0.000016
+ 11 EXTERNAL_IN  2026-04-28 2026-04-28      7712.77 | DATE_ONLY None DEPOSIT_OR_WITHDRAWAL rec=flow-06f91d25ebdd695b8a0bc5af | -0.005053
+ 12 INTERNAL_IN  2026-07-14 2026-07-14         5000 | DATETIME 12:41:05 TRANSFER:INTERNAL:IN rec=flow-8004db6340d58c0dd744e3b3 | -0.305731
+ 13 INTERNAL_IN  2026-08-03 2026-08-03         6901 | DATETIME 00:17:04 TRANSFER:INTERNAL:IN rec=flow-033e6da5f6aaff4dc620fbaf | -0.099134

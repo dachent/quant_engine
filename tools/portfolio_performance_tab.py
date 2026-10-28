@@ -576,7 +576,9 @@ def _build_slices(
                     if sleeve_links
                     else ""
                 )
-                + "; named by capital_reconciliation when that block is present)"
+                + "; named in capital_reconciliation.memo.perimeter_remainder "
+                "(component RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS) "
+                "when that block carries it)"
             ),
             "reason": None if reference is not None else "CAPITAL_SYSTEMATIC_ABSENT",
         },
@@ -669,6 +671,16 @@ def _benchmark_entry(
     }
 
 
+def _return_scope_labels(panel: Mapping[str, Any]) -> dict[str, str]:
+    """Series id -> the return-scope label the panel's strategy row states, when it does."""
+
+    return {
+        f"strategy:{row.get('strategy_name')}": str(row["return_scope_label"])
+        for row in _sequence(panel.get("strategies"))
+        if isinstance(row, Mapping) and isinstance(row.get("return_scope_label"), str)
+    }
+
+
 def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
     """Build the ``performance_tab`` block from the assembled panel mapping."""
 
@@ -682,6 +694,11 @@ def build_performance_tab(panel: Mapping[str, Any]) -> dict[str, Any]:
             modes[mode] = _build_mode(weekly, mode)
         except PerformanceTabError as exc:
             modes[mode] = _unavailable(str(exc))
+    scopes = _return_scope_labels(panel)
+    for block in modes.values():
+        for line in _sequence(block.get("lines")) if isinstance(block, dict) else []:
+            if isinstance(line, dict) and line.get("series_id") in scopes:
+                line["return_scope_label"] = scopes[str(line["series_id"])]
     manifest = panel.get("account_manifest")
     try:
         slices = _build_slices(
@@ -1157,6 +1174,15 @@ def verify_performance_tab(block: Mapping[str, Any], panel: Mapping[str, Any]) -
         raise _fail("modes differ")
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
         _verify_mode(_mapping(modes[mode]), weekly, mode)
+    scopes = _return_scope_labels(panel)
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        for line in _sequence(_mapping(modes[mode]).get("lines")):
+            if isinstance(line, Mapping) and line.get(
+                "return_scope_label"
+            ) != scopes.get(str(line.get("series_id"))):
+                raise _fail(
+                    f"{mode} {line.get('series_id')} return scope label differs"
+                )
     benchmarks = _sequence(block.get("benchmarks"))
     expected_ids = ["market:SPY", "market:SPXL"]
     if [b.get("series_id") for b in benchmarks] != expected_ids:

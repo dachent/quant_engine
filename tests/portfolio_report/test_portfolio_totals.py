@@ -510,3 +510,97 @@ def test_a_derived_product_epoch_reconciles_and_the_verifier_agrees() -> None:
         "B-s2",
     ]
     verify.verify_portfolio_totals(report, manifest, crosswalk)
+
+
+def _mismatch_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """A perimeter value 200 USD below the open epochs, the whole gap in strategy S3."""
+
+    case = _case()
+    open_by_strategy: dict[str, Decimal] = {}
+    for row in case["rows"]:
+        if row["end"] == CUTOFF:
+            strategy = row["strategy_id"]
+            open_by_strategy[strategy] = open_by_strategy.get(strategy, Decimal(0)) + (
+                Decimal(row["current_value"])
+            )
+    open_total = sum(open_by_strategy.values(), Decimal(0))
+    perimeter = open_total - Decimal(200)
+    custody = {
+        "strategies": [
+            {
+                "strategy_id": strategy,
+                "scope": "SYSTEMATIC",
+                "status": "AVAILABLE",
+                "current_value": {
+                    "status": "AVAILABLE",
+                    "value": str(value - (Decimal(200) if strategy == "S3" else 0)),
+                },
+            }
+            for strategy, value in sorted(open_by_strategy.items())
+        ]
+    }
+    published = totals.build_portfolio_totals(
+        rows=case["rows"],
+        invested_capital=case["capital"],
+        governed_hwm_proof=_proof(),
+        hwm_summary={"governed_perimeter_value_usd": str(perimeter)},
+        calculation_cutoff_date=CUTOFF,
+        custody_current_capital=custody,
+    )
+    report, manifest, crosswalk = _verification_inputs(case)
+    report.update(published)
+    report["hwm_summary"] = {"governed_perimeter_value_usd": str(perimeter)}
+    report["custody_current_capital"] = custody
+    return report, manifest, crosswalk
+
+
+def test_a_perimeter_on_another_basis_refuses_the_mwr_by_name_and_names_the_gap() -> (
+    None
+):
+    report, _manifest, _crosswalk = _mismatch_case()
+    mwr = report["portfolio_mwr_annualised"]
+    assert mwr["status"] == "UNAVAILABLE"
+    assert mwr["reason"] == "PERIMETER_VALUE_BASIS_MISMATCH"
+    assert Decimal(mwr["difference_usd"]) == Decimal(-200)
+    assert Decimal(mwr["governed_perimeter_value_usd"]) - Decimal(
+        mwr["current_of_open_epochs_usd"]
+    ) == Decimal(-200)
+    block = report["capital_reconciliation"]
+    memo = block["memo"]["perimeter_remainder"]
+    assert memo["component_id"] == "RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS"
+    assert Decimal(memo["amount_usd"]) == Decimal(-200)
+    assert [
+        (line["strategy_id"], Decimal(line["amount_usd"])) for line in memo["lines"]
+    ] == [("S3", Decimal(-200))]
+    assert Decimal(memo["unattributed_to_a_strategy_usd"]) == 0
+    # the memo is outside the difference: the residual stays zero
+    assert block["residual_usd"] == "0"
+    assert memo["component_id"] not in {c["component_id"] for c in block["components"]}
+
+
+def test_without_a_perimeter_gap_there_is_no_memo_and_the_mwr_is_available() -> None:
+    published = _build(_case())
+    assert "perimeter_remainder" not in published["capital_reconciliation"]["memo"]
+    assert published["portfolio_mwr_annualised"]["status"] == "AVAILABLE"
+
+
+def test_the_verifier_agrees_with_the_named_gap_and_rejects_each_tampering() -> None:
+    report, manifest, crosswalk = _mismatch_case()
+    verify.verify_portfolio_totals(report, manifest, crosswalk)
+    for mutate in (
+        lambda r: r["capital_reconciliation"]["memo"].pop("perimeter_remainder"),
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_remainder"].update(
+            amount_usd="-199"
+        ),
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_remainder"][
+            "lines"
+        ].clear(),
+        lambda r: r["portfolio_mwr_annualised"].update(
+            reason="NO_GOVERNED_PERIMETER_VALUE"
+        ),
+        lambda r: r["portfolio_mwr_annualised"].update(difference_usd="-199"),
+    ):
+        broken = deepcopy(report)
+        mutate(broken)
+        with pytest.raises(verify.PortfolioTotalsVerificationError):
+            verify.verify_portfolio_totals(broken, manifest, crosswalk)

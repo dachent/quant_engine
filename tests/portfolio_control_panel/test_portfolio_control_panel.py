@@ -10048,6 +10048,8 @@ def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values
         "closed_on": None,
         "parent_assignment_id": None,
         "sleeve_label": None,
+        "economic_end_date": None,
+        "end_recognition_basis": None,
         "mwr_status": "BLOCKED_ADMISSION",
         "mwr_reason": "SYNTHETIC_BLOCKED",
         "mwr_xirr": None,

@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 from types import ModuleType
+from collections.abc import Sequence
 from typing import Any, Callable, Mapping, TypedDict, cast
 
 from quant_engine.core import (
@@ -108,6 +109,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "portfolio_returns": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/returns.py",
     "provider_ledger": "tools/provider_ledger.py",
     "nested_tag_map": "tools/nested_strategy_tag_map.py",
+    "sleeve_disclosures": "tools/sleeve_disclosures.py",
     "quantbase_fund_facts": "tools/build_quantbase_fund_facts.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
     "release_builder": "tools/portfolio_release_builder.py",
@@ -162,6 +164,7 @@ _PREPARATION_STAGE_CODE = {
         "sleeve_account_facts",
         "quantbase_fund_facts",
         "nested_tag_map",
+        "sleeve_disclosures",
         "sleeve_inputs",
         "sleeve_ledger",
         "sleeve_nav",
@@ -1264,6 +1267,16 @@ def _layered_history_repository_dependency_identity() -> dict[str, object]:
 _SLEEVE_SECTION_KEYS = frozenset(
     {"policy_manifest", "ibkr_generation_root", "quantbase_source_dir"}
 )
+# the retained predecessor data root is optional: without it the predecessor comparison
+# is omitted with its reason
+_SLEEVE_SECTION_OPTIONAL = frozenset({"predecessor_data_root"})
+
+
+def _sleeve_section_shape_ok(section: object) -> bool:
+    return isinstance(section, Mapping) and (
+        _SLEEVE_SECTION_KEYS <= set(section)
+        and set(section) <= _SLEEVE_SECTION_KEYS | _SLEEVE_SECTION_OPTIONAL
+    )
 
 
 def _sleeve_tag_map_path(section: object) -> Path | None:
@@ -1271,14 +1284,56 @@ def _sleeve_tag_map_path(section: object) -> Path | None:
 
     if section is None:
         return None
-    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
+    if not _sleeve_section_shape_ok(section):
         raise AttendedPreparationError("sleeve facts configuration differs")
+    assert isinstance(section, Mapping)
     policy = _pin(section["policy_manifest"], "sleeve policy")
     manifest = _read(policy, "sleeve policy manifest")
     pin = manifest.get("sleeve-account-facts")
     if not isinstance(pin, Mapping) or not isinstance(pin.get("tag_map"), Mapping):
         raise AttendedPreparationError("sleeve policy manifest differs")
     return policy.parent / str(pin["tag_map"]["path"])
+
+
+def _build_sleeve_disclosure_sources(
+    section: object, *, facts_paths: Sequence[Path], destination: Path
+) -> Path | None:
+    """Write the disclosure sources of the selected sleeve facts (None without sleeves)."""
+
+    if section is None or not facts_paths:
+        return None
+    if not _sleeve_section_shape_ok(section):
+        raise AttendedPreparationError("sleeve facts configuration differs")
+    assert isinstance(section, Mapping)
+    import sleeve_disclosures
+
+    policy = _pin(section["policy_manifest"], "sleeve policy")
+    manifest = _read(policy, "sleeve policy manifest")
+    pin = manifest.get("disclosure-inputs")
+    inputs_path: Path | None = None
+    if isinstance(pin, Mapping):
+        inputs_path = policy.parent / str(pin.get("path"))
+        content = inputs_path.read_bytes() if inputs_path.is_file() else b""
+        if hashlib.sha256(content).hexdigest() != pin.get("sha256") or len(
+            content
+        ) != pin.get("size_bytes"):
+            raise AttendedPreparationError(
+                "sleeve disclosure inputs differ from their pin"
+            )
+    root_text = section.get("predecessor_data_root")
+    try:
+        sources = sleeve_disclosures.build_sources(
+            facts_paths=tuple(facts_paths),
+            inputs_path=inputs_path,
+            predecessor_data_root=None if root_text is None else Path(str(root_text)),
+        )
+    except (OSError, sleeve_disclosures.DisclosureError) as exc:
+        raise AttendedPreparationError(
+            f"sleeve disclosure sources are refused: {exc}"
+        ) from exc
+    path = destination / "sleeve-disclosure-sources.json"
+    _write(path, sources)
+    return path
 
 
 def _sleeve_parent_window_starts(section: object) -> dict[str, str]:
@@ -1315,8 +1370,9 @@ def _build_sleeve_facts(
 
     if section is None:
         return ()
-    if not isinstance(section, Mapping) or set(section) != _SLEEVE_SECTION_KEYS:
+    if not _sleeve_section_shape_ok(section):
         raise AttendedPreparationError("sleeve facts configuration differs")
+    assert isinstance(section, Mapping)
     import build_sleeve_facts_release as sleeve_release
 
     try:
@@ -2150,6 +2206,11 @@ def _prepare_attended_inputs(
             / str(ledger_result["generation_id"]),
             destination=sleeve_facts_root,
         )
+        disclosure_sources_path = _build_sleeve_disclosure_sources(
+            config.get("sleeve_facts"),
+            facts_paths=sleeve_facts_paths,
+            destination=sleeve_facts_root,
+        )
         epoch = stage_current_epoch_manifest(
             provider_ledger_generation_root=root / "stages" / "ledger",
             provider_ledger_generation_id=str(ledger_result["generation_id"]),
@@ -2207,6 +2268,7 @@ def _prepare_attended_inputs(
             source_clock_path=source_clock,
             evaluated_on=evaluated_on,
             nested_tag_map_path=_sleeve_tag_map_path(config.get("sleeve_facts")),
+            sleeve_disclosure_sources_path=disclosure_sources_path,
         )
         checkpoint(
             "epoch",

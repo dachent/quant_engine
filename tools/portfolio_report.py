@@ -105,6 +105,7 @@ from portfolio_invested_capital import (
     verify_governed_capital_result,
 )
 from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
+import sleeve_disclosures
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
     verify_portfolio_totals,
@@ -270,6 +271,7 @@ EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk
 # The nested-strategy tag map a candidate was built with (#592), kept beside the
 # report so verification and publication rebuild from the same bytes.
 NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
+SLEEVE_DISCLOSURE_EVIDENCE_NAME: Final = "sleeve-disclosure-sources.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -8738,6 +8740,21 @@ def _effective_performance_catalog(
     return {**catalog, "assignments": assignments}
 
 
+def _load_sleeve_disclosure_sources(path: Path) -> dict[str, Any]:
+    """The preparation-time disclosure sources (``sleeve-disclosure-sources/1``)."""
+
+    try:
+        document = json.loads(_regular_file_bytes(path, "sleeve disclosure sources"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("sleeve disclosure sources are not JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != sleeve_disclosures.SOURCES_SCHEMA
+    ):
+        raise ReportValidationError("sleeve disclosure sources identity differs")
+    return document
+
+
 def _load_nested_tag_map(path: Path) -> tuple[TagMap, bytes]:
     try:
         raw = path.read_bytes()
@@ -9207,6 +9224,7 @@ def build_report_data(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
+    sleeve_disclosure_sources_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -9240,6 +9258,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    epoch_included_rows: list[Mapping[str, Any]] = []
     epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
     epoch_verified_details: Mapping[
@@ -9257,6 +9276,13 @@ def build_report_data(
     tag_map_bytes_early = b""
     if nested_tag_map_path is not None:
         tag_map_early, tag_map_bytes_early = _load_nested_tag_map(nested_tag_map_path)
+    sleeve_sources: dict[str, Any] | None = None
+    if sleeve_disclosure_sources_path is not None:
+        if tag_map_early is None:
+            raise ReportValidationError(
+                "sleeve disclosure sources require the nested strategy tag map"
+            )
+        sleeve_sources = _load_sleeve_disclosure_sources(sleeve_disclosure_sources_path)
     if (
         _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
         and not epoch_supplied
@@ -9349,6 +9375,20 @@ def build_report_data(
                 row.get("effective_end"),
             )
             in current_epoch_tuples
+        ]
+        epoch_included_rows = [
+            row
+            for row in (
+                manifest_rows_raw if isinstance(manifest_rows_raw, list) else []
+            )
+            if isinstance(row, Mapping)
+            and (
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
+            )
+            in epoch_perimeter.included
         ]
         # The account perimeter stays the crosswalk's: a residual parent is still
         # the custody account of its strategy's capital.
@@ -10093,6 +10133,19 @@ def build_report_data(
                     "sha256": hashlib.sha256(tag_map_bytes_early).hexdigest(),
                 },
             ]
+        if sleeve_disclosure_sources_path is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "sleeve-disclosure-sources",
+                    "schema": sleeve_disclosures.SOURCES_SCHEMA,
+                    "sha256": hashlib.sha256(
+                        _regular_file_bytes(
+                            sleeve_disclosure_sources_path, "sleeve disclosure sources"
+                        )
+                    ).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -10181,10 +10234,43 @@ def build_report_data(
                     governed_hwm_proof=governed_hwm_proof,
                     hwm_summary=hwm_summary,
                     calculation_cutoff_date=calculation_cutoff_date,
+                    custody_current_capital=report.get("custody_current_capital"),
                 )
             )
         except PortfolioTotalsError as exc:
             raise ReportValidationError(str(exc)) from exc
+    if epoch_perimeter is not None and epoch_perimeter.has_derived:
+        sleeve_accounts = {
+            key[0]: epoch_perimeter.parents[key] for key in epoch_perimeter.derived
+        }
+        derived_product = sorted(
+            {key[1] for key in epoch_perimeter.derived & epoch_perimeter.product}
+        )
+        _apply_return_scope(
+            report, epoch_included_rows, sleeve_accounts, derived_product
+        )
+        if sleeve_sources is not None:
+            try:
+                disclosed = sleeve_disclosures.compose(
+                    sleeve_sources,
+                    rows=epoch_included_rows,
+                    invested_capital=invested_capital,
+                    sleeve_accounts=sleeve_accounts,
+                    product_strategies=derived_product,
+                )
+            except sleeve_disclosures.DisclosureError as exc:
+                raise ReportValidationError(str(exc)) from exc
+            report["methodology"].extend(disclosed["items"])
+            if disclosed["omitted"]:
+                report["methodology"].append(
+                    {
+                        "item": "Disclosures not shown",
+                        "value": "; ".join(
+                            f"{entry['entry']}: {entry['reason']}"
+                            for entry in disclosed["omitted"]
+                        ),
+                    }
+                )
     if decomposition_lenses is not None:
         report["decomposition_lenses"] = decomposition_lenses
     if portable_hwm_proof is not None:
@@ -11049,6 +11135,7 @@ def build_candidate(
     source_clock_path: Path | None = None,
     include_workbook: bool = False,
     nested_tag_map_path: Path | None = None,
+    sleeve_disclosure_sources_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -11081,6 +11168,7 @@ def build_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
         nested_tag_map_path=nested_tag_map_path,
+        sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -11093,6 +11181,13 @@ def build_candidate(
         _write_exact(
             candidate / NESTED_TAG_MAP_EVIDENCE_NAME,
             _regular_file_bytes(nested_tag_map_path, "nested strategy tag map"),
+        )
+    if sleeve_disclosure_sources_path is not None:
+        _write_exact(
+            candidate / SLEEVE_DISCLOSURE_EVIDENCE_NAME,
+            _regular_file_bytes(
+                sleeve_disclosure_sources_path, "sleeve disclosure sources"
+            ),
         )
     if invested_capital_result is not None:
         assert invested_capital_input_generation_path is not None
@@ -12059,6 +12154,68 @@ def _workbook_evidence_binding_from_snapshots(
         binding[f"{name}_sha256"] = hashlib.sha256(content).hexdigest()
         binding[f"{name}_size_bytes"] = len(content)
     return binding
+
+
+def _apply_return_scope(
+    report: dict[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    sleeve_accounts: Mapping[str, str],
+    derived_product: Sequence[str],
+) -> None:
+    """Name the basis of a strategy whose product epoch is a derived sleeve.
+
+    Its account-live fields (return, drawdown, current value, weekly series) come from the
+    canonical series of the account the strategy is mapped to; its MWR and governed capital
+    are those of the sleeve epoch.  Both are stated on the strategy row, with the parent
+    account's retired sleeves named, rather than left to be inferred.
+    """
+
+    for item in report.get("strategy_summary", []):
+        if not isinstance(item, dict) or item.get("strategy_id") not in derived_product:
+            continue
+        strategy = str(item["strategy_id"])
+        sleeves = sorted(
+            str(row["account_id"])
+            for row in rows
+            if row.get("strategy_id") == strategy
+            and row.get("effective_end") is None
+            and str(row["account_id"]) in sleeve_accounts
+        )
+        parents = sorted({sleeve_accounts[account] for account in sleeves})
+        retired = sorted(
+            str(row["account_id"])
+            for row in rows
+            if str(row["account_id"]) in sleeve_accounts
+            and sleeve_accounts[str(row["account_id"])] in parents
+            and row.get("strategy_id") != strategy
+        )
+        item["return_scope"] = {
+            "basis": "PARENT_ACCOUNT_LIVE_SERIES",
+            "parent_account_ids": parents,
+            "applies_to": [
+                "twr",
+                "account_live_max_drawdown",
+                "current_value",
+                "weekly_series",
+            ],
+            "includes_retired_sleeve_accounts": retired,
+            "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
+            "sleeve_epoch_accounts": sleeves,
+        }
+        item["return_scope_label"] = (
+            f"Return, drawdown, current value and weekly series: parent account "
+            f"{', '.join(parents)} (includes retired sleeves "
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
+            f"unallocated cash and margin). MWR and governed capital: sleeve "
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
+        )
+
+
+def _candidate_sleeve_disclosure_sources(candidate_dir: Path) -> Path | None:
+    """The disclosure sources a candidate was built with, when it carries them."""
+
+    path = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
 
 
 def _candidate_nested_tag_map(candidate_dir: Path) -> Path | None:
@@ -14342,6 +14499,9 @@ def verify_candidate(
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
         nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
+        sleeve_disclosure_sources_path=_candidate_sleeve_disclosure_sources(
+            candidate_dir
+        ),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -15418,6 +15578,9 @@ def publish_report(
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         source_clock_path=source_clock_path,
         nested_tag_map_path=_candidate_nested_tag_map(candidate_dir),
+        sleeve_disclosure_sources_path=_candidate_sleeve_disclosure_sources(
+            candidate_dir
+        ),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -15456,6 +15619,21 @@ def publish_report(
             str(report["report_schema_version"]),
         ),
     ]
+    disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
+    if disclosure_sources.is_file() and not disclosure_sources.is_symlink():
+        # the exact bytes the methodology disclosures were composed from
+        artifact_specs.append(
+            (
+                disclosure_sources,
+                "input/sleeve-disclosure-sources.json",
+                "sleeve-disclosure-sources",
+                _declared_schema_version(
+                    _load_json(disclosure_sources, "sleeve disclosure sources"),
+                    "schema_version",
+                    "sleeve disclosure sources",
+                ),
+            )
+        )
     if "workbook" in evidence_snapshots:
         artifact_specs.extend(
             [
@@ -15843,6 +16021,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--epoch-crosswalk", type=Path)
     build.add_argument("--epoch-manifest-generation-root", type=Path)
     build.add_argument("--nested-tag-map", type=Path)
+    build.add_argument("--sleeve-disclosure-sources", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -16000,6 +16179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 source_clock_path=args.source_clock,
                 nested_tag_map_path=args.nested_tag_map,
+                sleeve_disclosure_sources_path=args.sleeve_disclosure_sources,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

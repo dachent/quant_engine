@@ -42,6 +42,7 @@ import sleeve_ledger as ledger_module
 import sleeve_nav as nav_module
 
 MANIFEST_ARTIFACT_ID: Final = "sleeve-policy-manifest"
+DISCLOSURE_SECTION: Final = "disclosure-inputs"
 # The manifest keys each section by the artifact it builds.
 ACCOUNT_SECTION: Final = "sleeve-account-facts"
 FUND_SECTION: Final = "quantbase-fund-facts"
@@ -201,11 +202,21 @@ def build_release_sleeve_facts(
 
     policy_root = policy_manifest_path.parent
     manifest_bytes = policy_manifest_path.read_bytes()
+    loaded_manifest = _load_json(manifest_bytes, "sleeve policy manifest")
     manifest = _closed(
-        _load_json(manifest_bytes, "sleeve policy manifest"),
-        {"schema_version", "artifact_id", ACCOUNT_SECTION, FUND_SECTION},
+        loaded_manifest,
+        {"schema_version", "artifact_id", ACCOUNT_SECTION, FUND_SECTION}
+        | (
+            {DISCLOSURE_SECTION}
+            if isinstance(loaded_manifest, Mapping)
+            and DISCLOSURE_SECTION in loaded_manifest
+            else set()
+        ),
         "sleeve policy manifest",
     )
+    if DISCLOSURE_SECTION in manifest:
+        # the governed disclosure inputs the report cites: pinned, never typed into code
+        _pinned(policy_root, manifest[DISCLOSURE_SECTION], "sleeve disclosure inputs")
     if (
         manifest["schema_version"] != 1
         or manifest["artifact_id"] != MANIFEST_ARTIFACT_ID

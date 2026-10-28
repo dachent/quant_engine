@@ -12,3 +12,4 @@
 /.github/gitleaks-suppressions.json text eol=lf
 /.githooks/* text eol=lf
 /apps/portfolio-control-panel/styles.css text eol=lf
+/ops/mvp2-release/inputs/sleeves/*.txt text eol=lf

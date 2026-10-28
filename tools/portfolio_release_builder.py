@@ -1083,6 +1083,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "dependence_selected_inputs",
             "evaluated_on",
             "nested_tag_map",
+            "sleeve_disclosure_sources",
             "source_clock",
         }
         != required
@@ -1152,6 +1153,18 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("nested_tag_map identity differs")
+    if "sleeve_disclosure_sources" in recipe:
+        definition = recipe["sleeve_disclosure_sources"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("sleeve_disclosure_sources definition differs")
+        artifact = _path(definition["path"], "sleeve_disclosure_sources.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("sleeve_disclosure_sources identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1326,6 +1339,7 @@ def create_recipe(
     source_clock_path: Path | None = None,
     evaluated_on: str | None = None,
     nested_tag_map_path: Path | None = None,
+    sleeve_disclosure_sources_path: Path | None = None,
 ) -> dict[str, Any]:
     financial_cutoff = date.fromisoformat(as_of_date)
     normalized_evaluated_on: str | None = None
@@ -1436,6 +1450,10 @@ def create_recipe(
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
     if nested_tag_map_path is not None:
         payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
+    if sleeve_disclosure_sources_path is not None:
+        payload["sleeve_disclosure_sources"] = _file_definition(
+            sleeve_disclosure_sources_path.resolve()
+        )
     if normalized_evaluated_on is not None:
         payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
@@ -5579,6 +5597,7 @@ def build_report_candidate(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
+    sleeve_disclosure_sources_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -5652,6 +5671,11 @@ def build_report_candidate(
         *(
             ("--nested-tag-map", str(nested_tag_map_path))
             if nested_tag_map_path is not None
+            else ()
+        ),
+        *(
+            ("--sleeve-disclosure-sources", str(sleeve_disclosure_sources_path))
+            if sleeve_disclosure_sources_path is not None
             else ()
         ),
         "--implementation-reconciliation",
@@ -6115,6 +6139,7 @@ def build_report(
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
+    sleeve_disclosure_sources_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
         raise VerticalBuildError(
@@ -6196,6 +6221,7 @@ def build_report(
         **forwarded_arguments,
         source_clock_path=source_clock_path,
         nested_tag_map_path=nested_tag_map_path,
+        sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
     report_arguments = (
@@ -7418,6 +7444,16 @@ def build_stage(
         if isinstance(recipe.get("nested_tag_map"), dict)
         else {}
     )
+    sleeve_disclosure_paths = (
+        {
+            "sleeve_disclosure_sources_path": _path(
+                recipe["sleeve_disclosure_sources"]["path"],
+                "sleeve_disclosure_sources.path",
+            )
+        }
+        if isinstance(recipe.get("sleeve_disclosure_sources"), dict)
+        else {}
+    )
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -7487,6 +7523,7 @@ def build_stage(
             **dependence_selected_inputs_paths,
             **source_clock_paths,
             **nested_tag_map_paths,
+            **sleeve_disclosure_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,

@@ -237,3 +237,62 @@ def test_weekly_series_sampled_on_weekends_is_weekly_not_daily_calendar(
     ]
     assert producer._period_periods_per_year(trading) == (252, "DAILY_TRADING")
     assert verifier._period_ppy(trading) == (252, "DAILY_TRADING")
+
+
+def test_year_to_date_is_hidden_for_an_epoch_that_closed_in_an_earlier_year(
+    producer: Any, verifier: Any
+) -> None:
+    """J13: a retired epoch carries its calendar-year return, not a year-to-date one."""
+
+    links = _links(date(2024, 7, 24), 140, weekends=True)
+    row = {**_row(links, mwr_days=140), "current_value": "0", "net_capital": "10"}
+    shown = producer._period_return_fields(row, 2026)
+    assert shown["ytd_twr"] is None and shown["ytd_window"] is None
+    assert shown["calendar_year_twr"]["2024"] is not None
+    assert shown["annualisation_basis"]["ytd_twr"]["window_days"] is None
+    # the same epoch read in its own year keeps year to date, and the verifier agrees
+    kept = producer._period_return_fields(row, 2024)
+    assert kept["ytd_twr"] == kept["calendar_year_twr"]["2024"]
+    numeric = {
+        "observation_trace": {
+            "links": [{**link, "factor": Decimal(link["factor"])} for link in links]
+        },
+        "observation_linked_return": Decimal(row["observation_linked_return"]),
+        "annualized_return_on_net_capital": Decimal("0.1"),
+        "end": row["end"],
+        "opening_capital_date": row["opening_capital_date"],
+        "current_value": Decimal(0),
+        "net_capital": Decimal(10),
+    }
+    mwr = {
+        "mwr_xirr": row["mwr_xirr"],
+        "mwr_opening_date": row["mwr_opening_date"],
+        "mwr_terminal_date": row["mwr_terminal_date"],
+    }
+    for year in (2026, 2024, None):
+        assert producer.json_ready(
+            producer._period_return_fields(row, year)
+        ) == verifier._independent_period_fields(numeric, mwr, year)
+
+
+def test_a_fully_exited_epoch_has_no_return_on_net_capital(
+    producer: Any, verifier: Any
+) -> None:
+    """J6: gain == -net_capital when nothing is left, so the ratio is -100% by identity."""
+
+    assert producer._exited_epoch({"current_value": "0", "net_capital": "100"})
+    assert not producer._exited_epoch({"current_value": "5", "net_capital": "100"})
+    assert not producer._exited_epoch({"current_value": "0", "net_capital": "-100"})
+    assert verifier._independent_exited(
+        {"current_value": Decimal(0), "net_capital": Decimal(100)}
+    )
+    assert not verifier._independent_exited(
+        {"current_value": Decimal(1), "net_capital": Decimal(100)}
+    )
+    # the published basis says why the figure is absent
+    links = _links(date(2026, 8, 1), 40, weekends=False)
+    row = {**_row(links), "current_value": "0", "net_capital": "100"}
+    fields = producer._period_return_fields(row)
+    basis = fields["annualisation_basis"]["return_on_net_capital"]
+    assert basis["status"] == "NOT_MEANINGFUL_EXITED_EPOCH"
+    assert basis["reported_basis"] is None
