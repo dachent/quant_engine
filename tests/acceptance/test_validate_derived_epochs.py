@@ -183,6 +183,8 @@ def test_a_derived_account_of_an_active_parent_and_strategy_is_in_the_product_un
         _row(f"{PARENT}-s2", "product"),
         _row(f"{PARENT}-s1", "retained", "2026-06-23"),
         _row(f"{OTHER}-s9", "product"),  # hangs on no listed account
+        {**_row(f"{PARENT}-s3", "product"), "effective_start": "2026-10-01"},  # future
+        _row(f"{PARENT}-s4", "product", "2026-06-23"),  # ended before the cutoff
     ]
     ctx = _context(accounts={PARENT: "1"}, manifest=manifest, twr=[])
     reference = SimpleNamespace(
