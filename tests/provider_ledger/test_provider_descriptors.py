@@ -122,3 +122,16 @@ def test_fact_admission_gate_reads_the_same_filenames_as_the_ledger() -> None:
     assert gate._catalog_filenames() == {  # noqa: SLF001
         provider: name for provider, (name, _) in GOLDEN_CATALOGS.items()
     }
+
+
+def test_every_described_provider_has_exactly_one_finality_validator() -> None:
+    described = {item.provider_id for item in ledger._PROVIDER_REGISTRY.descriptors()}  # noqa: SLF001
+    assert set(ledger._FINALITY_VALIDATORS) == described  # noqa: SLF001
+
+
+def test_an_unsupported_provider_still_reports_the_unsupported_convention(
+    tmp_path: Path,
+) -> None:
+    # The dispatcher parses native JSON evidence before it looks a provider up, so
+    # an unknown provider with invalid evidence fails on the evidence, as before.
+    assert "nonexistent" not in ledger._FINALITY_VALIDATORS  # noqa: SLF001
